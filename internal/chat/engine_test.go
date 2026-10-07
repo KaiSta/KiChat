@@ -12,6 +12,7 @@ import (
 	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/store"
+	"kichat/internal/tools"
 )
 
 func newTestStore(t *testing.T) *store.Store {
@@ -61,15 +62,16 @@ func (f *fakeProvider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan ll
 	}
 	f.mu.Unlock()
 
+	// The channel is buffered for every scripted event, so delivery never blocks.
+	// A select against ctx.Done() would instead drop an already-scripted event
+	// whenever Stop cancelled first — both cases become ready at once and Go
+	// picks one at random — which is what made the "Stop keeps the partial
+	// output" assertion flaky under the race detector.
 	ch := make(chan llm.StreamEvent, len(events)+1)
 	go func() {
 		defer close(ch)
 		for i, ev := range events {
-			select {
-			case ch <- ev:
-			case <-ctx.Done():
-				return
-			}
+			ch <- ev
 			if block > 0 && i+1 >= block {
 				<-ctx.Done()
 				return
@@ -99,7 +101,30 @@ type capturedEvent struct {
 	payload map[string]any
 }
 
-func newTestEngine(t *testing.T, st *store.Store, provider *fakeProvider) (*Engine, *[]capturedEvent) {
+// eventLog collects the events a test engine emits. The engine emits from its
+// own goroutine, so every read has to take the lock: reading the slice directly
+// raced with the emitter, which `go test -race` caught.
+type eventLog struct {
+	mu     sync.Mutex
+	events []capturedEvent
+}
+
+func (l *eventLog) emit(name string, payload any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	m, _ := payload.(map[string]any)
+	l.events = append(l.events, capturedEvent{name: name, payload: m})
+}
+
+// snapshot returns a copy of the events seen so far, so a caller can iterate
+// without holding the lock.
+func (l *eventLog) snapshot() []capturedEvent {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]capturedEvent(nil), l.events...)
+}
+
+func newTestEngine(t *testing.T, st *store.Store, provider *fakeProvider) (*Engine, *eventLog) {
 	t.Helper()
 	settings := config.Default()
 	settings.AutoTitle = false
@@ -108,16 +133,9 @@ func newTestEngine(t *testing.T, st *store.Store, provider *fakeProvider) (*Engi
 	registry := llm.NewRegistry(nil)
 	registry.Register(provider)
 
-	var events []capturedEvent
-	var mu sync.Mutex
-	engine := NewEngine(st, registry, nil, func() config.Settings { return settings },
-		func(name string, payload any) {
-			mu.Lock()
-			defer mu.Unlock()
-			m, _ := payload.(map[string]any)
-			events = append(events, capturedEvent{name: name, payload: m})
-		})
-	return engine, &events
+	log := &eventLog{}
+	engine := NewEngine(st, registry, nil, func() config.Settings { return settings }, log.emit)
+	return engine, log
 }
 
 func makeChat(t *testing.T, st *store.Store) store.Chat {
@@ -181,7 +199,7 @@ func TestStreamFailureMarksTheReplyIncomplete(t *testing.T) {
 	}
 
 	sawError := false
-	for _, ev := range *captured {
+	for _, ev := range captured.snapshot() {
 		if ev.name == events.Error {
 			sawError = true
 		}
@@ -223,7 +241,7 @@ func TestToolRoundLimitIsReportedToTheUser(t *testing.T) {
 		t.Errorf("generations = %d, want the 3-iteration cap", n)
 	}
 	var warning string
-	for _, ev := range *captured {
+	for _, ev := range captured.snapshot() {
 		if ev.name == events.Warning {
 			if text, ok := ev.payload["warning"].(string); ok {
 				warning = text
@@ -268,7 +286,7 @@ func TestStopMidStreamKeepsPartialOutput(t *testing.T) {
 		}},
 	}
 	provider.started = make(chan struct{})
-	engine, events := newTestEngine(t, st, provider)
+	engine, log := newTestEngine(t, st, provider)
 
 	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Hallo"}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -318,7 +336,7 @@ func TestStopMidStreamKeepsPartialOutput(t *testing.T) {
 
 	// A done event must still be emitted so the UI can stop showing a spinner.
 	done := false
-	for _, ev := range *events {
+	for _, ev := range log.snapshot() {
 		if ev.name == "chat:done" {
 			done = true
 			if status, _ := ev.payload["status"].(string); status != store.StatusInterrupted {
@@ -615,5 +633,86 @@ func TestBudgetReflectsTheModelSwitchRisk(t *testing.T) {
 	}
 	if big.Used <= 0 {
 		t.Error("expected a non-zero used-token figure")
+	}
+}
+
+// TestToolProtocolFollowsAdvertisedCapabilities pins the negotiation between
+// native tool calling and the text protocol. Native `tools` are used only when
+// the model advertises tool support; a model that advertises nothing at all — an
+// Ollama modelfile without a capability list, or a custom endpoint — must fall
+// back to the text protocol, because sending `tools` a backend cannot honour
+// silently breaks tool calling instead of enabling it.
+func TestToolProtocolFollowsAdvertisedCapabilities(t *testing.T) {
+	cases := []struct {
+		name         string
+		capabilities []string
+		wantHint     bool
+	}{
+		{name: "no capability list falls back", capabilities: nil, wantHint: true},
+		{name: "tool support advertised stays native", capabilities: []string{llm.CapTools}, wantHint: false},
+		{name: "capabilities without tools fall back", capabilities: []string{llm.CapVision}, wantHint: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			makeChat(t, st)
+			provider := &fakeProvider{
+				model: llm.ModelInfo{
+					ID: "fake-model", Backend: "fake", ContextLimit: 8192,
+					State: llm.StateLoaded, Capabilities: tc.capabilities,
+				},
+				replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "ok"}}},
+			}
+			engine, _ := newTestEngine(t, st, provider)
+
+			if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Hallo"}); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if !waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+				t.Fatal("turn did not finish")
+			}
+
+			req := provider.lastRequest()
+			if len(req.Messages) == 0 {
+				t.Fatal("no request recorded")
+			}
+			system := string(req.Messages[0].Content)
+			if got := strings.Contains(system, tools.TextProtocolHint); got != tc.wantHint {
+				t.Errorf("text-protocol hint present = %v, want %v", got, tc.wantHint)
+			}
+		})
+	}
+}
+
+// TestToolOutputBudgetCapsPerAnswer pins the setting the Settings screen exposes:
+// tool results are charged against one budget for the whole answer, a result
+// over the limit is cut with the truncation marker, and once the budget is spent
+// the model is told so rather than handed empty text.
+func TestToolOutputBudgetCapsPerAnswer(t *testing.T) {
+	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: 100})
+
+	small := strings.Repeat("wort ", 5)
+	if got := budget.take(small); got != small {
+		t.Fatalf("a result inside the budget should pass through, got %q", got)
+	}
+
+	big := strings.Repeat("wort ", 5000)
+	got := budget.take(big)
+	if tokens := llm.EstimateTokens(got); tokens > 100 {
+		t.Errorf("truncated result is over budget: %d tokens", tokens)
+	}
+	if !strings.Contains(got, "gekürzt") {
+		t.Errorf("a shortened result must say so, got %q", got)
+	}
+	if next := budget.take("kurz"); next != exhaustedNotice {
+		t.Errorf("after the budget is spent got %q, want the notice", next)
+	}
+}
+
+// TestToolOutputBudgetDefaultsWhenUnset keeps an unset setting from silently
+// disabling the bound.
+func TestToolOutputBudgetDefaultsWhenUnset(t *testing.T) {
+	if b := newToolOutputBudget(config.Settings{}); b.remaining != 25000 {
+		t.Errorf("remaining = %d, want the 25000 default", b.remaining)
 	}
 }
