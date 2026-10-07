@@ -1,0 +1,180 @@
+package store
+
+import "time"
+
+// Message status values. "interrupted" marks a generation the user stopped and
+// "cancelled" a tool call that was abandoned; both are kept so the transcript
+// stays honest about what happened.
+const (
+	StatusComplete    = "complete"
+	StatusStreaming   = "streaming"
+	StatusInterrupted = "interrupted"
+	StatusCancelled   = "cancelled"
+)
+
+// Chat is one conversation.
+type Chat struct {
+	ID                 string    `json:"id"`
+	Title              string    `json:"title"`
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+	Backend            string    `json:"backend"`
+	Model              string    `json:"model"`
+	SystemPrompt       string    `json:"systemPrompt"`
+	SystemPromptPreset string    `json:"systemPromptPreset"`
+	Temperature        float64   `json:"temperature"`
+	TopP               float64   `json:"topP"`
+	NumCtx             int       `json:"numCtx"`
+	Archived           bool      `json:"archived"`
+	AutoCompact        bool      `json:"autoCompact"`
+	CompactThreshold   float64   `json:"compactThreshold"`
+	KeepRecentTurns    int       `json:"keepRecentTurns"`
+	SearchFirst        bool      `json:"searchFirst"`
+}
+
+// Message is one turn in a chat.
+type Message struct {
+	ID               string    `json:"id"`
+	ChatID           string    `json:"chatId"`
+	Seq              int       `json:"seq"`
+	Role             string    `json:"role"`
+	Content          string    `json:"content"`
+	Reasoning        string    `json:"reasoning"`
+	Name             string    `json:"name"`
+	ToolCallsJSON    string    `json:"toolCallsJson"`
+	ToolCallID       string    `json:"toolCallId"`
+	Status           string    `json:"status"`
+	CreatedAt        time.Time `json:"createdAt"`
+	Backend          string    `json:"backend"`
+	Model            string    `json:"model"`
+	PromptTokens     int       `json:"promptTokens"`
+	CompletionTokens int       `json:"completionTokens"`
+	TokensPerSecond  float64   `json:"tokensPerSecond"`
+	TTFTMs           int64     `json:"ttftMs"`
+	GenerationMs     int64     `json:"generationMs"`
+	StopReason       string    `json:"stopReason"`
+	StatsSource      string    `json:"statsSource"`
+
+	// Attachments are populated when a message is loaded, not stored inline.
+	Attachments []Attachment `json:"attachments,omitempty"`
+	// ToolCalls are populated when a message is loaded.
+	ToolCalls []ToolCallRecord `json:"toolCalls,omitempty"`
+}
+
+// Attachment is a file the user added to a chat.
+type Attachment struct {
+	ID            string    `json:"id"`
+	ChatID        string    `json:"chatId"`
+	MessageID     string    `json:"messageId"`
+	Kind          string    `json:"kind"`
+	Filename      string    `json:"filename"`
+	Mime          string    `json:"mime"`
+	SizeBytes     int64     `json:"sizeBytes"`
+	SHA256        string    `json:"sha256"`
+	Pages         int       `json:"pages"`
+	TokenEstimate int       `json:"tokenEstimate"`
+	Placement     string    `json:"placement"`
+	DocumentID    string    `json:"documentId"`
+	Warning       string    `json:"warning,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
+// Attachment placement modes.
+const (
+	PlacementInline  = "inline"
+	PlacementIndexed = "indexed"
+)
+
+// Document is extracted text from an attachment or a scraped page.
+type Document struct {
+	ID           string    `json:"id"`
+	AttachmentID string    `json:"attachmentId"`
+	ChatID       string    `json:"chatId"`
+	Title        string    `json:"title"`
+	Text         string    `json:"text"`
+	TokenCount   int       `json:"tokenCount"`
+	PageCount    int       `json:"pageCount"`
+	SHA256       string    `json:"sha256"`
+	SourceURL    string    `json:"sourceUrl"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+// Chunk is one indexed slice of a document.
+type Chunk struct {
+	ID         int64  `json:"id"`
+	DocumentID string `json:"documentId"`
+	ChatID     string `json:"chatId"`
+	Ordinal    int    `json:"ordinal"`
+	Heading    string `json:"heading"`
+	Page       int    `json:"page"`
+	Text       string `json:"text"`
+	Tokens     int    `json:"tokens"`
+}
+
+// ChunkHit is a search result.
+type ChunkHit struct {
+	Chunk    Chunk   `json:"chunk"`
+	Document string  `json:"documentTitle"`
+	Score    float64 `json:"score"`
+}
+
+// Compaction records a summarisation event. Original messages are never
+// removed, so a compaction is a reading instruction over history, not a
+// replacement of it.
+type Compaction struct {
+	ID           string    `json:"id"`
+	ChatID       string    `json:"chatId"`
+	Trigger      string    `json:"trigger"` // auto | manual
+	FromSeq      int       `json:"fromSeq"`
+	ToSeq        int       `json:"toSeq"`
+	Summary      string    `json:"summary"`
+	Focus        string    `json:"focus"`
+	TokensBefore int       `json:"tokensBefore"`
+	TokensAfter  int       `json:"tokensAfter"`
+	Model        string    `json:"model"`
+	Backend      string    `json:"backend"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+// Tool call status values.
+const (
+	ToolPending   = "pending"
+	ToolOK        = "ok"
+	ToolError     = "error"
+	ToolCancelled = "cancelled"
+)
+
+// ToolCallRecord is the persisted outcome of one tool invocation.
+type ToolCallRecord struct {
+	ID         string    `json:"id"`
+	MessageID  string    `json:"messageId"`
+	ChatID     string    `json:"chatId"`
+	Name       string    `json:"name"`
+	ArgsJSON   string    `json:"argsJson"`
+	ResultJSON string    `json:"resultJson"`
+	Status     string    `json:"status"`
+	DurationMs int64     `json:"durationMs"`
+	Error      string    `json:"error"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// SearchCacheEntry caches a search provider response.
+type SearchCacheEntry struct {
+	QueryHash    string    `json:"queryHash"`
+	Provider     string    `json:"provider"`
+	Query        string    `json:"query"`
+	ResponseJSON string    `json:"responseJson"`
+	CreatedAt    time.Time `json:"createdAt"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+}
+
+// ScrapeCacheEntry caches extracted page content.
+type ScrapeCacheEntry struct {
+	URLHash   string    `json:"urlHash"`
+	URL       string    `json:"url"`
+	Title     string    `json:"title"`
+	ContentMD string    `json:"contentMd"`
+	Tokens    int       `json:"tokens"`
+	FetchedAt time.Time `json:"fetchedAt"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}

@@ -1,0 +1,607 @@
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"kichat/internal/chat"
+	"kichat/internal/config"
+	"kichat/internal/ingest"
+	"kichat/internal/llm"
+	"kichat/internal/research"
+	"kichat/internal/secret"
+	"kichat/internal/store"
+)
+
+// --- settings --------------------------------------------------------------
+
+// GetSettings returns the current settings, with the Brave key reduced to a
+// boolean so the secret itself never crosses the bridge.
+func (a *App) GetSettings() (config.Settings, error) {
+	if err := a.ensure(); err != nil {
+		return config.Settings{}, err
+	}
+	s := a.Settings()
+	s.Search.BraveAPIKey = ""
+	return s, nil
+}
+
+// SaveSettings persists settings and rebuilds the services that depend on them.
+func (a *App) SaveSettings(s config.Settings) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	current := a.Settings()
+	// An empty key in the payload means "leave the stored key alone"; settings
+	// only ever carry a boolean about the key.
+	s.Search.BraveAPIKey = current.Search.BraveAPIKey
+	if s.DefaultSystemPrompt == "" {
+		s.DefaultSystemPrompt = config.DefaultSystemPrompt
+	}
+	if err := s.Save(a.store); err != nil {
+		return err
+	}
+	a.settingsMu.Lock()
+	a.settings = s
+	a.settingsMu.Unlock()
+	a.rebuildServices(s)
+	return nil
+}
+
+// SecretStatus reports how secrets are stored.
+type SecretStatus struct {
+	Backend     string `json:"backend"`
+	Keyring     bool   `json:"keyring"`
+	BraveKeySet bool   `json:"braveKeySet"`
+	Warning     string `json:"warning,omitempty"`
+}
+
+// GetSecretStatus reports where the Brave key is kept.
+func (a *App) GetSecretStatus() (SecretStatus, error) {
+	if err := a.ensure(); err != nil {
+		return SecretStatus{}, err
+	}
+	status := SecretStatus{
+		Backend: a.secrets.Backend(),
+		Keyring: a.secrets.KeyringAvailable(),
+	}
+	_, status.BraveKeySet = a.secrets.Get("brave")
+	if !status.Keyring {
+		status.Warning = "Kein Schlüsselbund verfügbar (libsecret fehlt). " +
+			"Der Key wird lokal verschlüsselt gespeichert — das schützt vor versehentlicher " +
+			"Offenlegung, aber nicht gegen einen Angreifer mit Zugriff auf dieses Benutzerkonto."
+	}
+	return status, nil
+}
+
+// SetBraveKey stores the Brave Search API key.
+func (a *App) SetBraveKey(key string) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	key = strings.TrimSpace(key)
+	if err := a.secrets.Set("brave", key); err != nil {
+		return err
+	}
+	a.settingsMu.Lock()
+	a.settings.Search.BraveAPIKey = key
+	a.settingsMu.Unlock()
+	a.rebuildServices(a.Settings())
+	return nil
+}
+
+// TestBraveKey validates a key with a single live query.
+func (a *App) TestBraveKey(key string) (research.SearchOutcome, error) {
+	if err := a.ensure(); err != nil {
+		return research.SearchOutcome{}, err
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		if stored, ok := a.secrets.Get("brave"); ok {
+			key = stored
+		}
+	}
+	if key == "" {
+		return research.SearchOutcome{}, errors.New("kein Brave API-Key angegeben")
+	}
+	provider := research.NewBraveProvider(key, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	results, err := provider.Search(ctx, research.SearchRequest{
+		Query: "test", Count: 1, Country: "DE", SearchLang: "de",
+	})
+	if err != nil {
+		return research.SearchOutcome{}, err
+	}
+	return research.SearchOutcome{Results: results, Provider: "brave"}, nil
+}
+
+// --- backends and models ---------------------------------------------------
+
+// GetHealth probes every configured backend.
+func (a *App) GetHealth() ([]llm.HealthStatus, error) {
+	if err := a.ensure(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	return a.registry.Health(ctx), nil
+}
+
+// ListModels returns the merged cross-backend model catalogue.
+func (a *App) ListModels(forceRefresh bool) ([]llm.ModelInfo, error) {
+	if err := a.ensure(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	if forceRefresh {
+		a.registry.Invalidate()
+	}
+	return a.visibleModels(ctx), nil
+}
+
+// SetModelOverride stores a per-model context window or capability correction.
+func (a *App) SetModelOverride(backend, model string, ov llm.ModelOverride) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	a.settingsMu.Lock()
+	if a.settings.ModelOverrides == nil {
+		a.settings.ModelOverrides = map[string]llm.ModelOverride{}
+	}
+	key := backend + "/" + model
+	if ov.ContextLimit == 0 && len(ov.Capabilities) == 0 {
+		delete(a.settings.ModelOverrides, key)
+	} else {
+		a.settings.ModelOverrides[key] = ov
+	}
+	settings := a.settings
+	a.settingsMu.Unlock()
+
+	if err := a.store.PutModelOverride(backend, model, ov); err != nil {
+		return err
+	}
+	a.registry.Invalidate()
+	return settings.Save(a.store)
+}
+
+// --- prompt presets --------------------------------------------------------
+
+// PromptVariable describes a template variable available in system prompts.
+type PromptVariable struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// GetPromptVariables lists the supported template variables.
+func (a *App) GetPromptVariables() []PromptVariable {
+	return []PromptVariable{
+		{Name: "datetime", Description: "Aktuelles Datum, Uhrzeit und Wochentag"},
+		{Name: "date", Description: "Nur das Datum (TT.MM.JJJJ)"},
+		{Name: "time", Description: "Nur die Uhrzeit (HH:MM)"},
+		{Name: "weekday", Description: "Wochentag ausgeschrieben"},
+		{Name: "location", Description: "Der in den Einstellungen hinterlegte Standort"},
+		{Name: "model", Description: "Das aktuell gewählte Modell"},
+		{Name: "backend", Description: "Das aktuelle Backend (LM Studio, Ollama, …)"},
+		{Name: "context_limit", Description: "Größe des Kontextfensters in Tokens"},
+		{Name: "context_used", Description: "Zuletzt gemessene Kontextbelegung"},
+		{Name: "tool_list", Description: "Liste der verfügbaren Tools"},
+	}
+}
+
+// PreviewSystemPrompt renders a prompt template with live values.
+func (a *App) PreviewSystemPrompt(tmpl string) (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	settings := a.Settings()
+	models := a.visibleModels(context.Background())
+	model := ""
+	if len(models) > 0 {
+		model = models[0].ID
+	}
+	return chat.PreviewPrompt(tmpl, settings.Location, model), nil
+}
+
+// UnresolvedPromptVars reports template variables that do not exist.
+func (a *App) UnresolvedPromptVars(tmpl string) []string {
+	return chat.UnresolvedVars(tmpl)
+}
+
+// --- compaction ------------------------------------------------------------
+
+// CompactRequest is the manual compaction payload.
+type CompactRequest struct {
+	ChatID  string  `json:"chatId"`
+	Focus   string  `json:"focus"`
+	Target  float64 `json:"target"`
+	FromSeq int     `json:"fromSeq"`
+	ToSeq   int     `json:"toSeq"`
+}
+
+// CompactNow runs a manual compaction.
+func (a *App) CompactNow(req CompactRequest) (store.Compaction, error) {
+	if err := a.ensure(); err != nil {
+		return store.Compaction{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	compaction, err := a.engine.Compact(ctx, req.ChatID, chat.CompactOptions{
+		Force:   true,
+		Focus:   req.Focus,
+		Target:  req.Target,
+		FromSeq: req.FromSeq,
+		ToSeq:   req.ToSeq,
+	})
+	if err != nil {
+		return store.Compaction{}, err
+	}
+	a.emit("chat:chats-changed", map[string]any{})
+	return compaction, nil
+}
+
+// ListCompactions returns a chat's compaction history.
+func (a *App) ListCompactions(chatID string) ([]store.Compaction, error) {
+	if err := a.ensure(); err != nil {
+		return nil, err
+	}
+	return a.store.ListCompactions(chatID)
+}
+
+// DeleteCompaction removes a compaction, restoring the folded messages to the
+// live context. The original messages were never deleted, so this is complete.
+func (a *App) DeleteCompaction(chatID, compactionID string) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	if err := a.store.DeleteCompaction(compactionID); err != nil {
+		return err
+	}
+	a.engine.InvalidateMeasurement(chatID)
+	// Any compaction that merged this one is now stale; drop later ones so the
+	// memory chain stays consistent.
+	compactions, err := a.store.ListCompactions(chatID)
+	if err != nil {
+		return err
+	}
+	_ = compactions
+	return nil
+}
+
+// --- attachments and documents --------------------------------------------
+
+// AttachmentInput describes a file to add.
+type AttachmentInput struct {
+	ChatID    string `json:"chatId"`
+	Path      string `json:"path"`
+	Placement string `json:"placement"`
+}
+
+// AutoIndexThreshold is the token count above which an attachment is indexed
+// rather than inlined.
+const AutoIndexThreshold = 8000
+
+// AddAttachment reads a file, extracts its text, and attaches it to a chat.
+func (a *App) AddAttachment(in AttachmentInput) (store.Attachment, error) {
+	if err := a.ensure(); err != nil {
+		return store.Attachment{}, err
+	}
+	if strings.TrimSpace(in.Path) == "" {
+		return store.Attachment{}, errors.New("kein Dateipfad angegeben")
+	}
+	info, err := os.Stat(in.Path)
+	if err != nil {
+		return store.Attachment{}, fmt.Errorf("Datei nicht lesbar: %w", err)
+	}
+	if info.IsDir() {
+		return store.Attachment{}, errors.New("Ordner können nicht angehängt werden")
+	}
+	const maxSize = 64 << 20
+	if info.Size() > maxSize {
+		return store.Attachment{}, fmt.Errorf("Datei ist zu groß (%d MB, Maximum %d MB)",
+			info.Size()>>20, int64(maxSize)>>20)
+	}
+	data, err := os.ReadFile(in.Path)
+	if err != nil {
+		return store.Attachment{}, fmt.Errorf("Datei nicht lesbar: %w", err)
+	}
+
+	result, err := a.extractor.Ingest(filepath.Base(in.Path), "", data)
+	if err != nil {
+		return store.Attachment{}, err
+	}
+
+	placement := in.Placement
+	if placement == "" {
+		if result.Tokens > AutoIndexThreshold {
+			placement = store.PlacementIndexed
+		} else {
+			placement = store.PlacementInline
+		}
+	}
+
+	attachment := store.Attachment{
+		ID:            newID(),
+		ChatID:        in.ChatID,
+		Kind:          string(result.Kind),
+		Filename:      filepath.Base(in.Path),
+		Mime:          result.Mime,
+		SizeBytes:     info.Size(),
+		Pages:         result.Pages,
+		TokenEstimate: result.Tokens,
+		Placement:     placement,
+		CreatedAt:     time.Now(),
+	}
+	if len(result.Warnings) > 0 {
+		attachment.Warning = strings.Join(result.Warnings, " ")
+	}
+
+	// Images carry their payload rather than text, so a vision model can receive
+	// them; everything else stores the extracted text.
+	documentText := result.Text
+	if result.Kind == ingest.KindImage {
+		documentText = base64.StdEncoding.EncodeToString(data)
+		attachment.TokenEstimate = 1024
+	}
+
+	document := store.Document{
+		ID:           newID(),
+		AttachmentID: attachment.ID,
+		ChatID:       in.ChatID,
+		Title:        filepath.Base(in.Path),
+		Text:         documentText,
+		TokenCount:   attachment.TokenEstimate,
+		PageCount:    result.Pages,
+		CreatedAt:    time.Now(),
+	}
+	if err := a.store.CreateDocument(document); err != nil {
+		return store.Attachment{}, err
+	}
+	attachment.DocumentID = document.ID
+
+	if placement == store.PlacementIndexed && result.Kind != ingest.KindImage {
+		chunks := ingest.ChunkDocument(result.Text, ingest.DefaultChunkSpec())
+		out := make([]store.Chunk, 0, len(chunks))
+		for _, c := range chunks {
+			out = append(out, store.Chunk{
+				DocumentID: document.ID,
+				ChatID:     in.ChatID,
+				Ordinal:    c.Ordinal,
+				Heading:    c.Heading,
+				Page:       c.Page,
+				Text:       c.Text,
+				Tokens:     c.Tokens,
+			})
+		}
+		if err := a.store.InsertChunks(out); err != nil {
+			attachment.Warning = strings.TrimSpace(attachment.Warning +
+				" Indizierung fehlgeschlagen: " + err.Error())
+		}
+	}
+
+	if err := a.store.CreateAttachment(attachment); err != nil {
+		return store.Attachment{}, err
+	}
+	a.emit("chat:attachments", map[string]any{"chatId": in.ChatID})
+	return attachment, nil
+}
+
+// RemoveAttachment deletes an attachment and its extracted text.
+func (a *App) RemoveAttachment(attachmentID string) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	attachment, err := a.store.GetAttachment(attachmentID)
+	if err != nil {
+		return err
+	}
+	if err := a.store.DeleteAttachment(attachmentID); err != nil {
+		return err
+	}
+	a.emit("chat:attachments", map[string]any{"chatId": attachment.ChatID})
+	return nil
+}
+
+// SetAttachmentPlacement switches an attachment between inline and indexed.
+func (a *App) SetAttachmentPlacement(attachmentID, placement string) (store.Attachment, error) {
+	if err := a.ensure(); err != nil {
+		return store.Attachment{}, err
+	}
+	attachment, err := a.store.GetAttachment(attachmentID)
+	if err != nil {
+		return store.Attachment{}, err
+	}
+	attachment.Placement = placement
+	if placement == store.PlacementIndexed {
+		document, err := a.store.GetDocument(attachment.DocumentID)
+		if err == nil {
+			existing, _ := a.store.ListChunks(document.ID)
+			if len(existing) == 0 {
+				chunks := ingest.ChunkDocument(document.Text, ingest.DefaultChunkSpec())
+				out := make([]store.Chunk, 0, len(chunks))
+				for _, c := range chunks {
+					out = append(out, store.Chunk{
+						DocumentID: document.ID, ChatID: attachment.ChatID,
+						Ordinal: c.Ordinal, Heading: c.Heading, Page: c.Page,
+						Text: c.Text, Tokens: c.Tokens,
+					})
+				}
+				if err := a.store.InsertChunks(out); err != nil {
+					return store.Attachment{}, err
+				}
+			}
+		}
+	}
+	if err := a.store.UpdateAttachment(attachment); err != nil {
+		return store.Attachment{}, err
+	}
+	a.emit("chat:attachments", map[string]any{"chatId": attachment.ChatID})
+	return attachment, nil
+}
+
+// PickFiles opens a native file dialog and returns the chosen paths.
+func (a *App) PickFiles() ([]string, error) {
+	if a.ctx == nil {
+		return nil, errors.New("App ist noch nicht bereit")
+	}
+	return runtime.OpenMultipleFilesDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Dateien zum Chat hinzufügen",
+	})
+}
+
+// GetDocument returns a document including its full text.
+func (a *App) GetDocument(documentID string) (store.Document, error) {
+	if err := a.ensure(); err != nil {
+		return store.Document{}, err
+	}
+	return a.store.GetDocument(documentID)
+}
+
+// ListChunks returns the indexed chunks of a document.
+func (a *App) ListChunks(documentID string) ([]store.Chunk, error) {
+	if err := a.ensure(); err != nil {
+		return nil, err
+	}
+	return a.store.ListChunks(documentID)
+}
+
+// --- search and scraping ---------------------------------------------------
+
+// Search runs a live web search, bypassing nothing but the provider chain.
+func (a *App) Search(query string) (research.SearchOutcome, error) {
+	if err := a.ensure(); err != nil {
+		return research.SearchOutcome{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	outcome, err := a.chain.Search(ctx, query, research.SearchRequest{})
+	if err != nil {
+		return research.SearchOutcome{}, err
+	}
+	return outcome, nil
+}
+
+// Scrape fetches a URL and returns clean Markdown.
+func (a *App) Scrape(url string, maxTokens int) (research.ScrapeResult, error) {
+	if err := a.ensure(); err != nil {
+		return research.ScrapeResult{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if maxTokens <= 0 {
+		maxTokens = 12000
+	}
+	return a.scraper.Scrape(ctx, url, maxTokens)
+}
+
+// ScrapeIntoChat scrapes a page and attaches it to a chat as an indexed or
+// inline document, which is how "read this page" becomes permanent context.
+func (a *App) ScrapeIntoChat(chatID, pageURL string, maxTokens int) (store.Attachment, error) {
+	if err := a.ensure(); err != nil {
+		return store.Attachment{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if maxTokens <= 0 {
+		maxTokens = 12000
+	}
+	result, err := a.scraper.Scrape(ctx, pageURL, maxTokens)
+	if err != nil {
+		return store.Attachment{}, err
+	}
+
+	title := result.Title
+	if title == "" {
+		title = result.FinalURL
+	}
+	attachment := store.Attachment{
+		ID:            newID(),
+		ChatID:        chatID,
+		Kind:          "web",
+		Filename:      title,
+		Mime:          "text/markdown",
+		SizeBytes:     int64(len(result.Markdown)),
+		TokenEstimate: result.Tokens,
+		Placement:     store.PlacementInline,
+		CreatedAt:     time.Now(),
+	}
+	if result.Warning != "" {
+		attachment.Warning = result.Warning
+	}
+	document := store.Document{
+		ID:           newID(),
+		AttachmentID: attachment.ID,
+		ChatID:       chatID,
+		Title:        title,
+		Text:         result.Markdown,
+		TokenCount:   result.Tokens,
+		SourceURL:    result.FinalURL,
+		CreatedAt:    time.Now(),
+	}
+	if err := a.store.CreateDocument(document); err != nil {
+		return store.Attachment{}, err
+	}
+	attachment.DocumentID = document.ID
+	if err := a.store.CreateAttachment(attachment); err != nil {
+		return store.Attachment{}, err
+	}
+	a.emit("chat:attachments", map[string]any{"chatId": chatID})
+	return attachment, nil
+}
+
+// SearchStatus reports provider availability and quota usage.
+type SearchStatus struct {
+	Providers     map[string]bool `json:"providers"`
+	Order         []string        `json:"order"`
+	BraveQueries  int64           `json:"braveQueriesThisMonth"`
+	BraveQuotaEst int64           `json:"braveQuotaEstimate"`
+	CacheMinutes  int             `json:"cacheMinutes"`
+	SecretBackend string          `json:"secretBackend"`
+}
+
+// GetSearchStatus reports the search configuration state.
+func (a *App) GetSearchStatus() (SearchStatus, error) {
+	if err := a.ensure(); err != nil {
+		return SearchStatus{}, err
+	}
+	settings := a.Settings()
+	return SearchStatus{
+		Providers:    a.chain.ProviderAvailability(),
+		Order:        settings.Search.ProviderOrder,
+		BraveQueries: a.chain.BraveQueriesThisMonth(),
+		// Brave's metered plan gives $5 of free credit per month at
+		// $5 per 1,000 requests, so about a thousand queries.
+		BraveQuotaEst: 1000,
+		CacheMinutes:  settings.Search.CacheMinutes,
+		SecretBackend: a.secrets.Backend(),
+	}, nil
+}
+
+// OpenExternal opens a URL in the user's browser.
+func (a *App) OpenExternal(target string) {
+	if a.ctx == nil {
+		return
+	}
+	runtime.BrowserOpenURL(a.ctx, target)
+}
+
+// RedactSecrets strips stored secrets from arbitrary text.
+func (a *App) RedactSecrets(text string) string {
+	if a.secrets == nil {
+		return text
+	}
+	var values []string
+	if v, ok := a.secrets.Get("brave"); ok {
+		values = append(values, v)
+	}
+	return secret.Redact(text, values...)
+}

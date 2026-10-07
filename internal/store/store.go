@@ -1,0 +1,291 @@
+// Package store persists chats, messages, documents and caches in a single
+// SQLite file using the pure-Go modernc driver, so no C toolchain is needed to
+// build for any platform.
+package store
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+// Store wraps the database handle.
+type Store struct {
+	db *sql.DB
+	// FTS reports whether full-text search is available. It is probed at open
+	// time so a build without FTS5 degrades to "documents are still readable,
+	// just not searchable" instead of failing outright.
+	FTS bool
+}
+
+// Open opens (creating if needed) the database at path and runs migrations.
+func Open(path string) (*Store, error) {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create data dir: %w", err)
+		}
+	}
+	// Pragma settings are passed both through the DSN and applied again on open,
+	// so behaviour does not depend on whether the driver keeps one connection.
+	dsn := "file:" + filepath.ToSlash(path) +
+		"?_pragma=busy_timeout(10000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(ON)"
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	db.SetMaxOpenConns(1) // SQLite writers serialise; one conn avoids lock churn.
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
+	for _, pragma := range []string{
+		"PRAGMA busy_timeout = 10000",
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA foreign_keys = ON",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("apply %s: %w", pragma, err)
+		}
+	}
+
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// Close releases the database.
+func (s *Store) Close() error { return s.db.Close() }
+
+// DB exposes the handle for packages that need custom queries.
+func (s *Store) DB() *sql.DB { return s.db }
+
+// migrations are applied in order and tracked via PRAGMA user_version.
+var migrations = []string{
+	// 1: core chat tables.
+	`
+CREATE TABLE IF NOT EXISTS chats (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  backend TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  system_prompt TEXT NOT NULL DEFAULT '',
+  system_prompt_preset TEXT NOT NULL DEFAULT '',
+  temperature REAL NOT NULL DEFAULT 0.7,
+  top_p REAL NOT NULL DEFAULT 0.9,
+  num_ctx INTEGER NOT NULL DEFAULT 0,
+  archived INTEGER NOT NULL DEFAULT 0,
+  auto_compact INTEGER NOT NULL DEFAULT 1,
+  compact_threshold REAL NOT NULL DEFAULT 0.80,
+  keep_recent_turns INTEGER NOT NULL DEFAULT 6,
+  search_first INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  reasoning TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  tool_calls_json TEXT NOT NULL DEFAULT '',
+  tool_call_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'complete',
+  created_at INTEGER NOT NULL,
+  backend TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  prompt_tokens INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  tokens_per_second REAL NOT NULL DEFAULT 0,
+  ttft_ms INTEGER NOT NULL DEFAULT 0,
+  generation_ms INTEGER NOT NULL DEFAULT 0,
+  stop_reason TEXT NOT NULL DEFAULT '',
+  stats_source TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, seq);
+
+CREATE TABLE IF NOT EXISTS compactions (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  trigger TEXT NOT NULL DEFAULT 'auto',
+  from_seq INTEGER NOT NULL DEFAULT 0,
+  to_seq INTEGER NOT NULL DEFAULT 0,
+  summary TEXT NOT NULL DEFAULT '',
+  focus TEXT NOT NULL DEFAULT '',
+  tokens_before INTEGER NOT NULL DEFAULT 0,
+  tokens_after INTEGER NOT NULL DEFAULT 0,
+  model TEXT NOT NULL DEFAULT '',
+  backend TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compactions_chat ON compactions(chat_id, to_seq);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL DEFAULT '',
+  chat_id TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  args_json TEXT NOT NULL DEFAULT '',
+  result_json TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_chat ON tool_calls(chat_id, created_at);
+`,
+	// 2: attachments and documents.
+	`
+CREATE TABLE IF NOT EXISTS attachments (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'file',
+  filename TEXT NOT NULL DEFAULT '',
+  mime TEXT NOT NULL DEFAULT '',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  sha256 TEXT NOT NULL DEFAULT '',
+  pages INTEGER NOT NULL DEFAULT 0,
+  token_estimate INTEGER NOT NULL DEFAULT 0,
+  placement TEXT NOT NULL DEFAULT 'inline',
+  document_id TEXT NOT NULL DEFAULT '',
+  warning TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_chat ON attachments(chat_id, created_at);
+
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  attachment_id TEXT NOT NULL DEFAULT '',
+  chat_id TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL DEFAULT '',
+  token_count INTEGER NOT NULL DEFAULT 0,
+  page_count INTEGER NOT NULL DEFAULT 0,
+  sha256 TEXT NOT NULL DEFAULT '',
+  source_url TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_documents_chat ON documents(chat_id);
+
+CREATE TABLE IF NOT EXISTS chunks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  chat_id TEXT NOT NULL DEFAULT '',
+  ordinal INTEGER NOT NULL,
+  heading TEXT NOT NULL DEFAULT '',
+  page INTEGER NOT NULL DEFAULT 0,
+  text TEXT NOT NULL,
+  tokens INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(document_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_chunks_chat ON chunks(chat_id);
+`,
+	// 3: caches, settings, counters.
+	`
+CREATE TABLE IF NOT EXISTS search_cache (
+  query_hash TEXT PRIMARY KEY,
+  provider TEXT NOT NULL DEFAULT '',
+  query TEXT NOT NULL DEFAULT '',
+  response_json TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scrape_cache (
+  url_hash TEXT PRIMARY KEY,
+  url TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  content_md TEXT NOT NULL DEFAULT '',
+  tokens INTEGER NOT NULL DEFAULT 0,
+  fetched_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS model_overrides (
+  backend TEXT NOT NULL,
+  model TEXT NOT NULL,
+  settings_json TEXT NOT NULL,
+  PRIMARY KEY (backend, model)
+);
+
+CREATE TABLE IF NOT EXISTS counters (
+  key TEXT PRIMARY KEY,
+  value INTEGER NOT NULL DEFAULT 0,
+  period TEXT NOT NULL DEFAULT ''
+);
+`,
+}
+
+// ftsMigration creates the search index. It is attempted separately because a
+// SQLite build without FTS5 must not prevent the app from starting.
+const ftsMigration = `
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+  text,
+  heading,
+  chat_id UNINDEXED,
+  doc_id UNINDEXED,
+  tokenize='unicode61 remove_diacritics 2'
+);
+`
+
+func (s *Store) migrate() error {
+	var version int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	for i := version; i < len(migrations); i++ {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(migrations[i]); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("migration %d: %w", i+1, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", i+1)); err != nil {
+			return err
+		}
+	}
+
+	// Probe FTS5 independently of the versioned migrations.
+	if _, err := s.db.Exec(ftsMigration); err != nil {
+		s.FTS = false
+		return nil
+	}
+	s.FTS = true
+	return nil
+}
+
+func millis(t time.Time) int64 { return t.UnixNano() / int64(time.Millisecond) }
+
+func fromMillis(ms int64) time.Time { return time.Unix(0, ms*int64(time.Millisecond)).UTC() }
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
