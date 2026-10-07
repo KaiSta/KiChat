@@ -95,8 +95,10 @@ a purple **MOCK BRIDGE** badge, so a harness page is never mistaken for the real
 
 - `tools/uiharness/mock-wails.js` holds the fixtures: a chat whose assistant reply uses
   every markdown feature (headings, table, blockquote, highlighted code, inline and
-  display math), a second chat with a seeded search message, and streaming replies
-  driven by real `chat:*` events over a simulated 40 ms cadence.
+  display math), a second chat with a seeded search message and a compaction, and
+  streaming replies driven by real `chat:*` events over a simulated 40 ms cadence. The
+  mock is `go:embed`ed, so a running harness picks up an edit to it only after a restart
+  — use `go run`, or rebuild before restarting.
 - Unmodelled bindings resolve **and log a warning** — if the console shows
   `unmodelled binding called: X`, the mock needs X when you exercise that path.
 - `?crash=render` injects an unrenderable message to prove the error boundary still

@@ -16,6 +16,10 @@
 //	go run ./tools/uiharness -dir frontend/dist -addr 127.0.0.1:8791
 //
 // The frontend must be built first (vite build, or any wails build).
+//
+// mock-wails.js is embedded into this binary, so a running server picks up a mock
+// edit only after a restart: `go run` rebuilds, a previously built binary does
+// not. Use go run, or rebuild before restarting, when changing the fixtures.
 package main
 
 import (

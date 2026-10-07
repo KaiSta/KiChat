@@ -654,6 +654,46 @@ Verfügbare Tools: {{tool_list}}`,
     message('chat-search', 'assistant', 'Aktuell liegen die Preise je nach Größe zwischen **2.400 €** und **4.800 €** ([1](https://example.de/waermespeicher)).', {
       seq: 2,
     }),
+    // A reply the backend stopped delivering halfway through. It carries the
+    // partial text and the `failed` status, which the chat has to show as
+    // incomplete rather than as a finished answer.
+    message('chat-search', 'user', 'Und wie hoch ist die Förderung aktuell?', { seq: 3 }),
+    message('chat-search', 'assistant', 'Die Förderung liegt je nach Bundesland bei etwa', {
+      seq: 4,
+      status: 'failed',
+      stopReason: 'stream_error',
+      promptTokens: 2140,
+      completionTokens: 11,
+      statsSource: 'estimated',
+    }),
+  ])
+
+  // Compactions are modelled, not stubbed: the card, the undo button and the
+  // "nothing to compact" answer are part of what has to be verifiable here, and a
+  // backend that always reports nothing would make them unreachable in the
+  // harness the same way they were unreachable in the app.
+  const compactions = new Map()
+  compactions.set('chat-search', [
+    {
+      id: nextId('comp'),
+      chatId: 'chat-search',
+      trigger: 'auto',
+      // Folded up to the seeded search message, so the card sits between it and
+      // the answer that cites it.
+      fromSeq: 1,
+      toSeq: 1,
+      summary:
+        '## Festgestellte Fakten\n' +
+        '- Wärmespeicher kosten je nach Größe 2.400–4.800 €.\n' +
+        '## Quellen\n' +
+        '- [Wärmespeicher](https://example.de/waermespeicher)\n',
+      focus: '',
+      tokensBefore: 2400,
+      tokensAfter: 96,
+      model: models[0].id,
+      backend: 'lmstudio',
+      createdAt: now(),
+    },
   ])
 
   // ?crash=render injects a message the chat view cannot render, which is the
@@ -751,7 +791,7 @@ Verfügbare Tools: {{tool_list}}`,
     return Promise.resolve({
       chat,
       messages: messages.get(chatId) || [],
-      compactions: [],
+      compactions: compactions.get(chatId) || [],
       attachments: [],
       documents: [],
       budget: budget(1713),
@@ -949,21 +989,24 @@ Verfügbare Tools: {{tool_list}}`,
       return Promise.resolve([...new Set(found.filter((v) => !KNOWN_VARS.includes(v)))].sort())
     },
 
-    // Mirrors chat.CompactResult. A conversation with nothing to fold reports
-    // created:false, which is the case the UI has to present as "nothing to
-    // compact" rather than as a failure — a brand-new chat is the easiest way to
-    // reach it here.
+    // Mirrors chat.CompactResult, including the contract the app now guarantees:
+    // a manual run folds whenever there is a message to fold, so only an empty
+    // chat reports created:false — the one case the UI has to present as
+    // "nothing to compact" rather than as a failure.
     CompactNow: (req) => {
-      const chatMessages = messages.get(req.chatId) || []
-      if (chatMessages.length < 2) {
+      const chatMessages = (messages.get(req.chatId) || []).filter(Boolean)
+      if (chatMessages.length === 0) {
         return Promise.resolve({ created: false, compaction: {} })
       }
+      const list = compactions.get(req.chatId) || []
+      const lastSeq = chatMessages.reduce((max, m) => Math.max(max, m.seq), 0)
+      const fromSeq = list.reduce((max, c) => Math.max(max, c.toSeq), 0) + 1
       const compaction = {
         id: nextId('comp'),
         chatId: req.chatId,
         trigger: 'manual',
-        fromSeq: 0,
-        toSeq: 2,
+        fromSeq,
+        toSeq: lastSeq,
         summary: 'Zusammenfassung aus dem Harness.',
         focus: req.focus || '',
         tokensBefore: 3200,
@@ -972,10 +1015,28 @@ Verfügbare Tools: {{tool_list}}`,
         backend: 'lmstudio',
         createdAt: now(),
       }
+      compactions.set(req.chatId, [...list, compaction])
+      // The real backend announces this on chat:compaction (and on chats:changed),
+      // and that event is what makes the thread draw the new card and the meter
+      // re-read the window. Without it the harness would keep showing the old
+      // thread and the button would look like it had done nothing.
+      emit('chat:compaction', { chatId: req.chatId, compaction })
+      emit('chats:changed', {})
       return Promise.resolve({ created: true, compaction })
     },
-    ListCompactions: () => Promise.resolve([]),
-    DeleteCompaction: () => Promise.resolve(null),
+    ListCompactions: (chatId) => Promise.resolve(compactions.get(chatId) || []),
+    // Mirrors the backend's cascade: compactions are cumulative, so deleting one
+    // takes every newer one with it. The UI only offers undo on the newest, which
+    // is why this never has to remove more than one row here.
+    DeleteCompaction: (chatId, id) => {
+      const list = compactions.get(chatId) || []
+      const target = list.find((c) => c.id === id)
+      compactions.set(
+        chatId,
+        target ? list.filter((c) => c.toSeq < target.toSeq) : list,
+      )
+      return Promise.resolve(null)
+    },
 
     PickFiles: () => Promise.resolve([]),
     AddAttachment: (input) => Promise.resolve({ id: nextId('att'), chatId: input.chatId, filename: 'harness.txt', kind: 'text', messageId: '', placement: 'inline', sizeBytes: 12, sha256: '', pages: 1, tokenEstimate: 12, documentId: '', createdAt: now() }),
