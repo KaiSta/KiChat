@@ -1,0 +1,17 @@
+Package: kichat
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Kai Stadtmueller <kai.stadtmueller@live.de>
+Installed-Size: @INSTALLED_SIZE@
+Section: utils
+Priority: optional
+Depends: libc6 (>= 2.34), libgdk-pixbuf-2.0-0, libglib2.0-0t64 | libglib2.0-0, libgtk-3-0t64 | libgtk-3-0, libjavascriptcoregtk-4.1-0, libsoup-3.0-0, libwebkit2gtk-4.1-0
+Description: Local-first LLM research chat
+ KiChat talks to a language model running on your own machine (LM Studio,
+ Ollama, or any OpenAI-compatible endpoint) and searches the web through Brave
+ or DuckDuckGo when a question needs current information: prices, laws, news,
+ live data. Attached documents are extracted and indexed locally, long
+ conversations are compacted automatically before they overflow the context
+ window, and every chat lives in a SQLite database under ~/.config/kichat.
+ There is no account, no cloud and no telemetry, and the network is only used
+ for the searches and model calls you ask for.

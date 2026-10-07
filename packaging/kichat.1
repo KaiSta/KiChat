@@ -1,0 +1,45 @@
+.TH KICHAT 1 "2026-10-07" "KiChat" "User Commands"
+.SH NAME
+kichat \- chat and research with a language model running on your own machine
+.SH SYNOPSIS
+.B kichat
+.SH DESCRIPTION
+.B kichat
+is a desktop application and has no command line: everything happens in the
+window, and every option is in the settings view inside it.
+.PP
+It talks to a model served by LM Studio, by Ollama, or by any OpenAI-compatible
+endpoint. When a question needs current information \- prices, laws, news, live
+data \- it searches the web through Brave or DuckDuckGo and reads the pages it
+finds. Documents you attach (PDF, DOCX, PPTX, Excel, plain text and Markdown) are
+extracted and indexed locally. Long conversations are compacted automatically
+before they overflow the model's context window, which is a reading instruction
+rather than a deletion: the original messages stay in the database.
+.PP
+There is no account, no cloud and no telemetry. The network is used only for the
+searches and model calls you ask for.
+.SH ENVIRONMENT
+.B kichat
+reads no environment variables. Its configuration is the settings view, stored in
+the database named under FILES.
+.SH FILES
+.TP
+.I ~/.config/kichat/kichat.db
+Everything that matters: chats, messages, compactions, attached documents and
+their full-text index, and the caches of searches and scraped pages.
+.TP
+.I ~/.config/kichat/secrets
+The search API key, when the desktop keyring could not be used. The key is kept
+in the keyring whenever one is available.
+.TP
+.I ~/.local/share/kichat
+Window and webview state: the HTTP cache, the HSTS list, media keys. Deleting it
+costs nothing but a slower first page.
+.SH NOTES
+Expired entries are pruned from both web caches on every start, so the database
+grows with your conversations rather than with your browsing.
+.PP
+Deleting
+.I kichat.db
+resets the application to a fresh installation. Deleting the directory resets
+everything.

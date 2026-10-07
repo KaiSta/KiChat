@@ -1,0 +1,22 @@
+# StartupWMClass has to match the window, not the executable name: Wails sets
+# WM_CLASS to ("kichat", "Kichat"), and desktops match against the second field,
+# so a launcher that used "kichat" would show a second, unpinned icon.
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=KiChat
+GenericName=Local LLM research chat
+Comment=Chat and research with a language model running on your own machine
+Exec=kichat
+Icon=kichat
+Terminal=false
+# Learned from desktop-file-validate rather than from the spec: with Utility as
+# the main category it hints that Chat belongs with Network, and adding a second
+# main category makes it hint that the app may appear twice in the menu. Of the
+# four combinations tried, Network as the single main category plus Chat is the
+# only one that validates silently — and it is the honest one, since the search
+# is what the app does over the network.
+Categories=Network;Chat;
+Keywords=llm;chat;research;ollama;lmstudio;local;
+StartupNotify=true
+StartupWMClass=Kichat

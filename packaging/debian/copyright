@@ -1,0 +1,12 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: KiChat
+Source: built from the local KiChat source tree
+
+Files: *
+Copyright: 2026 Kai Stadtmueller <kai.stadtmueller@live.de>
+License: all-rights-reserved
+ The source tree ships no LICENSE or COPYING file, so no license has been
+ granted yet and all rights are reserved by the copyright holder named above.
+ Replace this stanza with the real license before distributing this package to
+ anyone else — this file exists so the package is not silently claiming terms
+ nobody chose.

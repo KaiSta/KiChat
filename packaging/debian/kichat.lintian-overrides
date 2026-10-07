@@ -1,0 +1,28 @@
+# Lintian overrides for KiChat. Installed as /usr/share/lintian/overrides/kichat,
+# which is where lintian reads them from once the package is installed.
+#
+# Only findings that are false positives or deliberate leave a line here. The
+# hardening warnings are not overridden: -buildmode=pie and the external linker
+# with -z,now in the Makefile are what clear those, because they were real
+# findings about a real binary.
+#
+# The contexts below are wildcards on purpose. On lintian 2.117 the literal
+# context it prints (".comment", "Assistent Assistant") does not match, and every
+# literal spelling tried — the displayed context, the file path, the tag name
+# included — was reported back as `mismatched-override`. `*` is the one form that
+# suppresses, which was measured by repacking the same tree with each variant.
+#
+# `make lint-deb` checks the .deb twice: raw, then with the tags listed here
+# suppressed. The residual list stays visible, so this file has to earn its lines.
+
+# The spellings lintian flags are German UI strings and Go runtime symbols that
+# happen to look like English misspellings: "Assistent" is the German for
+# assistant, and "classs", "ment", "nAm" are substrings of identifiers
+# (classString, alignment, nAm...) rather than words anyone wrote.
+kichat binary: spelling-error-in-binary *
+
+# gcc leaves a .comment section with the compiler version in the object files it
+# produced for the cgo/GTK bindings, and Go carries it into the linked binary.
+# There is no supported way to drop one input section from a Go link, and it is
+# ~50 bytes of build provenance in a 22 MB binary.
+kichat binary: binary-has-unneeded-section *
