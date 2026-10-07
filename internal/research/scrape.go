@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
@@ -71,6 +72,10 @@ func NewScraper(st *store.Store, opts ScrapeOptions, pdf pdfExtractor) *Scraper 
 	return s
 }
 
+// maxRedirects bounds a redirect chain. Each hop is re-guarded, so the limit is
+// about cost, not about safety.
+const maxRedirects = 3
+
 // Configure applies new scrape settings and rebuilds the HTTP client.
 func (s *Scraper) Configure(opts ScrapeOptions) {
 	if opts.MaxBytes <= 0 {
@@ -82,19 +87,75 @@ func (s *Scraper) Configure(opts ScrapeOptions) {
 	if opts.CacheHours <= 0 {
 		opts.CacheHours = 168
 	}
+
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	// The dial-time check covers what no hostname check can: a name that resolves
+	// to a public address when inspected and to a private one when dialled. It is
+	// skipped when an HTTP proxy is configured, because then the connection goes
+	// to the proxy, which is allowed to live on the local network.
+	if !proxyConfigured() {
+		dialer.Control = privateDialControl(opts.AllowPrivateHosts)
+	}
+
 	client := &http.Client{
 		Timeout: opts.Timeout,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           dialer.DialContext,
+			ForceAttemptHTTP2:     true,
+			TLSHandshakeTimeout:   10 * time.Second,
+			MaxIdleConns:          8,
+			IdleConnTimeout:       30 * time.Second,
+			ResponseHeaderTimeout: opts.Timeout,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
+			if len(via) >= maxRedirects {
 				return fmt.Errorf("zu viele Weiterleitungen")
 			}
-			return nil
+			// Every hop is re-guarded. The check in Scrape only covers the URL that
+			// was named, and a redirect is exactly how a public address turns into a
+			// request against the user's own machine or a cloud metadata endpoint —
+			// whose response body would then be handed to the model.
+			return s.guardHost(context.Background(), req.URL, opts)
 		},
 	}
 	s.mu.Lock()
 	s.opts = opts
 	s.client = client
 	s.mu.Unlock()
+}
+
+// proxyConfigured reports whether the environment points HTTP at a proxy. It
+// decides whether the dial-time private-address check can be used at all.
+func proxyConfigured() bool {
+	probe, err := http.ProxyFromEnvironment(&http.Request{
+		URL: &url.URL{Scheme: "https", Host: "proxy-probe.invalid"},
+	})
+	return err == nil && probe != nil
+}
+
+// privateDialControl rejects a connection whose target is a loopback, private or
+// link-local address. It runs on the resolved address that is actually being
+// dialled, which is what makes it immune to a host that answers the second
+// lookup differently from the first.
+func privateDialControl(allowPrivate bool) func(network, address string, _ syscall.RawConn) error {
+	if allowPrivate {
+		return nil
+	}
+	return func(_ string, address string, _ syscall.RawConn) error {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			host = address
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return nil
+		}
+		if isPrivateIP(ip) {
+			return fmt.Errorf("Zugriff auf private Adressen ist deaktiviert (%s)", host)
+		}
+		return nil
+	}
 }
 
 func (s *Scraper) options() ScrapeOptions {
