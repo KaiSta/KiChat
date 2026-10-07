@@ -3,11 +3,13 @@ package chat
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"kichat/internal/config"
+	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/store"
 )
@@ -129,6 +131,111 @@ func makeChat(t *testing.T, st *store.Store) store.Chat {
 		t.Fatalf("create chat: %v", err)
 	}
 	return c
+}
+
+// TestStreamFailureMarksTheReplyIncomplete pins what a reply looks like when the
+// backend stops delivering it halfway. The partial text is kept, but the row may
+// not claim to be complete: nothing else would explain a sentence that simply
+// ends, and the context meter would count a finished answer that never arrived.
+func TestStreamFailureMarksTheReplyIncomplete(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{{
+			{Type: llm.EventDelta, Text: "Halbe Antwort"},
+			{Type: llm.EventError, Error: "Die Verbindung wurde unterbrochen: unexpected EOF"},
+		}},
+	}
+	engine, captured := newTestEngine(t, st, provider)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Hallo"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("turn did not finish")
+	}
+
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assistant *store.Message
+	for i := range messages {
+		if messages[i].Role == string(llm.RoleAssistant) {
+			assistant = &messages[i]
+		}
+	}
+	if assistant == nil {
+		t.Fatal("no assistant message persisted")
+	}
+	if assistant.Content != "Halbe Antwort" {
+		t.Errorf("content = %q, want the partial text to be kept", assistant.Content)
+	}
+	if assistant.Status != store.StatusFailed {
+		t.Errorf("status = %q, want %q", assistant.Status, store.StatusFailed)
+	}
+	if assistant.StopReason != "stream_error" {
+		t.Errorf("stop reason = %q, want stream_error", assistant.StopReason)
+	}
+
+	sawError := false
+	for _, ev := range *captured {
+		if ev.name == events.Error {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Error("the failed stream was never reported to the UI")
+	}
+}
+
+// TestToolRoundLimitIsReportedToTheUser covers the end of a tool loop: when the
+// iteration budget runs out while the model is still asking for tools, the chat
+// ends on tool results with no answer. That used to be silent — the turn looked
+// as though it had produced nothing at all.
+func TestToolRoundLimitIsReportedToTheUser(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	call := "```tool_call\n{\"name\": \"search_web\", \"arguments\": {\"query\": \"mietrecht\"}}\n```"
+	reply := []llm.StreamEvent{{Type: llm.EventDelta, Text: call}}
+	provider := &fakeProvider{
+		model: llm.ModelInfo{
+			ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded,
+			// A capability list without tools keeps the text protocol in play.
+			Capabilities: []string{"vision"},
+		},
+		replies: [][]llm.StreamEvent{reply, reply, reply, reply, reply, reply},
+	}
+	engine, captured := newTestEngine(t, st, provider)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Recherchiere Mietrecht"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("turn did not finish")
+	}
+
+	// newTestEngine sets ToolIterations to 3.
+	if n := provider.requestCount(); n != 3 {
+		t.Errorf("generations = %d, want the 3-iteration cap", n)
+	}
+	var warning string
+	for _, ev := range *captured {
+		if ev.name == events.Warning {
+			if text, ok := ev.payload["warning"].(string); ok {
+				warning = text
+			}
+		}
+	}
+	if warning == "" {
+		t.Fatal("the user was never told the tool budget ran out")
+	}
+	if !strings.Contains(warning, "Tool-Runden") {
+		t.Errorf("warning = %q, want it to name the tool-round limit", warning)
+	}
 }
 
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {

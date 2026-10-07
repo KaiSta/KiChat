@@ -138,9 +138,16 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			row.PromptTokens = usage.PromptTokens
 			row.CompletionTokens = usage.CompletionTokens
 		}
-		if ctx.Err() != nil {
+		switch {
+		case ctx.Err() != nil:
 			row.Status = store.StatusInterrupted
 			row.StopReason = "interrupted"
+		case streamErr != nil:
+			// The connection died mid-answer. The partial text is kept, but calling it
+			// complete would leave a reply that simply stops with nothing to explain
+			// it: neither the row nor the next request may claim it is finished.
+			row.Status = store.StatusFailed
+			row.StopReason = "stream_error"
 		}
 		// Persist the reply together with its tool calls before executing them, so
 		// the transcript is replayable even if the process dies mid-tool.
@@ -187,6 +194,20 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		}
 		e.emitStatus(in.Chat.ID, "idle")
 	}
+
+	// Falling out of the loop means the iteration budget ran out while the model
+	// was still calling tools, so the turn ends on tool results with no answer.
+	// Saying so is better than a turn that appears to have produced nothing.
+	extra := ""
+	if result.Text != "" {
+		extra = " Der bisherige Text steht oben, ist aber möglicherweise nicht abgeschlossen."
+	}
+	e.emit(events.Warning, map[string]any{
+		"chatId": in.Chat.ID,
+		"warning": fmt.Sprintf("Die maximale Zahl an Tool-Runden (%d) ist erreicht — es wurde keine "+
+			"abschließende Antwort erzeugt.%s Sende eine neue Nachricht, damit das Modell die "+
+			"Ergebnisse auswertet.", maxIter, extra),
+	})
 	return result, nil
 }
 
@@ -257,22 +278,21 @@ const cancelledToolOutput = "Der Nutzer hat die Generierung abgebrochen. Dieses 
 // appendToolResult persists a tool result as a message so the next iteration of
 // the loop sees it.
 func (e *Engine) appendToolResult(chatID string, call llm.ToolCall, output, status string) {
-	seq, err := e.Store.NextSeq(chatID)
-	if err != nil {
-		return
-	}
-	msg := store.Message{
+	msg, err := e.Store.AppendMessage(store.Message{
 		ID:         newID(),
 		ChatID:     chatID,
-		Seq:        seq,
 		Role:       string(llm.RoleTool),
 		Content:    output,
 		Name:       call.Name,
 		ToolCallID: call.ID,
 		Status:     status,
 		CreatedAt:  time.Now(),
-	}
-	if err := e.Store.CreateMessage(msg); err != nil {
+	})
+	if err != nil {
+		// Not a cosmetic failure: the assistant message that asked for this tool is
+		// already stored, so losing the result leaves a tool call without an answer
+		// and every later request in this chat is rejected by the backend.
+		e.persist(chatID, "Das Tool-Ergebnis", err)
 		return
 	}
 	e.emit(events.Message, map[string]any{"chatId": chatID, "message": msg})

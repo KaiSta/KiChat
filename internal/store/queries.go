@@ -161,19 +161,8 @@ func scanMessage(row interface{ Scan(...any) error }) (Message, error) {
 	return m, nil
 }
 
-// NextSeq returns the next sequence number for a chat.
-func (s *Store) NextSeq(chatID string) (int, error) {
-	var max sql.NullInt64
-	if err := s.db.QueryRow(`SELECT MAX(seq) FROM messages WHERE chat_id=?`, chatID).Scan(&max); err != nil {
-		return 0, err
-	}
-	if !max.Valid {
-		return 1, nil
-	}
-	return int(max.Int64) + 1, nil
-}
-
-// CreateMessage inserts a message.
+// CreateMessage inserts a message at the sequence number the caller assigned.
+// Use AppendMessage when the number should be allocated instead.
 func (s *Store) CreateMessage(m Message) error {
 	if m.CreatedAt.IsZero() {
 		m.CreatedAt = time.Now()
@@ -191,8 +180,61 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	if err != nil {
 		return err
 	}
-	_, _ = s.db.Exec(`UPDATE chats SET updated_at=? WHERE id=?`, millis(time.Now()), m.ChatID)
-	return nil
+	_, err = s.db.Exec(`UPDATE chats SET updated_at=? WHERE id=?`, millis(time.Now()), m.ChatID)
+	return err
+}
+
+// AppendMessage inserts a message at the next free sequence number of its chat
+// and returns it with Seq filled in.
+//
+// The sequence number is read and written inside one transaction. Reading
+// MAX(seq) and inserting it as two steps lets two writers compute the same
+// number: with a single pooled connection the transaction holds that connection
+// for its whole length, so nothing else can slip between the read and the write.
+// A duplicate would silently reorder a conversation, and the engine relies on
+// Seq to cut a fold at a turn boundary.
+//
+// The chat's updated_at is touched in the same transaction, which is also why a
+// failure there is reported: a message stored without it would leave the chat
+// list stale, and reporting the failure is the only way the caller can say so.
+func (s *Store) AppendMessage(m Message) (Message, error) {
+	if m.CreatedAt.IsZero() {
+		m.CreatedAt = time.Now()
+	}
+	if m.Status == "" {
+		m.Status = StatusComplete
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return m, err
+	}
+	defer tx.Rollback()
+
+	var max sql.NullInt64
+	if err := tx.QueryRow(`SELECT MAX(seq) FROM messages WHERE chat_id=?`, m.ChatID).Scan(&max); err != nil {
+		return m, err
+	}
+	m.Seq = 1
+	if max.Valid {
+		m.Seq = int(max.Int64) + 1
+	}
+
+	if _, err := tx.Exec(`
+INSERT INTO messages (`+messageColumns+`)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		m.ID, m.ChatID, m.Seq, m.Role, m.Content, m.Reasoning, m.Name,
+		m.ToolCallsJSON, m.ToolCallID, m.Status, millis(m.CreatedAt), m.Backend,
+		m.Model, m.PromptTokens, m.CompletionTokens, m.TokensPerSecond, m.TTFTMs,
+		m.GenerationMs, m.StopReason, m.StatsSource); err != nil {
+		return m, err
+	}
+	if _, err := tx.Exec(`UPDATE chats SET updated_at=? WHERE id=?`, millis(time.Now()), m.ChatID); err != nil {
+		return m, err
+	}
+	if err := tx.Commit(); err != nil {
+		return m, err
+	}
+	return m, nil
 }
 
 // UpdateMessage persists the mutable parts of a message — used while streaming

@@ -460,22 +460,17 @@ func (e *Engine) emitBudget(chatID string, chat *store.Chat,
 
 // appendUserMessage persists the user's turn and links any attachments.
 func (e *Engine) appendUserMessage(req TurnRequest, backendID, modelID string) error {
-	seq, err := e.Store.NextSeq(req.ChatID)
-	if err != nil {
-		return err
-	}
-	msg := store.Message{
+	msg, err := e.Store.AppendMessage(store.Message{
 		ID:        uuid.NewString(),
 		ChatID:    req.ChatID,
-		Seq:       seq,
 		Role:      string(llm.RoleUser),
 		Content:   req.Text,
 		Status:    store.StatusComplete,
 		CreatedAt: time.Now(),
 		Backend:   backendID,
 		Model:     modelID,
-	}
-	if err := e.Store.CreateMessage(msg); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	for _, id := range req.AttachmentIDs {
@@ -497,21 +492,16 @@ func (e *Engine) appendUserMessage(req TurnRequest, backendID, modelID string) e
 
 // createAssistantMessage inserts the placeholder row for the reply.
 func (e *Engine) createAssistantMessage(chatID, backendID, modelID string) (store.Message, error) {
-	seq, err := e.Store.NextSeq(chatID)
-	if err != nil {
-		return store.Message{}, err
-	}
-	msg := store.Message{
+	msg, err := e.Store.AppendMessage(store.Message{
 		ID:        uuid.NewString(),
 		ChatID:    chatID,
-		Seq:       seq,
 		Role:      string(llm.RoleAssistant),
 		Status:    store.StatusStreaming,
 		CreatedAt: time.Now(),
 		Backend:   backendID,
 		Model:     modelID,
-	}
-	if err := e.Store.CreateMessage(msg); err != nil {
+	})
+	if err != nil {
 		return store.Message{}, err
 	}
 	return msg, nil

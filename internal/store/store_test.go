@@ -1,8 +1,10 @@
 package store
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -37,25 +39,90 @@ func chatFixture(id string) Chat {
 	}
 }
 
+// TestAppendMessageAllocatesEachSequenceOnce is the regression test for the
+// sequence number that was read and written as two steps: two writers could both
+// read the same MAX(seq) and store the same number, which silently reorders a
+// conversation and breaks the turn-boundary cuts compaction relies on. The
+// allocation now happens inside one transaction.
+func TestAppendMessageAllocatesEachSequenceOnce(t *testing.T) {
+	st := newStore(t)
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatalf("CreateChat: %v", err)
+	}
+
+	const writers = 24
+	var wg sync.WaitGroup
+	seqs := make([]int, writers)
+	errs := make([]error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			msg, err := st.AppendMessage(Message{
+				ID: fmt.Sprintf("m%02d", i), ChatID: "c1", Role: "user",
+				Content: fmt.Sprintf("Nachricht %d", i), CreatedAt: time.Now(),
+			})
+			seqs[i], errs[i] = msg.Seq, err
+		}(i)
+	}
+	wg.Wait()
+
+	seen := map[int]string{}
+	for i, seq := range seqs {
+		if errs[i] != nil {
+			t.Fatalf("writer %d: %v", i, errs[i])
+		}
+		if seq < 1 || seq > writers {
+			t.Fatalf("writer %d got seq %d, outside 1..%d", i, seq, writers)
+		}
+		if other, dup := seen[seq]; dup {
+			t.Fatalf("seq %d was handed to both %s and m%02d", seq, other, i)
+		}
+		seen[seq] = fmt.Sprintf("m%02d", i)
+	}
+
+	messages, err := st.ListMessages("c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != writers {
+		t.Fatalf("stored %d messages, want %d", len(messages), writers)
+	}
+	for i, m := range messages {
+		if m.Seq != i+1 {
+			t.Fatalf("message %d has seq %d, want %d", i, m.Seq, i+1)
+		}
+	}
+}
+
 func TestChatAndMessageRoundTrip(t *testing.T) {
 	st := newStore(t)
 	if err := st.CreateChat(chatFixture("c1")); err != nil {
 		t.Fatalf("CreateChat: %v", err)
 	}
 
-	seq, err := st.NextSeq("c1")
-	if err != nil || seq != 1 {
-		t.Fatalf("NextSeq = %d, %v; want 1", seq, err)
-	}
-	msg := Message{
-		ID: "m1", ChatID: "c1", Seq: seq, Role: "user", Content: "Hallo",
+	msg, err := st.AppendMessage(Message{
+		ID: "m1", ChatID: "c1", Role: "user", Content: "Hallo",
 		Status: StatusComplete, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("AppendMessage: %v", err)
 	}
-	if err := st.CreateMessage(msg); err != nil {
-		t.Fatalf("CreateMessage: %v", err)
+	if msg.Seq != 1 {
+		t.Fatalf("first message got seq %d, want 1", msg.Seq)
 	}
-	if seq, _ := st.NextSeq("c1"); seq != 2 {
-		t.Fatalf("NextSeq after insert = %d, want 2", seq)
+	second, err := st.AppendMessage(Message{
+		ID: "m1b", ChatID: "c1", Role: "assistant", Content: "Hallo zurück",
+		CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	if second.Seq != 2 {
+		t.Fatalf("second message got seq %d, want 2", second.Seq)
+	}
+	if second.Status != StatusComplete {
+		t.Fatalf("an empty status should default to complete, got %q", second.Status)
 	}
 
 	// Round-trip including the numeric fields the UI reads.

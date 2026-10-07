@@ -4,11 +4,14 @@ import "time"
 
 // Message status values. "interrupted" marks a generation the user stopped and
 // "cancelled" a tool call that was abandoned; both are kept so the transcript
-// stays honest about what happened.
+// stays honest about what happened. "failed" marks a reply the backend stopped
+// delivering halfway through, which is a different story from a user pressing
+// Stop — the text is kept, but it must not read as a finished answer.
 const (
 	StatusComplete    = "complete"
 	StatusStreaming   = "streaming"
 	StatusInterrupted = "interrupted"
+	StatusFailed      = "failed"
 	StatusCancelled   = "cancelled"
 )
 

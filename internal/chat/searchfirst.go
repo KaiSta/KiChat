@@ -68,14 +68,9 @@ func (e *Engine) seedSearch(ctx context.Context, chat *store.Chat, query string,
 		return nil
 	}
 
-	seq, err := e.Store.NextSeq(chat.ID)
-	if err != nil {
-		return err
-	}
-	msg := store.Message{
+	msg, err := e.Store.AppendMessage(store.Message{
 		ID:        newID(),
 		ChatID:    chat.ID,
-		Seq:       seq,
 		Role:      "system",
 		Name:      "search",
 		Content:   content,
@@ -83,8 +78,8 @@ func (e *Engine) seedSearch(ctx context.Context, chat *store.Chat, query string,
 		CreatedAt: time.Now(),
 		Backend:   chat.Backend,
 		Model:     chat.Model,
-	}
-	if err := e.Store.CreateMessage(msg); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	e.emit(events.Message, map[string]any{"chatId": chat.ID, "message": msg})
