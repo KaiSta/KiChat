@@ -18,7 +18,12 @@ func newCustomProvider(id, name, baseURL, apiKey string) *openAICompatProvider {
 		chatPaths = []string{baseURL + "/chat/completions"}
 		modelsPath = baseURL + "/models"
 	}
-	chatPaths = append(chatPaths, baseURL+"/chat/completions")
+	// Add the bare OpenAI path as a fallback, unless the base URL already names
+	// it: a base ending in /v1 makes the two identical, and a duplicate entry
+	// would only retry the same 404.
+	if fallback := baseURL + "/chat/completions"; chatPaths[len(chatPaths)-1] != fallback {
+		chatPaths = append(chatPaths, fallback)
+	}
 	return &openAICompatProvider{
 		id:               id,
 		name:             name,
