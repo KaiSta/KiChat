@@ -75,6 +75,11 @@ function Sidebar() {
 
   const [filter, setFilter] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  // Inline rename: the id being edited and the draft it holds. Renaming from the
+  // list is the point — the list is where the chat to continue is chosen, and the
+  // header field in the chat view reads as a static heading.
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
 
   // The cycle follows the order LANGS declares, so this button and the picker in
   // Settings cannot disagree about what "next" means. Math.max also absorbs a
@@ -144,37 +149,88 @@ function Sidebar() {
           const active = c.id === activeChatId && view === 'chat'
           return (
             <div key={c.id} className="group relative">
-              <button
-                type="button"
-                onClick={() => {
-                  setView('chat')
-                  void useStore.getState().selectChat(c.id)
-                }}
-                className="w-full rounded-md px-2 py-2 text-left text-[13px] transition-colors hover:bg-[var(--surface-2)]"
-                style={active ? { background: 'var(--surface-3)' } : undefined}
-              >
-                <div className="flex items-center gap-2">
-                  {running[c.id] && (
-                    <span className="spin inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: 'var(--accent)' }} />
-                  )}
-                  <span className="truncate">{c.title || t('chat.empty.title')}</span>
+              {/*
+                An editing <input> must not be nested inside the row <button> —
+                that is invalid HTML and eats the field's focus and clicks. So the
+                row renders either the normal click target or the edit field.
+              */}
+              {renamingId === c.id ? (
+                <input
+                  autoFocus
+                  className="input"
+                  aria-label={t('nav.rename')}
+                  value={renameDraft}
+                  // Enter just blurs; the onBlur below is the single commit path
+                  // (blurring twice would rename twice). Escape unmounts the field,
+                  // so no blur fires and nothing is written. An empty or unchanged
+                  // value is skipped, so the title can never be cleared to blank.
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      e.currentTarget.blur()
+                    }
+                    if (e.key === 'Escape') setRenamingId(null)
+                  }}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  onBlur={(e) => {
+                    const value = e.target.value.trim()
+                    if (value && value !== c.title) void useStore.getState().renameChat(c.id, value)
+                    setRenamingId(null)
+                  }}
+                  style={active ? { background: 'var(--surface-3)' } : undefined}
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setView('chat')
+                    void useStore.getState().selectChat(c.id)
+                  }}
+                  className="w-full rounded-md px-2 py-2 text-left text-[13px] transition-colors hover:bg-[var(--surface-2)]"
+                  style={active ? { background: 'var(--surface-3)' } : undefined}
+                >
+                  <div className="flex items-center gap-2">
+                    {running[c.id] && (
+                      <span className="spin inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: 'var(--accent)' }} />
+                    )}
+                    <span className="truncate">{c.title || t('chat.empty.title')}</span>
+                  </div>
+                  <div className="faint flex items-center gap-2 text-[11px]">
+                    <span className="mono truncate" style={{ maxWidth: '8rem' }}>
+                      {c.model || '–'}
+                    </span>
+                    <span>·</span>
+                    <span>{timeAgo(c.updatedAt, lang)}</span>
+                  </div>
+                </button>
+              )}
+              {/* Both row actions live in one hover-revealed group; they are hidden
+                  while the field is open so nothing overlaps the input. */}
+              {renamingId !== c.id && (
+                <div className="absolute top-1.5 right-1 flex gap-1 opacity-0 group-hover:opacity-100">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    title={t('nav.rename')}
+                    aria-label={t('nav.rename')}
+                    onClick={() => {
+                      setRenameDraft(c.title)
+                      setRenamingId(c.id)
+                    }}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    title={t('nav.delete')}
+                    aria-label={t('nav.delete')}
+                    onClick={() => setConfirmDelete(c.id)}
+                  >
+                    ✕
+                  </button>
                 </div>
-                <div className="faint flex items-center gap-2 text-[11px]">
-                  <span className="mono truncate" style={{ maxWidth: '8rem' }}>
-                    {c.model || '–'}
-                  </span>
-                  <span>·</span>
-                  <span>{timeAgo(c.updatedAt, lang)}</span>
-                </div>
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-ghost absolute top-1.5 right-1 opacity-0 group-hover:opacity-100"
-                title={t('nav.delete')}
-                onClick={() => setConfirmDelete(c.id)}
-              >
-                ✕
-              </button>
+              )}
             </div>
           )
         })}
