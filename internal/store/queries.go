@@ -318,6 +318,32 @@ func (s *Store) DeleteMessagesFromSeq(chatID string, seq int) error {
 		if _, err := s.db.Exec(`DELETE FROM tool_calls WHERE message_id=?`, id); err != nil {
 			return err
 		}
+		// Each attachment owns a document, which owns its chunks and index rows.
+		// The document has to go with the attachment: deleting only the row would
+		// leave the extracted text unreachable, the same leak DeleteChat fixed.
+		// The ids are collected before deleting because a query and a write share
+		// the single pooled connection.
+		var docIDs []string
+		docRows, err := s.db.Query(`SELECT document_id FROM attachments WHERE message_id=?`, id)
+		if err != nil {
+			return err
+		}
+		for docRows.Next() {
+			var docID string
+			if err := docRows.Scan(&docID); err != nil {
+				docRows.Close()
+				return err
+			}
+			if docID != "" {
+				docIDs = append(docIDs, docID)
+			}
+		}
+		docRows.Close()
+		for _, docID := range docIDs {
+			if err := s.DeleteDocument(docID); err != nil {
+				return err
+			}
+		}
 		if _, err := s.db.Exec(`DELETE FROM attachments WHERE message_id=?`, id); err != nil {
 			return err
 		}

@@ -373,6 +373,52 @@ func TestDeleteAttachmentRemovesItsDocument(t *testing.T) {
 	}
 }
 
+// TestDeleteMessagesFromSeqRemovesOwnedDocuments: regenerating deletes the
+// trailing assistant message, and an attachment on the removed messages must take
+// its document and chunks with it. Deleting only the attachment row left the
+// extracted text unreachable — the same leak DeleteChat and DeleteAttachment fixed.
+func TestDeleteMessagesFromSeqRemovesOwnedDocuments(t *testing.T) {
+	st := newStore(t)
+	now := time.Now()
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMessage(Message{ID: "m1", ChatID: "c1", Seq: 1, Role: "assistant",
+		Content: "Antwort", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateDocument(Document{ID: "d1", ChatID: "c1", Title: "t",
+		Text: "Inhalt", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateAttachment(Attachment{ID: "a1", ChatID: "c1", MessageID: "m1",
+		Kind: "file", Filename: "f.txt", Placement: PlacementIndexed, DocumentID: "d1",
+		CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if st.FTS {
+		if err := st.InsertChunks([]Chunk{{DocumentID: "d1", ChatID: "c1", Ordinal: 0, Text: "Inhalt"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := st.DeleteMessagesFromSeq("c1", 1); err != nil {
+		t.Fatalf("DeleteMessagesFromSeq: %v", err)
+	}
+	if n := rowCount(t, st, "messages", "id=?", "m1"); n != 0 {
+		t.Error("the message survived its own deletion")
+	}
+	if n := rowCount(t, st, "attachments", "id=?", "a1"); n != 0 {
+		t.Error("the attachment survived the message it belonged to")
+	}
+	if n := rowCount(t, st, "documents", "id=?", "d1"); n != 0 {
+		t.Error("the document outlived the attachment it belonged to")
+	}
+	if n := rowCount(t, st, "chunks", "document_id=?", "d1"); n != 0 {
+		t.Error("the chunks outlived their document")
+	}
+}
+
 // TestPruneExpiredCachesDropsOnlyExpiredRows draws the line between "reads as
 // expired" and "is gone". GetSearchCache already hides an expired row, so only a
 // count proves the row is removed — that is the difference between a cache and an
