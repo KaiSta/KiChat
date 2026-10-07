@@ -88,8 +88,11 @@ func (s *Store) Set(name, value string) error {
 		if err := keyring.Set(keyringService, name, value); err == nil {
 			return nil
 		}
-		// Fall through to the encrypted file if the keyring refuses mid-run.
-		s.keyring = false
+		// One refusal is not proof the keyring is gone: a locked collection or a
+		// busy D-Bus session fails once and works afterwards. Flipping the flag here
+		// would hide every secret already in the keyring for the rest of the run,
+		// because Get only consults it while the flag is set — so the write falls
+		// through to the encrypted file and the next call tries the keyring again.
 	}
 	if value == "" {
 		delete(s.fallback, name)
