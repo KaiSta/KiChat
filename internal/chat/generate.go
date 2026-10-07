@@ -61,6 +61,9 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 	if maxIter <= 0 {
 		maxIter = 1
 	}
+	// Tool results are charged against one budget for the whole answer, so a
+	// single large scrape cannot fill the window on its own.
+	toolBudget := newToolOutputBudget(in.Settings)
 
 	for iteration := 0; iteration < maxIter; iteration++ {
 		if ctx.Err() != nil {
@@ -190,7 +193,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 				e.cancelRemainingCalls(in.Chat.ID, row, calls, i)
 				return result, ctx.Err()
 			}
-			e.runTool(ctx, in.Chat.ID, row, call)
+			e.runTool(ctx, in.Chat.ID, row, call, toolBudget)
 		}
 		e.emitStatus(in.Chat.ID, "idle")
 	}
@@ -212,7 +215,12 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 }
 
 // runTool executes one tool call and records both the call and its result.
-func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall) {
+//
+// The full result is stored for the UI, but only what fits the answer's tool
+// budget is written into the tool message the model reads. The stored message is
+// what is replayed on every later turn, so bounding it here is what actually
+// keeps a large scrape out of the window.
+func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, budget *toolOutputBudget) {
 	record := store.ToolCallRecord{
 		ID:        call.ID,
 		MessageID: row.ID,
@@ -240,7 +248,45 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 	e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
 	e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 
-	e.appendToolResult(chatID, call, output, record.Status)
+	e.appendToolResult(chatID, call, budget.take(output), record.Status)
+}
+
+// toolOutputBudget bounds how many tokens of tool results one answer carries into
+// its next request. The setting is per answer rather than per call, so several
+// tools cannot together exceed it. The budget is shared across the tool rounds
+// of a single generate call.
+type toolOutputBudget struct{ remaining int }
+
+func newToolOutputBudget(settings config.Settings) *toolOutputBudget {
+	remaining := settings.ToolTokenBudget
+	if remaining <= 0 {
+		remaining = 25000
+	}
+	return &toolOutputBudget{remaining: remaining}
+}
+
+// exhaustedNotice is what the model sees once the budget is spent, so it learns
+// that a result was withheld instead of reading an empty answer as a result.
+const exhaustedNotice = "Das Token-Budget für Tool-Ergebnisse in dieser Antwort ist aufgebraucht. " +
+	"Weitere Tool-Ergebnisse werden nicht mehr in den Kontext übernommen."
+
+// take returns the part of a tool result the model may see and charges it
+// against the budget. A result that does not fit is cut with the shared
+// truncation marker, so the model can tell a short result from a shortened one.
+func (b *toolOutputBudget) take(output string) string {
+	if b.remaining <= 0 {
+		return exhaustedNotice
+	}
+	if tokens := llm.EstimateTokens(output); tokens <= b.remaining {
+		b.remaining -= tokens
+		return output
+	}
+	cut := cutToTokens(output, b.remaining)
+	b.remaining = 0
+	if cut == "" {
+		return exhaustedNotice
+	}
+	return cut
 }
 
 func (e *Engine) executeTool(ctx context.Context, chatID string, call llm.ToolCall) (string, error) {
