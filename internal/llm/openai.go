@@ -43,6 +43,12 @@ type openAICompatProvider struct {
 	// return a `data` array; they disagree about everything inside it.
 	modelsFlavour modelListFlavour
 
+	// thinkingToggle marks a backend whose request can turn thinking off with
+	// `enable_thinking` even though its model metadata advertises no thinking
+	// capability (LM Studio). DeepSeek and plain OpenAI-compatible servers do not
+	// document the field, so they are left alone.
+	thinkingToggle bool
+
 	mu          sync.Mutex
 	chatPathIdx int
 }
@@ -78,11 +84,16 @@ func newLMStudioProvider(baseURL, apiKey string) *openAICompatProvider {
 		},
 		modelsPath:       baseURL + "/api/v0/models",
 		openAIModelsPath: baseURL + "/v1/models",
+		thinkingToggle:   true,
 	}
 }
 
 func (p *openAICompatProvider) ID() string   { return p.id }
 func (p *openAICompatProvider) Name() string { return p.name }
+
+// CanToggleThinking reports whether this backend accepts `enable_thinking` in the
+// request body.
+func (p *openAICompatProvider) CanToggleThinking() bool { return p.thinkingToggle }
 
 func (p *openAICompatProvider) authHeaders() map[string]string {
 	h := map[string]string{}
@@ -414,6 +425,13 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 	}
 	if req.Seed != nil {
 		body["seed"] = *req.Seed
+	}
+	// LM Studio has no dedicated reasoning parameter, but its request accepts the
+	// in-body `enable_thinking` toggle that Qwen-style chat templates read. Without
+	// it a reasoning model spends the whole output budget thinking and returns no
+	// summary at all.
+	if p.thinkingToggle && req.Think != nil && !*req.Think {
+		body["enable_thinking"] = false
 	}
 	if len(req.Tools) > 0 {
 		tools := make([]wireTool, 0, len(req.Tools))

@@ -336,7 +336,12 @@ func (a *App) CompactNow(req CompactRequest) (chat.CompactResult, error) {
 	if err := a.ensure(); err != nil {
 		return chat.CompactResult{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// A compaction reads a large transcript and writes a summary; on a local model
+	// running on CPU that is minutes of work, and five of them was not enough — the
+	// run was still producing tokens when the deadline cut it off, reported as
+	// "context deadline exceeded". The output is bounded (see compactWith), so this
+	// is a backstop against a stuck backend, not a budget the work has to fit in.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	result, err := a.engine.Compact(ctx, req.ChatID, chat.CompactOptions{
 		Force:   true,

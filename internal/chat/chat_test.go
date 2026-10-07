@@ -409,6 +409,26 @@ func TestPlanTranscriptBudgetScalesWithTheWindow(t *testing.T) {
 	}
 }
 
+// TestPlanTranscriptBudgetUsesTheWholeWindow pins the change that lets the
+// summariser read as much of the fold as the window allows. A half-window ceiling
+// meant a 128k model summarised a fold from only 64k of it; the allowance is now
+// whatever the prompt and the answer reserve leave free.
+func TestPlanTranscriptBudgetUsesTheWholeWindow(t *testing.T) {
+	const reserve, overhead = 1200, 500
+	const limit = 131072
+	got := PlanTranscriptBudget(limit, reserve, overhead)
+	if want := limit - reserve - overhead; got.Total != want {
+		t.Errorf("Total = %d, want %d (the whole window less prompt and reserve)", got.Total, want)
+	}
+	if got.Total <= limit/2 {
+		t.Errorf("Total = %d is still capped at half the window", got.Total)
+	}
+	if used := got.Total + reserve + overhead; used > limit {
+		t.Errorf("transcript %d + reserve %d + overhead %d = %d, over the %d-token window",
+			got.Total, reserve, overhead, used, limit)
+	}
+}
+
 // TestCutToTokensKeepsItsBudgetAndItsRunes pins the contract every budget above
 // rests on: the result is valid UTF-8, it says it was cut, and it never estimates
 // above the budget it was given — marker included.

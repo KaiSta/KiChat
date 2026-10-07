@@ -370,6 +370,11 @@ func (p *ollamaProvider) Chat(ctx context.Context, req ChatRequest) (<-chan Stre
 	if req.KeepAlive != "" {
 		body["keep_alive"] = req.KeepAlive
 	}
+	// Ollama is the one backend with a documented thinking switch, so a disabled
+	// summariser call skips thinking entirely rather than spending its budget on it.
+	if req.Think != nil {
+		body["think"] = *req.Think
+	}
 	if len(req.Tools) > 0 {
 		tools := make([]map[string]any, 0, len(req.Tools))
 		for _, t := range req.Tools {

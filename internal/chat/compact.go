@@ -11,31 +11,58 @@ import (
 	"kichat/internal/store"
 )
 
-// Complete runs a generation to completion without streaming it to the UI. Used
-// for compaction summaries and auto-titling.
-func Complete(ctx context.Context, p llm.Provider, req llm.ChatRequest) (string, *llm.Usage, error) {
+// completion is the outcome of a generation run to its end rather than streamed.
+// The reasoning and the stop reason are kept alongside the text because a
+// reasoning model can spend its whole output budget on private thinking and never
+// write an answer: without them an empty result is indistinguishable from a model
+// that simply said nothing, and the cause (and its fix) cannot be named. See
+// Summarize.
+type completion struct {
+	text       string
+	reasoning  string
+	stopReason string
+	usage      *llm.Usage
+}
+
+// runToCompletion drives a generation to its last event and collects everything a
+// caller might need to interpret the result. The text collected before an error
+// is kept, as the previous implementation did, so a partial answer is never lost.
+func runToCompletion(ctx context.Context, p llm.Provider, req llm.ChatRequest) (completion, error) {
 	events, err := p.Chat(ctx, req)
 	if err != nil {
-		return "", nil, err
+		return completion{}, err
 	}
-	var sb strings.Builder
-	var usage *llm.Usage
+	var out completion
+	var text, reasoning strings.Builder
 	for ev := range events {
 		switch ev.Type {
 		case llm.EventDelta:
-			sb.WriteString(ev.Text)
+			text.WriteString(ev.Text)
+		case llm.EventReasoning:
+			reasoning.WriteString(ev.Text)
 		case llm.EventUsage:
-			usage = ev.Usage
-		case llm.EventError:
-			return sb.String(), usage, errors.New(ev.Error)
+			out.usage = ev.Usage
 		case llm.EventDone:
-			// terminal
+			if ev.Stats != nil {
+				out.stopReason = ev.Stats.StopReason
+			}
+		case llm.EventError:
+			out.text, out.reasoning = text.String(), reasoning.String()
+			return out, errors.New(ev.Error)
 		}
 	}
+	out.text, out.reasoning = text.String(), reasoning.String()
 	if ctx.Err() != nil {
-		return sb.String(), usage, ctx.Err()
+		return out, ctx.Err()
 	}
-	return sb.String(), usage, nil
+	return out, nil
+}
+
+// Complete runs a generation to completion without streaming it to the UI. Used
+// for compaction summaries and auto-titling.
+func Complete(ctx context.Context, p llm.Provider, req llm.ChatRequest) (string, *llm.Usage, error) {
+	out, err := runToCompletion(ctx, p, req)
+	return out.text, out.usage, err
 }
 
 // PlanInput describes the state compaction is planned against.
@@ -343,9 +370,45 @@ Antworte ausschließlich mit Markdown in genau dieser Struktur:
 
 Lasse einen Abschnitt weg, wenn er leer ist.`
 
+// summaryOutputTokens is the summariser's default output cap. It is deliberately
+// generous and independent of the target summary size: `max_tokens` bounds a
+// reasoning model's private thinking and its answer together, so a cap sized to
+// the summary alone is spent entirely on the thinking and returns no summary at
+// all — the "empty summary" failure, and the one Cline raised its own default from
+// 4096 to 8192 to fix. The model is still instructed to be terse, so it normally
+// stops far short; the cap only stops a runaway generation from filling the
+// window. It is a cap, not a target.
+const summaryOutputTokens = 8192
+
+// noThinkTag is the in-prompt soft switch (Qwen3 and compatibles honour it) that
+// turns reasoning off without any backend parameter. It is the only lever that
+// reaches a local backend with no reasoning control — LM Studio's OpenAI-compatible
+// endpoint among them — where the request has nowhere to put "thinking: off".
+const noThinkTag = "/no_think"
+
+// summaryMinTranscriptTokens is the least transcript the summariser may be left
+// with when the window is small. The output cap above is trimmed only far enough
+// to leave this much room, so a small window still gives the model something to
+// read — the cap is never held to a fraction of the window.
+const summaryMinTranscriptTokens = 1024
+
+// summaryAttempts bounds how often a summarisation is retried when a thinking
+// model keeps spending its output budget before it writes a word of the answer.
+// Each retry grows the budget by the reasoning observed, so one or two is normally
+// enough; the cap keeps a model whose thinking keeps getting longer from looping.
+const summaryAttempts = 3
+
 // Summarize folds the plan's range into a memory summary. When a previous
 // summary exists it is merged in, which keeps the cost of repeated compaction
 // linear in the number of messages rather than quadratic.
+//
+// A summary is not a reasoning task, so thinking is switched off where the
+// backend allows it. Where it does not, a thinking model can still spend the
+// whole output budget thinking and return nothing — `max_tokens` bounds thinking
+// and answer together — so the call is retried with enough room to finish that
+// thinking AND write the summary, measured from the reasoning that actually came
+// back. The content itself stays bounded: the extra budget goes to the thinking,
+// not to a larger memory.
 func Summarize(ctx context.Context, p llm.Provider, model string, opts SummarizeOptions) (string, error) {
 	if p == nil {
 		return "", errors.New("kein Backend verfügbar")
@@ -354,25 +417,80 @@ func Summarize(ctx context.Context, p llm.Provider, model string, opts Summarize
 	if temp <= 0 {
 		temp = 0.2
 	}
-	req := llm.ChatRequest{
-		Model: model,
-		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: summarySystemPrompt},
-			{Role: llm.RoleUser, Content: summarisePrompt(opts)},
-		},
-		Temperature: temp,
-		MaxTokens:   opts.MaxTokens,
-		NumCtx:      opts.NumCtx,
+	// Ask the model not to think. A summary is a mechanical task, and `max_tokens`
+	// bounds thinking and answer together, so a reasoning model that thinks first
+	// can spend the whole budget before writing a word. `/no_think` is the in-prompt
+	// soft switch — the only lever that reaches a local backend with no reasoning
+	// parameter (LM Studio). A model that does not know the tag treats it as an
+	// ignorable trailing note.
+	userPrompt := summarisePrompt(opts) + "\n\n" + noThinkTag
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: summarySystemPrompt},
+		{Role: llm.RoleUser, Content: userPrompt},
 	}
-	text, _, err := Complete(ctx, p, req)
-	if err != nil {
-		return "", fmt.Errorf("Zusammenfassung fehlgeschlagen: %w", err)
+	promptTokens := llm.EstimateMessagesTokens(messages)
+
+	answer := opts.MaxTokens
+	if answer <= 0 {
+		answer = 1024
 	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return "", errors.New("das Modell hat eine leere Zusammenfassung geliefert")
+	budget := answer
+	var last completion
+	for attempt := 0; attempt < summaryAttempts; attempt++ {
+		req := llm.ChatRequest{
+			Model:       model,
+			Messages:    messages,
+			Temperature: temp,
+			MaxTokens:   budget,
+			NumCtx:      opts.NumCtx,
+		}
+		if opts.DisableThinking {
+			off := false
+			req.Think = &off
+		}
+		out, err := runToCompletion(ctx, p, req)
+		if err != nil {
+			return "", fmt.Errorf("Zusammenfassung fehlgeschlagen: %w", err)
+		}
+		if text := strings.TrimSpace(out.text); text != "" {
+			return text, nil
+		}
+		last = out
+		// Only a model that reasoned and ran out of budget is worth another look;
+		// one that simply said nothing will say nothing again.
+		if out.reasoning == "" && !strings.EqualFold(out.stopReason, "length") {
+			break
+		}
+		grown := llm.EstimateTokens(out.reasoning) + answer
+		if opts.ContextLimit > 0 {
+			if room := opts.ContextLimit - promptTokens; room > 0 && grown > room {
+				grown = room
+			}
+		}
+		if grown <= budget {
+			break
+		}
+		budget = grown
 	}
-	return text, nil
+	return "", emptySummaryError(last)
+}
+
+// emptySummaryError explains a summary that came back empty. The usual cause is a
+// reasoning model: because `max_tokens` bounds thinking and answer together, a
+// model that spent the whole budget thinking returns stop_reason "length" with no
+// content at all. Naming that cause names the fix — raise the summary budget —
+// instead of leaving "empty summary" to be read as a model that refused to answer.
+func emptySummaryError(out completion) error {
+	if out.reasoning != "" || strings.EqualFold(out.stopReason, "length") {
+		stop := out.stopReason
+		if stop == "" {
+			stop = "unbekannt"
+		}
+		return fmt.Errorf("das Modell hat sein Ausgabebudget beim Reasoning aufgebraucht und "+
+			"keine Zusammenfassung geschrieben (stop_reason %q, %d Zeichen Reasoning) — erhöhe "+
+			"„Max. Zusammenfassung (Tokens)“ in den Einstellungen", stop, len([]rune(out.reasoning)))
+	}
+	return errors.New("das Modell hat eine leere Zusammenfassung geliefert")
 }
 
 // summarisePrompt builds the user message of a summarisation call. It is split
@@ -410,6 +528,15 @@ type SummarizeOptions struct {
 	Temperature     float64
 	MaxTokens       int
 	NumCtx          int
+	// DisableThinking asks the backend to skip reasoning for this call. A summary
+	// is not a reasoning task, and a thinking model spends the output budget on
+	// private thinking before it writes a word of it. Only a backend with a
+	// documented control acts on it (Ollama); elsewhere it is ignored and the
+	// retry in Summarize adapts the budget instead.
+	DisableThinking bool
+	// ContextLimit is the model's window, used to cap a retry budget so a larger
+	// allowance never overruns what the model can hold. Zero means unknown.
+	ContextLimit int
 }
 
 // TranscriptBudget is the token allowance for one summarisation transcript,
@@ -423,10 +550,6 @@ type TranscriptBudget struct {
 }
 
 const (
-	// minTranscriptTokens is the smallest transcript worth sending: below it the
-	// summariser has too little to describe the messages it is replacing. It is
-	// only granted when the window has that much room to spare.
-	minTranscriptTokens = 1024
 	// transcriptBlockDivisor splits the transcript allowance into blocks, so one
 	// page-sized payload cannot claim all of it. Four holds a single block to a
 	// quarter, which is what stops a fold from becoming a summary of a web page.
@@ -436,14 +559,19 @@ const (
 // PlanTranscriptBudget derives the summarisation transcript's allowance from the
 // window of the model that will read it.
 //
-// The fixed character cap this replaces could not do that job, and bounded the
-// wrong thing. The same 4000 characters are around 1100 tokens: a modest block for
-// a 128k model and an eighth of the whole window for an 8k one. Worse, the cap was
-// per block, so nothing bounded the transcript as a whole — a long conversation
-// could reach a small model as a request larger than its window, which the backend
-// answers with an error or a silent truncation. Sizing from the window bounds both
-// ends, and the answer the model has to produce plus the prompt that carries it
-// are charged first, so the transcript never competes with them for the window.
+// The fixed character cap this replaced could not do that job, and bounded the
+// wrong thing: the same 4000 characters are a modest block for a 128k model and an
+// eighth of the whole window for an 8k one, and being per block it bounded nothing
+// as a whole — a long conversation could reach a small model as a request larger
+// than its window, which the backend answers with an error or a silent truncation.
+//
+// The allowance is now simply what the window leaves once the prompt that carries
+// the transcript and a reserve for the answer (see compactWith) are charged. It is
+// deliberately not capped at a fraction of the window: a half-window ceiling threw
+// away half the history a large model could have read, so a fold summarised by a
+// 128k model was cut to 64k for no reason. Exceeding the window is the one failure
+// this function exists to prevent, and the reserve — which carries its own safety
+// margin — is what keeps the transcript clear of it.
 //
 // A zero contextLimit means the window is unknown; the caller is expected to have
 // refused that case before here, and a zero budget renders an empty transcript
@@ -456,17 +584,7 @@ func PlanTranscriptBudget(contextLimit, reserveTokens, overheadTokens int) Trans
 	if free < 0 {
 		free = 0
 	}
-	// At most half the window, and never more than the reserves leave free. The
-	// free space is the hard part of the bound: exceeding the window is the
-	// failure this budget exists to prevent.
-	total := contextLimit / 2
-	if free < total {
-		total = free
-	}
-	if total < minTranscriptTokens && free >= minTranscriptTokens {
-		total = minTranscriptTokens
-	}
-	return TranscriptBudget{Total: total, Block: total / transcriptBlockDivisor}
+	return TranscriptBudget{Total: free, Block: free / transcriptBlockDivisor}
 }
 
 // RenderTranscript flattens messages into a plain transcript for summarisation,

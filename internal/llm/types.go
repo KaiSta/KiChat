@@ -159,6 +159,11 @@ type ChatRequest struct {
 	NumCtx    int
 	Seed      *int
 	KeepAlive string
+	// Think requests model-side thinking when non-nil: false disables it, true
+	// forces it, nil leaves the choice to the backend/model. Only a backend with a
+	// documented control acts on it (Ollama's `think`); others ignore it, which is
+	// why compaction also adapts its output budget rather than trusting this alone.
+	Think *bool
 }
 
 // Provider is a chat backend.
@@ -187,6 +192,17 @@ type Provider interface {
 // without such a cache does not have to implement an empty one.
 type CacheInvalidator interface {
 	InvalidateCache()
+}
+
+// ThinkingToggle is implemented by a provider that can express "do not think" in
+// the request it sends. It lets compaction ask for no thinking on a backend whose
+// model metadata advertises no thinking capability: LM Studio reports none, yet
+// its request accepts `enable_thinking`. A provider that does not implement it is
+// left to the model's own default.
+type ThinkingToggle interface {
+	// CanToggleThinking reports whether this provider can turn thinking off in the
+	// requests it sends.
+	CanToggleThinking() bool
 }
 
 // BackendAPIKeyName qualifies a secret with the backend it belongs to, so each

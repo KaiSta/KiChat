@@ -407,6 +407,97 @@ func TestOllamaReportsATruncatedStream(t *testing.T) {
 	}
 }
 
+// TestOllamaHonoursDisableThinking pins the summariser's escape from the
+// reasoning-budget problem: when a call asks for thinking off, the native
+// provider sends Ollama's `think: false` — and when it does not, the field is
+// absent so the model's own default applies.
+func TestOllamaHonoursDisableThinking(t *testing.T) {
+	// capture runs one request against a throwaway server and returns its body.
+	capture := func(t *testing.T, req ChatRequest) map[string]any {
+		t.Helper()
+		var body map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			fmt.Fprint(w, `{"model":"m","message":{"content":"ok"},"done":true,"done_reason":"stop"}`+"\n")
+		}))
+		defer server.Close()
+		events, err := newOllamaProvider(server.URL).Chat(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+		for range events {
+		}
+		return body
+	}
+
+	off := false
+	body := capture(t, ChatRequest{
+		Model:    "m",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		Think:    &off,
+	})
+	if got, ok := body["think"].(bool); !ok || got {
+		t.Errorf("think = %v (present=%v), want the boolean false", body["think"], ok)
+	}
+
+	body = capture(t, ChatRequest{
+		Model:    "m",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if v, ok := body["think"]; ok {
+		t.Errorf("think = %v, want the field omitted when the request leaves it to the model", v)
+	}
+}
+
+// TestLMStudioSendsEnableThinkingFalse pins the LM Studio lever for the
+// summariser: LM Studio has no reasoning parameter, but its request accepts the
+// in-body `enable_thinking` toggle the Qwen-style chat template reads. Without it
+// a reasoning model spends the whole output budget thinking and returns no
+// summary at all.
+func TestLMStudioSendsEnableThinkingFalse(t *testing.T) {
+	if !newLMStudioProvider("http://unused", "").CanToggleThinking() {
+		t.Fatal("LM Studio should advertise the thinking toggle")
+	}
+
+	capture := func(t *testing.T, req ChatRequest) map[string]any {
+		t.Helper()
+		var body map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+		}))
+		defer server.Close()
+		events, err := newLMStudioProvider(server.URL, "").Chat(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+		for range events {
+		}
+		return body
+	}
+
+	off := false
+	body := capture(t, ChatRequest{
+		Model:    "m",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		Think:    &off,
+	})
+	if got, ok := body["enable_thinking"].(bool); !ok || got {
+		t.Errorf("enable_thinking = %v (present=%v), want the boolean false", body["enable_thinking"], ok)
+	}
+
+	body = capture(t, ChatRequest{
+		Model:    "m",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if v, ok := body["enable_thinking"]; ok {
+		t.Errorf("enable_thinking = %v present without an explicit request", v)
+	}
+}
+
 // TestOpenAICompatFallsBackToV1On404 verifies the endpoint retirement path for
 // LM Studio builds without the native namespace.
 func TestOpenAICompatFallsBackToV1On404(t *testing.T) {

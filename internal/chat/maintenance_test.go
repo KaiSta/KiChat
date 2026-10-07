@@ -337,3 +337,279 @@ func TestManualCompactAlwaysFoldsWhenOnlyTheNewestTurnIsLeft(t *testing.T) {
 		t.Errorf("history still costs %d tokens after a full fold", assembly.Budget.History)
 	}
 }
+
+// TestCompactReservesRoomForReasoningInTheSummariser is the regression test for
+// the "empty summary" failure. A reasoning model spends `max_tokens` on private
+// thinking before it writes a word of the answer, so a budget sized to the
+// summary alone comes back empty (stop_reason "length") and compaction fails with
+// nothing folded. The summariser must therefore be granted room to think beyond
+// the summary itself — and the request must still fit the model's window.
+func TestCompactReservesRoomForReasoningInTheSummariser(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	add := func(id string, seq int, role, content string) {
+		t.Helper()
+		if err := st.CreateMessage(store.Message{
+			ID: id, ChatID: "chat-1", Seq: seq, Role: role, Content: content,
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("m1", 1, "user", "Erste Frage")
+	add("m2", 2, "assistant", "Erste Antwort")
+
+	const window = 8192
+	provider := &fakeProvider{
+		model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: window, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Gedächtnis."}}},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	req := provider.lastRequest()
+	if req.MaxTokens == 0 {
+		t.Fatal("the summariser was never called")
+	}
+	cfg := config.Default()
+	// The cap is generous — room for a reasoning model to think and still answer —
+	// and never exceeds the Cline-sized ceiling on a window this size.
+	if req.MaxTokens > summaryOutputTokens {
+		t.Errorf("summariser max_tokens = %d exceeds the %d-token cap", req.MaxTokens, summaryOutputTokens)
+	}
+	if req.MaxTokens <= cfg.Compact.MaxSummaryTokens {
+		t.Errorf("summariser max_tokens = %d is no larger than the %d-token summary target — "+
+			"a reasoning model would spend it all thinking",
+			req.MaxTokens, cfg.Compact.MaxSummaryTokens)
+	}
+	if used := llm.EstimateMessagesTokens(req.Messages); used+req.MaxTokens > window {
+		t.Errorf("summariser request = %d prompt + %d output = %d tokens, over the %d-token window",
+			used, req.MaxTokens, used+req.MaxTokens, window)
+	}
+}
+
+// TestCompactSummariserCapMatchesCline pins the number Cline uses for its
+// summariser output on a roomy window: 8192 — large enough that a reasoning model
+// can spend its thinking and still write a summary, which is the whole point of
+// the cap. A small window trims it only to keep the request inside the window.
+func TestCompactSummariserCapMatchesCline(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	add := func(id string, seq int, role, content string) {
+		t.Helper()
+		if err := st.CreateMessage(store.Message{
+			ID: id, ChatID: "chat-1", Seq: seq, Role: role, Content: content,
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("m1", 1, "user", "Erste Frage")
+	add("m2", 2, "assistant", "Erste Antwort")
+
+	provider := &fakeProvider{
+		model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Gedächtnis."}}},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if got := provider.lastRequest().MaxTokens; got != summaryOutputTokens {
+		t.Errorf("summariser max_tokens = %d on a 128k window, want the %d-token cap",
+			got, summaryOutputTokens)
+	}
+}
+
+// TestSummarizeAsksTheModelNotToThink pins the in-prompt soft switch. A summary
+// is a mechanical task, and `/no_think` is the only way to stop a reasoning model
+// thinking first on a backend with no reasoning parameter — LM Studio's chat
+// endpoint has nowhere to put "thinking: off".
+func TestSummarizeAsksTheModelNotToThink(t *testing.T) {
+	provider := &fakeProvider{replies: [][]llm.StreamEvent{{
+		{Type: llm.EventDelta, Text: "Gedächtnis."},
+	}}}
+	if _, err := Summarize(context.Background(), provider, "fake-model", SummarizeOptions{
+		Transcript: "### Nutzer\nHallo", MaxTokens: 1200,
+	}); err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	req := provider.lastRequest()
+	if len(req.Messages) == 0 {
+		t.Fatal("the summariser was never called")
+	}
+	last := req.Messages[len(req.Messages)-1]
+	if !strings.Contains(last.Content, noThinkTag) {
+		t.Errorf("summariser prompt does not carry %q:\n%s", noThinkTag, last.Content)
+	}
+}
+
+// TestSummarizeExplainsAReasoningOnlyAnswer pins the message a user sees when a
+// thinking model spends its whole output budget before writing a word of the
+// summary. "Empty summary" alone hides both the cause and the fix; the error has
+// to name the reasoning that ate the budget and the setting that grants more.
+func TestSummarizeExplainsAReasoningOnlyAnswer(t *testing.T) {
+	// Every attempt reasons and is cut off, so the final message has to name that
+	// cause. The retry asks again, so the same reply is scripted for each attempt.
+	onlyReasoning := []llm.StreamEvent{
+		{Type: llm.EventReasoning, Text: "Der Nutzer will eine Zusammenfassung."},
+		{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "length"}},
+	}
+	provider := &fakeProvider{
+		replies: [][]llm.StreamEvent{onlyReasoning, onlyReasoning},
+	}
+	_, err := Summarize(context.Background(), provider, "fake-model", SummarizeOptions{
+		Transcript: "### Nutzer\nHallo", MaxTokens: 1200,
+	})
+	if err == nil {
+		t.Fatal("a reasoning-only answer was accepted as a summary")
+	}
+	if !strings.Contains(err.Error(), "Reasoning") || !strings.Contains(err.Error(), "stop_reason") {
+		t.Errorf("error %q does not name the reasoning that ate the budget", err)
+	}
+}
+
+// TestSummarizeRejectsAnEmptyAnswer keeps the plain case honest: a model that
+// returns nothing at all is still an error, with the message users already know.
+func TestSummarizeRejectsAnEmptyAnswer(t *testing.T) {
+	provider := &fakeProvider{replies: [][]llm.StreamEvent{{{Type: llm.EventDone}}}}
+	_, err := Summarize(context.Background(), provider, "fake-model", SummarizeOptions{
+		Transcript: "### Nutzer\nHallo", MaxTokens: 1200,
+	})
+	if err == nil || !strings.Contains(err.Error(), "leere Zusammenfassung") {
+		t.Fatalf("err = %v, want the empty-summary error", err)
+	}
+}
+
+// TestSummarizeRetriesWhenReasoningAteTheBudget pins the fix for a thinking model
+// whose private reasoning consumes the whole output budget and leaves no summary.
+// The retry gives it room for the thinking it actually did plus a full answer, so
+// a model that reasons and then answers still produces a summary.
+func TestSummarizeRetriesWhenReasoningAteTheBudget(t *testing.T) {
+	provider := &fakeProvider{replies: [][]llm.StreamEvent{
+		{
+			{Type: llm.EventReasoning, Text: strings.Repeat("nachdenken ", 40)},
+			{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "length"}},
+		},
+		{
+			{Type: llm.EventReasoning, Text: "noch etwas"},
+			{Type: llm.EventDelta, Text: "## Festgestellte Fakten\n- Alles gut."},
+			{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "stop"}},
+		},
+	}}
+	const window = 40000
+
+	got, err := Summarize(context.Background(), provider, "fake-model", SummarizeOptions{
+		Transcript:   "### Nutzer\nHallo",
+		MaxTokens:    1200,
+		ContextLimit: window,
+	})
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if !strings.Contains(got, "Festgestellte Fakten") {
+		t.Errorf("summary = %q, want the content the model produced on the retry", got)
+	}
+	if n := provider.requestCount(); n != 2 {
+		t.Fatalf("summariser called %d times, want 2 (one bounded try, then one with room to think)", n)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("recorded %d requests, want 2", len(provider.requests))
+	}
+	first, second := provider.requests[0], provider.requests[1]
+	if second.MaxTokens <= first.MaxTokens {
+		t.Errorf("retry max_tokens = %d, want more than the first %d", second.MaxTokens, first.MaxTokens)
+	}
+	if room := window - llm.EstimateMessagesTokens(second.Messages); second.MaxTokens > room {
+		t.Errorf("retry max_tokens = %d exceeds the window room %d", second.MaxTokens, room)
+	}
+}
+
+// TestSummarizeDoesNotRetryAGenuineEmptyAnswer: a model that simply returned
+// nothing (no reasoning, a clean stop) will do so again, so it is reported once
+// rather than retried.
+func TestSummarizeDoesNotRetryAGenuineEmptyAnswer(t *testing.T) {
+	provider := &fakeProvider{replies: [][]llm.StreamEvent{{
+		{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "stop"}},
+	}}}
+	_, err := Summarize(context.Background(), provider, "fake-model", SummarizeOptions{
+		Transcript: "### Nutzer\nHallo", MaxTokens: 1200, ContextLimit: 40000,
+	})
+	if err == nil {
+		t.Fatal("an empty answer was accepted as a summary")
+	}
+	if n := provider.requestCount(); n != 1 {
+		t.Errorf("summariser called %d times, want 1 — an empty answer must not be retried", n)
+	}
+}
+
+// TestCompactDisablesThinkingForAThinkingModel pins that compaction asks a model
+// which advertises thinking to skip it: a summary is not a reasoning task, and
+// turning thinking off is what keeps a thinking model from spending its budget
+// before it writes a word of the summary.
+func TestCompactDisablesThinkingForAThinkingModel(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	add := func(id string, seq int, role, content string) {
+		t.Helper()
+		if err := st.CreateMessage(store.Message{
+			ID: id, ChatID: "chat-1", Seq: seq, Role: role, Content: content,
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("m1", 1, "user", "Erste Frage")
+	add("m2", 2, "assistant", "Erste Antwort")
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{
+			ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded,
+			Capabilities: []string{llm.CapThink},
+		},
+		replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Gedächtnis."}}},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	req := provider.lastRequest()
+	if req.Think == nil || *req.Think {
+		t.Errorf("think = %v, want false for a model that advertises thinking", req.Think)
+	}
+}
+
+// TestCompactAsksAToggleBackendNotToThink pins that compaction reaches the LM
+// Studio lever too: a backend whose model metadata advertises no thinking
+// capability, but which implements llm.ThinkingToggle, is asked not to think.
+func TestCompactAsksAToggleBackendNotToThink(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	add := func(id string, seq int, role, content string) {
+		t.Helper()
+		if err := st.CreateMessage(store.Message{
+			ID: id, ChatID: "chat-1", Seq: seq, Role: role, Content: content,
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("m1", 1, "user", "Erste Frage")
+	add("m2", 2, "assistant", "Erste Antwort")
+
+	provider := &fakeProvider{
+		toggleThinking: true,
+		model:          llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+		replies:        [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Gedächtnis."}}},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	req := provider.lastRequest()
+	if req.Think == nil || *req.Think {
+		t.Errorf("think = %v, want false for a backend that accepts the toggle", req.Think)
+	}
+}

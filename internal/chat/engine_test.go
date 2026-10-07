@@ -32,6 +32,10 @@ type fakeProvider struct {
 	// blockAfter, when > 0, makes a generation stall after that many events until
 	// the context is cancelled. That is how a Stop button feels to the engine.
 	blockAfter int
+	// toggleThinking marks a backend whose request accepts the thinking toggle
+	// (LM Studio's `enable_thinking`), so compaction asks it not to think even
+	// though the model advertises no thinking capability.
+	toggleThinking bool
 
 	mu       sync.Mutex
 	calls    int
@@ -41,6 +45,9 @@ type fakeProvider struct {
 
 func (f *fakeProvider) ID() string   { return "fake" }
 func (f *fakeProvider) Name() string { return "Fake" }
+
+// CanToggleThinking implements llm.ThinkingToggle.
+func (f *fakeProvider) CanToggleThinking() bool { return f.toggleThinking }
 
 func (f *fakeProvider) Health(context.Context) error { return nil }
 func (f *fakeProvider) ListModels(context.Context) ([]llm.ModelInfo, error) {

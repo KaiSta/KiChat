@@ -169,7 +169,7 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	}
 
 	// The transcript's allowance comes from the window of the model that has to
-	// read it, less what the prompt and the answer it must produce already claim.
+	// read it, less the prompt that carries it and a reserve for the answer.
 	// Measuring the prompt here, with the transcript left out, is what makes that
 	// subtraction exact instead of a guess.
 	overhead := llm.EstimateMessagesTokens([]llm.Message{
@@ -179,15 +179,54 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 			Focus:           opts.Focus,
 		})},
 	})
-	budget := PlanTranscriptBudget(assembly.Budget.Limit, settings.Compact.MaxSummaryTokens, overhead)
 
+	// The reserve is the summariser's output cap, and that cap is deliberately
+	// generous: `max_tokens` bounds a reasoning model's private thinking and its
+	// answer together, so a cap sized to the summary alone is spent entirely on the
+	// thinking and returns no summary at all. Cline caps its own summariser at 8192
+	// for exactly this. A larger configured summary size raises it, and it is held
+	// back only far enough to keep a minimal transcript and the request itself
+	// inside the window — never to a fraction of the window, which would shrink the
+	// cap on a small context for no reason. A slice is added on top as slack for the
+	// estimator undershooting the backend's real tokenizer.
+	outputTokens := summaryOutputTokens
+	if configured := settings.Compact.MaxSummaryTokens; configured > outputTokens {
+		outputTokens = configured
+	}
+	if room := assembly.Budget.Limit - overhead - summaryMinTranscriptTokens; outputTokens > room {
+		outputTokens = room
+	}
+	if outputTokens < 1 {
+		outputTokens = 1
+	}
+	margin := assembly.Budget.Limit / 16
+	budget := PlanTranscriptBudget(assembly.Budget.Limit, outputTokens+margin, overhead)
+	transcript := RenderTranscript(toFold, budget)
+
+	// A cap, not a target: the model is told to be terse, so it stops far short of
+	// it. The cap only stops a runaway generation from filling the window — the
+	// failure that produced a 20k-token "memory" for a 13k-token fold.
+	maxTokens := outputTokens
+
+	// Summarising is not a reasoning task, so the model is asked to skip thinking.
+	// A model that advertises thinking gets the backend's own control; a backend
+	// whose model metadata advertises none but whose request still accepts the
+	// toggle (LM Studio's `enable_thinking`) is asked the same way. Either way the
+	// in-prompt soft switch goes out, and Summarize's retry covers a model that
+	// thinks regardless.
+	disableThinking := modelInfo.Has(llm.CapThink)
+	if t, ok := provider.(llm.ThinkingToggle); ok && t.CanToggleThinking() {
+		disableThinking = true
+	}
 	summary, err := Summarize(ctx, provider, modelID, SummarizeOptions{
 		PreviousSummary: previous,
-		Transcript:      RenderTranscript(toFold, budget),
+		Transcript:      transcript,
 		Focus:           opts.Focus,
 		Temperature:     settings.Compact.SummaryTemperature,
-		MaxTokens:       settings.Compact.MaxSummaryTokens,
+		MaxTokens:       maxTokens,
 		NumCtx:          chat.NumCtx,
+		DisableThinking: disableThinking,
+		ContextLimit:    assembly.Budget.Limit,
 	})
 	if err != nil {
 		return nil, err
