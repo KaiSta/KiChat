@@ -191,14 +191,17 @@ func (s *Scraper) Scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 	urlHash := hashKey(clean)
 	if s.store != nil {
 		if entry, ok := s.store.GetScrapeCache(urlHash); ok {
-			return ScrapeResult{
+			result := ScrapeResult{
 				URL:      entry.URL,
 				FinalURL: entry.URL,
 				Title:    entry.Title,
 				Markdown: entry.ContentMD,
-				Tokens:   entry.Tokens,
 				Cached:   true,
-			}, nil
+			}
+			// The page was cached under whatever budget was asked for then; the
+			// caller may be asking for less now, so the bound is applied again.
+			trimToTokens(&result, maxTokens)
+			return result, nil
 		}
 	}
 
@@ -286,17 +289,7 @@ func (s *Scraper) Scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 
 	// Token-bounded truncation with an explicit marker, so the model knows the
 	// text was cut rather than just ending.
-	if maxTokens > 0 {
-		total := llm.EstimateTokens(result.Markdown)
-		if total > maxTokens {
-			result.Markdown = cutToTokens(result.Markdown, maxTokens)
-			result.Truncated = true
-			remaining := total - llm.EstimateTokens(result.Markdown)
-			result.Warning = fmt.Sprintf("Inhalt gekürzt: ca. %d von %d Tokens übernommen", maxTokens, total)
-			result.Markdown += fmt.Sprintf("\n\n…[gekürzt: ca. %d weitere Tokens nicht übernommen]", remaining)
-		}
-	}
-	result.Tokens = llm.EstimateTokens(result.Markdown)
+	trimToTokens(&result, maxTokens)
 
 	if s.store != nil {
 		_ = s.store.PutScrapeCache(store.ScrapeCacheEntry{
@@ -358,6 +351,23 @@ func cleanMarkdown(md string) string {
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
 	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+// trimToTokens applies the token bound with an explicit marker, so the model
+// knows the text was cut rather than just ending. It is shared by the fresh and
+// cached paths so a cached page cannot arrive larger than the caller asked for.
+func trimToTokens(result *ScrapeResult, maxTokens int) {
+	if maxTokens > 0 {
+		total := llm.EstimateTokens(result.Markdown)
+		if total > maxTokens {
+			result.Markdown = cutToTokens(result.Markdown, maxTokens)
+			result.Truncated = true
+			remaining := total - llm.EstimateTokens(result.Markdown)
+			result.Warning = fmt.Sprintf("Inhalt gekürzt: ca. %d von %d Tokens übernommen", maxTokens, total)
+			result.Markdown += fmt.Sprintf("\n\n…[gekürzt: ca. %d weitere Tokens nicht übernommen]", remaining)
+		}
+	}
+	result.Tokens = llm.EstimateTokens(result.Markdown)
 }
 
 // cutToTokens truncates Markdown at roughly the requested token budget, cutting
