@@ -130,6 +130,10 @@ export function SetAttachmentPlacement(arg1, arg2) {
   return window['go']['main']['App']['SetAttachmentPlacement'](arg1, arg2);
 }
 
+export function SetBackendAPIKey(arg1, arg2) {
+  return window['go']['main']['App']['SetBackendAPIKey'](arg1, arg2);
+}
+
 export function SetBraveKey(arg1) {
   return window['go']['main']['App']['SetBraveKey'](arg1);
 }

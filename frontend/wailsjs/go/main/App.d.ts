@@ -71,6 +71,8 @@ export function SendMessage(arg1:main.SendMessageRequest):Promise<void>;
 
 export function SetAttachmentPlacement(arg1:string,arg2:string):Promise<store.Attachment>;
 
+export function SetBackendAPIKey(arg1:string,arg2:string):Promise<void>;
+
 export function SetBraveKey(arg1:string):Promise<void>;
 
 export function SetModelOverride(arg1:string,arg2:string,arg3:llm.ModelOverride):Promise<void>;
