@@ -32,8 +32,15 @@ type ChunkOut struct {
 }
 
 var (
-	pageMarker    = regexp.MustCompile(`^##\s+Seite\s+(\d+)\s*$`)
-	headingMarker = regexp.MustCompile(`^(#{1,6})\s+(.*)$`)
+	// A page marker is the first line of the page it labels, not a paragraph of
+	// its own: the PDF extractor writes "## Seite 3\n<page text>". Matching it as a
+	// whole paragraph therefore never fired on real output, and every chunk of
+	// every PDF came back with page 0. The marker may also be alone, which is how
+	// hand-written Markdown writes it, so both forms have to match.
+	pageMarker = regexp.MustCompile(`^##[ \t]+Seite[ \t]+(\d+)[ \t]*(?:\r?\n|$)`)
+	// A heading is only one at the start of a block; whatever follows on the next
+	// line is that heading's body, not part of its text.
+	headingMarker = regexp.MustCompile(`^(#{1,6})[ \t]+([^\n]+)`)
 	// sentenceSplitter keeps the terminating punctuation with its sentence.
 	sentenceSplitter = regexp.MustCompile(`[^.!?]+[.!?]*\s*`)
 )
@@ -66,14 +73,19 @@ func ChunkDocument(text string, spec ChunkSpec) []ChunkOut {
 		if part == "" {
 			continue
 		}
-		// A page marker applies to everything after it.
+		// A page marker applies to everything after it, including its own block.
+		afterMarker := part
 		if m := pageMarker.FindStringSubmatch(part); m != nil {
 			if n, err := strconv.Atoi(m[1]); err == nil {
 				currentPage = n
 			}
-			continue
+			afterMarker = part[len(m[0]):]
+			if strings.TrimSpace(afterMarker) == "" {
+				// The marker stood alone: it labels the blocks that follow it.
+				continue
+			}
 		}
-		if m := headingMarker.FindStringSubmatch(part); m != nil {
+		if m := headingMarker.FindStringSubmatch(afterMarker); m != nil {
 			currentHeading = strings.TrimSpace(m[2])
 		}
 		blocks = append(blocks, block{text: part, heading: currentHeading, page: currentPage})

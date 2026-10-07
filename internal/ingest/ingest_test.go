@@ -345,6 +345,60 @@ func TestChunkDocumentTracksPageAndHeading(t *testing.T) {
 	}
 }
 
+// TestChunkDocumentReadsThePageMarkersTheExtractorWrites is the regression test
+// for page numbers never reaching the index. The extractor emits a marker as the
+// first line of a page ("## Seite 3\n<content>"), while this package's own test
+// fixture wrote it as a paragraph of its own — so the chunker passed its test
+// and produced page 0 for every real PDF. The two sides are pinned against each
+// other here by chunking the extractor's actual output rather than a hand-written
+// look-alike.
+func TestChunkDocumentReadsThePageMarkersTheExtractorWrites(t *testing.T) {
+	marked, pages := pageMarkedText("Erste Seite mit Inhalt.\n\fZweite Seite mit anderem Inhalt.\n")
+	if pages != 2 {
+		t.Fatalf("fixture produced %d pages, want 2", pages)
+	}
+	chunks := ChunkDocument(marked, ChunkSpec{TargetTokens: 8, OverlapRatio: 0})
+	if len(chunks) == 0 {
+		t.Fatal("the extractor's own output produced no chunks")
+	}
+
+	byPage := map[int]int{}
+	for _, c := range chunks {
+		byPage[c.Page]++
+	}
+	if byPage[0] != 0 {
+		t.Errorf("%d chunk(s) have no page at all: %+v", byPage[0], chunks)
+	}
+	if byPage[1] == 0 || byPage[2] == 0 {
+		t.Errorf("expected chunks on pages 1 and 2, got %+v", byPage)
+	}
+	// The page marker stays in the text so the page remains citable, and it must
+	// not be mistaken for a heading.
+	for _, c := range chunks {
+		if strings.HasPrefix(c.Text, "## Seite") && c.Heading != "" {
+			t.Errorf("page marker became a heading on page %d: %q", c.Page, c.Heading)
+		}
+	}
+}
+
+// TestChunkDocumentReadsAHeadingGluedToItsBody covers the same anchoring mistake
+// for headings: an extractor that writes "# Titel\nBody" in one paragraph must
+// still produce the heading, which is what the retrieval tools label their hits
+// with.
+func TestChunkDocumentReadsAHeadingGluedToItsBody(t *testing.T) {
+	chunks := ChunkDocument("# Mietrecht\nDie Kündigungsfrist beträgt drei Monate.",
+		ChunkSpec{TargetTokens: 200, OverlapRatio: 0})
+	if len(chunks) != 1 {
+		t.Fatalf("expected one chunk, got %d", len(chunks))
+	}
+	if chunks[0].Heading != "Mietrecht" {
+		t.Errorf("Heading = %q, want Mietrecht", chunks[0].Heading)
+	}
+	if !strings.Contains(chunks[0].Text, "Mietrecht") {
+		t.Errorf("the heading line should stay in the text, got %q", chunks[0].Text)
+	}
+}
+
 func TestChunkDocumentSplitsOversizedParagraph(t *testing.T) {
 	// One enormous paragraph with no blank lines must still be split, otherwise a
 	// single chunk could exceed the retrieval budget.
