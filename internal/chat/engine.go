@@ -250,13 +250,13 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 
 	// Assistant rows are created by generate as each model reply begins, so a
 	// tool round produces a faithful sequence of messages.
+	//
+	// Native tool calling is used only when the model advertises it. A model that
+	// advertises nothing at all (an Ollama modelfile without a capability list,
+	// or a custom endpoint) falls back to the text protocol, which works
+	// everywhere: sending `tools` a backend cannot honour degrades the reply
+	// rather than enabling tools, and the fallback is what makes that safe.
 	useNativeTools := settings.NativeTools && modelInfo.Has(llm.CapTools)
-	// If the model advertised nothing at all (Ollama with a missing modelfile
-	// capability list, or a custom endpoint) fall back to the text protocol,
-	// which works everywhere.
-	if len(modelInfo.Capabilities) == 0 && settings.NativeTools {
-		useNativeTools = true
-	}
 
 	result, genErr := e.generate(ctx, generateInput{
 		Chat:        chat,
@@ -381,6 +381,10 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 	}
 
 	working := *chat
+	// The prompt template reports the model that actually answers this turn,
+	// which may be a per-turn override rather than the chat's stored default.
+	working.Backend = backendID
+	working.Model = modelID
 	if extraSystem != "" {
 		working.SystemPrompt = working.SystemPrompt + "\n\n" + extraSystem
 	}
