@@ -57,7 +57,7 @@ export function MessageStats({ message }: { message: storeTypes.Message }) {
       {open && (
         <dl className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-0.5 max-w-md">
           <Row label={t('metrics.model')} value={message.model || '–'} />
-          <Row label="Backend" value={message.backend || '–'} />
+          <Row label={t('metrics.backend')} value={message.backend || '–'} />
           <Row label={t('metrics.promptTokens')} value={formatNumber(message.promptTokens)} />
           <Row label={t('metrics.completionTokens')} value={formatNumber(message.completionTokens)} />
           <Row label={t('metrics.stopReason')} value={message.stopReason || '–'} />
@@ -66,7 +66,7 @@ export function MessageStats({ message }: { message: storeTypes.Message }) {
             value={message.generationMs ? formatDuration(message.generationMs) : '–'}
           />
           <Row
-            label="tok/s"
+            label={t('metrics.tokensPerSecond')}
             value={
               message.tokensPerSecond
                 ? `${formatSpeed(message.tokensPerSecond)} ${estimated ? `(${t('metrics.estimated')})` : `(${t('metrics.measured')})`}`

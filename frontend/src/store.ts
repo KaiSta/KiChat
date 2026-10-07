@@ -273,7 +273,12 @@ export const useStore = create<State>((set, get) => {
     },
 
     selectChat: async (id) => {
-      set({ activeChatId: id, chatLoading: true, streaming: {} })
+      // Streaming buffers are keyed by message id, so they deliberately survive a
+      // switch: a chat that is still generating keeps whatever text has already
+      // arrived when the user comes back to it. The done/error handlers are what
+      // clear them. Blanking the map here made the streamed prefix vanish and
+      // left only the newest delta rendering.
+      set({ activeChatId: id, chatLoading: true })
       try {
         const state = await App.GetChatState(id)
         // Ignore a response for a chat the user has already navigated away from.

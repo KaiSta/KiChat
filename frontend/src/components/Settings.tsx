@@ -358,7 +358,7 @@ function BackendsTab({
               })
             }
           >
-            + OpenAI-kompatibel
+            + {t('settings.addCustom')}
           </button>
         </div>
       </Section>
@@ -367,7 +367,7 @@ function BackendsTab({
         <div className="text-[13px]">
           {t('settings.secrets')}: <strong>{secrets?.backend ?? '…'}</strong>
           {secrets && !secrets.keyring && (
-            <span className="badge badge-warn ml-2">libsecret fehlt</span>
+            <span className="badge badge-warn ml-2">{t('settings.keyringMissing')}</span>
           )}
         </div>
       </Section>
@@ -879,7 +879,7 @@ function ContextTab({
               onChange={(e) => patch({ compact: { ...compact, reserveForResponse: Number(e.target.value) } })}
             />
           </Field>
-          <Field label="Max. Zusammenfassung (Tokens)">
+          <Field label={t('settings.maxSummaryTokens')}>
             <input
               className="input"
               type="number"
@@ -891,8 +891,8 @@ function ContextTab({
         </div>
       </Section>
 
-      <Section title="Tool-Budget">
-        <Field label="Token-Budget für Tool-Ergebnisse pro Antwort">
+      <Section title={t('settings.toolBudget')}>
+        <Field label={t('settings.toolBudgetHint')}>
           <input
             className="input"
             type="number"

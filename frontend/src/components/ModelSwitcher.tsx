@@ -201,7 +201,7 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
         </dd>
         {budget.deltaSince > 0 && (
           <>
-            <dt className="faint">Δ seit Messung</dt>
+            <dt className="faint">{t('context.deltaSince')}</dt>
             <dd className="mono">+{formatNumber(budget.deltaSince)}</dd>
           </>
         )}
