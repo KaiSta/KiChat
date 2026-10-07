@@ -200,8 +200,9 @@ func (s *Settings) normalise() {
 	if len(s.Backends) == 0 {
 		s.Backends = llm.DefaultBackendConfigs()
 	}
-	// Ensure the two shipped backends always exist, even if the user removed
-	// them from an older settings blob.
+	// Ensure the shipped backends always exist, even if the user removed them
+	// from an older settings blob. This is also how a backend shipped in a later
+	// release — DeepSeek — reaches an installation that predates it.
 	seen := map[string]bool{}
 	for _, b := range s.Backends {
 		seen[b.ID] = true
@@ -218,6 +219,10 @@ func (s *Settings) normalise() {
 				s.Backends[i].BaseURL = "http://127.0.0.1:1234"
 			case "ollama":
 				s.Backends[i].BaseURL = "http://127.0.0.1:11434"
+			case "deepseek":
+				// Restored here as well as in the provider, so the settings field
+				// shows the address the app would actually use.
+				s.Backends[i].BaseURL = llm.DeepSeekDefaultBaseURL
 			}
 		}
 		if s.Backends[i].Name == "" {

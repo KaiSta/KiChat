@@ -168,6 +168,10 @@ const de = {
   'settings.themeLight': 'Hell',
   'settings.location': 'Standort ({{location}})',
   'settings.backends': 'Backends',
+  'settings.apiKeyRequired': 'API-Schlüssel (erforderlich)',
+  'settings.apiKeyOptional': 'API-Schlüssel (optional)',
+  'settings.backendsHint':
+    'LM Studio auf Port 1234, Ollama auf 11434. DeepSeek ist vorbereitet, aber aus, bis ein Schlüssel hinterlegt ist. Weitere OpenAI-kompatible Server können als eigener Eintrag ergänzt werden.',
   'settings.prompt': 'System-Prompt',
   'settings.promptDefault': 'Standard-Prompt',
   'settings.promptPreset': 'Vorlage',
@@ -417,6 +421,10 @@ const en: Record<keyof typeof de, string> = {
   'settings.themeLight': 'Light',
   'settings.location': 'Location ({{location}})',
   'settings.backends': 'Backends',
+  'settings.apiKeyRequired': 'API key (required)',
+  'settings.apiKeyOptional': 'API key (optional)',
+  'settings.backendsHint':
+    'LM Studio on port 1234, Ollama on 11434. DeepSeek is prepared but off until a key is set. Further OpenAI-compatible servers can be added as their own entry.',
   'settings.prompt': 'System prompt',
   'settings.promptDefault': 'Default prompt',
   'settings.promptPreset': 'Preset',
@@ -662,6 +670,10 @@ const zh: Record<keyof typeof de, string> = {
   'settings.themeLight': '浅色',
   'settings.location': '位置（{{location}}）',
   'settings.backends': '后端',
+  'settings.apiKeyRequired': 'API 密钥（必填）',
+  'settings.apiKeyOptional': 'API 密钥（可选）',
+  'settings.backendsHint':
+    'LM Studio 使用 1234 端口，Ollama 使用 11434 端口。DeepSeek 已预置，但需填入密钥后才会启用。其他 OpenAI 兼容服务器可作为独立条目添加。',
   'settings.prompt': '系统提示词',
   'settings.promptDefault': '默认提示词',
   'settings.promptPreset': '预设',

@@ -58,6 +58,10 @@ KICHAT_LIVE=1 KICHAT_BRAVE_KEY=<key> go test ./internal/research/ -run TestLive 
 # LM Studio: needs a *loaded* chat model; skips itself if none is
 KICHAT_LIVE=1 KICHAT_BRAVE_KEY=<key> go test ./internal/chat/ -run TestLive -v
 KICHAT_LIVE=1 go test ./internal/chat/ -run TestLiveEngineTurn -v   # needs KICHAT_LMSTUDIO
+
+# DeepSeek: metered, needs a key; skips without KICHAT_DEEPSEEK_KEY
+KICHAT_LIVE=1 KICHAT_DEEPSEEK_KEY=<key> go test ./internal/llm/ -run TestLiveDeepSeek -v
+#   optional: KICHAT_DEEPSEEK_BASE, KICHAT_DEEPSEEK_MODEL
 ```
 
 What each live test buys:
@@ -68,6 +72,13 @@ What each live test buys:
 - `TestLiveBraveBadKeyIsNotMisclassified` — a rejected key is not reported as a throttle.
 - `TestLiveSearchFirstTurn` — settings → chain → context → seeded prompt → LM Studio,
   and asserts the context payload is bigger than the headline listing it replaces.
+- `TestLiveDeepSeek` — the three claims the provider makes that only the real service
+  can confirm: the listing reports a context window (LM Studio's namespace does,
+  the plain OpenAI one cannot), `stream_options.include_usage` is honoured so the
+  context meter gets a measured `prompt_tokens`, and fragmented `tool_calls` stream
+  as expected. DeepSeek reasons by default and spends budget on `reasoning_content`
+  first, so a small `max_tokens` returns `finish_reason: "length"` with empty
+  `content` — the test asks for 2048/4096 for that reason.
 
 **Never put an API key in a tracked file.** Pass it in the environment; the app itself
 stores it through `internal/secret` (`~/.config/kichat/`). Measured facts worth keeping:

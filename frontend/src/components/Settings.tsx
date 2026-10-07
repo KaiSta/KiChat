@@ -282,7 +282,7 @@ function BackendsTab({
     <>
       <Section
         title={t('settings.backends')}
-        hint="LM Studio auf Port 1234, Ollama auf 11434. Weitere OpenAI-kompatible Server können als eigener Eintrag ergänzt werden."
+        hint={t('settings.backendsHint')}
       >
         {draft.backends.map((backend, index) => {
           const status = health.find((h) => h.id === backend.id)
@@ -310,12 +310,15 @@ function BackendsTab({
                 onChange={(e) => updateBackend(index, { baseUrl: e.target.value })}
                 placeholder="http://127.0.0.1:1234"
               />
-              {backend.kind === 'custom' && (
+              {(backend.kind === 'custom' || backend.kind === 'deepseek') && (
                 <input
                   className="input mono mt-2"
+                  type="password"
                   value={backend.apiKey ?? ''}
                   onChange={(e) => updateBackend(index, { apiKey: e.target.value })}
-                  placeholder="API key (optional)"
+                  placeholder={
+                    backend.kind === 'deepseek' ? t('settings.apiKeyRequired') : t('settings.apiKeyOptional')
+                  }
                 />
               )}
               {status && !status.ok && (

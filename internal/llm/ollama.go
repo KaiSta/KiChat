@@ -51,7 +51,9 @@ func (p *ollamaProvider) Health(ctx context.Context) error {
 		Version string `json:"version"`
 	}
 	if err := doJSON(ctx, jsonClient, http.MethodGet, p.baseURL+"/api/version", nil, nil, &v); err != nil {
-		return fmt.Errorf("%w: %s", ErrUnavailable, err)
+		// The cause is wrapped rather than printed so callers can inspect it;
+		// the message is unchanged.
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return nil
 }

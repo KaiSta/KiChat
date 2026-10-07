@@ -35,8 +35,33 @@ type openAICompatProvider struct {
 	// openAIModelsPath is the plain /v1/models fallback.
 	openAIModelsPath string
 
+	// requiresKey marks a backend that cannot answer without a credential. A
+	// request without one is not attempted at all, so the user is told what is
+	// missing instead of being handed the vendor's 401 body.
+	requiresKey bool
+	// modelsFlavour selects how the rich model listing is read. Both vendors
+	// return a `data` array; they disagree about everything inside it.
+	modelsFlavour modelListFlavour
+
 	mu          sync.Mutex
 	chatPathIdx int
+}
+
+// modelListFlavour names the shape of a model listing. The zero value is LM
+// Studio's native namespace, which is what every existing configuration uses.
+type modelListFlavour int
+
+const (
+	flavourLMStudio modelListFlavour = iota
+	flavourDeepSeek
+)
+
+// keyCheck reports a backend that needs a credential and has none.
+func (p *openAICompatProvider) keyCheck() error {
+	if p.requiresKey && strings.TrimSpace(p.apiKey) == "" {
+		return ErrMissingAPIKey
+	}
+	return nil
 }
 
 func newLMStudioProvider(baseURL, apiKey string) *openAICompatProvider {
@@ -73,7 +98,10 @@ func (p *openAICompatProvider) authHeaders() map[string]string {
 func (p *openAICompatProvider) Health(ctx context.Context) error {
 	_, err := p.ListModels(ctx)
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrUnavailable, err)
+		// Both are wrapped, not just printed: a caller that wants to know whether
+		// the backend is down or merely missing a key has to be able to ask, and
+		// "%s" buried the cause in the text where errors.Is cannot see it.
+		return fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return nil
 }
@@ -95,17 +123,19 @@ type lmStudioModelEntry struct {
 }
 
 func (p *openAICompatProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
+	if err := p.keyCheck(); err != nil {
+		return nil, err
+	}
 	if p.modelsPath != "" {
+		// Decoded entry by entry rather than into one vendor's struct: the two
+		// listings share only the envelope, so each entry is read in full by the
+		// mapper that knows its shape.
 		var resp struct {
-			Data []lmStudioModelEntry `json:"data"`
+			Data []json.RawMessage `json:"data"`
 		}
 		err := doJSON(ctx, jsonClient, http.MethodGet, p.modelsPath, p.authHeaders(), nil, &resp)
 		if err == nil {
-			out := make([]ModelInfo, 0, len(resp.Data))
-			for _, m := range resp.Data {
-				out = append(out, p.fromLMStudioEntry(m))
-			}
-			return out, nil
+			return p.mapModelEntries(resp.Data), nil
 		}
 		if he, ok := err.(*HTTPError); !ok || he.StatusCode != 404 {
 			// A real failure (connection refused, auth) — surface it.
@@ -115,6 +145,30 @@ func (p *openAICompatProvider) ListModels(ctx context.Context) ([]ModelInfo, err
 	}
 
 	return p.listOpenAIModels(ctx)
+}
+
+// mapModelEntries reads a rich listing with the mapper for its flavour. An entry
+// that cannot be decoded is skipped rather than failing the listing: one
+// unexpected model must not hide the others, the same way a dead backend does
+// not hide a live one.
+func (p *openAICompatProvider) mapModelEntries(raw []json.RawMessage) []ModelInfo {
+	out := make([]ModelInfo, 0, len(raw))
+	for _, entry := range raw {
+		if p.modelsFlavour == flavourDeepSeek {
+			var m deepSeekModelEntry
+			if err := json.Unmarshal(entry, &m); err != nil {
+				continue
+			}
+			out = append(out, p.fromDeepSeekEntry(m))
+			continue
+		}
+		var m lmStudioModelEntry
+		if err := json.Unmarshal(entry, &m); err != nil {
+			continue
+		}
+		out = append(out, p.fromLMStudioEntry(m))
+	}
+	return out
 }
 
 func (p *openAICompatProvider) fromLMStudioEntry(m lmStudioModelEntry) ModelInfo {
@@ -313,6 +367,9 @@ func (p *openAICompatProvider) retireChatPath() {
 }
 
 func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error) {
+	if err := p.keyCheck(); err != nil {
+		return nil, err
+	}
 	body := map[string]any{
 		"model":       req.Model,
 		"messages":    toWireMessages(req.Messages),

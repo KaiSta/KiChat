@@ -35,7 +35,7 @@ func newCustomProvider(id, name, baseURL, apiKey string) *openAICompatProvider {
 type BackendConfig struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
-	Kind    string `json:"kind"` // lmstudio | ollama | custom
+	Kind    string `json:"kind"` // lmstudio | ollama | custom | deepseek
 	BaseURL string `json:"baseUrl"`
 	APIKey  string `json:"apiKey"`
 	Enabled bool   `json:"enabled"`
@@ -98,6 +98,8 @@ func (r *Registry) Reconfigure(configs []BackendConfig) {
 			providers = append(providers, newOllamaProvider(c.BaseURL))
 		case "custom":
 			providers = append(providers, newCustomProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
+		case "deepseek":
+			providers = append(providers, newDeepSeekProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		}
 	}
 	r.mu.Lock()
@@ -284,8 +286,15 @@ func MergeOverrides(models []ModelInfo, overrides map[string]ModelOverride) []Mo
 	return models
 }
 
-// DefaultBackendConfigs returns the two backends KiChat ships with, pointing at
-// the standard local ports.
+// DefaultBackendConfigs returns the backends KiChat ships with: the two local
+// ones, pointing at their standard ports, and DeepSeek.
+//
+// DeepSeek ships **disabled**, unlike the local pair. It is a metered remote
+// service that needs a key, so enabling it by default would probe a paid API on
+// every health refresh without being asked, and — because a hosted model is
+// ready the moment a key is accepted — its models would win the loaded-model
+// race and quietly become the default for new chats. A user who wants it turns
+// it on and pastes a key in Settings.
 func DefaultBackendConfigs() []BackendConfig {
 	return []BackendConfig{
 		{
@@ -301,6 +310,13 @@ func DefaultBackendConfigs() []BackendConfig {
 			Kind:    "ollama",
 			BaseURL: "http://127.0.0.1:11434",
 			Enabled: true,
+		},
+		{
+			ID:      "deepseek",
+			Name:    "DeepSeek",
+			Kind:    "deepseek",
+			BaseURL: DeepSeekDefaultBaseURL,
+			Enabled: false,
 		},
 	}
 }

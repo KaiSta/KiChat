@@ -223,6 +223,19 @@
   const health = [
     { id: 'lmstudio', name: 'LM Studio', kind: 'lmstudio', baseUrl: 'http://127.0.0.1:1234', ok: true, models: models.length },
     { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', ok: false, error: 'connection refused', models: 0 },
+    // DeepSeek ships disabled and with no key, so its row has to be able to
+    // render a failure that is a missing credential rather than a dead port.
+    // The text mirrors what ErrMissingAPIKey wraps, so the harness shows the
+    // message the app would actually show.
+    {
+      id: 'deepseek',
+      name: 'DeepSeek',
+      kind: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      ok: false,
+      error: 'llm: backend unavailable: no API key configured',
+      models: 0,
+    },
   ]
 
   /*
@@ -477,6 +490,7 @@ Verfügbare Tools: {{tool_list}}`,
     backends: [
       { id: 'lmstudio', name: 'LM Studio', kind: 'lmstudio', baseUrl: 'http://127.0.0.1:1234', enabled: true },
       { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', enabled: false },
+      { id: 'deepseek', name: 'DeepSeek', kind: 'deepseek', baseUrl: 'https://api.deepseek.com', enabled: false },
     ],
     modelOverrides: {},
     search: {

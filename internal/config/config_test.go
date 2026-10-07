@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"kichat/internal/llm"
 	"kichat/internal/store"
 )
 
@@ -323,6 +324,68 @@ func TestNormaliseClampsLLMContextTokens(t *testing.T) {
 		if s.Search.LLMContextTokens != tc.want {
 			t.Errorf("llmContextTokens %d normalised to %d, want %d", tc.in, s.Search.LLMContextTokens, tc.want)
 		}
+	}
+}
+
+// TestNormaliseAddsMissingBackendsWithoutClobberingEdits covers the other half of
+// the upgrade path: the backend list is stored whole too, so a backend shipped in
+// a later release (DeepSeek) only reaches an existing installation if normalise
+// appends it. That append is what makes the feature arrive without a migration,
+// and it must not overwrite a shipped entry the user has configured.
+func TestNormaliseAddsMissingBackendsWithoutClobberingEdits(t *testing.T) {
+	// A blob written before DeepSeek existed: the two local backends only.
+	s := Default()
+	s.Backends = []llm.BackendConfig{
+		{ID: "lmstudio", Name: "LM Studio", Kind: "lmstudio", BaseURL: "http://127.0.0.1:1234", Enabled: true},
+		{ID: "ollama", Name: "Ollama", Kind: "ollama", BaseURL: "http://127.0.0.1:11434", Enabled: false},
+	}
+	s.normalise()
+
+	byID := map[string]llm.BackendConfig{}
+	for _, b := range s.Backends {
+		byID[b.ID] = b
+	}
+	added, ok := byID["deepseek"]
+	if !ok {
+		t.Fatalf("DeepSeek did not reach existing settings: %+v", s.Backends)
+	}
+	if added.Kind != "deepseek" || added.BaseURL != llm.DeepSeekDefaultBaseURL {
+		t.Errorf("added entry = %+v, want the shipped DeepSeek config", added)
+	}
+	// It is a metered remote service, so repairing an absence must not enable it.
+	if added.Enabled {
+		t.Error("the repaired DeepSeek entry is enabled")
+	}
+
+	// And an entry the user has already configured is left exactly as it is.
+	s2 := Default()
+	s2.Backends = []llm.BackendConfig{
+		{ID: "deepseek", Name: "Mein DeepSeek", Kind: "deepseek", BaseURL: "http://proxy.lan:8080", APIKey: "configured", Enabled: true},
+	}
+	s2.normalise()
+	if len(s2.Backends) != len(llm.DefaultBackendConfigs()) {
+		t.Errorf("backends = %+v, want the configured entry plus the missing defaults", s2.Backends)
+	}
+	var kept *llm.BackendConfig
+	for i := range s2.Backends {
+		if s2.Backends[i].ID == "deepseek" {
+			kept = &s2.Backends[i]
+		}
+	}
+	if kept == nil {
+		t.Fatal("the configured DeepSeek entry disappeared")
+	}
+	if kept.Name != "Mein DeepSeek" || kept.BaseURL != "http://proxy.lan:8080" || kept.APIKey != "configured" || !kept.Enabled {
+		t.Errorf("the user's backend was overwritten: %+v", *kept)
+	}
+	// Exactly once, in both cases: a duplicated entry would show twice in Settings
+	// and be probed twice by the registry.
+	seen := map[string]int{}
+	for _, b := range s2.Backends {
+		seen[b.ID]++
+	}
+	if seen["deepseek"] != 1 {
+		t.Errorf("deepseek appears %d times, want once", seen["deepseek"])
 	}
 }
 
