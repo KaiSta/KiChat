@@ -46,7 +46,16 @@ type CompactResult struct {
 
 // Compact folds older history into a memory summary. It is the single code path
 // behind both automatic and manual compaction; only Force and the range differ.
+//
+// A manual run is refused while a turn is in flight. The turn owns the newest
+// messages — an assistant row is written to as tokens arrive — so compacting now
+// would summarise half an answer and freeze that fragment into memory. The
+// automatic run is triggered by a turn and is the caller that may do it.
 func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions) (CompactResult, error) {
+	if e.IsRunning(chatID) {
+		return CompactResult{}, errors.New("für diesen Chat läuft noch eine Generierung — " +
+			"kompaktieren ist möglich, sobald sie fertig ist")
+	}
 	settings := e.Settings()
 	chat, err := e.Store.GetChat(chatID)
 	if err != nil {
@@ -159,9 +168,22 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		previous = assembly.MemorySummary
 	}
 
+	// The transcript's allowance comes from the window of the model that has to
+	// read it, less what the prompt and the answer it must produce already claim.
+	// Measuring the prompt here, with the transcript left out, is what makes that
+	// subtraction exact instead of a guess.
+	overhead := llm.EstimateMessagesTokens([]llm.Message{
+		{Role: llm.RoleSystem, Content: summarySystemPrompt},
+		{Role: llm.RoleUser, Content: summarisePrompt(SummarizeOptions{
+			PreviousSummary: previous,
+			Focus:           opts.Focus,
+		})},
+	})
+	budget := PlanTranscriptBudget(assembly.Budget.Limit, settings.Compact.MaxSummaryTokens, overhead)
+
 	summary, err := Summarize(ctx, provider, modelID, SummarizeOptions{
 		PreviousSummary: previous,
-		Transcript:      RenderTranscript(toFold),
+		Transcript:      RenderTranscript(toFold, budget),
 		Focus:           opts.Focus,
 		Temperature:     settings.Compact.SummaryTemperature,
 		MaxTokens:       settings.Compact.MaxSummaryTokens,

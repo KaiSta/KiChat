@@ -269,11 +269,13 @@ func Assemble(in AssemblyInput) Assembly {
 	budget.Estimated = budget.System + budget.Memory + budget.Attachments +
 		budget.History + budget.ToolSchemas
 
-	// A measurement is only comparable when the messages it counted are still
-	// part of the request. If compaction has since folded them away, the number
-	// no longer describes this prompt and must be dropped.
+	// A measurement is only comparable when every message it counted is still
+	// part of the request. Since it counts the whole prompt, a measurement taken
+	// at the fold boundary itself (MeasuredSeq == firstVerbatim-1) counted exactly
+	// the messages that are now replaced by the summary, so it over-reports the
+	// window by their full size and has to be dropped as well.
 	measuredValid := budget.MeasuredValid && budget.Measured > 0 &&
-		in.MeasuredSeq >= firstVerbatim-1 && in.MeasuredSeq >= 0
+		in.MeasuredSeq >= firstVerbatim && in.MeasuredSeq >= 0
 	budget.MeasuredValid = measuredValid
 	if measuredValid {
 		// The measurement predates the newest messages, so add their estimated
