@@ -25,10 +25,10 @@ numbers about what is being sent to the model.
 | Context | Automatic and manual compaction, live context-window fullness meter, per-segment inspector |
 | Research | Brave Search (API key) with DuckDuckGo fallback, page scraping with SSRF guard, optional search-before-answer |
 | Files | Attachments, PDF/office text extraction, chunked with BM25 retrieval over the chunks |
-| Prompting | Editable system prompt (German research default), prompt presets, template variables (`{{datetime}}`, `{{location}}`, `{{tool_list}}`, `{{context_used}}`, …) |
+| Prompting | Editable system prompt (German research default), five shipped presets — including one tuned for small local models — template variables (`{{datetime}}`, `{{location}}`, `{{tool_list}}`, `{{context_used}}`, …) |
 | Tools | Native tool calling with an automatic text-protocol fallback |
 | Metrics | Per-message tokens/s, TTFT, generation duration, stop reason, token counts |
-| UX | In-chat model switching with a pre-switch warning, Stop button, de/en UI toggle, dark-first theme |
+| UX | In-chat model switching with a pre-switch warning, Stop button, English default with German and Chinese also shipped, dark-first theme |
 
 ---
 
@@ -39,9 +39,10 @@ frontend renders. Nothing important is computed in JavaScript.
 
 ```
 main.go            Wails bootstrap: window, theme, go:embed all:frontend/dist
-app.go             App struct, service wiring, ChatState, event constants, chat CRUD
+app.go             App struct, service wiring, ChatState, chat CRUD
 api.go             Remaining bound RPCs (settings, search status, secrets, compaction)
 internal/
+  events/          Event names shared by the Go emitters and the frontend's map
   llm/             Provider abstraction over the wire formats
     types.go         Message, ModelInfo, Usage, GenerationStats, StreamEvent, Provider
     tokens.go        Heuristic estimator (pre-send prediction only)
@@ -73,7 +74,7 @@ frontend/src/
   App.tsx          Shell: sidebar, toasts, chat/settings view switch
   store.ts         zustand store: single wiring point for events, send/stop/regenerate
   lib/api.ts       Typed binding layer (see the Plain<T> note below)
-  lib/i18n.ts      de/en strings
+  lib/i18n.ts      en/de/zh strings; a missing translation is a compile error
   components/      ChatView, ModelSwitcher (meter + inspector), MessageParts,
                    Markdown (memoised, throttled), Settings (5 tabs)
 ```
@@ -89,12 +90,15 @@ usage}`.
 Turns are serialised per chat: a second `Send` while one is in flight is rejected
 rather than interleaved.
 
-### Events (`app.go`)
+### Events (`internal/events`)
 
 `chat:start`, `chat:delta`, `chat:reasoning`, `chat:tool`, `chat:message`,
 `chat:status`, `chat:done`, `chat:error`, `chat:warning`, `chat:budget`,
-`chat:compaction`, `chat:title`, `chats:changed` — all wired in exactly one place in
-`store.ts`, so there is a single place to reason about event handling.
+`chat:compaction`, `chat:title`, `chat:attachments`, `chats:changed` — named once in
+`internal/events`, emitted only through those constants, and wired in exactly one place
+in `store.ts`, so there is a single place to reason about event handling. Two tests in
+that package read the frontend's map and scan the emit sites, because a wrong name does
+not break the build — it just quietly leaves a listener that never fires.
 
 ### Storage
 
@@ -149,7 +153,11 @@ type stops being homomorphic and destroys arrays), then exports namespaced alias
 `BackendConfig` was given camelCase JSON tags because the generated names
 (`ID`/`BaseURL`) were unusable from TypeScript.
 
-**Language:** both de and en, defaulting to the German research prompt.
+**Language:** English is the default, with German and Chinese shipped alongside it. The interface and the shipped system prompts move together: every built-in prompt exists in each shipped language, and `(*Settings).LocalisePrompts` rewrites one that is still byte-identical to a shipped body into the language the interface is set to. A prompt the user edited — or added themselves — is never touched, because rewriting it would throw their work away and a half-translated prompt is worse than an untranslated one. That runs both when settings are loaded and when they are saved, which is what makes switching the language in settings change the text in the textarea beside it instead of waiting for a restart. A stored value the build does not recognise resolves to English, so a hand-edited or older settings blob can never leave the UI without a dictionary, and a language with no prompt body falls back to the English one rather than to an empty textarea. All three dictionaries are keyed off one key set, so a key added to one language and forgotten in another fails `tsc` instead of falling back silently.
+
+**The system-prompt presets are data, not code branches.** `config.DefaultPresets(lang)` returns five built-ins — research (the default), small-local, assistant, coding and blank — and the settings view offers them as a dropdown. The small-local one exists because a local setup often starts on a model that cannot hold a long instruction block: it is short, imperative, and bans the two failure modes that bite hardest at that size (inventing facts, and running off into unstructured prose). The list is stored whole in the settings blob, so a preset shipped later would never reach an existing installation — `normalise()` therefore appends any built-in that is missing while leaving an edited one untouched, the same way the shipped backends are re-added.
+
+**The context window is re-read on demand.** The limit is resolved from the model's loaded context length, falling back to its maximum only when the model is not loaded — LM Studio reports both, and confusing them is how a model running at 8k gets displayed as 128K. Because a listing is cached (30 s in the registry, 10 minutes for Ollama's `/api/show`, and indefinitely in the frontend store), a model loaded or reconfigured after the app last looked keeps showing the old number. The meter therefore carries an explicit re-check that forces a fresh listing *and* clears the providers' own caches — `CacheInvalidator` is a separate optional interface, so a provider without such a cache does not have to implement an empty one — then recomputes the chat state, since the budget is derived from that same catalogue server-side.
 
 ---
 
@@ -186,6 +194,46 @@ projection 15%.
 Note on LM Studio: its streamed responses do not report tokens/s, so those figures come
 from the client-side estimator and are labelled `geschätzt`. This is correct behaviour,
 not a bug — the fallback exists precisely for this case.
+
+### Guards added after the pass above
+
+These were checked with `go test ./...`, not against a running app, and are recorded
+separately so the next full build pass can confirm them in situ rather than reading this
+section as evidence it did not gather.
+
+- **The scraper re-guards the host on every redirect hop**, and again on the address it
+  actually dials. Before this, the guard covered only the URL that was named, so a page
+  could redirect the scraper into `127.0.0.1`, the local network or a cloud metadata
+  endpoint and have the response handed to the model. `TestScrapeRedirectHopIsGuarded`
+  and `TestPrivateDialControl` fail on the previous code.
+- **Transient failures are retried** — 429, 5xx and transport errors get two further
+  attempts with a doubling backoff before a turn fails. Only a request whose response
+  has not yet been handed to a caller is retried, so a stream is never replayed. This is
+  what `HTTPError.Retryable` was written for and never used.
+- **Credentials are redacted from backend error bodies**, which some gateways echo back.
+  Coverage is the LLM client's credential headers; the Brave client builds its own
+  requests, so see the limitations below.
+- **Compaction deletion is real.** Deleting a compaction now drops the later ones
+  summarised on top of it, which the code previously claimed to do while discarding the
+  list it had just loaded.
+- **"Nothing to compact" is an outcome, not an error.** A manual compaction over a
+  conversation with nothing to fold returned `keine Kompaktierung erstellt`, which the
+  window showed as a failure. `Compact` now returns a `CompactResult` whose `Created`
+  flag says what happened, so the UI can say "nothing to compact" — and the same flag
+  stops a no-op run from handing back an *older* compaction as its own result, which a
+  caller could not tell apart from having compacted.
+- **No API slice is nil.** `chat.UnresolvedVars` returned a nil slice when every
+  variable was known, which marshals to JSON `null` rather than `[]`; the prompt editor
+  calls `.length` on it, so opening the system-prompt tab threw and tripped the error
+  boundary. The remaining API-visible slices already returned empty slices, and this one
+  now does too. Both faults are pinned by tests rather than by inspection.
+- **The interface theme is stated, not implied.** The stylesheets declared no
+  `color-scheme`, so WebKitGTK painted native form controls in its own default (light)
+  scheme while the app's text stayed near-white — the settings dropdowns rendered as
+  empty boxes. WebKitGTK ignores a `background` on a `<select>`, so no amount of control
+  styling fixed this; `color-scheme` per theme does. Verified by rendering the built
+  bundle in WebKitGTK 4.1 itself (`.freebuff/webkit_check.py`), which is also the only
+  way to catch a fault that does not reproduce in the Chromium harness.
 
 ### Testing notes worth keeping
 
@@ -295,8 +343,10 @@ wails build                    # when webkit2gtk-4.0 is available
   scanned PDFs will not yield text.
 - **`scrapeIntoChat` has no UI.** The Go binding exists but the planned SourcesPanel was
   never written, so scraped pages can only be reached through the tool loop.
-- `frontend/src/App.css` is unused (`main.tsx` imports `style.css`), and `cmd/` is an
-  empty leftover directory.
+- **Secret redaction is partial.** It covers the credential headers on the LLM client.
+  The Brave client builds its own request, so a key echoed back by that endpoint would
+  reach the UI unredacted; Brave's documented rejection body does not echo the key, so
+  this is a gap in the guard rather than an observed leak.
 - **A fresh clone does not build on Node 18 / npm 9** (see §6). This is a toolchain
   limitation rather than a defect in the repository, but it does mean the repository
   alone is not sufficient to build on the machine it was developed on.
@@ -306,29 +356,41 @@ wails build                    # when webkit2gtk-4.0 is available
 
 ## 9. Roadmap
 
-Ordered by value, not effort.
+Ordered by value, not effort. Shipped items are deleted rather than left to rot: the
+**error boundary** that was #1 here is in `App.tsx`, wrapping the view switch, and the
+event-name constants now live in `internal/events` so a mismatch fails the build.
 
-1. **Error boundary around the app shell.** A render error currently blanks the whole
-   window with no message — postmortem §5.1 is the proof. Cheapest and highest-value
-   change available.
-2. **CI on a clean clone** with Node 22 and `-tags webkit2_41`, running `go vet`,
+1. **CI on a clean clone** with Node 22 and `-tags webkit2_41`, running `go vet`,
    `go test`, `tsc --noEmit` and a full build. This converts the build recipe and the
-   native-binding trap into a red build instead of a discovery.
-3. **Move the development toolchain to Node 22.** Fixes the clone build, restores
+   native-binding trap into a red build instead of a discovery. It is now the highest
+   value item on this list by a wide margin: without it, the frontend cannot be checked
+   automatically at all, and `go vet ./...` cannot run on a clone that has not been
+   built yet.
+2. **Move the development toolchain to Node 22.** Fixes the clone build, restores
    `wails dev`, and removes the recurring `--no-save` step.
-4. **Semantic retrieval over ingested documents.** FTS5 BM25 exists and documents are
+3. **Give the binding layer tests.** `app.go` and `api.go` are ~1,000 lines with no test
+   file, and they are the surface the UI actually calls. The event mismatch fixed above
+   is exactly the class of defect a test there would have caught. Either commit a
+   placeholder `frontend/dist` so `package main` compiles for testing, or move the
+   bindings behind an `internal/app` package.
+4. **Localise the backend's user-facing text.** All UI-facing errors and warnings are
+   German literals emitted from Go, so the English and Chinese UI show German toasts. The fix is
+   for Go to emit stable codes and let the frontend translate, keeping today's strings
+   as the `de` entries. Tool output and seeded search text are prompt content for the
+   model, not UI text, and should stay as they are.
+5. **Semantic retrieval over ingested documents.** FTS5 BM25 exists and documents are
    already chunked; embeddings (the local `text-embedding-nomic-embed-text-v1.5` is
    already available) would enable "ask a question across the whole library".
-5. **Citation-fidelity checker.** Nothing currently verifies that a claim appears in the
+6. **Citation-fidelity checker.** Nothing currently verifies that a claim appears in the
    cited source. A post-generation pass over the fetched text would make research mode
    trustworthy rather than merely plausible.
-6. **MCP client**, so tools come from the ecosystem instead of being hardcoded.
-7. **Multi-model arena** — one prompt across several local models, side by side.
-8. **Automatic model fallback** when a backend is down or the context does not fit.
-9. **Cross-chat memory** backed by the same FTS index.
-10. **SourcesPanel UI** for the existing `scrapeIntoChat` binding.
-11. Vision support for the VLM models already listed by LM Studio.
-12. Remaining exploratory ideas: document generation, model benchmarking, branching
+7. **MCP client**, so tools come from the ecosystem instead of being hardcoded.
+8. **Multi-model arena** — one prompt across several local models, side by side.
+9. **Automatic model fallback** when a backend is down or the context does not fit.
+10. **Cross-chat memory** backed by the same FTS index.
+11. **SourcesPanel UI** for the existing `scrapeIntoChat` binding.
+12. Vision support for the VLM models already listed by LM Studio.
+13. Remaining exploratory ideas: document generation, model benchmarking, branching
     conversations, and scheduled watch tasks.
 
 ---
