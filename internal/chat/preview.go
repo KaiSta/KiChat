@@ -26,15 +26,15 @@ func (e *Engine) PreviewBudget(ctx context.Context, chatID, backendID, modelID s
 	}
 
 	var model llm.ModelInfo
-	var provider llm.Provider
 	if backendID != "" && modelID != "" {
 		model = e.resolveModel(ctx, backendID, modelID, settings)
-		provider, _ = e.Registry.Provider(backendID)
 	} else {
 		return ContextBudget{}, fmt.Errorf("kein Modell ausgewählt")
 	}
 
-	assembly, _, err := e.buildAssembly(ctx, &c, provider, backendID, modelID, settings, model, "")
+	// No provider is needed: this is a preview, and it has to work for a backend
+	// the registry does not know.
+	assembly, _, err := e.buildAssembly(ctx, &c, backendID, modelID, settings, model, "")
 	if err != nil {
 		return ContextBudget{}, err
 	}

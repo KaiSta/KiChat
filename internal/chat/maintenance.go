@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"kichat/internal/config"
+	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/store"
 )
@@ -30,32 +31,45 @@ type CompactOptions struct {
 	ToSeq   int
 }
 
+// CompactResult reports what a compaction run actually did. A run that finds
+// nothing to fold is a normal outcome rather than a failure — asking to compact a
+// short conversation is not an error — so it is reported rather than raised, and
+// the caller can say "nothing to compact" instead of showing a failure.
+//
+// Created also distinguishes a new compaction from an older one that merely still
+// exists: without it a no-op run would hand back the previous compaction as though
+// it had just produced it.
+type CompactResult struct {
+	Created    bool             `json:"created"`
+	Compaction store.Compaction `json:"compaction"`
+}
+
 // Compact folds older history into a memory summary. It is the single code path
 // behind both automatic and manual compaction; only Force and the range differ.
-func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions) (store.Compaction, error) {
+func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions) (CompactResult, error) {
 	settings := e.Settings()
 	chat, err := e.Store.GetChat(chatID)
 	if err != nil {
-		return store.Compaction{}, err
+		return CompactResult{}, err
 	}
 	backendID, modelID := chat.Backend, chat.Model
 	if backendID == "" || modelID == "" {
-		return store.Compaction{}, errors.New("kein Modell ausgewählt")
+		return CompactResult{}, errors.New("kein Modell ausgewählt")
 	}
 	provider, ok := e.Registry.Provider(backendID)
 	if !ok {
-		return store.Compaction{}, fmt.Errorf("Backend %q ist nicht konfiguriert", backendID)
+		return CompactResult{}, fmt.Errorf("Backend %q ist nicht konfiguriert", backendID)
 	}
 	modelInfo := e.resolveModel(ctx, backendID, modelID, settings)
 
-	if err := e.compactWith(ctx, &chat, provider, backendID, modelID, modelInfo, settings, opts); err != nil {
-		return store.Compaction{}, err
+	created, err := e.compactWith(ctx, &chat, provider, backendID, modelID, modelInfo, settings, opts)
+	if err != nil {
+		return CompactResult{}, err
 	}
-	compactions, err := e.Store.ListCompactions(chatID)
-	if err != nil || len(compactions) == 0 {
-		return store.Compaction{}, errors.New("keine Kompaktierung erstellt")
+	if created == nil {
+		return CompactResult{Created: false}, nil
 	}
-	return compactions[len(compactions)-1], nil
+	return CompactResult{Created: true, Compaction: *created}, nil
 }
 
 // maybeAutoCompact compacts when the projected next request would cross the
@@ -67,28 +81,34 @@ func (e *Engine) maybeAutoCompact(ctx context.Context, chat *store.Chat, provide
 		return nil
 	}
 	modelInfo := e.resolveModel(ctx, chat.Backend, modelID, settings)
-	return e.compactWith(ctx, chat, provider, chat.Backend, modelID, modelInfo, settings, CompactOptions{})
+	// The created compaction is irrelevant here: an automatic run has nobody to
+	// report back to, and "nothing to fold" is already the silent outcome.
+	_, err := e.compactWith(ctx, chat, provider, chat.Backend, modelID, modelInfo, settings, CompactOptions{})
+	return err
 }
 
+// compactWith performs one compaction. It returns the compaction it created, or
+// nil when there was nothing to fold — a planner that decided no compaction was
+// needed, or a range that turned out to hold no messages.
 func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm.Provider,
 	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings,
-	opts CompactOptions) error {
+	opts CompactOptions) (*store.Compaction, error) {
 
-	assembly, _, err := e.buildAssembly(ctx, chat, provider, backendID, modelID, settings, modelInfo, "")
+	assembly, _, err := e.buildAssembly(ctx, chat, backendID, modelID, settings, modelInfo, "")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if assembly.Budget.Limit <= 0 {
-		return errors.New("Kontextfenster des Modells ist unbekannt")
+		return nil, errors.New("Kontextfenster des Modells ist unbekannt")
 	}
 
 	messages, err := e.Store.ListMessages(chat.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	compactions, err := e.Store.ListCompactions(chat.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	plan := PlanCompaction(PlanInput{
@@ -103,7 +123,7 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		Target:           opts.Target,
 	})
 	if !plan.Needed {
-		return nil
+		return nil, nil
 	}
 	// A manual call may pin the range explicitly.
 	if opts.ToSeq > 0 && opts.ToSeq > plan.FromSeq {
@@ -121,7 +141,7 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		}
 	}
 	if len(toFold) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	e.emitStatus(chat.ID, "compacting")
@@ -148,7 +168,7 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		NumCtx:          chat.NumCtx,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	compaction := store.Compaction{
@@ -165,14 +185,14 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		Backend:      backendID,
 	}
 	if err := e.Store.CreateCompaction(compaction); err != nil {
-		return err
+		return nil, err
 	}
 
 	// The prompt has changed shape, so the previous measurement no longer
 	// describes it.
 	e.InvalidateMeasurement(chat.ID)
-	e.emit("chat:compaction", map[string]any{"chatId": chat.ID, "compaction": compaction})
-	return nil
+	e.emit(events.Compaction, map[string]any{"chatId": chat.ID, "compaction": compaction})
+	return &compaction, nil
 }
 
 func triggerName(force bool) string {
@@ -241,5 +261,5 @@ func (e *Engine) autoTitle(ctx context.Context, chat *store.Chat, provider llm.P
 		return
 	}
 	chat.Title = title
-	e.emit("chat:title", map[string]any{"chatId": chat.ID, "title": title})
+	e.emit(events.Title, map[string]any{"chatId": chat.ID, "title": title})
 }

@@ -11,7 +11,7 @@ export function ActiveGenerations():Promise<Array<string>>;
 
 export function AddAttachment(arg1:main.AttachmentInput):Promise<store.Attachment>;
 
-export function CompactNow(arg1:main.CompactRequest):Promise<store.Compaction>;
+export function CompactNow(arg1:main.CompactRequest):Promise<chat.CompactResult>;
 
 export function CreateChat(arg1:string,arg2:string):Promise<store.Chat>;
 

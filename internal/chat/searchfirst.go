@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"kichat/internal/config"
+	"kichat/internal/events"
 	"kichat/internal/research"
 	"kichat/internal/store"
 )
@@ -86,7 +87,7 @@ func (e *Engine) seedSearch(ctx context.Context, chat *store.Chat, query string,
 	if err := e.Store.CreateMessage(msg); err != nil {
 		return err
 	}
-	e.emit("chat:message", map[string]any{"chatId": chat.ID, "message": msg})
+	e.emit(events.Message, map[string]any{"chatId": chat.ID, "message": msg})
 	return nil
 }
 

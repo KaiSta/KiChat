@@ -14,6 +14,7 @@ import (
 
 	"kichat/internal/chat"
 	"kichat/internal/config"
+	"kichat/internal/events"
 	"kichat/internal/ingest"
 	"kichat/internal/llm"
 	"kichat/internal/research"
@@ -244,14 +245,16 @@ type CompactRequest struct {
 	ToSeq   int     `json:"toSeq"`
 }
 
-// CompactNow runs a manual compaction.
-func (a *App) CompactNow(req CompactRequest) (store.Compaction, error) {
+// CompactNow runs a manual compaction. It returns what the run did rather than
+// only an error, because "there was nothing to fold" is a normal answer to a
+// manual request and the UI has to be able to say so.
+func (a *App) CompactNow(req CompactRequest) (chat.CompactResult, error) {
 	if err := a.ensure(); err != nil {
-		return store.Compaction{}, err
+		return chat.CompactResult{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	compaction, err := a.engine.Compact(ctx, req.ChatID, chat.CompactOptions{
+	result, err := a.engine.Compact(ctx, req.ChatID, chat.CompactOptions{
 		Force:   true,
 		Focus:   req.Focus,
 		Target:  req.Target,
@@ -259,10 +262,12 @@ func (a *App) CompactNow(req CompactRequest) (store.Compaction, error) {
 		ToSeq:   req.ToSeq,
 	})
 	if err != nil {
-		return store.Compaction{}, err
+		return chat.CompactResult{}, err
 	}
-	a.emit("chat:chats-changed", map[string]any{})
-	return compaction, nil
+	if result.Created {
+		a.emit(events.ChatsChanged, map[string]any{})
+	}
+	return result, nil
 }
 
 // ListCompactions returns a chat's compaction history.
@@ -418,7 +423,7 @@ func (a *App) AddAttachment(in AttachmentInput) (store.Attachment, error) {
 	if err := a.store.CreateAttachment(attachment); err != nil {
 		return store.Attachment{}, err
 	}
-	a.emit("chat:attachments", map[string]any{"chatId": in.ChatID})
+	a.emit(events.Attachments, map[string]any{"chatId": in.ChatID})
 	return attachment, nil
 }
 
@@ -434,7 +439,7 @@ func (a *App) RemoveAttachment(attachmentID string) error {
 	if err := a.store.DeleteAttachment(attachmentID); err != nil {
 		return err
 	}
-	a.emit("chat:attachments", map[string]any{"chatId": attachment.ChatID})
+	a.emit(events.Attachments, map[string]any{"chatId": attachment.ChatID})
 	return nil
 }
 
@@ -471,7 +476,7 @@ func (a *App) SetAttachmentPlacement(attachmentID, placement string) (store.Atta
 	if err := a.store.UpdateAttachment(attachment); err != nil {
 		return store.Attachment{}, err
 	}
-	a.emit("chat:attachments", map[string]any{"chatId": attachment.ChatID})
+	a.emit(events.Attachments, map[string]any{"chatId": attachment.ChatID})
 	return attachment, nil
 }
 
@@ -581,7 +586,7 @@ func (a *App) ScrapeIntoChat(chatID, pageURL string, maxTokens int) (store.Attac
 	if err := a.store.CreateAttachment(attachment); err != nil {
 		return store.Attachment{}, err
 	}
-	a.emit("chat:attachments", map[string]any{"chatId": chatID})
+	a.emit(events.Attachments, map[string]any{"chatId": chatID})
 	return attachment, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"kichat/internal/config"
+	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/tools"
@@ -34,6 +35,22 @@ type generateResult struct {
 	Usage            *llm.Usage
 }
 
+// persist reports a write that failed rather than dropping it on the floor. An
+// answer the user can read but that never reached the database is gone at the
+// next start, and discovering that later is worse than being told now. The turn
+// carries on either way: the reply is already on screen, so a warning describes
+// what happened more truthfully than aborting would. There is nothing to return
+// — no caller can do anything about it, which is exactly why it used to be lost.
+func (e *Engine) persist(chatID, what string, err error) {
+	if err == nil {
+		return
+	}
+	e.emit(events.Warning, map[string]any{
+		"chatId":  chatID,
+		"warning": fmt.Sprintf("%s konnte nicht gespeichert werden: %s", what, err.Error()),
+	})
+}
+
 // generate runs the model, executing tools until the model stops asking for
 // them. Every model reply becomes its own assistant message, so a transcript
 // replays exactly as it happened.
@@ -54,12 +71,12 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		if !in.UseNative {
 			extraSystem = tools.TextProtocolHint
 		}
-		assembly, toolDefs, err := e.buildAssembly(ctx, &in.Chat, in.Provider,
+		assembly, toolDefs, err := e.buildAssembly(ctx, &in.Chat,
 			in.BackendID, in.ModelID, in.Settings, in.Model, extraSystem)
 		if err != nil {
 			return result, err
 		}
-		e.emit("chat:budget", map[string]any{"chatId": in.Chat.ID, "budget": assembly.Budget})
+		e.emit(events.Budget, map[string]any{"chatId": in.Chat.ID, "budget": assembly.Budget})
 
 		row, err := e.createAssistantMessage(in.Chat.ID, in.BackendID, in.ModelID)
 		if err != nil {
@@ -68,7 +85,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		if result.PrimaryMessageID == "" {
 			result.PrimaryMessageID = row.ID
 		}
-		e.emit("chat:start", map[string]any{
+		e.emit(events.Start, map[string]any{
 			"chatId":    in.Chat.ID,
 			"messageId": row.ID,
 			"backend":   in.BackendID,
@@ -92,7 +109,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		if err != nil {
 			row.Status = store.StatusCancelled
 			row.Content = ""
-			_ = e.Store.UpdateMessage(row)
+			e.persist(in.Chat.ID, "Der Abbruch", e.Store.UpdateMessage(row))
 			return result, err
 		}
 
@@ -128,7 +145,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// Persist the reply together with its tool calls before executing them, so
 		// the transcript is replayable even if the process dies mid-tool.
 		row.ToolCallsJSON = encodeToolCalls(calls)
-		_ = e.Store.UpdateMessage(row)
+		e.persist(in.Chat.ID, "Die Antwort", e.Store.UpdateMessage(row))
 
 		result.Text = joinText(result.Text, text)
 		result.Reasoning = joinText(result.Reasoning, reasoning)
@@ -184,8 +201,8 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 		Status:    store.ToolPending,
 		CreatedAt: time.Now(),
 	}
-	_ = e.Store.UpsertToolCall(record)
-	e.emit("chat:tool", map[string]any{"chatId": chatID, "toolCall": record})
+	e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
+	e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 
 	start := time.Now()
 	output, execErr := e.executeTool(ctx, chatID, call)
@@ -199,8 +216,8 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 		record.Status = store.ToolOK
 	}
 	record.ResultJSON = resultJSON(output)
-	_ = e.Store.UpsertToolCall(record)
-	e.emit("chat:tool", map[string]any{"chatId": chatID, "toolCall": record})
+	e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
+	e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 
 	e.appendToolResult(chatID, call, output, record.Status)
 }
@@ -229,8 +246,8 @@ func (e *Engine) cancelRemainingCalls(chatID string, row store.Message, calls []
 			Status:     store.ToolCancelled,
 			CreatedAt:  time.Now(),
 		}
-		_ = e.Store.UpsertToolCall(record)
-		e.emit("chat:tool", map[string]any{"chatId": chatID, "toolCall": record})
+		e.persist(chatID, "Der abgebrochene Tool-Aufruf", e.Store.UpsertToolCall(record))
+		e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 		e.appendToolResult(chatID, call, cancelledToolOutput, store.ToolCancelled)
 	}
 }
@@ -258,7 +275,7 @@ func (e *Engine) appendToolResult(chatID string, call llm.ToolCall, output, stat
 	if err := e.Store.CreateMessage(msg); err != nil {
 		return
 	}
-	e.emit("chat:message", map[string]any{"chatId": chatID, "message": msg})
+	e.emit(events.Message, map[string]any{"chatId": chatID, "message": msg})
 }
 
 func resultJSON(output string) string {
@@ -274,8 +291,10 @@ func resultJSON(output string) string {
 // consume reads the stream, emits batched deltas to the UI, and accumulates the
 // reply. Batching keeps a fast local model at 60+ tokens/s from flooding the
 // webview with one event per token.
+// The channel parameter is named stream rather than events so it cannot shadow
+// the events package that names the payloads emitted from here.
 func (e *Engine) consume(ctx context.Context, chatID, messageID string,
-	events <-chan llm.StreamEvent) (text, reasoning string, calls []llm.ToolCall,
+	stream <-chan llm.StreamEvent) (text, reasoning string, calls []llm.ToolCall,
 	stats *llm.GenerationStats, usage *llm.Usage, err error) {
 
 	const (
@@ -297,13 +316,13 @@ func (e *Engine) consume(ctx context.Context, chatID, messageID string,
 			return
 		}
 		if textBuf.Len() > 0 {
-			e.emit("chat:delta", map[string]any{
+			e.emit(events.Delta, map[string]any{
 				"chatId": chatID, "messageId": messageID, "text": textBuf.String(),
 			})
 			textBuf.Reset()
 		}
 		if reasoningBuf.Len() > 0 {
-			e.emit("chat:reasoning", map[string]any{
+			e.emit(events.Reasoning, map[string]any{
 				"chatId": chatID, "messageId": messageID, "text": reasoningBuf.String(),
 			})
 			reasoningBuf.Reset()
@@ -311,7 +330,7 @@ func (e *Engine) consume(ctx context.Context, chatID, messageID string,
 		lastFlush = time.Now()
 	}
 
-	for ev := range events {
+	for ev := range stream {
 		switch ev.Type {
 		case llm.EventDelta:
 			text += ev.Text

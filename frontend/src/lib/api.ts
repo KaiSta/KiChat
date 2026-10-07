@@ -106,7 +106,10 @@ export const App = {
 }
 
 /* --------------------------------------------------------------------------
- * Event names, mirrored from the Go constants in app.go.
+ * Event names, mirrored from the Go constants in internal/events. That package
+ * exists because these pairs used to drift: a misspelled name silently leaves a
+ * listener that never fires. The Go test in that package now reads this map and
+ * fails when the two disagree.
  * ------------------------------------------------------------------------ */
 export const EV = {
   delta: 'chat:delta',

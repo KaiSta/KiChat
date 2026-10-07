@@ -13,6 +13,7 @@ import (
 
 	"kichat/internal/chat"
 	"kichat/internal/config"
+	"kichat/internal/events"
 	"kichat/internal/ingest"
 	"kichat/internal/llm"
 	"kichat/internal/research"
@@ -21,21 +22,8 @@ import (
 	"kichat/internal/tools"
 )
 
-// Event names shared with the frontend.
-const (
-	EventDelta      = "chat:delta"
-	EventReasoning  = "chat:reasoning"
-	EventStart      = "chat:start"
-	EventMessage    = "chat:message"
-	EventTool       = "chat:tool"
-	EventStatus     = "chat:status"
-	EventDone       = "chat:done"
-	EventError      = "chat:error"
-	EventWarning    = "chat:warning"
-	EventBudget     = "chat:budget"
-	EventCompaction = "chat:compaction"
-	EventTitle      = "chat:title"
-)
+// Event names live in internal/events so the emitters and the frontend's
+// subscriber list cannot drift apart; see that package for why.
 
 // App is the bound Wails application object.
 type App struct {
@@ -262,7 +250,7 @@ func (a *App) CreateChat(backend, model string) (store.Chat, error) {
 	if err := a.store.CreateChat(newChat); err != nil {
 		return store.Chat{}, err
 	}
-	a.emit("chats:changed", map[string]any{})
+	a.emit(events.ChatsChanged, map[string]any{})
 	return newChat, nil
 }
 
@@ -340,7 +328,7 @@ func (a *App) UpdateChat(c store.Chat) (store.Chat, error) {
 	if err := a.store.UpdateChat(c); err != nil {
 		return store.Chat{}, err
 	}
-	a.emit("chats:changed", map[string]any{})
+	a.emit(events.ChatsChanged, map[string]any{})
 	return a.store.GetChat(c.ID)
 }
 
@@ -352,7 +340,7 @@ func (a *App) RenameChat(chatID, title string) error {
 	if err := a.store.SetChatTitle(chatID, title); err != nil {
 		return err
 	}
-	a.emit("chats:changed", map[string]any{})
+	a.emit(events.ChatsChanged, map[string]any{})
 	return nil
 }
 
@@ -366,7 +354,7 @@ func (a *App) DeleteChat(chatID string) error {
 		return err
 	}
 	a.engine.InvalidateMeasurement(chatID)
-	a.emit("chats:changed", map[string]any{})
+	a.emit(events.ChatsChanged, map[string]any{})
 	return nil
 }
 

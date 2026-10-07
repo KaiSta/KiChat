@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"kichat/internal/config"
+	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/tools"
@@ -126,7 +127,7 @@ func (e *Engine) emitStatus(chatID, phase string) {
 	if e.Emit == nil {
 		return
 	}
-	e.Emit("chat:status", map[string]any{"chatId": chatID, "phase": phase})
+	e.Emit(events.Status, map[string]any{"chatId": chatID, "phase": phase})
 }
 
 func (e *Engine) emit(name string, payload any) {
@@ -187,7 +188,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 	settings := e.Settings()
 	chat, err := e.Store.GetChat(req.ChatID)
 	if err != nil {
-		e.emit("chat:error", map[string]any{"chatId": req.ChatID, "error": err.Error()})
+		e.emit(events.Error, map[string]any{"chatId": req.ChatID, "error": err.Error()})
 		return
 	}
 
@@ -199,7 +200,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 		modelID = req.Model
 	}
 	if backendID == "" || modelID == "" {
-		e.emit("chat:error", map[string]any{
+		e.emit(events.Error, map[string]any{
 			"chatId": req.ChatID,
 			"error":  "Kein Modell ausgewählt. Bitte oben im Chat ein Modell wählen.",
 		})
@@ -207,7 +208,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 	}
 	provider, ok := e.Registry.Provider(backendID)
 	if !ok {
-		e.emit("chat:error", map[string]any{
+		e.emit(events.Error, map[string]any{
 			"chatId": req.ChatID,
 			"error":  fmt.Sprintf("Backend %q ist nicht konfiguriert.", backendID),
 		})
@@ -219,7 +220,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 	// A manual regenerate drops the previous assistant reply first.
 	if req.Regenerate {
 		if err := e.dropTrailingAssistant(req.ChatID); err != nil {
-			e.emit("chat:error", map[string]any{"chatId": req.ChatID, "error": err.Error()})
+			e.emit(events.Error, map[string]any{"chatId": req.ChatID, "error": err.Error()})
 			return
 		}
 	}
@@ -227,14 +228,14 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 	// Persist the user message before generating, so a crash never loses it.
 	if strings.TrimSpace(req.Text) != "" || len(req.AttachmentIDs) > 0 {
 		if err := e.appendUserMessage(req, backendID, modelID); err != nil {
-			e.emit("chat:error", map[string]any{"chatId": req.ChatID, "error": err.Error()})
+			e.emit(events.Error, map[string]any{"chatId": req.ChatID, "error": err.Error()})
 			return
 		}
 	}
 
 	// Optionally seed the turn with web results before the model sees it.
 	if err := e.seedSearch(ctx, &chat, req.Text, settings, modelInfo.ContextLimit); err != nil {
-		e.emit("chat:warning", map[string]any{
+		e.emit(events.Warning, map[string]any{
 			"chatId":  req.ChatID,
 			"warning": fmt.Sprintf("Vorab-Recherche fehlgeschlagen: %s", err.Error()),
 		})
@@ -244,7 +245,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 		// A failed compaction is reported but does not abort the turn: the user
 		// still deserves an answer, and an over-long context will surface as a
 		// backend error which is easier to understand.
-		e.emit("chat:warning", map[string]any{"chatId": req.ChatID, "warning": err.Error()})
+		e.emit(events.Warning, map[string]any{"chatId": req.ChatID, "warning": err.Error()})
 	}
 
 	// Assistant rows are created by generate as each model reply begins, so a
@@ -275,14 +276,14 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 	}
 
 	if genErr != nil && ctx.Err() == nil {
-		e.emit("chat:error", map[string]any{
+		e.emit(events.Error, map[string]any{
 			"chatId":    req.ChatID,
 			"messageId": result.PrimaryMessageID,
 			"error":     genErr.Error(),
 		})
 	}
 
-	e.emit("chat:done", map[string]any{
+	e.emit(events.Done, map[string]any{
 		"chatId":        req.ChatID,
 		"messageId":     result.PrimaryMessageID,
 		"lastMessageId": result.LastMessageID,
@@ -291,18 +292,10 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 		"usage":         result.Usage,
 	})
 
-	e.emitBudget(req.ChatID, &chat, provider, backendID, modelID, settings, modelInfo)
+	e.emitBudget(req.ChatID, &chat, backendID, modelID, settings, modelInfo)
 	if chat.Title == "" && settings.AutoTitle {
 		e.autoTitle(ctx, &chat, provider, modelID, req.Text)
 	}
-}
-
-func maxSeqOf(st *store.Store, chatID string) int {
-	seq, err := st.NextSeq(chatID)
-	if err != nil {
-		return 0
-	}
-	return seq - 1
 }
 
 // resolveModel looks up model metadata, applying user overrides and falling back
@@ -350,7 +343,11 @@ func capacitySuffix(limit int, source string) string {
 }
 
 // buildAssembly prepares the request payload and its budget for a chat.
-func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat, provider llm.Provider,
+//
+// It takes no provider, deliberately: the assembly is built from what the store
+// holds, which is what lets a budget be previewed for a backend that is not
+// configured at all — and it leaves nothing here that could dereference a nil one.
+func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 	backendID, modelID string, settings config.Settings, model llm.ModelInfo,
 	extraSystem string) (Assembly, []llm.ToolDefinition, error) {
 
@@ -448,14 +445,14 @@ func anyProviderAvailable(chain interface{ ProviderAvailability() map[string]boo
 }
 
 // emitBudget publishes the current context budget so the meter can update.
-func (e *Engine) emitBudget(chatID string, chat *store.Chat, provider llm.Provider,
+func (e *Engine) emitBudget(chatID string, chat *store.Chat,
 	backendID, modelID string, settings config.Settings, model llm.ModelInfo) {
-	assembly, _, err := e.buildAssembly(context.Background(), chat, provider,
+	assembly, _, err := e.buildAssembly(context.Background(), chat,
 		backendID, modelID, settings, model, "")
 	if err != nil {
 		return
 	}
-	e.emit("chat:budget", map[string]any{
+	e.emit(events.Budget, map[string]any{
 		"chatId": chatID,
 		"budget": assembly.Budget,
 	})
@@ -494,7 +491,7 @@ func (e *Engine) appendUserMessage(req TurnRequest, backendID, modelID string) e
 			return err
 		}
 	}
-	e.emit("chat:message", map[string]any{"chatId": req.ChatID, "message": msg})
+	e.emit(events.Message, map[string]any{"chatId": req.ChatID, "message": msg})
 	return nil
 }
 
