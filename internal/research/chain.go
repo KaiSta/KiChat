@@ -184,7 +184,12 @@ func (c *Chain) Search(ctx context.Context, query string, req SearchRequest) (Se
 					})
 				}
 				if name == "brave" {
-					_, _ = c.store.IncrCounter("search:brave", config.CurrentPeriod())
+					// A failed counter leaves the displayed monthly usage short of what
+					// Brave actually billed, so it is said out loud instead of dropped.
+					if _, cErr := c.store.IncrCounter("search:brave", config.CurrentPeriod()); cErr != nil {
+						outcome.Warning = mergeWarning(outcome.Warning,
+							"Das monatliche Brave-Kontingent konnte nicht gezählt werden: "+cErr.Error())
+					}
 				}
 			}
 			return outcome, nil
@@ -251,7 +256,7 @@ func (c *Chain) GroundedContext(ctx context.Context, query string, req SearchReq
 	if brave != nil && brave.Available() {
 		grounded, err := brave.Context(ctx, req, maxTokens)
 		if err == nil && !grounded.Empty() {
-			c.recordGrounded(cacheKey, opts, grounded)
+			grounded.Warning = mergeWarning(grounded.Warning, c.recordGrounded(cacheKey, opts, grounded))
 			return grounded, nil
 		}
 		switch {
@@ -303,15 +308,19 @@ func (c *Chain) GroundedContext(ctx context.Context, query string, req SearchReq
 	if grounded.Empty() {
 		return GroundedContext{}, fmt.Errorf("Recherche ohne verwertbare Inhalte: %s", strings.Join(reasons, " | "))
 	}
-	c.recordGrounded(cacheKey, opts, grounded)
+	grounded.Warning = mergeWarning(grounded.Warning, c.recordGrounded(cacheKey, opts, grounded))
 	return grounded, nil
 }
 
 // recordGrounded caches a grounded result and counts the metered request. The
-// counter matters because the context route bills like any other Brave query.
-func (c *Chain) recordGrounded(cacheKey string, opts Options, grounded GroundedContext) {
+// counter matters because the context route bills like any other Brave query, so
+// a failure to count it comes back as a warning the caller can show: a quota
+// display that silently lags behind the real bill is worse than a note about it.
+// Failing to cache is not reported — the content is already in hand, and the
+// only consequence is one more metered request later.
+func (c *Chain) recordGrounded(cacheKey string, opts Options, grounded GroundedContext) string {
 	if c.store == nil {
-		return
+		return ""
 	}
 	if raw, err := json.Marshal(grounded); err == nil {
 		_ = c.store.PutSearchCache(store.SearchCacheEntry{
@@ -324,8 +333,19 @@ func (c *Chain) recordGrounded(cacheKey string, opts Options, grounded GroundedC
 		})
 	}
 	if strings.HasPrefix(grounded.Provider, "brave") {
-		_, _ = c.store.IncrCounter("search:brave", config.CurrentPeriod())
+		if _, err := c.store.IncrCounter("search:brave", config.CurrentPeriod()); err != nil {
+			return "Das monatliche Brave-Kontingent konnte nicht gezählt werden: " + err.Error()
+		}
 	}
+	return ""
+}
+
+// mergeWarning joins two notes for the caller, keeping the empty case empty.
+func mergeWarning(existing, add string) string {
+	if existing == "" {
+		return add
+	}
+	return existing + "; " + add
 }
 
 func jsonMarshalResults(results []SearchResult) (string, error) {
