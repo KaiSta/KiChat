@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { timeAgo } from './lib/api'
+import { LANGS } from './lib/i18n'
 import { useStore } from './store'
 import { ChatView } from './components/ChatView'
 import { ErrorBoundary } from './components/ErrorBoundary'
@@ -10,6 +11,10 @@ export default function App() {
   const ready = useStore((s) => s.ready)
   const bootError = useStore((s) => s.bootError)
   const view = useStore((s) => s.view)
+  // Declared above the early returns below, like every other hook here: a hook
+  // that runs on some renders but not others changes the hook count and React
+  // unmounts the whole tree.
+  const t = useStore((s) => s.t)
 
   useEffect(() => {
     void bootstrap()
@@ -26,7 +31,7 @@ export default function App() {
       <div className="flex h-full items-center justify-center p-8">
         <div className="card max-w-lg p-4">
           <div className="mb-2 font-semibold" style={{ color: 'var(--danger)' }}>
-            Start fehlgeschlagen
+            {t('app.startFailed')}
           </div>
           <pre className="mono text-[12px] whitespace-pre-wrap">{bootError}</pre>
         </div>
@@ -71,6 +76,12 @@ function Sidebar() {
   const [filter, setFilter] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
+  // The cycle follows the order LANGS declares, so this button and the picker in
+  // Settings cannot disagree about what "next" means. Math.max also absorbs a
+  // language this build does not ship: it lands on the first entry, English.
+  const langIndex = Math.max(0, LANGS.findIndex((l) => l.id === lang))
+  const nextLang = LANGS[(langIndex + 1) % LANGS.length]
+
   const filtered = useMemo(() => {
     const needle = filter.trim().toLowerCase()
     if (!needle) return chats
@@ -90,7 +101,7 @@ function Sidebar() {
         <button
           type="button"
           className="btn btn-sm btn-ghost"
-          title={theme === 'dark' ? 'Light' : 'Dark'}
+          title={theme === 'dark' ? t('settings.themeLight') : t('settings.themeDark')}
           onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
         >
           {theme === 'dark' ? '☀' : '☾'}
@@ -98,10 +109,10 @@ function Sidebar() {
         <button
           type="button"
           className="btn btn-sm btn-ghost"
-          title={lang === 'de' ? 'English' : 'Deutsch'}
-          onClick={() => setLang(lang === 'de' ? 'en' : 'de')}
+          title={nextLang.label}
+          onClick={() => setLang(nextLang.id)}
         >
-          {lang.toUpperCase()}
+          {LANGS[langIndex].label}
         </button>
       </div>
 

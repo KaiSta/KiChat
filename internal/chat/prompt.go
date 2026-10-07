@@ -86,7 +86,10 @@ func RenderPrompt(tmpl string, vars TemplateVars) string {
 // prompt editor can warn about typos.
 func UnresolvedVars(tmpl string) []string {
 	seen := map[string]bool{}
-	var out []string
+	// Deliberately non-nil: a nil slice marshals to JSON null, not [], and the
+	// prompt editor calls .length on the result. "No unknown variables" is an
+	// empty list, and sending null turns an ordinary state into a render error.
+	out := []string{}
 	for _, m := range varPattern.FindAllStringSubmatch(tmpl, -1) {
 		name := m[1]
 		if seen[name] {

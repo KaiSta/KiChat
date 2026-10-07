@@ -1,9 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { App, formatNumber, type config, type llm, type main } from '../lib/api'
 import { useStore } from '../store'
-import type { Lang } from '../lib/i18n'
+import { asLang, LANGS } from '../lib/i18n'
 
 type Tab = 'general' | 'backends' | 'prompt' | 'research' | 'context'
+
+/**
+ * Translate a key, falling back to text the backend supplied. translate() echoes
+ * the key back when it has no entry, and that echo is the signal: a preset or a
+ * template variable the backend knows but this build of the dictionary does not
+ * still reads as something rather than as "preset.my-id".
+ */
+function translatedOr(t: (key: string) => string, key: string, fallback: string): string {
+  const translated = t(key)
+  return translated === key ? fallback : translated
+}
 
 export function Settings() {
   const t = useStore((s) => s.t)
@@ -23,8 +34,12 @@ export function Settings() {
   const save = async () => {
     setSaving(true)
     try {
-      await App.SaveSettings(draft)
-      useStore.setState({ settings: draft })
+      // Adopt what the backend stored rather than the draft: the untouched
+      // built-in prompts are rewritten into the language being saved, so the
+      // draft and the stored settings would otherwise disagree until a restart.
+      const stored = await App.SaveSettings(draft)
+      setDraft(stored)
+      useStore.setState({ settings: stored })
       useStore.getState().toast('info', t('settings.saved'))
       await useStore.getState().refreshModels(true)
       await useStore.getState().refreshHealth()
@@ -111,7 +126,6 @@ function GeneralTab({
   patch: (c: Partial<config.Settings>) => void
 }) {
   const t = useStore((s) => s.t)
-  const lang = useStore((s) => s.lang)
   const setLang = useStore((s) => s.setLang)
   const theme = useStore((s) => s.theme)
   const setTheme = useStore((s) => s.setTheme)
@@ -119,17 +133,25 @@ function GeneralTab({
   return (
     <>
       <Section title={t('settings.general')}>
-        <Field label={t('settings.language')}>
+        {/* The list comes from LANGS so a language added there appears here
+            without touching this screen, and so the stored value stays typed. */}
+        <Field label={t('settings.language')} hint={t('settings.languageHint')}>
           <select
             className="select"
-            value={draft.language}
+            value={asLang(draft.language)}
             onChange={(e) => {
-              patch({ language: e.target.value })
-              setLang(e.target.value as Lang)
+              const next = asLang(e.target.value)
+              patch({ language: next })
+              setLang(next)
             }}
           >
-            <option value="de">Deutsch</option>
-            <option value="en">English</option>
+            {LANGS.map((l) => (
+              // The endonym: a language is listed in its own script so it is
+              // legible to the person looking for it.
+              <option key={l.id} value={l.id}>
+                {l.label}
+              </option>
+            ))}
           </select>
         </Field>
         <Field label={t('settings.theme')}>
@@ -142,14 +164,11 @@ function GeneralTab({
               setTheme(value)
             }}
           >
-            <option value="dark">Dunkel</option>
-            <option value="light">Hell</option>
+            <option value="dark">{t('settings.themeDark')}</option>
+            <option value="light">{t('settings.themeLight')}</option>
           </select>
         </Field>
-        <Field
-          label={t('settings.location')}
-          hint={lang === 'de' ? 'Wird als {{location}} in den System-Prompt eingesetzt.' : 'Substituted as {{location}} in the system prompt.'}
-        >
+        <Field label={t('settings.location')}>
           <input className="input" value={draft.location} onChange={(e) => patch({ location: e.target.value })} />
         </Field>
         <label className="flex items-center gap-2 text-[13px]">
@@ -186,7 +205,7 @@ function GeneralTab({
               onChange={(e) => patch({ sampler: { ...draft.sampler, topP: Number(e.target.value) } })}
             />
           </Field>
-          <Field label={t('settings.numCtx')} hint={lang === 'de' ? 'Nur Ollama nutzt diesen Wert pro Anfrage.' : 'Only Ollama applies this per request.'}>
+          <Field label={t('settings.numCtx')} hint={t('settings.numCtxHint')}>
             <input
               className="input"
               type="number"
@@ -439,6 +458,12 @@ function PromptTab({
   patch: (c: Partial<config.Settings>) => void
 }) {
   const t = useStore((s) => s.t)
+  // A shipped preset is shown under its translated name, and a shipped variable
+  // under its translated description. translatedOr() falls back to the text the
+  // backend sent when a key has no entry — that is how a preset the user adds
+  // later still shows the name it was given instead of "preset.my-id".
+  const presetLabel = (p: config.PromptPreset) => translatedOr(t, `preset.${p.id}`, p.name)
+  const variableLabel = (v: main.PromptVariable) => translatedOr(t, v.key, v.description)
   const [variables, setVariables] = useState<main.PromptVariable[]>([])
   const [preview, setPreview] = useState('')
   const [unknown, setUnknown] = useState<string[]>([])
@@ -479,15 +504,8 @@ function PromptTab({
 
   return (
     <>
-      <Section
-        title={t('settings.prompt')}
-        hint={
-          draft.language === 'en'
-            ? 'Used for new chats. Variables in {{braces}} are resolved at send time.'
-            : 'Gilt für neue Chats. Variablen in {{Klammern}} werden beim Senden aufgelöst.'
-        }
-      >
-        <Field label={t('settings.promptPreset')}>
+      <Section title={t('settings.prompt')} hint={t('settings.promptHint')}>
+        <Field label={t('settings.promptPreset')} hint={t('settings.promptPresetHint')}>
           <div className="flex gap-2">
             <select
               className="select"
@@ -500,11 +518,28 @@ function PromptTab({
               <option value="">–</option>
               {draft.promptPresets.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name}
+                  {presetLabel(p)}
                 </option>
               ))}
             </select>
-            <button type="button" className="btn" onClick={() => void App.GetSettings()}>
+            <button
+              type="button"
+              className="btn"
+              title={t('settings.promptReload')}
+              aria-label={t('settings.promptReload')}
+              onClick={() => {
+                // Re-read what is stored. Discarding unsaved edits here is what the
+                // button means sitting next to the preset list, and the store is
+                // updated with it so the rest of the view agrees. This used to fetch
+                // the settings and drop the answer, so the button did nothing at all.
+                void App.GetSettings()
+                  .then((fresh) => {
+                    patch(fresh)
+                    useStore.setState({ settings: fresh })
+                  })
+                  .catch((err) => useStore.getState().toast('error', String(err)))
+              }}
+            >
               ↺
             </button>
           </div>
@@ -558,7 +593,7 @@ function PromptTab({
           {variables.map((v) => (
             <div key={v.name} className="flex items-center gap-2 text-[12px]">
               <code className="mono">{`{{${v.name}}}`}</code>
-              <span className="faint min-w-0 flex-1 truncate">{v.description}</span>
+              <span className="faint min-w-0 flex-1 truncate">{variableLabel(v)}</span>
               <button type="button" className="btn btn-sm btn-ghost" onClick={() => insertVariable(v.name)}>
                 {t('settings.promptInsert')}
               </button>

@@ -59,7 +59,7 @@ export function RemoveAttachment(arg1:string):Promise<void>;
 
 export function RenameChat(arg1:string,arg2:string):Promise<void>;
 
-export function SaveSettings(arg1:config.Settings):Promise<void>;
+export function SaveSettings(arg1:config.Settings):Promise<config.Settings>;
 
 export function Scrape(arg1:string,arg2:number):Promise<research.ScrapeResult>;
 

@@ -35,25 +35,35 @@ func (a *App) GetSettings() (config.Settings, error) {
 }
 
 // SaveSettings persists settings and rebuilds the services that depend on them.
-func (a *App) SaveSettings(s config.Settings) error {
+//
+// It returns what was stored instead of nothing because the built-in system
+// prompts follow the interface language, and only the backend knows which of the
+// prompts in the payload are still untouched: handing the caller its own draft
+// back would leave the prompt textarea showing the previous language until the
+// next start.
+func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	if err := a.ensure(); err != nil {
-		return err
+		return config.Settings{}, err
 	}
 	current := a.Settings()
 	// An empty key in the payload means "leave the stored key alone"; settings
 	// only ever carry a boolean about the key.
 	s.Search.BraveAPIKey = current.Search.BraveAPIKey
-	if s.DefaultSystemPrompt == "" {
-		s.DefaultSystemPrompt = config.DefaultSystemPrompt
-	}
+	// Moving the untouched prompts to the new language, and repairing an empty
+	// default prompt, happen here as well as on load: clearing the textarea and
+	// switching the language in the same save must not leave either undone.
+	s.LocalisePrompts()
 	if err := s.Save(a.store); err != nil {
-		return err
+		return config.Settings{}, err
 	}
 	a.settingsMu.Lock()
 	a.settings = s
 	a.settingsMu.Unlock()
 	a.rebuildServices(s)
-	return nil
+	// The key is a secret and never crosses the bridge, so the copy handed back
+	// carries the same blanked shape GetSettings returns.
+	s.Search.BraveAPIKey = ""
+	return s, nil
 }
 
 // SecretStatus reports how secrets are stored.
@@ -177,24 +187,30 @@ func (a *App) SetModelOverride(backend, model string, ov llm.ModelOverride) erro
 // --- prompt presets --------------------------------------------------------
 
 // PromptVariable describes a template variable available in system prompts.
+//
+// Key is the i18n key the settings view translates and Description is the
+// untranslated fallback, the same pair a built-in preset name uses: the list sits
+// directly under the prompt editor, so leaving it in one language made the screen
+// read as English above and German below.
 type PromptVariable struct {
 	Name        string `json:"name"`
+	Key         string `json:"key"`
 	Description string `json:"description"`
 }
 
 // GetPromptVariables lists the supported template variables.
 func (a *App) GetPromptVariables() []PromptVariable {
 	return []PromptVariable{
-		{Name: "datetime", Description: "Aktuelles Datum, Uhrzeit und Wochentag"},
-		{Name: "date", Description: "Nur das Datum (TT.MM.JJJJ)"},
-		{Name: "time", Description: "Nur die Uhrzeit (HH:MM)"},
-		{Name: "weekday", Description: "Wochentag ausgeschrieben"},
-		{Name: "location", Description: "Der in den Einstellungen hinterlegte Standort"},
-		{Name: "model", Description: "Das aktuell gewählte Modell"},
-		{Name: "backend", Description: "Das aktuelle Backend (LM Studio, Ollama, …)"},
-		{Name: "context_limit", Description: "Größe des Kontextfensters in Tokens"},
-		{Name: "context_used", Description: "Zuletzt gemessene Kontextbelegung"},
-		{Name: "tool_list", Description: "Liste der verfügbaren Tools"},
+		{Name: "datetime", Key: "promptvar.datetime", Description: "Aktuelles Datum, Uhrzeit und Wochentag"},
+		{Name: "date", Key: "promptvar.date", Description: "Nur das Datum (TT.MM.JJJJ)"},
+		{Name: "time", Key: "promptvar.time", Description: "Nur die Uhrzeit (HH:MM)"},
+		{Name: "weekday", Key: "promptvar.weekday", Description: "Wochentag ausgeschrieben"},
+		{Name: "location", Key: "promptvar.location", Description: "Der in den Einstellungen hinterlegte Standort"},
+		{Name: "model", Key: "promptvar.model", Description: "Das aktuell gewählte Modell"},
+		{Name: "backend", Key: "promptvar.backend", Description: "Das aktuelle Backend (LM Studio, Ollama, …)"},
+		{Name: "context_limit", Key: "promptvar.context_limit", Description: "Größe des Kontextfensters in Tokens"},
+		{Name: "context_used", Key: "promptvar.context_used", Description: "Zuletzt gemessene Kontextbelegung"},
+		{Name: "tool_list", Key: "promptvar.tool_list", Description: "Liste der verfügbaren Tools"},
 	}
 }
 

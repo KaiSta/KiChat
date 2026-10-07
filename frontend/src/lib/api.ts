@@ -1,6 +1,8 @@
 import * as WailsApp from '../../wailsjs/go/main/App'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
 import * as Gen from '../../wailsjs/go/models'
+// Type-only, and i18n.ts imports nothing itself, so this cannot make a cycle.
+import type { Lang } from './i18n'
 
 /**
  * Wails generates a class per Go struct, and gives every class that contains a
@@ -225,18 +227,18 @@ export function toneVar(tone: 'ok' | 'warn' | 'danger'): string {
   return `var(--${tone})`
 }
 
-export function timeAgo(value: unknown, lang: 'de' | 'en'): string {
+export function timeAgo(value: unknown, lang: Lang): string {
   const date = toDate(value)
   if (!date) return ''
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000)
-  if (seconds < 60) return lang === 'de' ? 'gerade eben' : 'just now'
+  if (seconds < 60) return lang === 'de' ? 'gerade eben' : lang === 'zh' ? '刚刚' : 'just now'
   const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return lang === 'de' ? `${minutes} Min.` : `${minutes} min`
+  if (minutes < 60) return lang === 'de' ? `${minutes} Min.` : lang === 'zh' ? `${minutes} 分钟前` : `${minutes} min`
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return lang === 'de' ? `${hours} Std.` : `${hours} h`
+  if (hours < 24) return lang === 'de' ? `${hours} Std.` : lang === 'zh' ? `${hours} 小时前` : `${hours} h`
   const days = Math.floor(hours / 24)
-  if (days < 30) return lang === 'de' ? `${days} T.` : `${days} d`
-  return date.toLocaleDateString(lang === 'de' ? 'de-DE' : 'en-GB')
+  if (days < 30) return lang === 'de' ? `${days} T.` : lang === 'zh' ? `${days} 天前` : `${days} d`
+  return date.toLocaleDateString(lang === 'de' ? 'de-DE' : lang === 'zh' ? 'zh-CN' : 'en-GB')
 }
 
 export function toDate(value: unknown): Date | null {

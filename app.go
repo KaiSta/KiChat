@@ -252,7 +252,7 @@ func (a *App) CreateChat(backend, model string) (store.Chat, error) {
 		Backend:            backend,
 		Model:              model,
 		SystemPrompt:       settings.DefaultSystemPrompt,
-		SystemPromptPreset: "research",
+		SystemPromptPreset: config.PresetResearch,
 		Temperature:        settings.Sampler.Temperature,
 		TopP:               settings.Sampler.TopP,
 		AutoCompact:        true,

@@ -10,7 +10,30 @@ import {
   type research,
   type store as storeTypes,
 } from './lib/api'
-import { translate, type Lang } from './lib/i18n'
+import { WindowSetDarkTheme, WindowSetLightTheme } from '../wailsjs/runtime/runtime'
+import { asLang, translate, type Lang } from './lib/i18n'
+
+/**
+ * Applies the theme to the document and asks the native window to match.
+ *
+ * The document attribute is what actually themes this app: the `color-scheme` it
+ * selects in style.css is what makes the engine draw its own widgets — a <select>
+ * popup, scrollbars — in the app's palette instead of the desktop's.
+ *
+ * The Wails calls additionally put the native window frame and menus into the
+ * same theme on the platforms that implement them. Linux does not: in Wails
+ * v2.15 all three are empty stubs, so on this build they cost a call and change
+ * nothing. They are kept because the app targets more than Linux; do not mistake
+ * them for the reason the dropdowns are readable.
+ */
+function applyTheme(theme: 'dark' | 'light') {
+  document.documentElement.setAttribute('data-theme', theme)
+  if (theme === 'dark') {
+    WindowSetDarkTheme()
+  } else {
+    WindowSetLightTheme()
+  }
+}
 
 /** Live text for a message that is still streaming. */
 interface StreamBuffer {
@@ -115,7 +138,7 @@ export const useStore = create<State>((set, get) => {
     ready: false,
     bootError: null,
 
-    lang: 'de',
+    lang: 'en',
     theme: 'dark',
     view: 'chat',
 
@@ -152,9 +175,9 @@ export const useStore = create<State>((set, get) => {
       try {
         const settings = await App.GetSettings()
         // Settings may carry a hand-edited or older language value.
-        const lang: Lang = settings.language === 'en' ? 'en' : 'de'
+        const lang: Lang = asLang(settings.language)
         const theme = settings.theme === 'light' ? 'light' : 'dark'
-        document.documentElement.setAttribute('data-theme', theme)
+        applyTheme(theme)
         set({ settings, lang, theme, ready: true })
 
         wireEvents(set, get, clearStreaming, upsertMessage)
@@ -180,12 +203,19 @@ export const useStore = create<State>((set, get) => {
       if (settings) {
         const next = { ...settings, language: lang }
         set({ settings: next })
-        void App.SaveSettings(next).catch(() => undefined)
+        void App.SaveSettings(next)
+          .then((stored) => {
+            // The built-in system prompts follow the interface language, so the
+            // stored copy replaces ours. Guarded because two quick switches can
+            // resolve out of order and the older answer must not win.
+            if (get().lang === lang) set({ settings: stored })
+          })
+          .catch(() => undefined)
       }
     },
 
     setTheme: (theme) => {
-      document.documentElement.setAttribute('data-theme', theme)
+      applyTheme(theme)
       set({ theme })
       const settings = get().settings
       if (settings) {
