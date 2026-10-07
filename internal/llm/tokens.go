@@ -66,6 +66,15 @@ func EstimateTokens(text string) int {
 // adds around each message.
 const perMessageOverhead = 4
 
+// imageTokensEach is the conservative per-image cost. A data URL of an image
+// costs roughly (bytes/3) tokens for the base64 characters plus the image patch
+// tokens, which dominate; a flat figure per image is used instead of pretending
+// to be precise. It is shared with the budget accounting so the two cannot drift.
+const imageTokensEach = 1024
+
+// EstimateImageTokens returns the conservative token cost of n image payloads.
+func EstimateImageTokens(n int) int { return n * imageTokensEach }
+
 // EstimateMessagesTokens approximates the token cost of a full message list,
 // including the image payloads that are sent as data URLs.
 func EstimateMessagesTokens(messages []Message) int {
@@ -77,10 +86,8 @@ func EstimateMessagesTokens(messages []Message) int {
 		for _, tc := range m.ToolCalls {
 			total += EstimateTokens(tc.Name) + EstimateTokens(tc.Arguments) + 8
 		}
-		// A data URL of an image costs roughly (bytes/3) tokens for the base64
-		// characters plus the image patch tokens, which dominate. We use a flat
-		// conservative figure per image instead of pretending to be precise.
-		total += len(m.Images) * 1024
+		// A flat conservative figure per image, for the reason above.
+		total += EstimateImageTokens(len(m.Images))
 	}
 	return total
 }

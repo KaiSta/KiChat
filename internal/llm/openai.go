@@ -326,7 +326,7 @@ func toWireMessages(messages []Message) []wireMessage {
 			for _, img := range m.Images {
 				parts = append(parts, map[string]any{
 					"type":      "image_url",
-					"image_url": map[string]any{"url": "data:image/png;base64," + img},
+					"image_url": map[string]any{"url": imageDataURL(img)},
 				})
 			}
 			wm.Content = parts
@@ -347,6 +347,32 @@ func toWireMessages(messages []Message) []wireMessage {
 		out = append(out, wm)
 	}
 	return out
+}
+
+// imageDataURL wraps a base64 image payload in a data URL, sniffing the media
+// type from the payload's own prefix. The wire format has no separate mime field,
+// and a JPEG mislabelled as PNG is rejected by servers that validate the declared
+// type.
+func imageDataURL(b64 string) string {
+	return "data:" + imageMimeType(b64) + ";base64," + b64
+}
+
+// imageMimeType reads the media type from the base64 of a file's magic bytes.
+func imageMimeType(b64 string) string {
+	switch {
+	case strings.HasPrefix(b64, "iVBORw0KGgo"):
+		return "image/png"
+	case strings.HasPrefix(b64, "/9j/"):
+		return "image/jpeg"
+	case strings.HasPrefix(b64, "R0lGOD"):
+		return "image/gif"
+	case strings.HasPrefix(b64, "UklGR"):
+		return "image/webp"
+	case strings.HasPrefix(b64, "Qk"):
+		return "image/bmp"
+	default:
+		return "image/png"
+	}
 }
 
 func (p *openAICompatProvider) currentChatPath() string {
