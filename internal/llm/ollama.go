@@ -295,9 +295,16 @@ type ollamaChatResponse struct {
 	EvalDuration          int64 `json:"eval_duration"`
 }
 
-func (p *ollamaProvider) Chat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error) {
-	msgs := make([]ollamaMessage, 0, len(req.Messages))
-	for _, m := range req.Messages {
+// toOllamaMessages maps our messages onto Ollama's wire shape.
+//
+// A stored tool call whose arguments are not valid JSON is replayed verbatim
+// under _raw_arguments rather than as an empty object. An empty object tells the
+// model its own earlier call took no arguments, which is a different story from
+// "the arguments are unreadable" — and a conversation is replayed on every turn,
+// so a rewritten turn would follow the model through the rest of the chat.
+func toOllamaMessages(in []Message) []ollamaMessage {
+	msgs := make([]ollamaMessage, 0, len(in))
+	for _, m := range in {
 		om := ollamaMessage{
 			Role:     string(m.Role),
 			Content:  m.Content,
@@ -317,13 +324,20 @@ func (p *ollamaProvider) Chat(ctx context.Context, req ChatRequest) (<-chan Stre
 			call.Function.Name = tc.Name
 			args := map[string]any{}
 			if tc.Arguments != "" {
-				_ = json.Unmarshal([]byte(tc.Arguments), &args)
+				if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+					args = map[string]any{"_raw_arguments": tc.Arguments}
+				}
 			}
 			call.Function.Arguments = args
 			om.ToolCalls = append(om.ToolCalls, call)
 		}
 		msgs = append(msgs, om)
 	}
+	return msgs
+}
+
+func (p *ollamaProvider) Chat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error) {
+	msgs := toOllamaMessages(req.Messages)
 
 	options := map[string]any{}
 	if req.Temperature > 0 {
