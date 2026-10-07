@@ -259,21 +259,32 @@ func (a *App) ListCompactions(chatID string) ([]store.Compaction, error) {
 
 // DeleteCompaction removes a compaction, restoring the folded messages to the
 // live context. The original messages were never deleted, so this is complete.
+//
+// Any compaction that was summarised on top of this one is dropped with it; see
+// DeleteCompactionsFrom for why that is not optional. The measurement goes too,
+// because the prompt has changed shape and the old count no longer describes it.
 func (a *App) DeleteCompaction(chatID, compactionID string) error {
 	if err := a.ensure(); err != nil {
 		return err
 	}
-	if err := a.store.DeleteCompaction(compactionID); err != nil {
-		return err
-	}
-	a.engine.InvalidateMeasurement(chatID)
-	// Any compaction that merged this one is now stale; drop later ones so the
-	// memory chain stays consistent.
 	compactions, err := a.store.ListCompactions(chatID)
 	if err != nil {
 		return err
 	}
-	_ = compactions
+	target, found := 0, false
+	for _, c := range compactions {
+		if c.ID == compactionID {
+			target, found = c.ToSeq, true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("Kompaktierung %q existiert nicht mehr", compactionID)
+	}
+	if err := a.store.DeleteCompactionsFrom(chatID, target); err != nil {
+		return err
+	}
+	a.engine.InvalidateMeasurement(chatID)
 	return nil
 }
 

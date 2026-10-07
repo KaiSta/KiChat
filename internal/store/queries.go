@@ -59,14 +59,36 @@ func (s *Store) SetChatTitle(id, title string) error {
 }
 
 // DeleteChat removes a chat and everything belonging to it.
+//
+// The chat row carries messages, compactions and attachments away by cascade,
+// but documents and chunks hold no foreign key to chats, so they are deleted
+// here by hand. They are the two largest tables in this database — a document is
+// the whole extracted text, a chunk a slice of it — and leaving them behind made
+// every deleted chat a permanent leak: measured, a deleted chat kept its
+// document and its chunk rows while dropping everything else. The transaction is
+// what keeps a half-deleted chat out of reach: either the lot goes or nothing does.
 func (s *Store) DeleteChat(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	if s.FTS {
-		if _, err := s.db.Exec(`DELETE FROM chunks_fts WHERE chat_id = ?`, id); err != nil {
+		if _, err := tx.Exec(`DELETE FROM chunks_fts WHERE chat_id = ?`, id); err != nil {
 			return err
 		}
 	}
-	_, err := s.db.Exec(`DELETE FROM chats WHERE id=?`, id)
-	return err
+	if _, err := tx.Exec(`DELETE FROM chunks WHERE chat_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM documents WHERE chat_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM chats WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 const chatColumns = `id,title,created_at,updated_at,backend,model,system_prompt,
@@ -297,15 +319,52 @@ UPDATE attachments SET message_id=?,pages=?,token_estimate=?,placement=?,
 	return err
 }
 
-// DeleteAttachment removes an attachment and its document.
+// DeleteAttachment removes an attachment and the document it owns.
+//
+// The document goes first and its error is returned rather than dropped: chunks
+// cascade from documents and those two tables hold the bulk of the data, so a
+// silently ignored failure here leaves a document nothing can reach — the same
+// leak DeleteChat had. Deleting the document first also means a failure leaves
+// the attachment row in place, so the operation can simply be repeated. A row
+// that is already gone is not an error: deleting twice must not report one.
 func (s *Store) DeleteAttachment(id string) error {
 	var docID string
-	_ = s.db.QueryRow(`SELECT document_id FROM attachments WHERE id=?`, id).Scan(&docID)
-	if docID != "" {
-		_ = s.DeleteDocument(docID)
+	err := s.db.QueryRow(`SELECT document_id FROM attachments WHERE id=?`, id).Scan(&docID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("Anhang %s lesen: %w", id, err)
 	}
-	_, err := s.db.Exec(`DELETE FROM attachments WHERE id=?`, id)
+	if docID != "" {
+		if err := s.DeleteDocument(docID); err != nil {
+			return fmt.Errorf("Dokument %s entfernen: %w", docID, err)
+		}
+	}
+	_, err = s.db.Exec(`DELETE FROM attachments WHERE id=?`, id)
 	return err
+}
+
+// PruneExpiredCaches deletes expired rows from the two web caches and reports how
+// many it removed.
+//
+// Reads already treat an expired row as a miss (GetSearchCache, GetScrapeCache),
+// so this changes no result — it stops both tables from growing for the whole
+// lifetime of an installation. Nothing else ever deletes from them, and a scrape
+// row holds an entire extracted page, which makes them the fastest-growing rows
+// in a research workflow. Open calls this, so every start trims the backlog.
+func (s *Store) PruneExpiredCaches() (int64, error) {
+	now := millis(time.Now())
+	var removed int64
+	for _, table := range []string{"search_cache", "scrape_cache"} {
+		res, err := s.db.Exec("DELETE FROM "+table+" WHERE expires_at < ?", now)
+		if err != nil {
+			return removed, fmt.Errorf("%s aufräumen: %w", table, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return removed, err
+		}
+		removed += n
+	}
+	return removed, nil
 }
 
 const attachmentColumns = `id,chat_id,message_id,kind,filename,mime,size_bytes,
@@ -595,9 +654,16 @@ FROM compactions WHERE chat_id=? ORDER BY to_seq`, chatID)
 	return out, rows.Err()
 }
 
-// DeleteCompaction removes one compaction record.
-func (s *Store) DeleteCompaction(id string) error {
-	_, err := s.db.Exec(`DELETE FROM compactions WHERE id=?`, id)
+// DeleteCompactionsFrom removes every compaction of a chat whose range ends at
+// or after toSeq.
+//
+// Compactions are cumulative: each one is summarised on top of the memory in
+// force when it ran, so a later compaction embeds the content of the earlier
+// ones. Dropping the middle of that chain would leave the prompt asserting a
+// summary of messages that are back in the live context, sending the same text
+// twice, so the stale tail goes with it in a single statement.
+func (s *Store) DeleteCompactionsFrom(chatID string, toSeq int) error {
+	_, err := s.db.Exec(`DELETE FROM compactions WHERE chat_id=? AND to_seq>=?`, chatID, toSeq)
 	return err
 }
 

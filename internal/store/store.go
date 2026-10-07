@@ -62,6 +62,14 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Housekeeping that has to happen on every start: nothing else ever removes a
+	// row from the two web caches. A failure is reported rather than swallowed —
+	// being unable to delete from its own database is not something to paper over,
+	// and every later write would fail the same way.
+	if _, err := s.PruneExpiredCaches(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 

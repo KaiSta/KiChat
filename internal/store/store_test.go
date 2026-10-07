@@ -2,9 +2,21 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// rowCount counts rows so a test can assert on the tables no API method would
+// ever show again — which is exactly where a leak hides.
+func rowCount(t *testing.T, st *Store, table, where string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := st.DB().QueryRow("SELECT COUNT(*) FROM "+table+" WHERE "+where, args...).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
 
 func newStore(t *testing.T) *Store {
 	t.Helper()
@@ -238,6 +250,111 @@ func TestDeleteChatCascadesAndRemovesIndexEntries(t *testing.T) {
 			t.Errorf("index entries survived the delete: %+v", hits)
 		}
 	}
+
+	// Documents and chunks hold no foreign key to chats, so they are removed by
+	// hand. Asserting on the rows rather than on a read result matters: these two
+	// tables are the largest in the database, and a chat that keeps them leaks the
+	// extracted text for good.
+	if n := rowCount(t, st, "documents", "chat_id=?", "c1"); n != 0 {
+		t.Errorf("%d documents survived the delete", n)
+	}
+	if n := rowCount(t, st, "chunks", "chat_id=?", "c1"); n != 0 {
+		t.Errorf("%d chunks survived the delete", n)
+	}
+}
+
+// TestDeleteAttachmentRemovesItsDocument pins the order the rows go in: the
+// document carries the chunks, so it must not outlive the attachment pointing at
+// it, and deleting something that is already gone must stay quiet.
+func TestDeleteAttachmentRemovesItsDocument(t *testing.T) {
+	st := newStore(t)
+	now := time.Now()
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateDocument(Document{ID: "d1", ChatID: "c1", Title: "t",
+		Text: "Inhalt", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateAttachment(Attachment{ID: "a1", ChatID: "c1", Kind: "file",
+		Filename: "f.txt", Placement: PlacementIndexed, DocumentID: "d1", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if st.FTS {
+		if err := st.InsertChunks([]Chunk{{DocumentID: "d1", ChatID: "c1", Ordinal: 0,
+			Text: "Inhalt"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := st.DeleteAttachment("a1"); err != nil {
+		t.Fatalf("DeleteAttachment: %v", err)
+	}
+	if n := rowCount(t, st, "attachments", "id=?", "a1"); n != 0 {
+		t.Error("the attachment survived its own deletion")
+	}
+	if n := rowCount(t, st, "documents", "id=?", "d1"); n != 0 {
+		t.Error("the document outlived its attachment")
+	}
+	if n := rowCount(t, st, "chunks", "document_id=?", "d1"); n != 0 {
+		t.Error("the chunks outlived their document")
+	}
+
+	// A second click on delete, or a stale view, must not report an error.
+	if err := st.DeleteAttachment("a1"); err != nil {
+		t.Errorf("deleting an attachment that is already gone: %v", err)
+	}
+}
+
+// TestPruneExpiredCachesDropsOnlyExpiredRows draws the line between "reads as
+// expired" and "is gone". GetSearchCache already hides an expired row, so only a
+// count proves the row is removed — that is the difference between a cache and an
+// archive, and nothing else in the store ever deletes from these two tables.
+func TestPruneExpiredCachesDropsOnlyExpiredRows(t *testing.T) {
+	st := newStore(t)
+	entries := []SearchCacheEntry{
+		{QueryHash: "fresh", Provider: "brave", Query: "q", ResponseJSON: "[]",
+			CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		{QueryHash: "stale", Provider: "brave", Query: "q", ResponseJSON: "[]",
+			CreatedAt: time.Now().Add(-2 * time.Hour), ExpiresAt: time.Now().Add(-time.Hour)},
+	}
+	for _, e := range entries {
+		if err := st.PutSearchCache(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page := ScrapeCacheEntry{URLHash: "u1", URL: "https://x.de", Title: "T",
+		ContentMD: strings.Repeat("Seiteninhalt ", 50), Tokens: 3,
+		FetchedAt: time.Now().Add(-48 * time.Hour), ExpiresAt: time.Now().Add(-time.Hour)}
+	if err := st.PutScrapeCache(page); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := st.PruneExpiredCaches()
+	if err != nil {
+		t.Fatalf("PruneExpiredCaches: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed %d rows, want 2: one stale search entry and one stale page", removed)
+	}
+	if n := rowCount(t, st, "search_cache", "query_hash=?", "stale"); n != 0 {
+		t.Error("the expired search entry is still stored")
+	}
+	if n := rowCount(t, st, "scrape_cache", "url_hash=?", "u1"); n != 0 {
+		t.Error("the expired page is still stored")
+	}
+	if n := rowCount(t, st, "search_cache", "query_hash=?", "fresh"); n != 1 {
+		t.Error("a cache entry that is still valid was pruned")
+	}
+
+	// The app prunes on every start, so a second run has to find nothing.
+	again, err := st.PruneExpiredCaches()
+	if err != nil {
+		t.Fatalf("second PruneExpiredCaches: %v", err)
+	}
+	if again != 0 {
+		t.Errorf("a second prune removed %d rows, want 0", again)
+	}
 }
 
 // TestDeleteCompactionKeepsOriginalMessages is the core promise of the
@@ -275,8 +392,8 @@ func TestDeleteCompactionKeepsOriginalMessages(t *testing.T) {
 		t.Errorf("compaction did not round-trip: %+v", compactions[0])
 	}
 
-	if err := st.DeleteCompaction("k1"); err != nil {
-		t.Fatalf("DeleteCompaction: %v", err)
+	if err := st.DeleteCompactionsFrom("c1", 3); err != nil {
+		t.Fatalf("DeleteCompactionsFrom: %v", err)
 	}
 	messages, err := st.ListMessages("c1")
 	if err != nil {
@@ -284,6 +401,51 @@ func TestDeleteCompactionKeepsOriginalMessages(t *testing.T) {
 	}
 	if len(messages) != 4 {
 		t.Fatalf("messages = %d, want 4: deleting a compaction must not delete history", len(messages))
+	}
+}
+
+// TestDeleteCompactionsFromDropsTheStaleTail pins that re-opening history
+// re-opens all of it: a compaction summarised on top of the deleted one is stale
+// and goes with it, while earlier ones and other chats survive.
+func TestDeleteCompactionsFromDropsTheStaleTail(t *testing.T) {
+	st := newStore(t)
+	for _, id := range []string{"c1", "c2"} {
+		if err := st.CreateChat(chatFixture(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, c := range []Compaction{
+		{ID: "k1", ChatID: "c1", Trigger: "auto", FromSeq: 1, ToSeq: 3, Summary: "a"},
+		{ID: "k2", ChatID: "c1", Trigger: "auto", FromSeq: 1, ToSeq: 10, Summary: "a+b"},
+		{ID: "k3", ChatID: "c1", Trigger: "auto", FromSeq: 1, ToSeq: 20, Summary: "a+b+c"},
+		{ID: "other", ChatID: "c2", Trigger: "auto", FromSeq: 1, ToSeq: 10, Summary: "x"},
+	} {
+		c.CreatedAt = time.Now()
+		if err := st.CreateCompaction(c); err != nil {
+			t.Fatalf("CreateCompaction %s: %v", c.ID, err)
+		}
+	}
+
+	// Deleting the middle compaction takes the later one with it.
+	if err := st.DeleteCompactionsFrom("c1", 10); err != nil {
+		t.Fatalf("DeleteCompactionsFrom: %v", err)
+	}
+
+	remaining, err := st.ListCompactions("c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].ID != "k1" {
+		t.Errorf("remaining compactions = %+v, want only k1", remaining)
+	}
+
+	other, err := st.ListCompactions("c2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 1 || other[0].ID != "other" {
+		t.Errorf("another chat's compactions were touched: %+v", other)
 	}
 }
 
