@@ -719,5 +719,12 @@ func (a *App) RedactSecrets(text string) string {
 	if v, ok := a.secrets.Get("brave"); ok {
 		values = append(values, v)
 	}
+	// Backend API keys are secrets too, so they are redacted alongside the Brave
+	// key rather than being left to leak into a log or a toast.
+	for _, b := range a.Settings().Backends {
+		if v, ok := a.secrets.Get(llm.BackendAPIKeyName(b.ID)); ok {
+			values = append(values, v)
+		}
+	}
 	return secret.Redact(text, values...)
 }
