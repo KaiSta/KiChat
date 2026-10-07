@@ -433,7 +433,9 @@ function SearchFirstToggle() {
     <button
       type="button"
       className={`btn btn-sm ${on ? 'btn-primary' : ''}`}
-      title={t('search.searchFirst')}
+      // The label says what is switched, the tooltip says what switching it
+      // actually does to the turn — a repeated label taught nothing.
+      title={t('search.searchFirstHint')}
       onClick={() => void updateChat({ searchFirst: !on })}
     >
       🔎 {t('search.searchFirst')}

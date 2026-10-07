@@ -137,6 +137,8 @@ const de = {
   'search.duckduckgo': 'DuckDuckGo',
   'search.cached': 'aus dem Cache',
   'search.searchFirst': 'Vor jeder Antwort suchen',
+  'search.searchFirstHint':
+    'Ist das an, sucht KiChat vor jeder Antwort mit deiner Frage im Web und legt die Treffer in den Prompt — so antworten auch Modelle mit Quellen, die von sich aus keine Tools aufrufen. Mit LLM-Kontext kommen echte Seitenausschnitte dazu, sonst nur Überschriften und Kurztexte. Kostet pro Antwort eine Suchanfrage und gilt nur für diesen Chat.',
   'search.providers': 'Anbieter',
   'search.quota': 'Brave-Anfragen diesen Monat',
 
@@ -384,6 +386,8 @@ const en: Record<keyof typeof de, string> = {
   'search.duckduckgo': 'DuckDuckGo',
   'search.cached': 'cached',
   'search.searchFirst': 'Search before every answer',
+  'search.searchFirstHint':
+    'When on, KiChat searches the web with your question before every answer and puts the hits into the prompt — so models that never call tools themselves still answer from sources. With LLM context enabled it injects real page excerpts, otherwise only headlines and snippets. Costs one search request per answer and applies to this chat only.',
   'search.providers': 'Providers',
   'search.quota': 'Brave requests this month',
 
@@ -628,6 +632,8 @@ const zh: Record<keyof typeof de, string> = {
   'search.duckduckgo': 'DuckDuckGo',
   'search.cached': '来自缓存',
   'search.searchFirst': '每次回答前先搜索',
+  'search.searchFirstHint':
+    '开启后，KiChat 会在每次回答前用你的问题搜索网络，并把命中结果放进提示词——即便模型本身不会调用工具，也能依据来源作答。启用 LLM 上下文时会注入真实网页摘录，否则仅有标题与摘要。每次回答消耗一次搜索请求，且仅对当前对话生效。',
   'search.providers': '提供商',
   'search.quota': '本月 Brave 请求数',
 

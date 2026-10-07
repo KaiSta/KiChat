@@ -35,6 +35,21 @@ function applyTheme(theme: 'dark' | 'light') {
   }
 }
 
+/**
+ * Builds the translator for one language.
+ *
+ * A new function per language is the point, not an accident: components read the
+ * translator with `useStore((s) => s.t)`, and a selector that keeps returning
+ * the same reference never re-renders. A translator that read the language at
+ * call time (`translate(get().lang, ...)`) therefore re-rendered only the one
+ * component that also selected `lang` — the sidebar — and left the chat area in
+ * the previous language until some unrelated state change happened to repaint
+ * it.
+ */
+function makeT(lang: Lang): (key: string, vars?: Record<string, string | number>) => string {
+  return (key, vars) => translate(lang, key, vars)
+}
+
 /** Live text for a message that is still streaming. */
 interface StreamBuffer {
   text: string
@@ -160,7 +175,7 @@ export const useStore = create<State>((set, get) => {
 
     setNextModel: (value) => set({ nextModel: value }),
 
-    t: (key, vars) => translate(get().lang, key, vars),
+    t: makeT('en'),
 
     toast: (kind, message) => {
       const id = ++toastSeq
@@ -178,7 +193,9 @@ export const useStore = create<State>((set, get) => {
         const lang: Lang = asLang(settings.language)
         const theme = settings.theme === 'light' ? 'light' : 'dark'
         applyTheme(theme)
-        set({ settings, lang, theme, ready: true })
+        // The translator is replaced alongside the language it speaks, so every
+        // subscriber repaints.
+        set({ settings, lang, theme, ready: true, t: makeT(lang) })
 
         wireEvents(set, get, clearStreaming, upsertMessage)
 
@@ -198,7 +215,7 @@ export const useStore = create<State>((set, get) => {
     },
 
     setLang: (lang) => {
-      set({ lang })
+      set({ lang, t: makeT(lang) })
       const settings = get().settings
       if (settings) {
         const next = { ...settings, language: lang }
