@@ -130,8 +130,11 @@ func Assemble(in AssemblyInput) Assembly {
 		memoryID = latest.ID
 	}
 
-	// Group inlined document text by the message it belongs to.
+	// Group inlined document text by the message it belongs to, and keep images
+	// apart: an image's document holds base64 bytes, which must travel as an
+	// image part rather than as document text.
 	inlineByMessage := map[string][]store.Document{}
+	imagesByMessage := map[string][]string{}
 	docByID := map[string]store.Document{}
 	for _, d := range in.Documents {
 		docByID[d.ID] = d
@@ -142,11 +145,18 @@ func Assemble(in AssemblyInput) Assembly {
 			if a.DocumentID != "" {
 				attachmentByDoc[a.DocumentID] = a
 			}
-			if a.Placement == store.PlacementInline {
-				if d, ok := docByID[a.DocumentID]; ok {
-					inlineByMessage[m.ID] = append(inlineByMessage[m.ID], d)
-				}
+			if a.Placement != store.PlacementInline {
+				continue
 			}
+			d, ok := docByID[a.DocumentID]
+			if !ok {
+				continue
+			}
+			if isImageAttachment(a) {
+				imagesByMessage[m.ID] = append(imagesByMessage[m.ID], d.Text)
+				continue
+			}
+			inlineByMessage[m.ID] = append(inlineByMessage[m.ID], d)
 		}
 	}
 
@@ -217,6 +227,17 @@ func Assemble(in AssemblyInput) Assembly {
 			maxIncluded = m.Seq
 		}
 		lm := toLLMMessage(m)
+		if imgs := imagesByMessage[m.ID]; len(imgs) > 0 {
+			lm.Images = imgs
+			tokens := llm.EstimateImageTokens(len(imgs))
+			budget.Attachments += tokens
+			budget.Segments = append(budget.Segments, ContextSegment{
+				Kind:   SegmentAttachments,
+				Label:  "Bilder",
+				Tokens: tokens,
+				Detail: fmt.Sprintf("%d Bild(er) in Nachricht #%d", len(imgs), m.Seq),
+			})
+		}
 		if docs := inlineByMessage[m.ID]; len(docs) > 0 {
 			var sb strings.Builder
 			sb.WriteString(lm.Content)
@@ -309,6 +330,13 @@ func Assemble(in AssemblyInput) Assembly {
 		AttachmentNotice:   notice,
 		MaxIncludedSeq:     maxIncluded,
 	}
+}
+
+// isImageAttachment reports whether an attachment's payload is an image. An
+// image's document text is the raw base64 of the file, so it is sent as an
+// image part instead of being inlined as document text.
+func isImageAttachment(a store.Attachment) bool {
+	return strings.HasPrefix(strings.ToLower(a.Mime), "image/") || a.Kind == "image"
 }
 
 // renderDocumentBlock wraps document text in an explicit delimiter. The wrapper

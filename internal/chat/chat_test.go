@@ -516,6 +516,52 @@ func withAttachment(messages []store.Message, seq int, documentID string) []stor
 	return out
 }
 
+// TestAssembleSendsImagesAsImageParts: an image attachment's document holds the
+// file's base64 bytes, which must reach the backend as an image part rather than
+// as document text. Inlining the base64 as text both wastes the window and never
+// shows the model a picture, which is why the two are kept apart here.
+func TestAssembleSendsImagesAsImageParts(t *testing.T) {
+	const b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	messages := withImageAttachment(conversation(2), 1, "img1")
+
+	assembly := Assemble(AssemblyInput{
+		Chat:     asmChat("Du bist ein Assistent."),
+		Messages: messages,
+		Limit:    10000, Reserve: 0,
+		Documents: []store.Document{{ID: "img1", Title: "bild.png", Text: b64, TokenCount: 1024}},
+	})
+
+	var imageParts []string
+	for _, m := range assembly.Messages {
+		if strings.Contains(m.Content, b64) {
+			t.Fatal("base64 image bytes leaked into message content instead of an image part")
+		}
+		imageParts = append(imageParts, m.Images...)
+	}
+	if len(imageParts) != 1 || imageParts[0] != b64 {
+		t.Fatalf("image parts = %v, want the base64 payload exactly once", imageParts)
+	}
+	if assembly.Budget.Attachments != 1024 {
+		t.Errorf("attachment tokens = %d, want 1024 for one image", assembly.Budget.Attachments)
+	}
+}
+
+func withImageAttachment(messages []store.Message, seq int, documentID string) []store.Message {
+	out := make([]store.Message, len(messages))
+	copy(out, messages)
+	for i := range out {
+		if out[i].Seq == seq {
+			out[i].Attachments = []store.Attachment{{
+				ID: "img-a1", ChatID: "c1", MessageID: out[i].ID,
+				Kind: "image", Mime: "image/png", Filename: "bild.png",
+				DocumentID: documentID, Placement: store.PlacementInline,
+				TokenEstimate: 1024,
+			}}
+		}
+	}
+	return out
+}
+
 // TestAssembleMeasurementDelta covers the subtle accounting rule: the backend's
 // prompt_tokens describes the previous request, so messages added since must be
 // added on top rather than ignored.
