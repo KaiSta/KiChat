@@ -219,12 +219,20 @@ function Sidebar() {
 function Toasts() {
   const toasts = useStore((s) => s.toasts)
   const dismiss = useStore((s) => s.dismissToast)
+  const t = useStore((s) => s.t)
   if (toasts.length === 0) return null
   return (
     <div className="pointer-events-none absolute right-4 bottom-4 z-50 flex w-96 flex-col gap-2">
       {toasts.map((toast) => (
+        /* A warning is how this app reports a degraded turn — a search that failed,
+         * a reply that could not be saved — so it has to reach a screen reader too.
+         * role carries the urgency: an error is announced at once, everything else
+         * waits its turn. aria-atomic reads the message as one sentence instead of
+         * announcing the icon, the text and the close button separately. */
         <div
           key={toast.id}
+          role={toast.kind === 'error' ? 'alert' : 'status'}
+          aria-atomic="true"
           className="card pointer-events-auto flex items-start gap-2 p-3 text-[12px]"
           style={{
             boxShadow: 'var(--shadow)',
@@ -238,7 +246,12 @@ function Toasts() {
         >
           <span>{toast.kind === 'error' ? '⛔' : toast.kind === 'warning' ? '⚠' : 'ℹ'}</span>
           <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{toast.message}</span>
-          <button type="button" className="btn btn-sm btn-ghost" onClick={() => dismiss(toast.id)}>
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            aria-label={t('common.close')}
+            onClick={() => dismiss(toast.id)}
+          >
             ✕
           </button>
         </div>

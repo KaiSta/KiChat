@@ -8,6 +8,10 @@
  */
 :root,
 [data-theme='dark'] {
+  /* Tells the engine how to draw the widgets it owns rather than styles: the
+   * <select> popup, scrollbars, and the like. Without it those follow the GTK
+   * theme, so a dark app on a light desktop showed unreadable dropdowns. */
+  color-scheme: dark;
   --bg: #0d1017;
   --surface: #151a23;
   --surface-2: #1c222d;
@@ -30,6 +34,7 @@
 }
 
 [data-theme='light'] {
+  color-scheme: light;
   --bg: #f6f7f9;
   --surface: #ffffff;
   --surface-2: #f0f2f5;
@@ -164,6 +169,12 @@ body {
 .textarea:focus,
 .select:focus {
   border-color: var(--accent);
+}
+/* The popup list is a native widget and does not inherit the select's colours, so
+ * it has to be told explicitly or it renders its default text on our background. */
+.select option {
+  background: var(--surface);
+  color: var(--text);
 }
 .textarea {
   resize: vertical;
