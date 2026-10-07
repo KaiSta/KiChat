@@ -156,6 +156,21 @@ const de = {
   'settings.braveTest': 'Key testen',
   'settings.braveSave': 'Key speichern',
   'settings.braveClear': 'Key löschen',
+  'settings.llmContext': 'LLM-Kontext von Brave nutzen',
+  'settings.llmContextHint':
+    'Liefert ganze Seitenabschnitte statt nur Überschriften, damit das Modell Quellen ohne zweiten Abruf lesen kann. Fällt automatisch auf die normale Websuche zurück.',
+  'settings.llmContextTokens': 'Token-Budget für Seiteninhalt',
+  'settings.llmContextTokensHint':
+    '1024–32768 (Limit der API). Zusätzlich auf ein Viertel des Kontextfensters des Modells begrenzt.',
+  'settings.llmContextActive': 'Aktiv',
+  'settings.llmContextOff': 'Aus — nur Überschriften und Kurzbeschreibungen.',
+  'settings.resultCount': 'Ergebnisse pro Suche',
+  'settings.cacheMinutes': 'Cache (Minuten)',
+  'settings.country': 'Land (country)',
+  'settings.searchLang': 'Sprache (search_lang)',
+  'settings.scraping': 'Web-Scraping',
+  'settings.providerOrderHint':
+    'Die Reihenfolge bestimmt den Fallback: schlägt der erste Anbieter fehl, wird der nächste genutzt.',
   'settings.respectRobots': 'robots.txt respektieren',
   'settings.allowPrivate': 'Zugriff auf lokale/private Adressen erlauben',
   'settings.allowPrivateHint':
@@ -173,6 +188,12 @@ const de = {
   'settings.modelsFound': 'Modelle',
   'settings.refresh': 'Aktualisieren',
   'settings.secrets': 'Speicherort für Schlüssel',
+
+  'error.title': 'Diese Ansicht ließ sich nicht zeichnen',
+  'error.hint':
+    'Ein Darstellungsfehler wurde abgefangen, damit das Fenster nicht leer bleibt. „Erneut versuchen“ zeichnet dieselbe Ansicht neu.',
+  'error.retry': 'Erneut versuchen',
+  'error.copy': 'Details kopieren',
 
   'tool.search_web': 'Websuche',
   'tool.scrape_url': 'Seite lesen',
@@ -349,6 +370,21 @@ const en: Record<keyof typeof de, string> = {
   'settings.braveTest': 'Test key',
   'settings.braveSave': 'Save key',
   'settings.braveClear': 'Clear key',
+  'settings.llmContext': 'Use Brave LLM context',
+  'settings.llmContextHint':
+    'Returns whole page sections instead of headlines, so the model can read sources without a second fetch. Falls back to a normal web search automatically.',
+  'settings.llmContextTokens': 'Token budget for page content',
+  'settings.llmContextTokensHint':
+    '1024–32768 (API limit). Also capped to a quarter of the model’s context window.',
+  'settings.llmContextActive': 'Enabled',
+  'settings.llmContextOff': 'Off — headlines and short descriptions only.',
+  'settings.resultCount': 'Results per search',
+  'settings.cacheMinutes': 'Cache (minutes)',
+  'settings.country': 'Country (country)',
+  'settings.searchLang': 'Language (search_lang)',
+  'settings.scraping': 'Web scraping',
+  'settings.providerOrderHint':
+    'The order defines the fallback: if the first provider fails, the next one is used.',
   'settings.respectRobots': 'Respect robots.txt',
   'settings.allowPrivate': 'Allow local/private addresses',
   'settings.allowPrivateHint':
@@ -366,6 +402,12 @@ const en: Record<keyof typeof de, string> = {
   'settings.modelsFound': 'models',
   'settings.refresh': 'Refresh',
   'settings.secrets': 'Key storage',
+
+  'error.title': 'This view could not be rendered',
+  'error.hint':
+    'A rendering error was caught so the window does not go blank. “Try again” re-renders the same view.',
+  'error.retry': 'Try again',
+  'error.copy': 'Copy details',
 
   'tool.search_web': 'Web search',
   'tool.scrape_url': 'Read page',

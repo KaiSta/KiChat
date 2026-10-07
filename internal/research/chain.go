@@ -206,6 +206,128 @@ func (c *Chain) Search(ctx context.Context, query string, req SearchRequest) (Se
 	return SearchOutcome{}, fmt.Errorf("Suche fehlgeschlagen: %s", strings.Join(errs, " | "))
 }
 
+// GroundedContext returns pre-extracted, token-budgeted page content for a
+// query, preferring Brave's LLM-context route and degrading to a plain web
+// search when that route is unavailable or the account cannot use it.
+//
+// The fallback still returns the same shape, built from result descriptions, so
+// the caller has one thing to handle and the turn is never blocked by the state
+// of a metered third-party plan. Whatever degradation happened is reported in
+// Warning rather than hidden.
+func (c *Chain) GroundedContext(ctx context.Context, query string, req SearchRequest, maxTokens int) (GroundedContext, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return GroundedContext{}, ErrEmptyQuery
+	}
+
+	c.mu.RLock()
+	brave, _ := c.providers["brave"].(*BraveProvider)
+	opts := c.opts
+	c.mu.RUnlock()
+
+	if req.Country == "" {
+		req.Country = opts.Country
+	}
+	if req.SearchLang == "" {
+		req.SearchLang = opts.SearchLang
+	}
+	req.Query = query
+
+	// A separate key prefix namespaces this cache: the same query yields page
+	// chunks here and result listings elsewhere, and they must not be confused.
+	cacheKey := hashKey(fmt.Sprintf("ctx1|%s|%d|%d|%s|%s|%s",
+		strings.ToLower(query), maxTokens, req.Count, req.Freshness, req.Country, req.SearchLang))
+	if c.store != nil {
+		if entry, ok := c.store.GetSearchCache(cacheKey); ok {
+			var cached GroundedContext
+			if err := json.Unmarshal([]byte(entry.ResponseJSON), &cached); err == nil && !cached.Empty() {
+				cached.Cached = true
+				return cached, nil
+			}
+		}
+	}
+
+	var reasons []string
+	if brave != nil && brave.Available() {
+		grounded, err := brave.Context(ctx, req, maxTokens)
+		if err == nil && !grounded.Empty() {
+			c.recordGrounded(cacheKey, opts, grounded)
+			return grounded, nil
+		}
+		switch {
+		case err == nil:
+			reasons = append(reasons, "brave-context: keine Abschnitte")
+		case errors.Is(err, ErrQuotaExhausted):
+			reasons = append(reasons, "Brave-Kontingent aufgebraucht")
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			return GroundedContext{}, err
+		default:
+			reasons = append(reasons, err.Error())
+		}
+	} else {
+		reasons = append(reasons, "brave: kein API-Key konfiguriert")
+	}
+
+	// Fall back to a normal search. Sources are then only as good as their
+	// descriptions, which is worth saying out loud.
+	outcome, err := c.Search(ctx, query, req)
+	if err != nil {
+		return GroundedContext{}, fmt.Errorf("Recherche fehlgeschlagen: %s", strings.Join(reasons, " | "))
+	}
+	grounded := GroundedContext{
+		Provider:  outcome.Provider,
+		MaxTokens: 0,
+		Warning: fmt.Sprintf(
+			"LLM-Kontext nicht verfügbar (%s) – nur Kurzbeschreibungen aus der Websuche",
+			strings.Join(reasons, " | ")),
+	}
+	if outcome.Warning != "" {
+		grounded.Warning += "; " + outcome.Warning
+	}
+	for _, r := range outcome.Results {
+		if r.Snippet == "" && len(r.Extra) == 0 {
+			continue
+		}
+		snippets := make([]string, 0, 1+len(r.Extra))
+		if r.Snippet != "" {
+			snippets = append(snippets, r.Snippet)
+		}
+		snippets = append(snippets, r.Extra...)
+		grounded.Sources = append(grounded.Sources, GroundedSource{
+			URL:      r.URL,
+			Title:    r.Title,
+			Snippets: snippets,
+			Kind:     "page",
+		})
+	}
+	if grounded.Empty() {
+		return GroundedContext{}, fmt.Errorf("Recherche ohne verwertbare Inhalte: %s", strings.Join(reasons, " | "))
+	}
+	c.recordGrounded(cacheKey, opts, grounded)
+	return grounded, nil
+}
+
+// recordGrounded caches a grounded result and counts the metered request. The
+// counter matters because the context route bills like any other Brave query.
+func (c *Chain) recordGrounded(cacheKey string, opts Options, grounded GroundedContext) {
+	if c.store == nil {
+		return
+	}
+	if raw, err := json.Marshal(grounded); err == nil {
+		_ = c.store.PutSearchCache(store.SearchCacheEntry{
+			QueryHash:    cacheKey,
+			Provider:     grounded.Provider,
+			Query:        "",
+			ResponseJSON: string(raw),
+			CreatedAt:    time.Now(),
+			ExpiresAt:    time.Now().Add(time.Duration(opts.CacheMinutes) * time.Minute),
+		})
+	}
+	if strings.HasPrefix(grounded.Provider, "brave") {
+		_, _ = c.store.IncrCounter("search:brave", config.CurrentPeriod())
+	}
+}
+
 func jsonMarshalResults(results []SearchResult) (string, error) {
 	raw, err := json.Marshal(results)
 	if err != nil {

@@ -52,8 +52,21 @@ type SearchProvider interface {
 // ErrNoProvider means every configured provider was unavailable.
 var ErrNoProvider = errors.New("no search provider available")
 
-// ErrRateLimited is returned when a provider rejects the request due to quota.
+// ErrRateLimited is returned when a provider throttles a request for now.
 var ErrRateLimited = errors.New("search provider rate limited")
+
+// ErrQuotaExhausted means the account's plan or credit balance is used up, so
+// waiting and retrying will not help: the caller should fall through to another
+// provider and tell the user why rather than pretending it was a hiccup.
+var ErrQuotaExhausted = errors.New("search provider quota exhausted")
+
+// ErrEmptyQuery means there was nothing usable left to search for.
+var ErrEmptyQuery = errors.New("empty search query")
+
+// ErrInvalidKey means the provider rejected the configured API key. It is
+// distinct from a throttle or an exhausted balance because retrying cannot help
+// and the user has to be told to fix the key instead.
+var ErrInvalidKey = errors.New("search provider rejected the API key")
 
 // httpError mirrors the backend HTTP error for search providers.
 type httpError struct {

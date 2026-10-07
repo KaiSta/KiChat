@@ -21,11 +21,14 @@ const BraveLLMContextEndpoint = "https://api.search.brave.com/res/v1/llm/context
 
 // BraveProvider queries the Brave Search API.
 type BraveProvider struct {
-	APIKey    string
-	Endpoint  string
-	limiter   *rateLimiter
-	client    *http.Client
-	lastQuota int
+	APIKey   string
+	Endpoint string
+	// ContextEndpoint is the LLM-context route, overridable for the same reason
+	// as Endpoint: fixtures must be replayable without spending API quota.
+	ContextEndpoint string
+	limiter         *rateLimiter
+	client          *http.Client
+	lastQuota       int
 }
 
 // NewBraveProvider builds a Brave provider. The endpoint is overridable for
@@ -35,8 +38,9 @@ func NewBraveProvider(apiKey, endpoint string) *BraveProvider {
 		endpoint = BraveEndpoint
 	}
 	return &BraveProvider{
-		APIKey:   apiKey,
-		Endpoint: endpoint,
+		APIKey:          apiKey,
+		Endpoint:        endpoint,
+		ContextEndpoint: BraveLLMContextEndpoint,
 		// Brave's published limit on the metered tier is about one query per
 		// second; stay slightly under it.
 		limiter: newRateLimiter(0.9),
@@ -150,15 +154,10 @@ func (b *BraveProvider) Search(ctx context.Context, req SearchRequest) ([]Search
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if resp.StatusCode == http.StatusTooManyRequests {
-			return nil, fmt.Errorf("%w: %s: %s", ErrRateLimited, resp.Status,
-				strings.TrimSpace(string(raw)))
-		}
-		return nil, &httpError{
-			StatusCode: resp.StatusCode,
-			Status:     resp.Status,
-			Body:       strings.TrimSpace(string(raw)),
-			Provider:   "brave",
+		// Shared with the LLM-context route: also tells an exhausted credit
+		// balance apart from a momentary throttle, which the status alone cannot.
+		if err := classifyBraveFailure(resp.StatusCode, raw); err != nil {
+			return nil, err
 		}
 	}
 	if v := resp.Header.Get("X-RateLimit-Remaining"); v != "" {

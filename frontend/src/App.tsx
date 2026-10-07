@@ -2,12 +2,14 @@ import { useEffect, useMemo, useState } from 'react'
 import { timeAgo } from './lib/api'
 import { useStore } from './store'
 import { ChatView } from './components/ChatView'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { Settings } from './components/Settings'
 
 export default function App() {
   const bootstrap = useStore((s) => s.bootstrap)
   const ready = useStore((s) => s.ready)
   const bootError = useStore((s) => s.bootError)
+  const view = useStore((s) => s.view)
 
   useEffect(() => {
     void bootstrap()
@@ -36,15 +38,21 @@ export default function App() {
     <div className="flex h-full">
       <Sidebar />
       <main className="flex min-w-0 flex-1 flex-col">
-        <ViewSwitch />
+        {/*
+          Keyed on the view and kept inside the shell, so a crash in the chat
+          view leaves the sidebar usable and switching views recovers instead of
+          taking the whole window down.
+        */}
+        <ErrorBoundary key={view} area={`view:${view}`}>
+          <ViewSwitch view={view} />
+        </ErrorBoundary>
       </main>
       <Toasts />
     </div>
   )
 }
 
-function ViewSwitch() {
-  const view = useStore((s) => s.view)
+function ViewSwitch({ view }: { view: 'chat' | 'settings' }) {
   return view === 'settings' ? <Settings /> : <ChatView />
 }
 

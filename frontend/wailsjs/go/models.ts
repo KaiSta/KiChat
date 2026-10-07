@@ -156,6 +156,8 @@ export namespace config {
 	    freshness: string;
 	    extraSnippets: boolean;
 	    cacheMinutes: number;
+	    useLlmContext: boolean;
+	    llmContextTokens: number;
 	    scrapeRespectRobots: boolean;
 	    scrapeMaxBytes: number;
 	    scrapeTimeoutSeconds: number;
@@ -176,6 +178,8 @@ export namespace config {
 	        this.freshness = source["freshness"];
 	        this.extraSnippets = source["extraSnippets"];
 	        this.cacheMinutes = source["cacheMinutes"];
+	        this.useLlmContext = source["useLlmContext"];
+	        this.llmContextTokens = source["llmContextTokens"];
 	        this.scrapeRespectRobots = source["scrapeRespectRobots"];
 	        this.scrapeMaxBytes = source["scrapeMaxBytes"];
 	        this.scrapeTimeoutSeconds = source["scrapeTimeoutSeconds"];

@@ -598,7 +598,7 @@ function ResearchTab({
   return (
     <>
       <Section title={t('settings.research')}>
-        <Field label={t('search.providers')} hint="Die Reihenfolge bestimmt den Fallback: schlägt der erste Anbieter fehl, wird der nächste genutzt.">
+        <Field label={t('search.providers')} hint={t('settings.providerOrderHint')}>
           <div className="flex gap-2">
             {['brave', 'duckduckgo'].map((name) => {
               const enabled = search.providerOrder.includes(name)
@@ -699,7 +699,7 @@ function ResearchTab({
         )}
 
         <div className="mt-3 grid grid-cols-2 gap-3">
-          <Field label="Ergebnisse pro Suche">
+          <Field label={t('settings.resultCount')}>
             <input
               className="input"
               type="number"
@@ -709,7 +709,7 @@ function ResearchTab({
               onChange={(e) => patch({ search: { ...search, resultCount: Number(e.target.value) } })}
             />
           </Field>
-          <Field label="Cache (Minuten)">
+          <Field label={t('settings.cacheMinutes')}>
             <input
               className="input"
               type="number"
@@ -718,14 +718,14 @@ function ResearchTab({
               onChange={(e) => patch({ search: { ...search, cacheMinutes: Number(e.target.value) } })}
             />
           </Field>
-          <Field label="Land (country)">
+          <Field label={t('settings.country')}>
             <input
               className="input"
               value={search.country}
               onChange={(e) => patch({ search: { ...search, country: e.target.value } })}
             />
           </Field>
-          <Field label="Sprache (search_lang)">
+          <Field label={t('settings.searchLang')}>
             <input
               className="input"
               value={search.searchLang}
@@ -735,7 +735,33 @@ function ResearchTab({
         </div>
       </Section>
 
-      <Section title="Web-Scraping">
+      <Section title={t('settings.llmContext')} hint={t('settings.llmContextHint')}>
+        <label className="mb-3 flex items-center gap-2 text-[13px]">
+          <input
+            type="checkbox"
+            checked={search.useLlmContext}
+            onChange={(e) => patch({ search: { ...search, useLlmContext: e.target.checked } })}
+          />
+          {t('settings.llmContextActive')}
+        </label>
+        <Field
+          label={t('settings.llmContextTokens')}
+          hint={search.useLlmContext ? t('settings.llmContextTokensHint') : t('settings.llmContextOff')}
+        >
+          <input
+            className="input"
+            type="number"
+            min="1024"
+            max="32768"
+            step="1024"
+            disabled={!search.useLlmContext}
+            value={search.llmContextTokens}
+            onChange={(e) => patch({ search: { ...search, llmContextTokens: Number(e.target.value) } })}
+          />
+        </Field>
+      </Section>
+
+      <Section title={t('settings.scraping')}>
         <label className="mb-2 flex items-center gap-2 text-[13px]">
           <input
             type="checkbox"

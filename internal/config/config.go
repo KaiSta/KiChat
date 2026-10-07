@@ -44,6 +44,13 @@ type SearchSettings struct {
 	ExtraSnippets bool     `json:"extraSnippets"`
 	CacheMinutes  int      `json:"cacheMinutes"`
 
+	// UseLLMContext prefers Brave's LLM-context route, which returns whole page
+	// chunks instead of headlines, so the model can read sources without a
+	// second scrape round trip. It degrades to a plain search when unavailable.
+	UseLLMContext bool `json:"useLlmContext"`
+	// LLMContextTokens is the token budget requested from that route.
+	LLMContextTokens int `json:"llmContextTokens"`
+
 	ScrapeRespectRobots     bool  `json:"scrapeRespectRobots"`
 	ScrapeMaxBytes          int64 `json:"scrapeMaxBytes"`
 	ScrapeTimeoutSeconds    int   `json:"scrapeTimeoutSeconds"`
@@ -143,6 +150,8 @@ func Default() Settings {
 			ResultCount:          8,
 			ExtraSnippets:        true,
 			CacheMinutes:         60,
+			UseLLMContext:        true,
+			LLMContextTokens:     8192, // Brave's own default; range 1024-32768
 			ScrapeRespectRobots:  true,
 			ScrapeMaxBytes:       5 << 20,
 			ScrapeTimeoutSeconds: 20,
@@ -262,6 +271,17 @@ func (s *Settings) normalise() {
 	}
 	if s.Search.CacheMinutes <= 0 {
 		s.Search.CacheMinutes = 60
+	}
+	// Ranges come from the Brave LLM-context reference; values outside them are
+	// rejected by the API, so they are clamped rather than sent and failed.
+	if s.Search.LLMContextTokens <= 0 {
+		s.Search.LLMContextTokens = 8192
+	}
+	if s.Search.LLMContextTokens < 1024 {
+		s.Search.LLMContextTokens = 1024
+	}
+	if s.Search.LLMContextTokens > 32768 {
+		s.Search.LLMContextTokens = 32768
 	}
 	if s.Search.ScrapeMaxBytes <= 0 {
 		s.Search.ScrapeMaxBytes = 5 << 20

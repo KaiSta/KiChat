@@ -233,7 +233,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 	}
 
 	// Optionally seed the turn with web results before the model sees it.
-	if err := e.seedSearch(ctx, &chat, req.Text, settings); err != nil {
+	if err := e.seedSearch(ctx, &chat, req.Text, settings, modelInfo.ContextLimit); err != nil {
 		e.emit("chat:warning", map[string]any{
 			"chatId":  req.ChatID,
 			"warning": fmt.Sprintf("Vorab-Recherche fehlgeschlagen: %s", err.Error()),
