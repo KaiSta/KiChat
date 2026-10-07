@@ -246,6 +246,167 @@ func TestOpenAICompatStreamParsesDeltasAndStats(t *testing.T) {
 	}
 }
 
+// TestOpenAICompatToleratesARepeatedToolName covers the other half of tool-call
+// streaming: a server that repeats the whole function name in every delta. The
+// name is accumulated because it may arrive in fragments, so a repeat used to
+// produce "search_websearch_web" and the call no longer resolved to a tool.
+func TestOpenAICompatToleratesARepeatedToolName(t *testing.T) {
+	frames := []string{
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search_web","arguments":"{\"query\":"}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"search_web","arguments":"\"Mietrecht\"}"}}]},"finish_reason":"tool_calls"}]}`,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v0/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for _, frame := range frames {
+			fmt.Fprintf(w, "data: %s\n\n", frame)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider := newLMStudioProvider(server.URL, "")
+	events, err := provider.Chat(context.Background(), ChatRequest{
+		Model:    "m",
+		Messages: []Message{{Role: RoleUser, Content: "Test"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	var calls []ToolCall
+	for ev := range events {
+		if ev.Type == EventToolCall {
+			calls = append(calls, *ev.ToolCall)
+		}
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d (%+v)", len(calls), calls)
+	}
+	if calls[0].Name != "search_web" {
+		t.Errorf("tool name = %q, want one search_web", calls[0].Name)
+	}
+	if calls[0].Arguments != `{"query":"Mietrecht"}` {
+		t.Errorf("tool arguments = %q", calls[0].Arguments)
+	}
+}
+
+// TestOpenAICompatReportsATruncatedStream is the regression test for a reply that
+// stops mid-answer: the body fails before the stream ends, which used to look
+// exactly like the model finishing. Half a reply was then stored as a complete
+// one, with the turn reported as a success.
+func TestOpenAICompatReportsATruncatedStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v0/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Promise more than is written: the body then fails while being read
+		// instead of ending cleanly, which is how a dropped connection looks.
+		w.Header().Set("Content-Length", "4096")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Halbe Ant"}}]}`+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	provider := newLMStudioProvider(server.URL, "")
+	events, err := provider.Chat(context.Background(), ChatRequest{
+		Model:    "m",
+		Messages: []Message{{Role: RoleUser, Content: "Test"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	var (
+		content   strings.Builder
+		streamErr string
+		sawDone   bool
+	)
+	for ev := range events {
+		switch ev.Type {
+		case EventDelta:
+			content.WriteString(ev.Text)
+		case EventError:
+			streamErr = ev.Error
+		case EventDone:
+			sawDone = true
+		}
+	}
+	if content.String() != "Halbe Ant" {
+		t.Errorf("the partial text should still reach the caller, got %q", content.String())
+	}
+	if streamErr == "" {
+		t.Error("a truncated stream must be reported as an error")
+	}
+	if sawDone {
+		t.Error("a truncated stream must not be reported as a finished generation")
+	}
+}
+
+// TestOllamaReportsATruncatedStream is the same contract for the native Ollama
+// provider, which has its own reader.
+func TestOllamaReportsATruncatedStream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Length", "4096")
+		flusher, _ := w.(http.Flusher)
+		fmt.Fprint(w, `{"model":"m","message":{"content":"Halbe Ant"},"done":false}`+"\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	provider := newOllamaProvider(server.URL)
+	events, err := provider.Chat(context.Background(), ChatRequest{
+		Model:    "m",
+		Messages: []Message{{Role: RoleUser, Content: "Test"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	var (
+		content   strings.Builder
+		streamErr string
+		sawDone   bool
+	)
+	for ev := range events {
+		switch ev.Type {
+		case EventDelta:
+			content.WriteString(ev.Text)
+		case EventError:
+			streamErr = ev.Error
+		case EventDone:
+			sawDone = true
+		}
+	}
+	if content.String() != "Halbe Ant" {
+		t.Errorf("the partial text should still reach the caller, got %q", content.String())
+	}
+	if streamErr == "" {
+		t.Error("a truncated stream must be reported as an error")
+	}
+	if sawDone {
+		t.Error("a truncated stream must not be reported as a finished generation")
+	}
+}
+
 // TestOpenAICompatFallsBackToV1On404 verifies the endpoint retirement path for
 // LM Studio builds without the native namespace.
 func TestOpenAICompatFallsBackToV1On404(t *testing.T) {

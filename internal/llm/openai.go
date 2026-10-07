@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -396,6 +397,13 @@ func (p *openAICompatProvider) consume(ctx context.Context, rc io.ReadCloser, ev
 		}
 		payload, err := reader.Next()
 		if err != nil {
+			// Only a clean end of the body finishes the answer. Anything else — a
+			// reset connection, a truncated body — used to end the stream as if the
+			// model had stopped, which stores half a reply as a complete one.
+			if !errors.Is(err, io.EOF) && ctx.Err() == nil {
+				send(StreamEvent{Type: EventError, Error: fmt.Sprintf("Die Verbindung wurde unterbrochen: %s", err)})
+				return
+			}
 			break
 		}
 		if len(payload) == 0 {
@@ -478,7 +486,15 @@ func (p *openAICompatProvider) consume(ctx context.Context, rc io.ReadCloser, ev
 					entry.ID = tc.ID
 				}
 				if tc.Function.Name != "" {
-					entry.Name += tc.Function.Name
+					// The name arrives as fragments, so it is accumulated — except when a
+					// server repeats the whole name in every delta, where appending would
+					// produce "search_websearch_web" and the call would no longer resolve.
+					// A fragment that starts with what we have is the full name again.
+					if strings.HasPrefix(tc.Function.Name, entry.Name) {
+						entry.Name = tc.Function.Name
+					} else {
+						entry.Name += tc.Function.Name
+					}
 				}
 				entry.Arguments += tc.Function.Arguments
 			}

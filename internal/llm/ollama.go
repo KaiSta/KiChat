@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -419,6 +420,12 @@ func (p *ollamaProvider) consume(ctx context.Context, rc io.ReadCloser, events c
 		}
 		var resp ollamaChatResponse
 		if err := reader.Next(&resp); err != nil {
+			// As in the OpenAI-compatible provider: anything other than a clean end
+			// of the body is a broken answer, not a finished one.
+			if !errors.Is(err, io.EOF) && ctx.Err() == nil {
+				send(StreamEvent{Type: EventError, Error: fmt.Sprintf("Die Verbindung wurde unterbrochen: %s", err)})
+				return
+			}
 			break
 		}
 		if resp.Error != "" {
