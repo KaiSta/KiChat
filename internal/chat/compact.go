@@ -133,19 +133,30 @@ func PlanCompaction(in PlanInput) CompactPlan {
 	}
 	toSeq := keepFrom - 1
 
+	// A forced manual compaction should still produce a real cut when the chat is
+	// shorter than keepTurns: otherwise the button returns "nothing to compact"
+	// even though there is history that could be summarised.
 	if toSeq < fromSeq {
-		plan.Needed = false
-		if plan.Reason == "" {
-			plan.Reason = "nichts zu komprimieren"
-		} else {
-			plan.Reason += " — aber kein Verlauf zum Komprimieren"
+		if !in.Force {
+			plan.Needed = false
+			if plan.Reason == "" {
+				plan.Reason = "nichts zu komprimieren"
+			} else {
+				plan.Reason += " — aber kein Verlauf zum Komprimieren"
+			}
+			return plan
 		}
-		return plan
+		// Fold everything up to the newest user turn, which is the last turn that
+		// could contain a tool exchange we are not allowed to split.
+		if len(userSeqs) > 0 {
+			keepFrom = userSeqs[len(userSeqs)-1]
+		}
+		toSeq = keepFrom - 1
 	}
 
 	// Manual compaction with a target ratio: pull the cut later until the
 	// estimate fits, so "compact to 50%" actually means it.
-	if in.Force && in.Target > 0 && in.Budget.Limit > 0 {
+	if in.Force && in.Target > 0 && in.Budget.Limit > 0 && toSeq >= fromSeq {
 		budgetTarget := int(in.Target * float64(in.Budget.Limit))
 		remaining := in.Budget.System + in.Budget.Memory + in.Budget.ToolSchemas
 		for _, m := range in.Messages {

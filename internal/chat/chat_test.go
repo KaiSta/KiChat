@@ -168,6 +168,35 @@ func TestPlanCompactionWithTooFewTurnsFoldsNothing(t *testing.T) {
 	}
 }
 
+// TestManualCompactionOnShortChatFoldsWhatExists documents the new manual-
+// compaction behaviour: a forced run over a conversation whose only turns are
+// fewer than keepRecentTurns still picks a real cut (the newest user turn is the
+// last turn that could split a tool exchange).
+func TestManualCompactionOnShortChatFoldsWhatExists(t *testing.T) {
+	plan := PlanCompaction(PlanInput{
+		Messages:  conversation(2),
+		Budget:    ContextBudget{Limit: 10000, ProjectedRatio: 0.99},
+		Threshold: 0.80, KeepRecentTurns: 6, Reserve: 1024, Force: true,
+	})
+	if !plan.Needed {
+		t.Fatalf("forced run over a short chat should still pick a cut: %+v", plan)
+	}
+	if plan.FromSeq != 1 {
+		t.Fatalf("FromSeq = %d, want 1", plan.FromSeq)
+	}
+	// The cut lands before the newest user turn, so its whole exchange stays
+	// verbatim and only the older turn is folded.
+	if plan.ToSeq != 2 {
+		t.Fatalf("ToSeq = %d, want 2 — fold turn one, keep the newest user turn verbatim", plan.ToSeq)
+	}
+	if plan.KeepFromSeq != 3 {
+		t.Fatalf("KeepFromSeq = %d, want 3 (the newest user message)", plan.KeepFromSeq)
+	}
+	if plan.FoldedCount != 2 {
+		t.Fatalf("FoldedCount = %d, want 2", plan.FoldedCount)
+	}
+}
+
 func TestPlanCompactionResumesAfterPreviousCompaction(t *testing.T) {
 	messages := conversation(12)
 	plan := PlanCompaction(PlanInput{

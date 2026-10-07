@@ -127,7 +127,14 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
     if (!chatId) return
     setBusy(true)
     try {
-      await App.CompactNow({ chatId, focus, target, fromSeq: 0, toSeq: 0 })
+      const outcome = await App.CompactNow({ chatId, focus, target, fromSeq: 0, toSeq: 0 })
+      if (!outcome.created) {
+        // Nothing was folded. That is an ordinary answer to a manual request
+        // rather than a failure, so it is said plainly — and the panel stays
+        // open, because closing it would look like it had worked.
+        useStore.getState().toast('info', t('compact.noNeed'))
+        return
+      }
       onClose()
     } catch (err) {
       useStore.getState().toast('error', String(err))
