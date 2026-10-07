@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { formatDuration, formatNumber, formatSpeed } from '../lib/api'
+import { App, formatDuration, formatNumber, formatSpeed } from '../lib/api'
 import type { store as storeTypes } from '../lib/api'
 import { useStore } from '../store'
 
@@ -235,14 +235,33 @@ export function CompactionCard({
   compaction,
   collapsed,
   onToggle,
+  undoable,
 }: {
   compaction: storeTypes.Compaction
   collapsed: boolean
   onToggle: () => void
+  // Only the newest compaction of a chat may be undone. Compactions are
+  // cumulative — each one summarises on top of the memory in force when it ran —
+  // so undoing an older one would leave a newer summary quoting messages that are
+  // back in the live context.
+  undoable: boolean
 }) {
   const t = useStore((s) => s.t)
   const [open, setOpen] = useState(false)
+  const [undoing, setUndoing] = useState(false)
   const saved = Math.max(0, compaction.tokensBefore - compaction.tokensAfter)
+
+  const undo = async () => {
+    setUndoing(true)
+    try {
+      await App.DeleteCompaction(compaction.chatId, compaction.id)
+      await useStore.getState().refreshChatState()
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    } finally {
+      setUndoing(false)
+    }
+  }
 
   return (
     <div
@@ -268,6 +287,11 @@ export function CompactionCard({
         <button type="button" className="btn btn-sm btn-ghost" onClick={() => setOpen((v) => !v)}>
           {open ? t('common.close') : t('compact.summary')}
         </button>
+        {undoable && (
+          <button type="button" className="btn btn-sm btn-ghost" disabled={undoing} onClick={() => void undo()}>
+            {t('compact.undo')}
+          </button>
+        )}
       </div>
       {compaction.focus && (
         <div className="faint mt-1">

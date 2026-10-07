@@ -117,11 +117,17 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
   const t = useStore((s) => s.t)
   const budget = useStore((s) => s.chatState?.budget)
   const chatId = useStore((s) => s.activeChatId)
+  // A running turn owns the newest messages, and the backend refuses to compact
+  // while it does. Disabling the buttons says that before the click instead of
+  // reporting it after.
+  const running = useStore((s) => (s.activeChatId ? !!s.running[s.activeChatId] : false))
   const [compactOpen, setCompactOpen] = useState(false)
   const [focus, setFocus] = useState('')
   const [busy, setBusy] = useState(false)
 
   if (!budget) return null
+
+  const blocked = busy || running
 
   const runCompact = async (target: number) => {
     if (!chatId) return
@@ -208,20 +214,35 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
       )}
 
       {!compactOpen ? (
-        <div className="flex gap-2">
-          <button type="button" className="btn btn-sm btn-primary" onClick={() => setCompactOpen(true)}>
-            {t('context.compactNow')}
-          </button>
+        <div className="space-y-2">
+          {/* The action buttons inside the form are disabled while a turn runs;
+              saying so here means the reason is visible before the click that
+              opens the form, not only after it. */}
+          {running && (
+            <div className="text-[12px]" style={{ color: 'var(--warn)' }}>
+              {t('compact.busy')}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              disabled={blocked}
+              onClick={() => setCompactOpen(true)}
+            >
+              {t('context.compactNow')}
+            </button>
           {budget.overLimit && (
             <button
               type="button"
               className="btn btn-sm"
-              disabled={busy}
+              disabled={blocked}
               onClick={() => void runCompact(0.6)}
             >
               {t('context.compactToFit')}
             </button>
           )}
+          </div>
         </div>
       ) : (
         <div className="space-y-2">
@@ -234,14 +255,19 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
               placeholder={t('compact.focusHint')}
             />
           </label>
+          {running && (
+            <div className="text-[12px]" style={{ color: 'var(--warn)' }}>
+              {t('compact.busy')}
+            </div>
+          )}
           <div className="flex flex-wrap gap-2">
-            <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => void runCompact(0)}>
+            <button type="button" className="btn btn-sm btn-primary" disabled={blocked} onClick={() => void runCompact(0)}>
               {busy ? t('compact.running') : t('compact.run')}
             </button>
-            <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void runCompact(0.6)}>
+            <button type="button" className="btn btn-sm" disabled={blocked} onClick={() => void runCompact(0.6)}>
               → 60%
             </button>
-            <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void runCompact(0.4)}>
+            <button type="button" className="btn btn-sm" disabled={blocked} onClick={() => void runCompact(0.4)}>
               → 40%
             </button>
             <button type="button" className="btn btn-sm btn-ghost" onClick={() => setCompactOpen(false)}>

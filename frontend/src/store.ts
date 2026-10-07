@@ -472,9 +472,15 @@ function wireEvents(
     // otherwise the Stop button would stay stuck.
     set((s) => ({ running: { ...s.running, [p.chatId]: false } }))
     if (p.chatId !== active()) return
-    clearStreaming(p.chatId)
-    void get().refreshChatState()
-    void get().loadChats()
+    // Read the finished messages before dropping the stream buffers. A buffer is
+    // keyed by message id and only cleared for ids the chat already holds, so
+    // clearing first left the streamed text rendering on top of the stored reply
+    // whenever the refresh carrying the finished row had not landed yet.
+    void (async () => {
+      await get().refreshChatState()
+      clearStreaming(p.chatId)
+      await get().loadChats()
+    })()
   })
 
   on<{ chatId: string; messageId?: string; error: string }>(EV.error, (p) => {
@@ -482,8 +488,12 @@ function wireEvents(
       running: { ...s.running, [p.chatId]: false },
     }))
     if (p.chatId === active()) {
-      clearStreaming(p.chatId)
-      void get().refreshChatState()
+      // Same order as the done handler: the stored row is authoritative, so it is
+      // read before the buffer that renders on top of it is dropped.
+      void (async () => {
+        await get().refreshChatState()
+        clearStreaming(p.chatId)
+      })()
     }
     get().toast('error', p.error)
   })

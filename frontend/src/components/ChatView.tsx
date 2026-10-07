@@ -74,6 +74,20 @@ export function ChatView() {
     return list.reduce((max, c) => Math.max(max, c.toSeq), 0)
   }, [chatState?.compactions])
 
+  // The only compaction that can be undone without contradicting a newer summary.
+  const newestCompactionId = useMemo(() => {
+    const list = chatState?.compactions ?? []
+    let newest = ''
+    let top = -1
+    for (const c of list) {
+      if (c.toSeq > top) {
+        top = c.toSeq
+        newest = c.id
+      }
+    }
+    return newest
+  }, [chatState?.compactions])
+
   const items = useMemo<Item[]>(() => {
     if (!chatState) return []
     const out: Item[] = []
@@ -188,6 +202,7 @@ export function ChatView() {
                 <div className="px-4">
                   <CompactionCard
                     compaction={item.compaction}
+                    undoable={item.compaction.id === newestCompactionId}
                     collapsed={!!collapsed[item.compaction.id]}
                     onToggle={() =>
                       setCollapsed((prev) => ({ ...prev, [item.compaction.id]: !prev[item.compaction.id] }))
@@ -341,6 +356,14 @@ function MessageRow({
         </span>
         {!isUser && message.model && <span className="faint mono">{message.model}</span>}
         {folded && <span className="badge" title={t('compact.title')}>🗜</span>}
+        {/* A reply the backend stopped delivering is not a finished answer, and it
+            has to say so next to the text rather than only in a toast that is gone
+            by the time the conversation is read again. */}
+        {message.status === 'failed' && (
+          <span className="badge badge-danger" title={t('chat.failedHint')}>
+            {t('chat.failed')}
+          </span>
+        )}
         <CopyButton text={live.text} />
       </div>
 
