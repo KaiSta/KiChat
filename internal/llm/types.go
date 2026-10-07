@@ -177,6 +177,18 @@ type Provider interface {
 	Chat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error)
 }
 
+// CacheInvalidator is implemented by a provider that caches per-model metadata
+// beyond a single listing. An explicit re-check has to reach those caches too:
+// Ollama keeps its /api/show detail for ten minutes, so dropping only the
+// registry's catalogue would hand back the very number the user asked to have
+// re-read, and the re-check would look broken.
+//
+// It is a separate interface rather than a method on Provider so a provider
+// without such a cache does not have to implement an empty one.
+type CacheInvalidator interface {
+	InvalidateCache()
+}
+
 // ErrUnavailable marks a backend that could not be reached.
 var ErrUnavailable = errors.New("backend unavailable")
 

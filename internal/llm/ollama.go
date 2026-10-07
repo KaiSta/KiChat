@@ -158,6 +158,16 @@ func applyOllamaShow(info *ModelInfo, sh ollamaShowInfo) {
 	}
 }
 
+// InvalidateCache drops the cached /api/show detail so the next listing reads it
+// again. Needed because ollamaShowTTL is long enough that a model reloaded with a
+// different num_ctx would otherwise keep reporting its previous window.
+func (p *ollamaProvider) InvalidateCache() {
+	p.mu.Lock()
+	p.showCache = map[string]ollamaShowInfo{}
+	p.showAt = map[string]time.Time{}
+	p.mu.Unlock()
+}
+
 func (p *ollamaProvider) cachedShow(model string) (ollamaShowInfo, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

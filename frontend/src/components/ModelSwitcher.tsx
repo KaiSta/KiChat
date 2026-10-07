@@ -65,6 +65,51 @@ export function ContextMeter({ onOpen }: { onOpen: () => void }) {
 }
 
 /* -------------------------------------------------------------------------
+ * Re-check
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Re-reads the context window from the backend on demand.
+ *
+ * The listing is cached, and the model switcher badge renders cached numbers, so
+ * a model that was loaded — or reloaded with a different context length — since
+ * the app last looked keeps reporting the old window. That is the difference
+ * between the 128K a model's maximum allows and the 8k it was actually loaded
+ * with. Forcing the listing refreshes the badge, and recomputing the chat state
+ * refreshes the meter, which is derived from the same catalogue server-side.
+ */
+export function ContextRecheck() {
+  const t = useStore((s) => s.t)
+  const refreshModels = useStore((s) => s.refreshModels)
+  const [checking, setChecking] = useState(false)
+
+  const recheck = async () => {
+    if (checking) return
+    setChecking(true)
+    try {
+      // Order matters: the budget is computed from the catalogue, so refreshing
+      // the chat state first would rebuild it from the stale listing.
+      await refreshModels(true)
+    } finally {
+      await useStore.getState().refreshChatState()
+      setChecking(false)
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className="btn btn-sm btn-ghost"
+      disabled={checking}
+      onClick={() => void recheck()}
+      title={t('context.recheckTitle')}
+    >
+      {checking ? t('context.rechecking') : `↻ ${t('context.recheck')}`}
+    </button>
+  )
+}
+
+/* -------------------------------------------------------------------------
  * Context inspector
  * ---------------------------------------------------------------------- */
 

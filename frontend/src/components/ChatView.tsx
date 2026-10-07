@@ -4,7 +4,7 @@ import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { OnFileDrop, OnFileDropOff } from '../../wailsjs/runtime/runtime'
 import { App, formatNumber, type store as storeTypes } from '../lib/api'
 import { messageText, pendingAttachments, useStore } from '../store'
-import { ContextInspector, ContextMeter, ModelSwitcher } from './ModelSwitcher'
+import { ContextInspector, ContextMeter, ContextRecheck, ModelSwitcher } from './ModelSwitcher'
 import { AttachmentChips, CompactionCard, MessageStats, ReasoningBlock, ToolCallCard } from './MessageParts'
 import { Markdown } from './Markdown'
 
@@ -284,6 +284,7 @@ export function ChatView() {
             <ContextMeter onOpen={() => setInspectorOpen((v) => !v)} />
             {inspectorOpen && <ContextInspector onClose={() => setInspectorOpen(false)} />}
           </div>
+          <ContextRecheck />
           <span className="faint ml-auto text-[11px]">{t('files.dropHint')}</span>
         </div>
       </div>

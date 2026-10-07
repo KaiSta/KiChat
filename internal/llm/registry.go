@@ -230,12 +230,26 @@ func (r *Registry) ListModels(ctx context.Context, forceRefresh bool) []ModelInf
 	return append([]ModelInfo(nil), merged...)
 }
 
-// Invalidate drops the cached catalogue so the next listing refetches.
+// Invalidate drops the cached catalogue so the next listing refetches, and
+// clears any per-model cache inside the providers as well. Both are needed for
+// an explicit re-check to report what the backend says right now: a context
+// window that changed because the model was loaded, unloaded or reconfigured
+// can otherwise be masked by a provider cache that outlives the catalogue.
 func (r *Registry) Invalidate() {
 	r.mu.Lock()
 	r.catalog = nil
 	r.catalogAt = time.Time{}
+	providers := append([]Provider(nil), r.providers...)
 	r.mu.Unlock()
+
+	// Called outside the lock: a provider's cache has its own mutex, and holding
+	// the registry lock across a network-free cache clear invites a deadlock the
+	// moment one of them grows a call back into the registry.
+	for _, p := range providers {
+		if inv, ok := p.(CacheInvalidator); ok {
+			inv.InvalidateCache()
+		}
+	}
 }
 
 // FindModel looks up a model in the catalogue.
