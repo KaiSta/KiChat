@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"kichat/internal/llm"
+	"kichat/internal/secret"
 	"kichat/internal/store"
 )
 
@@ -28,7 +29,7 @@ func TestLoadKeepsDefaultsForFieldsAddedLater(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := Load(st)
+	got, err := Load(st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,6 +214,10 @@ func TestUneditedPromptsFollowTheAppLanguage(t *testing.T) {
 // back, so the language switch is saved to a real store and reloaded. This is
 // the path SaveSettings takes — localise, then write.
 func TestTheSwitchedLanguageSurvivesTheRoundTrip(t *testing.T) {
+	ss, err := secret.New(t.TempDir() + "/secrets")
+	if err != nil {
+		t.Fatal(err)
+	}
 	st, err := store.Open(filepath.Join(t.TempDir(), "settings.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +236,7 @@ func TestTheSwitchedLanguageSurvivesTheRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	back, err := Load(st)
+	back, err := Load(st, ss)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,4 +425,71 @@ func TestNormaliseAddsMissingPresetsWithoutClobberingEdits(t *testing.T) {
 			t.Errorf("preset %q appears %d times, want once", def.ID, seen[def.ID])
 		}
 	}
+}
+
+// TestLoadReadsKeysFromTheSecretStore pins the split of responsibilities the
+// secret store introduced: the settings blob is written without secrets, so the
+// Brave key and each backend's API key only come back when Load is handed the
+// secret store. Without this the keys a user typed in Settings would be gone on
+// the next start — the exact bug the reconcile path was added to fix.
+func TestLoadReadsKeysFromTheSecretStore(t *testing.T) {
+	t.Run("the brave key is read back", func(t *testing.T) {
+		ss, err := secret.New(filepath.Join(t.TempDir(), "secrets"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ss.Set("brave", "brave-key"); err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.Open(filepath.Join(t.TempDir(), "settings.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		if err := Default().Save(st); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := Load(st, ss)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Search.BraveAPIKey != "brave-key" {
+			t.Errorf("BraveAPIKey = %q, want the key from the secret store", got.Search.BraveAPIKey)
+		}
+	})
+
+	t.Run("a backend key is read back", func(t *testing.T) {
+		ss, err := secret.New(filepath.Join(t.TempDir(), "secrets"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ss.Set(llm.BackendAPIKeyName("deepseek"), "sk-deepseek"); err != nil {
+			t.Fatal(err)
+		}
+		st, err := store.Open(filepath.Join(t.TempDir(), "settings.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		// The blob SaveSettings writes: Default() already carries the shipped
+		// DeepSeek entry, and its key is blank in the blob by design.
+		if err := Default().Save(st); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := Load(st, ss)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var key string
+		for _, b := range got.Backends {
+			if b.ID == "deepseek" {
+				key = b.APIKey
+			}
+		}
+		if key != "sk-deepseek" {
+			t.Errorf("deepseek key = %q, want the key from the secret store", key)
+		}
+	})
 }

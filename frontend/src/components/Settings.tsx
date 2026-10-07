@@ -82,7 +82,7 @@ export function Settings() {
       <div className="min-h-0 flex-1 overflow-y-auto scroll-thin p-4">
         <div className="mx-auto max-w-3xl space-y-4">
           {tab === 'general' && <GeneralTab draft={draft} patch={patch} />}
-          {tab === 'backends' && <BackendsTab draft={draft} patch={patch} />}
+          {tab === 'backends' && <BackendsTab draft={draft} patch={patch} onApply={save} />}
           {tab === 'prompt' && <PromptTab draft={draft} patch={patch} />}
           {tab === 'research' && <ResearchTab draft={draft} patch={patch} />}
           {tab === 'context' && <ContextTab draft={draft} patch={patch} />}
@@ -258,15 +258,17 @@ function GeneralTab({
 function BackendsTab({
   draft,
   patch,
+  onApply,
 }: {
   draft: config.Settings
   patch: (c: Partial<config.Settings>) => void
+  // Persisting is what applies a typed-in API key to the registry, so the
+  // refresh control commits the draft first and then re-reads models/health.
+  onApply: () => void
 }) {
   const t = useStore((s) => s.t)
   const health = useStore((s) => s.health)
   const models = useStore((s) => s.models)
-  const refreshHealth = useStore((s) => s.refreshHealth)
-  const refreshModels = useStore((s) => s.refreshModels)
   const [secrets, setSecrets] = useState<main.SecretStatus | null>(null)
 
   useEffect(() => {
@@ -333,10 +335,7 @@ function BackendsTab({
           <button
             type="button"
             className="btn btn-sm"
-            onClick={() => {
-              void refreshHealth()
-              void refreshModels(true)
-            }}
+            onClick={() => void onApply()}
           >
             {t('settings.refresh')}
           </button>

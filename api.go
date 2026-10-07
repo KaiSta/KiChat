@@ -24,15 +24,14 @@ import (
 
 // --- settings --------------------------------------------------------------
 
-// GetSettings returns the current settings, with the Brave key reduced to a
-// boolean so the secret itself never crosses the bridge.
+// GetSettings returns the current settings with every secret blanked: the Brave
+// key and each backend's API key are mirrored only as shape/booleans and never
+// cross the bridge.
 func (a *App) GetSettings() (config.Settings, error) {
 	if err := a.ensure(); err != nil {
 		return config.Settings{}, err
 	}
-	s := a.Settings()
-	s.Search.BraveAPIKey = ""
-	return s, nil
+	return a.sanitize(a.Settings()), nil
 }
 
 // SaveSettings persists settings and rebuilds the services that depend on them.
@@ -42,29 +41,84 @@ func (a *App) GetSettings() (config.Settings, error) {
 // prompts in the payload are still untouched: handing the caller its own draft
 // back would leave the prompt textarea showing the previous language until the
 // next start.
+//
+// Backend API keys are secrets. Each backend's key is stored under its own name
+// in the secret store, the same way the Brave key is, and neither the blob nor
+// the bridge ever carries the secret. SaveSettings commits the draft's keys to
+// the secret store and reads the real stored values back into the snapshot the
+// registry is built from, so a key typed in Settings reaches the provider. The
+// copy it persists is sanitised; the keys stay only in memory and in the store.
 func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	if err := a.ensure(); err != nil {
 		return config.Settings{}, err
 	}
-	current := a.Settings()
-	// An empty key in the payload means "leave the stored key alone"; settings
-	// only ever carry a boolean about the key.
-	s.Search.BraveAPIKey = current.Search.BraveAPIKey
+	// The draft only ever carries a boolean about the Brave key (GetSettings
+	// blanks the secret), so an empty BraveAPIKey means "leave the stored key
+	// alone".
+	s.Search.BraveAPIKey = a.Settings().Search.BraveAPIKey
 	// Moving the untouched prompts to the new language, and repairing an empty
 	// default prompt, happen here as well as on load: clearing the textarea and
 	// switching the language in the same save must not leave either undone.
 	s.LocalisePrompts()
-	if err := s.Save(a.store); err != nil {
-		return config.Settings{}, err
+	// Commit each backend key through the secret store, then reconcile the
+	// snapshot from what is actually stored so the registry sees the real key on
+	// the next rebuild rather than the draft's blank.
+	s, err := a.reconcileBackendKeys(s)
+	if err != nil {
+		return s, err
+	}
+	// Persist the sanitised copy: the secrets live in the secret store, never in
+	// the settings blob. The in-memory snapshot keeps the real keys so the
+	// rebuild below can authenticate.
+	if err := a.sanitize(s).Save(a.store); err != nil {
+		return s, err
 	}
 	a.settingsMu.Lock()
 	a.settings = s
 	a.settingsMu.Unlock()
 	a.rebuildServices(s)
-	// The key is a secret and never crosses the bridge, so the copy handed back
-	// carries the same blanked shape GetSettings returns.
-	s.Search.BraveAPIKey = ""
+	return a.sanitize(s), nil
+}
+
+// reconcileBackendKeys commits each backend's draft key to the secret store and
+// reads the real stored value back into the snapshot. A non-empty draft key
+// overwrites what is stored, the same way SetBackendAPIKey does; an empty one
+// leaves the stored key alone — it never clears a key the user set earlier, and
+// it never rewrites over one with a blank.
+func (a *App) reconcileBackendKeys(s config.Settings) (config.Settings, error) {
+	for i := range s.Backends {
+		b := &s.Backends[i]
+		name := llm.BackendAPIKeyName(b.ID)
+		if want := strings.TrimSpace(b.APIKey); want != "" {
+			if err := a.secrets.Set(name, want); err != nil {
+				return s, err
+			}
+			b.APIKey = want
+			continue
+		}
+		// Empty draft: keep whatever is on disk, which may be nothing.
+		if stored, ok := a.secrets.Get(name); ok {
+			b.APIKey = stored
+		} else {
+			b.APIKey = ""
+		}
+	}
 	return s, nil
+}
+
+// sanitize returns the copy that the bridge is allowed to hand back and that the
+// settings blob is allowed to store. Secrets never cross it. The backend slice is
+// copied before it is blanked, so the caller's snapshot — the one the registry is
+// built from — keeps its real keys.
+func (a *App) sanitize(s config.Settings) config.Settings {
+	backends := make([]llm.BackendConfig, len(s.Backends))
+	copy(backends, s.Backends)
+	for i := range backends {
+		backends[i].APIKey = ""
+	}
+	s.Backends = backends
+	s.Search.BraveAPIKey = ""
+	return s
 }
 
 // SecretStatus reports how secrets are stored.
@@ -93,7 +147,37 @@ func (a *App) GetSecretStatus() (SecretStatus, error) {
 	return status, nil
 }
 
-// SetBraveKey stores the Brave Search API key.
+// setBackendAPIKey stores one backend's key in the secret store and rebuilds the
+// registry so the change takes effect at once. The secret store owns the key, so
+// it never reaches the settings blob or the bridge.
+func (a *App) setBackendAPIKey(backendID, key string) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	key = strings.TrimSpace(key)
+	if err := a.secrets.Set(llm.BackendAPIKeyName(backendID), key); err != nil {
+		return err
+	}
+	a.settingsMu.Lock()
+	for i := range a.settings.Backends {
+		if a.settings.Backends[i].ID == backendID {
+			a.settings.Backends[i].APIKey = key
+		}
+	}
+	a.settingsMu.Unlock()
+	a.rebuildServices(a.Settings())
+	return nil
+}
+
+// SetBackendAPIKey stores an API key for one backend. Empty clears it.
+func (a *App) SetBackendAPIKey(backendID, apiKey string) error {
+	return a.setBackendAPIKey(backendID, apiKey)
+}
+
+// SetBraveKey stores the Brave Search API key. It is kept separate from
+// setBackendAPIKey because Brave is a search provider, not a chat backend: its key
+// lives under the plain "brave" name the rest of the app reads, not under a
+// backend-qualified one.
 func (a *App) SetBraveKey(key string) error {
 	if err := a.ensure(); err != nil {
 		return err

@@ -189,6 +189,13 @@ type CacheInvalidator interface {
 	InvalidateCache()
 }
 
+// BackendAPIKeyName qualifies a secret with the backend it belongs to, so each
+// backend's key lives under its own name in the secret store without colliding
+// with the Brave key or with another backend.
+func BackendAPIKeyName(backendID string) string {
+	return "backend:" + backendID
+}
+
 // ErrUnavailable marks a backend that could not be reached.
 var ErrUnavailable = errors.New("backend unavailable")
 

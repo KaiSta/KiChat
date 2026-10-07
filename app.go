@@ -91,21 +91,16 @@ func (a *App) init() error {
 	}
 	a.store = st
 
-	settings, err := config.Load(st)
-	if err != nil {
-		// A corrupt settings blob should not stop the app from starting.
-		settings = config.Default()
-	}
-
 	secrets, err := secret.New(filepath.Join(a.dataDir, "secrets"))
 	if err != nil {
 		return err
 	}
 	a.secrets = secrets
 
-	// The Brave key lives in the keyring; settings only mirror whether it is set.
-	if stored, ok := secrets.Get("brave"); ok {
-		settings.Search.BraveAPIKey = stored
+	settings, err := config.Load(st, secrets)
+	if err != nil {
+		// A corrupt settings blob should not stop the app from starting.
+		settings = config.Default()
 	}
 
 	a.settingsMu.Lock()

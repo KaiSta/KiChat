@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"kichat/internal/llm"
+	"kichat/internal/secret"
 	"kichat/internal/store"
 )
 
@@ -167,8 +168,12 @@ func DefaultPresets(lang string) []PromptPreset {
 	}
 }
 
-// Load reads settings, filling in defaults for anything missing or new.
-func Load(st *store.Store) (Settings, error) {
+// Load reads the settings blob and folds the secrets back in from the secret
+// store: the Brave key and each backend's API key, which the blob deliberately
+// does not carry. Without this the keys a user typed in Settings would be gone on
+// the next start. Load only reads the secret store; a missing key is not an error,
+// so a first run with nothing stored still loads cleanly.
+func Load(st *store.Store, ss *secret.Store) (Settings, error) {
 	s := Default()
 	found, err := st.GetSetting(settingsKey, &s)
 	if err != nil {
@@ -177,11 +182,25 @@ func Load(st *store.Store) (Settings, error) {
 	if !found {
 		return s, nil
 	}
+	if ss != nil {
+		// The Brave key is a search-provider secret stored under its plain name;
+		// each backend key is qualified with its backend id.
+		if v, ok := ss.Get("brave"); ok {
+			s.Search.BraveAPIKey = v
+		}
+		for i := range s.Backends {
+			if v, ok := ss.Get(llm.BackendAPIKeyName(s.Backends[i].ID)); ok {
+				s.Backends[i].APIKey = v
+			}
+		}
+	}
 	s.normalise()
 	return s, nil
 }
 
-// Save writes settings.
+// Save writes the settings blob. Secrets are not part of it — SaveSettings
+// commits the keys to the secret store and hands this a sanitised copy — so the
+// blob only ever carries the non-secret shape of the configuration.
 func (s Settings) Save(st *store.Store) error {
 	return st.PutSetting(settingsKey, s)
 }
