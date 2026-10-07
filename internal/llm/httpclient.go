@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -32,9 +33,129 @@ var streamClient = &http.Client{
 	},
 }
 
+// Retrying is only ever done on a request whose response has not been handed to
+// a caller yet. That is why the streaming reads are not covered: re-running one
+// would replay tokens the user has already seen. Everything below is safe to
+// repeat — a metadata call, or the request phase of a stream that failed before
+// its body was returned.
+const (
+	maxAttempts   = 3
+	retryBaseWait = 250 * time.Millisecond
+	retryMaxWait  = 2 * time.Second
+)
+
+// retryable reports whether err is worth another attempt.
+func retryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	// A cancelled or expired context is the caller's decision, not a hiccup.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Retryable()
+	}
+	// A transport failure — a backend still starting up refusing connections, a
+	// reset connection — is usually transient.
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+// sleepBackoff waits before the next attempt, doubling each time. It returns
+// false when the context ended first, so a Stop does not have to wait it out.
+func sleepBackoff(ctx context.Context, attemptNo int) bool {
+	wait := retryBaseWait << attemptNo
+	if wait > retryMaxWait {
+		wait = retryMaxWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// withRetry runs attempt until it succeeds, fails unrecoverably, or runs out of
+// attempts. The last real error is reported rather than the cancellation that
+// ended a wait, because "the backend returned 503 twice" is the actionable fact.
+func withRetry[T any](ctx context.Context, attempt func() (T, error)) (T, error) {
+	var (
+		lastErr error
+		zero    T
+	)
+	for i := 0; i < maxAttempts; i++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if lastErr != nil {
+				return zero, lastErr
+			}
+			return zero, ctxErr
+		}
+		value, err := attempt()
+		if err == nil {
+			return value, nil
+		}
+		lastErr = err
+		if !retryable(err) || i == maxAttempts-1 {
+			break
+		}
+		if !sleepBackoff(ctx, i) {
+			break
+		}
+	}
+	return zero, lastErr
+}
+
+// credentialHeaders are the request headers whose value must never survive into
+// an error message. A gateway or reverse proxy occasionally echoes the request
+// back in its error page, and HTTPError.Body carries that text verbatim to a
+// toast or a log.
+var credentialHeaders = map[string]bool{
+	"authorization":        true,
+	"x-subscription-token": true,
+	"api-key":              true,
+	"x-api-key":            true,
+	"x-goog-api-key":       true,
+}
+
+// redactHeaders removes every credential we sent from an error body, so a
+// provider cannot leak its own key by repeating what it was told.
+func redactHeaders(err error, headers map[string]string) error {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Body == "" {
+		return err
+	}
+	for name, value := range headers {
+		if !credentialHeaders[strings.ToLower(name)] {
+			continue
+		}
+		for _, secret := range []string{value, strings.TrimSpace(strings.TrimPrefix(value, "Bearer "))} {
+			// A short value is a generic word, not a key; redacting it would
+			// mangle the message without protecting anything.
+			if len(secret) < 8 {
+				continue
+			}
+			httpErr.Body = strings.ReplaceAll(httpErr.Body, secret, "[redacted]")
+		}
+	}
+	return err
+}
+
 // doJSON performs a request, decodes the JSON body into out, and converts
-// non-2xx responses into *HTTPError so callers can react to status codes.
+// non-2xx responses into *HTTPError so callers can react to status codes. A
+// transient failure is retried before it is reported.
 func doJSON(ctx context.Context, client *http.Client, method, url string, headers map[string]string, body any, out any) error {
+	_, err := withRetry(ctx, func() (struct{}, error) {
+		return struct{}{}, doJSONOnce(ctx, client, method, url, headers, body, out)
+	})
+	return err
+}
+
+func doJSONOnce(ctx context.Context, client *http.Client, method, url string, headers map[string]string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -61,12 +182,12 @@ func doJSON(ctx context.Context, client *http.Client, method, url string, header
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return &HTTPError{
+		return redactHeaders(&HTTPError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
 			Body:       strings.TrimSpace(string(raw)),
 			URL:        url,
-		}
+		}, headers)
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -77,7 +198,18 @@ func doJSON(ctx context.Context, client *http.Client, method, url string, header
 
 // postStream issues a streaming POST and hands back the raw response body. The
 // caller owns closing it.
+//
+// Only the request phase is retried, and it completes before the caller starts
+// reading, so a retry cannot duplicate output. A response lost after the backend
+// had already begun generating would cost one wasted generation, which is the
+// price of not failing the turn outright.
 func postStream(ctx context.Context, url string, headers map[string]string, body any) (io.ReadCloser, error) {
+	return withRetry(ctx, func() (io.ReadCloser, error) {
+		return postStreamOnce(ctx, url, headers, body)
+	})
+}
+
+func postStreamOnce(ctx context.Context, url string, headers map[string]string, body any) (io.ReadCloser, error) {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)
@@ -98,12 +230,12 @@ func postStream(ctx context.Context, url string, headers map[string]string, body
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		resp.Body.Close()
-		return nil, &HTTPError{
+		return nil, redactHeaders(&HTTPError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
 			Body:       strings.TrimSpace(string(raw)),
 			URL:        url,
-		}
+		}, headers)
 	}
 	return resp.Body, nil
 }
