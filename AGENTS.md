@@ -13,35 +13,80 @@ dive on context compaction (strategy, arithmetic, failure modes, where the code 
 | --- | --- | --- |
 | Go | 1.26.0 (`go 1.26.0`) | fine |
 | Wails CLI | 2.15.0 | fine |
-| Node / npm | 18.19.1 / 9.2.0 | **two traps, see below** |
+| Node / npm | 22.23.3 / 10.9.9 in `~/.local/node/bin` | **not on `PATH`** — see Trap 2 |
 | webkit2gtk | only 4.1 | **every build needs `-tags webkit2_41`** |
 
 **Trap 1 — build tag.** Only `webkit2gtk-4.1` is installed, so
 `wails build -tags webkit2_41` is the only build that works. Without the tag it fails
 to link.
 
-**Trap 2 — npm 9 cannot read the `libc` field.** On this Node/npm a clean
-`npm install` skips `@tailwindcss/oxide-linux-x64-gnu`, and Vite then dies with
-`Cannot find native binding`. npm only learned libc-aware optional resolution in v10.
-The working route on Node 18 is:
+**Trap 2 — node and npm are not on `PATH`.** They are in `~/.local/node/bin`
+(22.23.3 / 10.9.9) rather than in `/usr/bin`. Mint 22.3 (zena, noble base) offers
+`nodejs` 18.19.1 and `npm` 9.2.0 in `noble/universe`, and neither is installed — nor
+would it be enough, since npm 9 cannot install Vite 7's native binding (below) and
+`vite dev` needs ≥ Node 20.19. The Makefile assumes `npm` is callable, and npm is a
+script whose first line is `#!/usr/bin/env node`, so a *path* to npm is not enough:
+with node off `PATH`, `make build` dies at its `npm install` step with
+`/usr/bin/env: 'node': No such file or directory` (exit 127), and the bare
+`npm run build` that `wails build` runs for itself (wails.json) cannot start at all.
+Fix that in the shell, not in the Makefile — the Makefile is the same one machines
+with a properly installed node use:
 
 ```bash
-cd frontend && npm i --no-save @tailwindcss/oxide-linux-x64-gnu@4.3.3
+export PATH="$HOME/.local/node/bin:$PATH"   # put it in ~/.bashrc to make it stick
 ```
 
-Declaring it in `package.json` and regenerating the lockfile were both tried and both
-fail; do not repeat that. **`vite dev` is impossible on Node 18** (Vite 7 needs
-≥ 20.19 / ≥ 22.12 and dies with `crypto.hash is not a function`) — `vite build` works.
+A system-wide Node (NodeSource is the maintained apt route on Mint:
+`curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -`, then
+`sudo apt install nodejs`, which brings its own npm) lands in `/usr/bin` and needs
+none of the above. Do not `apt install npm` from Mint's own repo next to it: that is
+npm 9, it conflicts, and it is the one this project cannot build with.
+
+The npm 9 `libc` trap that used to live here is history: with npm 10 a clean
+`npm install` *does* install `@tailwindcss/oxide-linux-x64-gnu` (verified in an empty
+directory against the real lockfile), so the Makefile's extra `--no-save` install and the
+directory-as-stamp are now only a guard for an older npm — declaring the binding in
+`package.json` or regenerating the lockfile still does not work, tried, do not repeat it.
+**`vite dev` needs ≥ Node 20.19 / ≥ 22.12** (below that Vite 7 dies with
+`crypto.hash is not a function`); the Node installed here is new enough and
+`npm run dev` serves `http://localhost:5173/` in under a second, but `vite build` is what
+the targets and the checks run.
+
+**Upgrading the toolchain changes nothing this repo depends on.** Measured against this exact
+lockfile, Node 22.23.3 and 24.21.0 (Krypton, the newest LTS — 26 is Current) crossed with
+npm 11.19.0 and 12.2.0: a clean `npm install` from a fresh copy, `tsc && vite build`, and,
+with Node 24, `make check` and `make build` — all exit 0, and `package-lock.json` comes out
+byte-identical (lockfileVersion 3, which npm 9+ all read). Nothing pins the versions: no
+`.nvmrc`, no `engines`, no `packageManager`, and the only file naming them is this table.
+Two behaviours to expect:
+
+- npm ≥ 11 gates lifecycle scripts behind `allowScripts` and warns about
+  `esbuild@0.28.2 (postinstall: node install.js)` on every install ("not yet covered" on 11,
+  "blocked" on 12). It is noise, not breakage: the build is green with that script never run,
+  because esbuild resolves its prebuilt binary from the platform package the lockfile already
+  installs. `npm install-scripts approve esbuild` silences it. (npm 12 permits Node
+  `^22.22.2 || ^24.15.0 || >=26`, so it can be installed beside the Node here.)
+- the Makefile resolves `npm` from `PATH`, falls back to `~/.local/node/bin/npm`, and never
+  resolves `node` at all — so node itself has to be on `PATH` for any of it to run, for the
+  shebang reason in Trap 2. Exporting that directory, or installing Node system-wide, is what
+  makes a machine work; the Makefile is unchanged for it.
 
 ## Checks that must pass
 
 ```bash
+make check                                  # the next four, in one step
+make build                                  # the last one, into build/bin/kichat
+
 gofmt -l .                                  # must print nothing
 go vet ./...
 go test ./... -count=1
 cd frontend && npx tsc --noEmit             # or: npm run build (tsc && vite build)
 wails build -tags webkit2_41                # produces build/bin/kichat
 ```
+
+Both targets add `-tags webkit2_41` and resolve the tools themselves, which is what makes
+them work from a shell where neither `node` nor `wails` is on `PATH`. The raw commands are
+the same gates, but `npx` and `npm` need Trap 2's `export PATH` first.
 
 `wails build` regenerates `frontend/wailsjs/go/models.ts`, so after changing a Go
 struct that crosses the bridge, build (or `wails generate module`) before type-checking
@@ -97,7 +142,7 @@ in a browser shows a bootstrap failure. `tools/uiharness` fixes that by serving 
 built frontend with a mocked bridge:
 
 ```bash
-cd frontend && npm run build          # the harness serves dist/
+make frontend                        # or: cd frontend && npm run build (needs node on PATH)
 go run ./tools/uiharness             # http://127.0.0.1:8791/
 ```
 
