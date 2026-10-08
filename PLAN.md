@@ -339,6 +339,12 @@ wails build                    # when webkit2gtk-4.0 is available
 - **Brave Search needs a user key.** Without one the DuckDuckGo fallback is used; the
   Brave path itself has not been exercised live. Brave is metered (~1,000-1,250 searches
   per $5 of monthly credit), which is why fallback matters.
+- **The DuckDuckGo fallback can be refused by an anti-bot check.** Both scraped HTML
+  endpoints answer a suspected client with HTTP 202 and a challenge page instead of
+  results, and nothing in the request shape changes that (measured against the live
+  endpoints). The provider now reports this as a block rather than an empty search, but
+  it means a user without a working Brave key can end up with no search at all until the
+  check clears or another provider is configured.
 - **OCR is out of scope.** `pdftotext`/`pdfinfo` are used; `tesseract` is absent, so
   scanned PDFs will not yield text.
 - **`scrapeIntoChat` has no UI.** The Go binding exists but the planned SourcesPanel was

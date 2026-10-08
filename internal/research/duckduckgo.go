@@ -2,6 +2,7 @@ package research
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,12 +16,38 @@ import (
 // DuckDuckGo has no official web-search API. This provider scrapes the
 // no-JavaScript HTML endpoints, which is inherently fragile: the selectors below
 // are covered by fixture tests so layout drift is caught immediately, and the
-// lite endpoint is tried as a second shape.
+// lite endpoint is tried as a second shape. What is not a layout change is the
+// anti-bot interstitial, which is reported as what it is.
 const (
 	ddgHTMLEndpoint  = "https://html.duckduckgo.com/html/"
 	ddgLiteEndpoint  = "https://lite.duckduckgo.com/lite/"
 	browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 )
+
+// ddgChallengeMarkers are strings only the interstitial carries: the challenge
+// script, its form and its modal. They are what a block is detected by, because
+// neither the status nor an empty parse can tell it apart from a real answer —
+// measured on 2026-10-08, a host DuckDuckGo did not trust was answered with HTTP
+// 202 (not an error status) and a page with no result nodes at all, which is
+// exactly what a genuine zero-result page looks like from the outside.
+var ddgChallengeMarkers = []string{"anomaly.js", "challenge-form", "anomaly-modal"}
+
+// ddgBlockedErr is returned when the interstitial is served instead of results.
+// It names the reason and the way out: "no results" would send the reader
+// looking for a selector bug in a page that was never served.
+var ddgBlockedErr = fmt.Errorf("%w: DuckDuckGo verlangt eine Bot-Prüfung (Captcha) statt "+
+	"Suchergebnissen – im Browser lösen oder einen anderen Suchanbieter konfigurieren", ErrBlocked)
+
+// isDDGChallenge reports whether a response body is the interstitial rather than
+// a page of results.
+func isDDGChallenge(body string) bool {
+	for _, marker := range ddgChallengeMarkers {
+		if strings.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 // DuckDuckGoProvider scrapes DuckDuckGo's HTML search results.
 type DuckDuckGoProvider struct {
@@ -48,7 +75,9 @@ func (d *DuckDuckGoProvider) Available() bool   { return true }
 func (d *DuckDuckGoProvider) RequiresKey() bool { return false }
 
 // Search tries the lightweight HTML endpoint first and falls back to the lite
-// form, which has a different and more stable layout.
+// form, which has a different and more stable layout. A bot check ends the
+// attempt: it is handed out per client rather than per layout, so the second
+// shape cannot succeed where the first was refused.
 func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]SearchResult, error) {
 	if err := d.limiter.Wait(ctx); err != nil {
 		return nil, err
@@ -59,10 +88,20 @@ func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]S
 		return results, nil
 	}
 	htmlErr := err
+	// Asking the lite layout now would only buy a second identical failure, and
+	// the pacing it would wait out is time the turn does not have.
+	if errors.Is(htmlErr, ErrBlocked) {
+		return nil, htmlErr
+	}
 
 	liteResults, liteErr := d.searchLite(ctx, req)
 	if liteErr == nil && len(liteResults) > 0 {
 		return liteResults, nil
+	}
+	// Same reasoning one step later: a block explains itself better on its own
+	// than nested under whichever other failure came first.
+	if errors.Is(liteErr, ErrBlocked) {
+		return nil, liteErr
 	}
 	switch {
 	case htmlErr != nil && liteErr != nil:
@@ -110,6 +149,9 @@ func (d *DuckDuckGoProvider) searchHTML(ctx context.Context, req SearchRequest) 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, err
+	}
+	if isDDGChallenge(string(body)) {
+		return nil, ddgBlockedErr
 	}
 	return parseDDGHtml(string(body), req.Count)
 }
@@ -177,6 +219,9 @@ func (d *DuckDuckGoProvider) searchLite(ctx context.Context, req SearchRequest) 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, err
+	}
+	if isDDGChallenge(string(body)) {
+		return nil, ddgBlockedErr
 	}
 	return parseDDGLite(string(body), req.Count)
 }

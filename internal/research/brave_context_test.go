@@ -188,6 +188,26 @@ func TestBraveFailureClassification(t *testing.T) {
 			want:   ErrInvalidKey,
 		},
 		{
+			// The same rejection, measured, with the envelope the API really
+			// sends and the other wording it uses: the detail varies with the
+			// shape of the value sent, the code does not. Classifying on the
+			// wording reported this one as "brave: Unprocessable Entity The
+			// provided subscription token is invalid." — a server fault the user
+			// had no way to act on.
+			name:   "rejected token as 422, full envelope",
+			status: http.StatusUnprocessableEntity,
+			body: `{"type":"ErrorResponse","error":{"id":"3c3bbca5-0bff-4ef5-b70d-75ce40c9473f","status":422,` +
+				`"detail":"The provided subscription token is invalid.","meta":{"component":"authentication"},` +
+				`"code":"SUBSCRIPTION_TOKEN_INVALID"},"time":1791488101}`,
+			want: ErrInvalidKey,
+		},
+		{
+			name:   "rejected token as 422, code only",
+			status: http.StatusUnprocessableEntity,
+			body:   `{"error":{"status":422,"detail":"The provided subscription token is invalid.","code":"SUBSCRIPTION_TOKEN_INVALID"}}`,
+			want:   ErrInvalidKey,
+		},
+		{
 			name:   "invalid key as 401",
 			status: http.StatusUnauthorized,
 			body:   `{"error":{"status":401,"code":"INTERNAL"}}`,
@@ -205,10 +225,30 @@ func TestBraveFailureClassification(t *testing.T) {
 			if tc.want == ErrQuotaExhausted && errors.Is(err, ErrRateLimited) {
 				t.Error("quota error also matched ErrRateLimited")
 			}
-			if tc.want == ErrInvalidKey && (errors.Is(err, ErrRateLimited) || errors.Is(err, ErrQuotaExhausted)) {
-				t.Error("a rejected key was classified as a throttle or an exhausted balance")
+			if tc.want == ErrInvalidKey {
+				if errors.Is(err, ErrRateLimited) || errors.Is(err, ErrQuotaExhausted) {
+					t.Error("a rejected key was classified as a throttle or an exhausted balance")
+				}
+				// The detail is Brave's, so the message has to carry the action
+				// that fixes it or it reads like a fault the app should retry.
+				if !strings.Contains(err.Error(), "Einstellungen") {
+					t.Errorf("err = %v, want it to point at the settings", err)
+				}
 			}
 		})
+	}
+
+	// A 422 about the request rather than the credential is not a key problem:
+	// it is answered by clamping the query, and reporting it as a bad key would
+	// send the user to the settings for nothing.
+	requestErr := classifyBraveFailure(http.StatusUnprocessableEntity,
+		[]byte(`{"error":{"status":422,"detail":"The request was rejected.","code":"VALIDATION"}}`))
+	if errors.Is(requestErr, ErrInvalidKey) {
+		t.Errorf("a 422 about the request was classified as a key rejection: %v", requestErr)
+	}
+	var requestHTTP *httpError
+	if !errors.As(requestErr, &requestHTTP) || requestHTTP.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("err = %v, want an httpError keeping the 422", requestErr)
 	}
 
 	// Anything that is neither a throttle nor a key problem stays an httpError

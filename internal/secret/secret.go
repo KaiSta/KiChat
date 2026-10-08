@@ -34,8 +34,24 @@ type Store struct {
 	fallback map[string]string
 }
 
-// New opens the secret store rooted at dir.
+// New opens the secret store rooted at dir, using the OS keyring when one is
+// available.
 func New(dir string) (*Store, error) {
+	return newStore(dir, probeKeyring())
+}
+
+// NewIsolated opens a store that keeps every secret inside dir and never touches
+// the OS keyring.
+//
+// Tests must use this one. The keyring is a per-user global resource, so a test
+// store built with New() writes its fixtures into the real keyring of whoever
+// runs the suite: doing so once replaced a user's stored Brave key with the
+// string "brave-key", and the app then presented that as a rejected API key.
+func NewIsolated(dir string) (*Store, error) {
+	return newStore(dir, false)
+}
+
+func newStore(dir string, useKeyring bool) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("Secret-Verzeichnis: %w", err)
 	}
@@ -45,7 +61,7 @@ func New(dir string) (*Store, error) {
 		dataFile: filepath.Join(dir, "secrets.enc"),
 		fallback: map[string]string{},
 	}
-	s.keyring = probeKeyring()
+	s.keyring = useKeyring
 	if err := s.loadFallback(); err != nil {
 		return nil, err
 	}

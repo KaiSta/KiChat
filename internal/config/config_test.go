@@ -221,7 +221,7 @@ func TestUneditedPromptsFollowTheAppLanguage(t *testing.T) {
 // back, so the language switch is saved to a real store and reloaded. This is
 // the path SaveSettings takes — localise, then write.
 func TestTheSwitchedLanguageSurvivesTheRoundTrip(t *testing.T) {
-	ss, err := secret.New(t.TempDir() + "/secrets")
+	ss, err := secret.NewIsolated(t.TempDir() + "/secrets")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func TestNormaliseAddsMissingPresetsWithoutClobberingEdits(t *testing.T) {
 // the next start — the exact bug the reconcile path was added to fix.
 func TestLoadReadsKeysFromTheSecretStore(t *testing.T) {
 	t.Run("the brave key is read back", func(t *testing.T) {
-		ss, err := secret.New(filepath.Join(t.TempDir(), "secrets"))
+		ss, err := secret.NewIsolated(filepath.Join(t.TempDir(), "secrets"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -467,7 +467,7 @@ func TestLoadReadsKeysFromTheSecretStore(t *testing.T) {
 	})
 
 	t.Run("a backend key is read back", func(t *testing.T) {
-		ss, err := secret.New(filepath.Join(t.TempDir(), "secrets"))
+		ss, err := secret.NewIsolated(filepath.Join(t.TempDir(), "secrets"))
 		if err != nil {
 			t.Fatal(err)
 		}

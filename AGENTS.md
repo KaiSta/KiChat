@@ -116,6 +116,8 @@ What each live test buys:
 - `TestLiveBraveContextClampsLongQuery` — local clamping beats the API's 422.
 - `TestLiveBraveChainUsesContext` — the chain picks the context route, not the fallback.
 - `TestLiveBraveBadKeyIsNotMisclassified` — a rejected key is not reported as a throttle.
+  It sends no working credential, so it cannot succeed and cannot consume credit; it
+  checks both wordings the API uses for one and the same rejection (below).
 - `TestLiveSearchFirstTurn` — settings → chain → context → seeded prompt → LM Studio,
   and asserts the context payload is bigger than the headline listing it replaces.
 - `TestLiveDeepSeek` — the three claims the provider makes that only the real service
@@ -128,9 +130,27 @@ What each live test buys:
 
 **Never put an API key in a tracked file.** Pass it in the environment; the app itself
 stores it through `internal/secret` (`~/.config/kichat/`). Measured facts worth keeping:
-a rejected key comes back as **HTTP 422 "The provided API key is invalid."** (not 401),
-and a used-up balance vs a momentary throttle can only be told apart by the error
-envelope's `code` (`QUOTA_LIMITED` / `RATE_LIMITED`), because both can arrive as 429.
+a rejected key comes back as **HTTP 422 with `code: "SUBSCRIPTION_TOKEN_INVALID"`** (not
+401), and its free-text `detail` varies with the shape of the value sent — a key-shaped
+one draws "The provided API key is invalid.", anything else "The provided subscription
+token is invalid." So the **code** is what classifies it; matching on the wording misses
+half of the failures and reports them as plain server errors (which is what the real
+`websearch` failure that prompted this fix looked like). A used-up balance vs a momentary
+throttle can likewise only be told apart by the envelope's `code` (`QUOTA_LIMITED` /
+`RATE_LIMITED`), because both can arrive as 429.
+
+**DuckDuckGo's HTML endpoints can be refused outright, and the refusal looks like an
+empty page.** Measured here: both `html.duckduckgo.com/html/` and
+`lite.duckduckgo.com/lite/` answered **HTTP 202** — not an error status — with the
+anti-bot interstitial ("Unfortunately, bots use DuckDuckGo too… Select all squares
+containing a duck") and no result nodes, for GET and POST, with a Firefox or a Chrome
+user agent, with referer and language headers set. Nothing in the request shape changed
+it: the check is on the client, so pacing or a HEAD/GET variation is not a workaround.
+That is why a block is detected by the interstitial's own markup (`anomaly.js`,
+`challenge-form`, `anomaly-modal`) and reported as `ErrBlocked`, and why the lite layout
+is not retried after it; "no results (layout may have changed)" is reserved for a page
+that really has no hits. A working Brave key, a different provider, or a different
+network is the way out.
 
 ## Verifying the UI
 
@@ -198,5 +218,11 @@ was actually measured here:
   fully populated default, so absent fields keep their default (pinned by
   `internal/config/config_test.go`). Do not change an existing field's type.
 - Tests pin behaviour (what the user or the model sees), not implementation details.
+- **A test must never reach the real keyring or the real `~/.config/kichat` data.** The
+  keyring is a per-user global resource and `secret.New` probes it, so a test store built
+  with `New` wrote its fixtures into the keyring of whoever ran the suite: a stored Brave
+  key became the string `brave-key`, the app read that back at startup and every search
+  came back as a rejected key (422 `SUBSCRIPTION_TOKEN_INVALID`). Tests use
+  `secret.NewIsolated(dir)`, which keeps every secret in the temp dir and never probes.
 - `.freebuff/` is gitignored scratch space; `frontend/dist`, `build/bin` and `node_modules`
   are build output.
