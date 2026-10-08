@@ -312,7 +312,12 @@ function BackendsTab({
                 onChange={(e) => updateBackend(index, { baseUrl: e.target.value })}
                 placeholder="http://127.0.0.1:1234"
               />
-              {(backend.kind === 'custom' || backend.kind === 'deepseek') && (
+              {/* llama.cpp belongs here because `llama-server --api-key` makes the
+                  server reject every request without the matching bearer token;
+                  a keyed server would otherwise be unreachable from the UI. */}
+              {(backend.kind === 'custom' ||
+                backend.kind === 'deepseek' ||
+                backend.kind === 'llamacpp') && (
                 <input
                   className="input mono mt-2"
                   type="password"

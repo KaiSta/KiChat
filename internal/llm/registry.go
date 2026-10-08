@@ -105,6 +105,8 @@ func (r *Registry) Reconfigure(configs []BackendConfig) {
 			providers = append(providers, newCustomProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		case "deepseek":
 			providers = append(providers, newDeepSeekProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
+		case "llamacpp":
+			providers = append(providers, newLlamaCppProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		}
 	}
 	r.mu.Lock()
@@ -292,7 +294,7 @@ func MergeOverrides(models []ModelInfo, overrides map[string]ModelOverride) []Mo
 }
 
 // DefaultBackendConfigs returns the backends KiChat ships with: the two local
-// ones, pointing at their standard ports, and DeepSeek.
+// ones, pointing at their standard ports, plus DeepSeek and llama.cpp.
 //
 // DeepSeek ships **disabled**, unlike the local pair. It is a metered remote
 // service that needs a key, so enabling it by default would probe a paid API on
@@ -300,6 +302,13 @@ func MergeOverrides(models []ModelInfo, overrides map[string]ModelOverride) []Mo
 // ready the moment a key is accepted — its models would win the loaded-model
 // race and quietly become the default for new chats. A user who wants it turns
 // it on and pastes a key in Settings.
+//
+// llama.cpp ships disabled as well, and for a different reason: 127.0.0.1:8080 is
+// its documented default but not a port it owns the way LM Studio owns 1234 or
+// Ollama owns 11434. It is the most contested port on a developer's machine, and
+// `llama-server` is normally started by hand, often on a port the user picked. So
+// the address is offered rather than probed: a user who runs llama-server enables
+// this entry and points it at the port they used.
 func DefaultBackendConfigs() []BackendConfig {
 	return []BackendConfig{
 		{
@@ -315,6 +324,13 @@ func DefaultBackendConfigs() []BackendConfig {
 			Kind:    "ollama",
 			BaseURL: "http://127.0.0.1:11434",
 			Enabled: true,
+		},
+		{
+			ID:      "llamacpp",
+			Name:    "llama.cpp",
+			Kind:    "llamacpp",
+			BaseURL: LlamaCppDefaultBaseURL,
+			Enabled: false,
 		},
 		{
 			ID:      "deepseek",

@@ -34,6 +34,11 @@ type openAICompatProvider struct {
 	modelsPath string
 	// openAIModelsPath is the plain /v1/models fallback.
 	openAIModelsPath string
+	// propsPath returns backend-specific generation properties; empty if
+	// unsupported. llama.cpp's /props is the only place that reports the context
+	// window a model is actually loaded with, which `-c` — defaulting to
+	// "loaded from model" — leaves unknowable client-side.
+	propsPath string
 
 	// requiresKey marks a backend that cannot answer without a credential. A
 	// request without one is not attempted at all, so the user is told what is
@@ -48,6 +53,13 @@ type openAICompatProvider struct {
 	// capability (LM Studio). DeepSeek and plain OpenAI-compatible servers do not
 	// document the field, so they are left alone.
 	thinkingToggle bool
+
+	// chatTemplateKwargs marks a backend that turns thinking off by handing the
+	// parameter to its chat template instead of sending a field of its own.
+	// llama.cpp works this way, through `chat_template_kwargs`; LM Studio does
+	// not, so the two cases stay apart rather than sharing one field name that
+	// only one of them accepts.
+	chatTemplateKwargs bool
 
 	// nativeChatPath is LM Studio's v1 chat route, and v1ModelsPath is the
 	// listing that says which models expose a reasoning setting. Both are used
@@ -73,6 +85,13 @@ type openAICompatProvider struct {
 	// not recorded, so the next summarisation retries instead of silently
 	// keeping the optimisation off for the rest of the session.
 	v1Unavailable bool
+
+	// props caches the reading of propsPath. `-c` is fixed when llama-server
+	// starts, so the number only changes when the server behind the URL is
+	// replaced — which is precisely what an explicit re-check announces, and
+	// InvalidateCache is where it is dropped.
+	props       *llamaCppProps
+	propsLoaded bool
 }
 
 // modelListFlavour names the shape of a model listing. The zero value is LM
@@ -82,6 +101,7 @@ type modelListFlavour int
 const (
 	flavourLMStudio modelListFlavour = iota
 	flavourDeepSeek
+	flavourLlamaCpp
 )
 
 // keyCheck reports a backend that needs a credential and has none.
@@ -116,8 +136,17 @@ func (p *openAICompatProvider) ID() string   { return p.id }
 func (p *openAICompatProvider) Name() string { return p.name }
 
 // CanToggleThinking reports whether this backend accepts `enable_thinking` in the
-// request body.
-func (p *openAICompatProvider) CanToggleThinking() bool { return p.thinkingToggle }
+// request body, or — for llama.cpp — as a chat template parameter.
+//
+// The answer is deliberately optimistic for llama.cpp: the provider claims the
+// ability, and the request itself is built conservatively, so a template that
+// turns out not to read the parameter is left alone rather than sent a field it
+// would reject. Compaction asks this question without a context to look a
+// template up in, and it also adapts its own output budget, so claiming too
+// little would cost a working model the optimisation outright.
+func (p *openAICompatProvider) CanToggleThinking() bool {
+	return p.thinkingToggle || p.chatTemplateKwargs
+}
 
 func (p *openAICompatProvider) authHeaders() map[string]string {
 	h := map[string]string{}
@@ -170,7 +199,7 @@ func (p *openAICompatProvider) ListModels(ctx context.Context) ([]ModelInfo, err
 		}
 		err := doJSON(ctx, jsonClient, http.MethodGet, p.modelsPath, p.authHeaders(), nil, &resp)
 		if err == nil {
-			return p.mapModelEntries(resp.Data), nil
+			return p.enrichLlamaCpp(ctx, p.mapModelEntries(resp.Data)), nil
 		}
 		if he, ok := err.(*HTTPError); !ok || he.StatusCode != 404 {
 			// A real failure (connection refused, auth) — surface it.
@@ -179,7 +208,11 @@ func (p *openAICompatProvider) ListModels(ctx context.Context) ([]ModelInfo, err
 		// 404: this build predates the native namespace. Fall through.
 	}
 
-	return p.listOpenAIModels(ctx)
+	models, err := p.listOpenAIModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return p.enrichLlamaCpp(ctx, models), nil
 }
 
 // mapModelEntries reads a rich listing with the mapper for its flavour. An entry
@@ -195,6 +228,14 @@ func (p *openAICompatProvider) mapModelEntries(raw []json.RawMessage) []ModelInf
 				continue
 			}
 			out = append(out, p.fromDeepSeekEntry(m))
+			continue
+		}
+		if p.modelsFlavour == flavourLlamaCpp {
+			var m llamaCppModelEntry
+			if err := json.Unmarshal(entry, &m); err != nil {
+				continue
+			}
+			out = append(out, p.fromLlamaCppEntry(m))
 			continue
 		}
 		var m lmStudioModelEntry
@@ -313,6 +354,10 @@ type openAIChunk struct {
 		GenerationTime   float64 `json:"generation_time"`
 		StopReason       string  `json:"stop_reason"`
 	} `json:"stats"`
+	// Timings is llama.cpp's own measurement of the generation, sent on the final
+	// frame alongside `usage`. It is the difference between the badge saying
+	// "llama.cpp" and it saying "estimated".
+	Timings   *llamaCppTimings `json:"timings"`
 	ModelInfo *struct {
 		ContextLength int    `json:"context_length"`
 		Arch          string `json:"arch"`
@@ -442,6 +487,11 @@ func (p *openAICompatProvider) InvalidateCache() {
 	p.reasoningChoice = nil
 	p.reasoningLoaded = false
 	p.v1Unavailable = false
+	// llama.cpp's loaded window is chosen when the server starts, so a re-check
+	// after restarting it is the only way the app learns the new one. Dropping
+	// the reading here is what makes the UI's re-check button do its job.
+	p.props = nil
+	p.propsLoaded = false
 }
 
 // --- reasoning control (LM Studio v1) --------------------------------------
@@ -751,12 +801,23 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 	if req.Seed != nil {
 		body["seed"] = *req.Seed
 	}
-	// LM Studio has no dedicated reasoning parameter, but its request accepts the
-	// in-body `enable_thinking` toggle that Qwen-style chat templates read. Without
-	// it a reasoning model spends the whole output budget thinking and returns no
-	// summary at all.
-	if p.thinkingToggle && req.Think != nil && !*req.Think {
-		body["enable_thinking"] = false
+	if req.Think != nil && !*req.Think {
+		switch {
+		case p.chatTemplateKwargs && p.templateTogglesThinking(ctx):
+			// llama.cpp reads the toggle out of the chat template's parameters
+			// and rejects a parameter the loaded template does not use, so it is
+			// only sent once the template has been seen to name it.
+			for k, v := range llamaCppThinkingOff() {
+				body[k] = v
+			}
+		case p.thinkingToggle:
+			// LM Studio has no dedicated reasoning parameter either, but its
+			// request accepts the in-body `enable_thinking` toggle that
+			// Qwen-style chat templates read. Without it a reasoning model
+			// spends the whole output budget thinking and returns no summary at
+			// all.
+			body["enable_thinking"] = false
+		}
 	}
 	if len(req.Tools) > 0 {
 		tools := make([]wireTool, 0, len(req.Tools))
@@ -803,6 +864,7 @@ func (p *openAICompatProvider) consume(ctx context.Context, rc io.ReadCloser, ev
 		ctxLength     int
 		arch, quant   string
 		textLen       int
+		timings       *llamaCppTimings
 	)
 
 	toolCalls := map[int]*ToolCall{}
@@ -870,6 +932,9 @@ func (p *openAICompatProvider) consume(ctx context.Context, rc io.ReadCloser, ev
 				StopReason:         chunk.Stats.StopReason,
 				Source:             SourceLMStudio,
 			}
+		}
+		if chunk.Timings != nil {
+			timings = chunk.Timings
 		}
 		if chunk.ModelInfo != nil {
 			ctxLength = chunk.ModelInfo.ContextLength
@@ -956,6 +1021,24 @@ func (p *openAICompatProvider) consume(ctx context.Context, rc io.ReadCloser, ev
 	}
 
 	elapsed := time.Since(start)
+	// llama.cpp measures the generation itself and reports it in `timings`, so
+	// these numbers are the server's rather than our own stopwatch, and the
+	// badge names the backend instead of admitting to an estimate. They replace
+	// the estimate rather than sitting beside it.
+	//
+	// `prompt_tokens` already counts the cached part of the prompt — the server
+	// sends `prompt_tokens_details.cached_tokens` for that — so `timings.cache_n`
+	// needs no mapping of its own into the usage object.
+	if timings != nil && timings.PredictedPerSecond > 0 {
+		stats = &GenerationStats{
+			TokensPerSecond: timings.PredictedPerSecond,
+			// The decode loop timed itself; the client can only measure from
+			// the request to the last byte, which includes the wait for the
+			// first token and any queueing.
+			GenerationMs: int64(timings.PredictedMs),
+			Source:       SourceLlamaCpp,
+		}
+	}
 	if usage == nil {
 		// No usage from the server; derive a conservative estimate so the meter
 		// still moves. Marked as estimated so the UI never presents it as fact.

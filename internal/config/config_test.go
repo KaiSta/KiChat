@@ -369,6 +369,20 @@ func TestNormaliseAddsMissingBackendsWithoutClobberingEdits(t *testing.T) {
 		t.Error("the repaired DeepSeek entry is enabled")
 	}
 
+	// llama.cpp arrives the same way, and is also shipped off — 8080 is its
+	// documented default but not a port llama-server owns the way LM Studio owns
+	// 1234, and the server is normally started by hand on a port the user picked.
+	llama, ok := byID["llamacpp"]
+	if !ok {
+		t.Fatalf("llama.cpp did not reach existing settings: %+v", s.Backends)
+	}
+	if llama.Kind != "llamacpp" || llama.BaseURL != llm.LlamaCppDefaultBaseURL {
+		t.Errorf("added entry = %+v, want the shipped llama.cpp config", llama)
+	}
+	if llama.Enabled {
+		t.Error("the repaired llama.cpp entry is enabled")
+	}
+
 	// And an entry the user has already configured is left exactly as it is.
 	s2 := Default()
 	s2.Backends = []llm.BackendConfig{
@@ -398,6 +412,35 @@ func TestNormaliseAddsMissingBackendsWithoutClobberingEdits(t *testing.T) {
 	}
 	if seen["deepseek"] != 1 {
 		t.Errorf("deepseek appears %d times, want once", seen["deepseek"])
+	}
+}
+
+// TestNormaliseRestoresAShippedBackendsAddress covers a settings blob that names
+// a shipped backend but carries no address for it — which is what an entry added
+// by hand, or a partly written blob, looks like. Both shipped kinds with a
+// documented address are repaired, and a kind without one is left alone so no
+// address is invented for it.
+func TestNormaliseRestoresAShippedBackendsAddress(t *testing.T) {
+	s := Default()
+	s.Backends = []llm.BackendConfig{
+		{ID: "llamacpp", Name: "llama.cpp", Kind: "llamacpp", Enabled: true},
+		{ID: "deepseek", Name: "DeepSeek", Kind: "deepseek", Enabled: true},
+		{ID: "my-server", Name: "Eigenbau", Kind: "custom", Enabled: true},
+	}
+	s.normalise()
+
+	got := map[string]string{}
+	for _, b := range s.Backends {
+		got[b.ID] = b.BaseURL
+	}
+	if got["llamacpp"] != llm.LlamaCppDefaultBaseURL {
+		t.Errorf("llama.cpp address = %q, want %q", got["llamacpp"], llm.LlamaCppDefaultBaseURL)
+	}
+	if got["deepseek"] != llm.DeepSeekDefaultBaseURL {
+		t.Errorf("deepseek address = %q, want %q", got["deepseek"], llm.DeepSeekDefaultBaseURL)
+	}
+	if got["my-server"] != "" {
+		t.Errorf("a custom endpoint was given an invented address: %q", got["my-server"])
 	}
 }
 

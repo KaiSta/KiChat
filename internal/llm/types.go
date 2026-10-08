@@ -118,6 +118,7 @@ type GenerationStats struct {
 const (
 	SourceLMStudio  = "lmstudio"
 	SourceOllama    = "ollama"
+	SourceLlamaCpp  = "llamacpp"
 	SourceEstimated = "estimated"
 )
 
