@@ -75,8 +75,10 @@ frontend/src/
   store.ts         zustand store: single wiring point for events, send/stop/regenerate
   lib/api.ts       Typed binding layer (see the Plain<T> note below)
   lib/i18n.ts      en/de/zh strings; a missing translation is a compile error
+  lib/stream.ts    arriving text: settled/live split, open-fence detection, throttle
   components/      ChatView, ModelSwitcher (meter + inspector), MessageParts,
-                   Markdown (memoised, throttled), Settings (5 tabs)
+                   Markdown (one parse per settled piece, live piece throttled),
+                   Settings (5 tabs)
 ```
 
 ### Data flow of one turn

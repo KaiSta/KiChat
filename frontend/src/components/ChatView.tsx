@@ -19,7 +19,6 @@ export function ChatView() {
   const chatLoading = useStore((s) => s.chatLoading)
   const running = useStore((s) => (s.activeChatId ? !!s.running[s.activeChatId] : false))
   const phase = useStore((s) => (s.activeChatId ? s.phase[s.activeChatId] : undefined))
-  const streaming = useStore((s) => s.streaming)
   const send = useStore((s) => s.send)
   const stop = useStore((s) => s.stop)
   const toast = useStore((s) => s.toast)
@@ -192,11 +191,7 @@ export function ChatView() {
             itemContent={(_index, item) =>
               item.kind === 'message' ? (
                 <div className="px-4 pb-1">
-                  <MessageRow
-                    message={item.message}
-                    streaming={streaming}
-                    folded={item.message.seq <= foldedUpTo}
-                  />
+                  <MessageRow message={item.message} folded={item.message.seq <= foldedUpTo} />
                 </div>
               ) : (
                 <div className="px-4">
@@ -313,15 +308,17 @@ export function ChatView() {
 
 function MessageRow({
   message,
-  streaming,
   folded,
 }: {
   message: storeTypes.Message
-  streaming: Record<string, { text: string; reasoning: string }>
   folded: boolean
 }) {
   const t = useStore((s) => s.t)
-  const live = messageText(message, streaming)
+  // Only the message being written subscribes to its own stream buffer. Reading
+  // the whole buffer map here instead meant every delta re-rendered the chat
+  // view, the list and every row in it — the reason the rest of the window
+  // twitched along with the text.
+  const live = useStore(useShallow((s) => messageText(message, s.streaming)))
   const isUser = message.role === 'user'
   const isTool = message.role === 'tool'
 

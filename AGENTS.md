@@ -208,6 +208,28 @@ was actually measured here:
   miss opens a modal GTK file dialog that swallows all further input.
 - Prefer the harness, or keyboard navigation, for anything but a final look.
 
+### Pinning the streaming renderer
+
+`node tools/streamcheck/check.mjs` (Node 22.18+, for its TypeScript support; needs
+`cd frontend && npm install` first) renders every prefix of four sample replies twice —
+once the way a finished message is rendered, once the way an arriving one is — and fails
+if the visible text differs, if the pieces `frontend/src/lib/stream.ts` cuts would change
+as the text grows (the memo depends on their being append-only), or if a line is lost in
+the split. It imports the real module directly, runs in under a second, and is **not**
+part of `make check`.
+
+The numbers behind that shape, from the parser and from the real UI. With this app's
+pipeline, re-parsing the whole reply on every delta and on every throttle commit cost
+237 ms of parsing for a 4 kB answer, 1.7 s for a 12 kB one and 6 s for a 24 kB one
+(`node` + `react-dom/server` over the real plugins). Driving the mock-bridge harness in
+headless Chromium over CDP, with the fixture reply enlarged to ~5 kB so the run is worth
+measuring, one streamed reply tore down and rebuilt 4511 elements and rewrote the message
+9576 times — that is the stutter and the flicker, while the rest of the window stays still.
+Parsing each settled piece once, throttling the live piece and showing an open code fence
+as plain text brings the same three replies down to 46, 137 and 266 ms, a 45 kB code-only
+answer from 6.7 s of parsing to a single parse, and the harness reply to 256 remounts over
+887 rewrites.
+
 ## Conventions
 
 - Comments explain **why**, not what; user-facing strings go through
