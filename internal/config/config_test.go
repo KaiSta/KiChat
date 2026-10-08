@@ -39,6 +39,13 @@ func TestLoadKeepsDefaultsForFieldsAddedLater(t *testing.T) {
 	if want := Default().Search.LLMContextTokens; got.Search.LLMContextTokens != want {
 		t.Errorf("llmContextTokens = %d, want the default %d", got.Search.LLMContextTokens, want)
 	}
+	// The summary model defaults to the empty ref, which means "the chat's own
+	// model": a stored blob that predates the field must not quietly acquire one,
+	// or every compaction would go looking for a backend nobody chose.
+	if got.Compact.SummaryModel != (llm.Ref{}) {
+		t.Errorf("summaryModel = %+v, want an empty ref meaning the chat's own model",
+			got.Compact.SummaryModel)
+	}
 }
 
 // TestEnglishIsTheDefaultLanguage pins the shipped default. The German research

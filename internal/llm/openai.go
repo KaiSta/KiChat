@@ -49,8 +49,30 @@ type openAICompatProvider struct {
 	// document the field, so they are left alone.
 	thinkingToggle bool
 
+	// nativeChatPath is LM Studio's v1 chat route, and v1ModelsPath is the
+	// listing that says which models expose a reasoning setting. Both are used
+	// only for a request that explicitly asks not to think: that route is the
+	// only place the setting exists, and it is deliberately narrow (no tools, no
+	// assistant turns), so every other request stays on chatPaths.
+	nativeChatPath string
+	v1ModelsPath   string
+
 	mu          sync.Mutex
 	chatPathIdx int
+	// reasoningChoice maps a model to the reasoning setting to send for it,
+	// learned from the v1 listing. A model missing from the map exposes no
+	// reasoning setting, and none is sent: measured, LM Studio answers such a
+	// request with HTTP 400 "does not expose reasoning configuration", so the
+	// setting may never be sent blind.
+	reasoningChoice map[string]string
+	// reasoningLoaded marks the listing as read (even when it produced no
+	// choices) so an ordinary turn never pays for it twice.
+	reasoningLoaded bool
+	// v1Unavailable records a 404 from the v1 namespace, which is permanent:
+	// a build without it is not asked again. A transient failure is deliberately
+	// not recorded, so the next summarisation retries instead of silently
+	// keeping the optimisation off for the rest of the session.
+	v1Unavailable bool
 }
 
 // modelListFlavour names the shape of a model listing. The zero value is LM
@@ -84,6 +106,8 @@ func newLMStudioProvider(baseURL, apiKey string) *openAICompatProvider {
 		},
 		modelsPath:       baseURL + "/api/v0/models",
 		openAIModelsPath: baseURL + "/v1/models",
+		nativeChatPath:   baseURL + "/api/v1/chat",
+		v1ModelsPath:     baseURL + "/api/v1/models",
 		thinkingToggle:   true,
 	}
 }
@@ -276,6 +300,12 @@ type openAIChunk struct {
 		PromptTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
+		// Some OpenAI-compatible servers report the thinking share here instead
+		// of in a namespace of their own. Reading it keeps the context meter
+		// honest about a model that spent its budget thinking.
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 	Stats *struct {
 		TokensPerSecond  float64 `json:"tokens_per_second"`
@@ -403,9 +433,304 @@ func (p *openAICompatProvider) retireChatPath() {
 	}
 }
 
+// InvalidateCache forgets the learned reasoning settings, so a re-check reads
+// the v1 listing again instead of handing an existing installation the answer
+// that was cached before the user loaded a different model.
+func (p *openAICompatProvider) InvalidateCache() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reasoningChoice = nil
+	p.reasoningLoaded = false
+	p.v1Unavailable = false
+}
+
+// --- reasoning control (LM Studio v1) --------------------------------------
+
+// reasoningSettingFor returns the reasoning setting to send for a model and
+// whether one should be sent at all.
+//
+// Only LM Studio's native v1 route can turn thinking off, and only for a model
+// that publishes a reasoning configuration: sending `reasoning` for any other
+// model is rejected with HTTP 400 "does not expose reasoning configuration"
+// (measured against a model without one). So the capability is *read* first and
+// the setting derived from it — a hard-coded request field would break every
+// ordinary model.
+//
+// "off" is what a summary wants, because a summary is not a reasoning task. A
+// model that allows only graded settings gets "low", the least reasoning it
+// permits; a model whose only setting is "on" gets nothing at all, and the
+// caller's output budget has to absorb the thinking.
+func (p *openAICompatProvider) reasoningSettingFor(ctx context.Context, model string) (string, bool) {
+	if p.v1ModelsPath == "" {
+		return "", false
+	}
+	if !p.reasoningCached() {
+		p.loadReasoningChoices(ctx)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.v1Unavailable {
+		return "", false
+	}
+	setting, ok := p.reasoningChoice[model]
+	return setting, ok
+}
+
+func (p *openAICompatProvider) reasoningCached() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.reasoningLoaded || p.v1Unavailable
+}
+
+// loadReasoningChoices reads the v1 model listing once and reduces it to the
+// reasoning setting each model should be asked for.
+func (p *openAICompatProvider) loadReasoningChoices(ctx context.Context) {
+	var resp struct {
+		Models []struct {
+			Key          string `json:"key"`
+			Capabilities struct {
+				Reasoning *struct {
+					AllowedOptions []string `json:"allowed_options"`
+				} `json:"reasoning"`
+			} `json:"capabilities"`
+		} `json:"models"`
+	}
+	err := doJSON(ctx, jsonClient, http.MethodGet, p.v1ModelsPath, p.authHeaders(), nil, &resp)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err != nil {
+		var he *HTTPError
+		switch {
+		case errors.As(err, &he) && he.StatusCode == http.StatusNotFound:
+			// This build has no v1 namespace; there is nothing to learn and no
+			// point asking again.
+			p.reasoningLoaded = true
+			p.v1Unavailable = true
+		default:
+			// The server was up but unhelpful. Nothing is remembered, so the next
+			// summarisation retries rather than losing the optimisation for good.
+		}
+		return
+	}
+	choices := make(map[string]string, 1)
+	for _, m := range resp.Models {
+		if m.Capabilities.Reasoning == nil {
+			continue
+		}
+		if setting, ok := leastReasoning(m.Capabilities.Reasoning.AllowedOptions); ok {
+			choices[m.Key] = setting
+		}
+	}
+	p.reasoningChoice = choices
+	// Read once, and only once: without this the listing would be fetched on
+	// every summary and would refill a setting that was just retired for a model.
+	p.reasoningLoaded = true
+}
+
+// leastReasoning picks the least reasoning a model permits, preferring to switch
+// it off outright. A model offering only ["low","medium","high"] cannot be
+// silenced; asking for its lowest grade is the closest thing to it.
+func leastReasoning(options []string) (string, bool) {
+	for _, want := range []string{"off", "low"} {
+		for _, have := range options {
+			if have == want {
+				return want, true
+			}
+		}
+	}
+	return "", false
+}
+
+// retireReasoning reacts to a native request that failed before producing
+// anything. A 404 means the namespace is gone; a 400 that names `reasoning`
+// means the cached setting was wrong for this model, which is then dropped so
+// the next call goes straight to the OpenAI-compatible path instead of paying
+// for the same rejection again. Only that one model is forgotten: a re-read
+// would return the same listing, so nothing would be gained by it.
+func (p *openAICompatProvider) retireReasoning(err error, model string) {
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch {
+	case he.StatusCode == http.StatusNotFound:
+		p.v1Unavailable = true
+	case he.StatusCode == http.StatusBadRequest && strings.Contains(he.Body, "reasoning"):
+		delete(p.reasoningChoice, model)
+	}
+}
+
+// nativeChatEvent is one frame of LM Studio's /api/v1/chat event stream. The
+// route's own field names are used because the two namespaces agree about almost
+// nothing: it reports `input_tokens` rather than `prompt_tokens`, has no
+// finish_reason, and splits thinking into its own event family.
+type nativeChatEvent struct {
+	Type    string `json:"type"`
+	Content string `json:"content"`
+	Error   *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error"`
+	Result *struct {
+		Output []struct {
+			Type    string `json:"type"` // message | reasoning | tool_call
+			Content string `json:"content"`
+		} `json:"output"`
+		Stats *nativeStats `json:"stats"`
+	} `json:"result"`
+}
+
+type nativeStats struct {
+	InputTokens           int     `json:"input_tokens"`
+	TotalOutputTokens     int     `json:"total_output_tokens"`
+	ReasoningOutputTokens int     `json:"reasoning_output_tokens"`
+	TokensPerSecond       float64 `json:"tokens_per_second"`
+	TimeToFirstToken      float64 `json:"time_to_first_token_seconds"`
+}
+
+// expressibleOnNative reports whether a request can be carried by the native
+// route at all. The route takes a system prompt and a flat list of input parts:
+// there is no assistant role and no place for an image, a tool schema or a tool
+// result. Any of those means "not this route" rather than a quietly shortened
+// prompt — a summary must never be written from part of a conversation.
+//
+// A pinned seed is excluded for the same reason: the compat body honours it, and
+// a request that asked for a reproducible answer must not be handed to a route
+// that would silently ignore the request. (NumCtx and KeepAlive need no such
+// care: only Ollama reads them at all.)
+//
+// This is checked before the capability listing is read, so a request the route
+// cannot carry never costs a round trip to find that out.
+func expressibleOnNative(req ChatRequest) bool {
+	if len(req.Tools) > 0 || req.Seed != nil {
+		return false
+	}
+	users := 0
+	for _, m := range req.Messages {
+		if len(m.Images) > 0 || len(m.ToolCalls) > 0 || m.ToolCallID != "" {
+			return false
+		}
+		switch m.Role {
+		case RoleSystem:
+		case RoleUser:
+			users++
+		default:
+			return false
+		}
+	}
+	return users > 0
+}
+
+// nativeV1Request builds the /api/v1/chat body for a request that must not
+// think. The caller has already established, via expressibleOnNative, that the
+// route can carry it.
+func nativeV1Request(req ChatRequest, reasoning string) (map[string]any, bool) {
+	if !expressibleOnNative(req) {
+		return nil, false
+	}
+	var (
+		system []string
+		input  = make([]map[string]any, 0, len(req.Messages))
+	)
+	for _, m := range req.Messages {
+		if m.Role == RoleSystem {
+			if m.Content != "" {
+				system = append(system, m.Content)
+			}
+			continue
+		}
+		input = append(input, map[string]any{"type": "text", "content": m.Content})
+	}
+	if len(input) == 0 {
+		return nil, false
+	}
+
+	body := map[string]any{
+		"model":       req.Model,
+		"input":       input,
+		"stream":      true,
+		"temperature": req.Temperature,
+		"reasoning":   reasoning,
+		// An internal call is not a conversation: without this the exchange is
+		// kept and answered with a response_id, so every compaction would litter
+		// the user's LM Studio chat history.
+		"store": false,
+	}
+	if len(system) > 0 {
+		body["system_prompt"] = strings.Join(system, "\n\n")
+	}
+	if req.TopP > 0 {
+		body["top_p"] = req.TopP
+	}
+	if req.MaxTokens > 0 {
+		body["max_output_tokens"] = req.MaxTokens
+	}
+	return body, true
+}
+
+// nativeUsage converts the v1 token accounting, including the reasoning share
+// that the OpenAI-compatible namespace cannot report at all.
+func nativeUsage(s *nativeStats) *Usage {
+	if s == nil {
+		return nil
+	}
+	return &Usage{
+		PromptTokens:     s.InputTokens,
+		CompletionTokens: s.TotalOutputTokens,
+		TotalTokens:      s.InputTokens + s.TotalOutputTokens,
+		ReasoningTokens:  s.ReasoningOutputTokens,
+	}
+}
+
+// nativeStatsEvent converts the reported speed and derives the stop reason the
+// route does not send. A request that ended exactly on its own cap is reported
+// as "length", which is what tells Summarize's retry that the answer was cut off
+// instead of merely short — the case a reasoning model hits when it thinks past
+// its budget.
+func nativeStatsEvent(s *nativeStats, maxTokens int) *GenerationStats {
+	if s == nil {
+		return nil
+	}
+	st := &GenerationStats{
+		TokensPerSecond:    s.TokensPerSecond,
+		TimeToFirstTokenMs: int64(s.TimeToFirstToken * 1000),
+		Source:             SourceLMStudio,
+	}
+	if maxTokens > 0 && s.TotalOutputTokens >= maxTokens {
+		st.StopReason = "length"
+	}
+	return st
+}
+
 func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error) {
 	if err := p.keyCheck(); err != nil {
 		return nil, err
+	}
+	// A request that explicitly asks not to think goes to LM Studio's native
+	// route when the model publishes a reasoning setting: that route is the only
+	// place the setting exists, and it is the difference between a summary and a
+	// model that spends every token of its budget thinking (measured on
+	// qwen3.8-4b-distill: 48 of 48 output tokens on reasoning, and no message
+	// item at all, i.e. content empty).
+	if p.nativeChatPath != "" && req.Think != nil && !*req.Think && expressibleOnNative(req) {
+		if setting, ok := p.reasoningSettingFor(ctx, req.Model); ok {
+			if nativeBody, buildable := nativeV1Request(req, setting); buildable {
+				if rc, err := postStream(ctx, p.nativeChatPath, p.authHeaders(), nativeBody); err == nil {
+					events := make(chan StreamEvent, 64)
+					go p.consumeNative(ctx, rc, events, req.Model, req.MaxTokens)
+					return events, nil
+				} else {
+					// The route failed before a single token, so nothing is lost by
+					// falling through: an optimisation must never be the reason a
+					// compaction fails. It is also the one place a stale capability
+					// answer shows up, so it is retired here.
+					p.retireReasoning(err, req.Model)
+				}
+			}
+		}
 	}
 	body := map[string]any{
 		"model":       req.Model,
@@ -530,6 +855,9 @@ func (p *openAICompatProvider) consume(ctx context.Context, rc io.ReadCloser, ev
 			}
 			if chunk.Usage.PromptTokensDetails != nil {
 				u.CachedPromptTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+			}
+			if chunk.Usage.CompletionTokensDetails != nil {
+				u.ReasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
 			}
 			usage = u
 		}
@@ -668,6 +996,153 @@ func (p *openAICompatProvider) consume(ctx context.Context, rc io.ReadCloser, ev
 			Quantization: quant,
 		}})
 	}
+	send(StreamEvent{Type: EventDone, Stats: stats})
+}
+
+// consumeNative translates LM Studio's native event stream — chat.start,
+// reasoning.delta, message.delta, chat.end — into the very same StreamEvents the
+// OpenAI-compatible path emits, so nothing downstream can tell the two apart.
+func (p *openAICompatProvider) consumeNative(ctx context.Context, rc io.ReadCloser,
+	events chan<- StreamEvent, model string, maxTokens int) {
+
+	defer close(events)
+	defer rc.Close()
+
+	start := time.Now()
+	var (
+		ttft              time.Duration
+		sawFirstToken     bool
+		sawMessageDelta   bool
+		sawReasoningDelta bool
+		textLen           int
+		usage             *Usage
+		stats             *GenerationStats
+	)
+
+	send := func(ev StreamEvent) bool {
+		select {
+		case events <- ev:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	firstToken := func() {
+		if !sawFirstToken {
+			ttft = time.Since(start)
+			sawFirstToken = true
+		}
+	}
+
+	reader := newSSEReader(rc)
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		payload, err := reader.Next()
+		if err != nil {
+			// Only a clean end of the body finishes the answer. A truncated
+			// stream ends here too, but it is reported, because half a summary
+			// stored as memory is worse than a failed compaction.
+			if !errors.Is(err, io.EOF) && ctx.Err() == nil {
+				send(StreamEvent{Type: EventError, Error: fmt.Sprintf("Die Verbindung wurde unterbrochen: %s", err)})
+				return
+			}
+			break
+		}
+		if len(payload) == 0 {
+			continue
+		}
+		var ev nativeChatEvent
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			// One malformed frame must not abort a long generation.
+			continue
+		}
+		switch ev.Type {
+		case "reasoning.delta":
+			if ev.Content == "" {
+				continue
+			}
+			sawReasoningDelta = true
+			firstToken()
+			if !send(StreamEvent{Type: EventReasoning, Text: ev.Content}) {
+				return
+			}
+		case "message.delta":
+			if ev.Content == "" {
+				continue
+			}
+			// This is the event that only exists because the request asked not
+			// to think: `reasoning.delta` carries the private deliberation that
+			// used to consume the entire budget and leave this one empty.
+			sawMessageDelta = true
+			firstToken()
+			textLen += len(ev.Content)
+			if !send(StreamEvent{Type: EventDelta, Text: ev.Content}) {
+				return
+			}
+		case "error":
+			msg := "LM Studio meldete einen Fehler beim Streamen"
+			if ev.Error != nil && ev.Error.Message != "" {
+				msg = ev.Error.Message
+			}
+			send(StreamEvent{Type: EventError, Error: msg})
+			return
+		case "chat.end":
+			// The final frame repeats the whole aggregated result, deltas and
+			// all. Only the numbers are taken from it, so no text is emitted
+			// twice — except when no delta of that kind ever arrived, where the
+			// aggregate is the only copy there is.
+			if ev.Result == nil {
+				continue
+			}
+			for _, item := range ev.Result.Output {
+				switch {
+				case item.Type == "reasoning" && item.Content != "" && !sawReasoningDelta:
+					sawReasoningDelta = true
+					if !send(StreamEvent{Type: EventReasoning, Text: item.Content}) {
+						return
+					}
+				case item.Type == "message" && item.Content != "" && !sawMessageDelta:
+					sawMessageDelta = true
+					firstToken()
+					textLen += len(item.Content)
+					if !send(StreamEvent{Type: EventDelta, Text: item.Content}) {
+						return
+					}
+				}
+			}
+			usage = nativeUsage(ev.Result.Stats)
+			stats = nativeStatsEvent(ev.Result.Stats, maxTokens)
+		}
+	}
+
+	elapsed := time.Since(start)
+	if usage == nil {
+		// No numbers from the server; derive a conservative estimate so the meter
+		// still moves, marked as estimated so it is never presented as fact.
+		completion := EstimateTokens(strings.Repeat("x", textLen))
+		usage = &Usage{CompletionTokens: completion, TotalTokens: completion}
+	}
+	if stats == nil {
+		stats = &GenerationStats{Source: SourceEstimated}
+	}
+	if stats.TimeToFirstTokenMs == 0 {
+		stats.TimeToFirstTokenMs = ttft.Milliseconds()
+	}
+	if stats.GenerationMs == 0 {
+		// This route reports no generation time of its own; what is left after
+		// the first token is the honest approximation of it.
+		stats.GenerationMs = elapsed.Milliseconds() - stats.TimeToFirstTokenMs
+	}
+	if stats.TokensPerSecond == 0 && usage.CompletionTokens > 0 {
+		if micros := elapsed.Microseconds(); micros > 0 {
+			stats.TokensPerSecond = float64(usage.CompletionTokens) / (float64(micros) / 1e6)
+		}
+	}
+	stats.TotalMs = elapsed.Milliseconds()
+
+	send(StreamEvent{Type: EventUsage, Usage: usage})
 	send(StreamEvent{Type: EventDone, Stats: stats})
 }
 

@@ -27,6 +27,11 @@ func newTestStore(t *testing.T) *store.Store {
 
 // fakeProvider is a scripted backend. Each entry in replies is one generation.
 type fakeProvider struct {
+	// id and name let a test register a second backend, so it can pin that a
+	// compaction runs on a model other than the chat's own.
+	id   string
+	name string
+
 	replies [][]llm.StreamEvent
 	model   llm.ModelInfo
 	// blockAfter, when > 0, makes a generation stall after that many events until
@@ -43,8 +48,19 @@ type fakeProvider struct {
 	started  chan struct{}
 }
 
-func (f *fakeProvider) ID() string   { return "fake" }
-func (f *fakeProvider) Name() string { return "Fake" }
+func (f *fakeProvider) ID() string {
+	if f.id != "" {
+		return f.id
+	}
+	return "fake"
+}
+
+func (f *fakeProvider) Name() string {
+	if f.name != "" {
+		return f.name
+	}
+	return "Fake"
+}
 
 // CanToggleThinking implements llm.ThinkingToggle.
 func (f *fakeProvider) CanToggleThinking() bool { return f.toggleThinking }
@@ -101,6 +117,17 @@ func (f *fakeProvider) lastRequest() llm.ChatRequest {
 		return llm.ChatRequest{}
 	}
 	return f.requests[len(f.requests)-1]
+}
+
+// requestAt returns the nth request the provider was given, so a test can compare
+// a retry against the attempt it followed.
+func (f *fakeProvider) requestAt(i int) llm.ChatRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i < 0 || i >= len(f.requests) {
+		return llm.ChatRequest{}
+	}
+	return f.requests[i]
 }
 
 type capturedEvent struct {

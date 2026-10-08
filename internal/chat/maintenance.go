@@ -168,6 +168,29 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		previous = assembly.MemorySummary
 	}
 
+	// The summariser may be a different model than the chat's own, in which case
+	// its own window is what this call has to live in — the plan above stays
+	// priced against the chat's window, because the plan is about the chat.
+	target, err := e.summariser(ctx, provider, backendID, modelID, modelInfo,
+		assembly.Budget.Limit, chat.NumCtx, settings)
+	if err != nil {
+		return nil, err
+	}
+	limit := target.Limit
+	if limit <= 0 {
+		// An unknown window for the summariser. The chat's own is the only honest
+		// fallback, and it is reported: the alternative is a summary silently
+		// written through a different budget than the one that was configured.
+		limit = assembly.Budget.Limit
+		if target.Configured {
+			e.emit(events.Warning, map[string]any{
+				"chatId": chat.ID,
+				"warning": fmt.Sprintf("das Kontextfenster des Zusammenfassungs-Modells %q ist unbekannt — "+
+					"verwendet wird das Fenster des Chat-Modells", target.Model),
+			})
+		}
+	}
+
 	// The transcript's allowance comes from the window of the model that has to
 	// read it, less the prompt that carries it and a reserve for the answer.
 	// Measuring the prompt here, with the transcript left out, is what makes that
@@ -193,14 +216,14 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	if configured := settings.Compact.MaxSummaryTokens; configured > outputTokens {
 		outputTokens = configured
 	}
-	if room := assembly.Budget.Limit - overhead - summaryMinTranscriptTokens; outputTokens > room {
+	if room := limit - overhead - summaryMinTranscriptTokens; outputTokens > room {
 		outputTokens = room
 	}
 	if outputTokens < 1 {
 		outputTokens = 1
 	}
-	margin := assembly.Budget.Limit / 16
-	budget := PlanTranscriptBudget(assembly.Budget.Limit, outputTokens+margin, overhead)
+	margin := limit / 16
+	budget := PlanTranscriptBudget(limit, outputTokens+margin, overhead)
 	transcript := RenderTranscript(toFold, budget)
 
 	// A cap, not a target: the model is told to be terse, so it stops far short of
@@ -214,19 +237,19 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	// toggle (LM Studio's `enable_thinking`) is asked the same way. Either way the
 	// in-prompt soft switch goes out, and Summarize's retry covers a model that
 	// thinks regardless.
-	disableThinking := modelInfo.Has(llm.CapThink)
-	if t, ok := provider.(llm.ThinkingToggle); ok && t.CanToggleThinking() {
+	disableThinking := target.Info.Has(llm.CapThink)
+	if t, ok := target.Provider.(llm.ThinkingToggle); ok && t.CanToggleThinking() {
 		disableThinking = true
 	}
-	summary, err := Summarize(ctx, provider, modelID, SummarizeOptions{
+	summary, err := Summarize(ctx, target.Provider, target.Model, SummarizeOptions{
 		PreviousSummary: previous,
 		Transcript:      transcript,
 		Focus:           opts.Focus,
 		Temperature:     settings.Compact.SummaryTemperature,
 		MaxTokens:       maxTokens,
-		NumCtx:          chat.NumCtx,
+		NumCtx:          target.NumCtx,
 		DisableThinking: disableThinking,
-		ContextLimit:    assembly.Budget.Limit,
+		ContextLimit:    limit,
 	})
 	if err != nil {
 		return nil, err
@@ -242,8 +265,11 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		Focus:        opts.Focus,
 		TokensBefore: plan.TokensBefore,
 		TokensAfter:  llm.EstimateTokens(summary),
-		Model:        modelID,
-		Backend:      backendID,
+		// The model that actually wrote the memory, which is not necessarily the
+		// chat's own: the card in the transcript names it, and a memory written
+		// by a different model is a fact worth being able to see.
+		Model:   target.Model,
+		Backend: target.Backend,
 	}
 	if err := e.Store.CreateCompaction(compaction); err != nil {
 		return nil, err
@@ -254,6 +280,67 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	e.InvalidateMeasurement(chat.ID)
 	e.emit(events.Compaction, map[string]any{"chatId": chat.ID, "compaction": compaction})
 	return &compaction, nil
+}
+
+// summaryTarget is the model that writes a compaction's memory: which provider and
+// model to call, the window it has to work in, and the per-chat override to send.
+type summaryTarget struct {
+	Provider llm.Provider
+	Backend  string
+	Model    string
+	Info     llm.ModelInfo
+	// Limit is the context window the summarisation call is budgeted against.
+	Limit int
+	// NumCtx is a per-chat context override. It belongs to the chat's own model,
+	// so it is carried over only when that is also the summariser.
+	NumCtx int
+	// Configured marks a model chosen in the settings instead of the chat's own.
+	Configured bool
+}
+
+// summariser resolves which model writes the memory.
+//
+// The chat's own model is the default: it is already loaded, and chatLimit/numCtx
+// already encode any per-chat context override. A configured summary model wins
+// instead, and a choice that cannot be honoured is an error rather than a silent
+// fallback — a user who picked a non-thinking model for this job has to hear that
+// the choice was not applied, or the fix for an empty summary stays hidden.
+// (Measured on a local reasoning model: 48 of 48 output tokens went to reasoning
+// and not a single message was produced.)
+func (e *Engine) summariser(ctx context.Context, provider llm.Provider, backendID, modelID string,
+	modelInfo llm.ModelInfo, chatLimit, numCtx int, settings config.Settings) (summaryTarget, error) {
+
+	own := summaryTarget{
+		Provider: provider,
+		Backend:  backendID,
+		Model:    modelID,
+		Info:     modelInfo,
+		Limit:    chatLimit,
+		NumCtx:   numCtx,
+	}
+	ref := settings.Compact.SummaryModel
+	if ref.Backend == "" || ref.Model == "" {
+		return own, nil
+	}
+	if ref.Backend == backendID && ref.Model == modelID {
+		// Spelled out, but the same model: nothing to resolve, and the per-chat
+		// override still applies to it.
+		return own, nil
+	}
+	summaryProvider, ok := e.Registry.Provider(ref.Backend)
+	if !ok {
+		return summaryTarget{}, fmt.Errorf("das Zusammenfassungs-Modell %q gehört zum Backend %q, "+
+			"das nicht konfiguriert ist", ref.Model, ref.Backend)
+	}
+	info := e.resolveModel(ctx, ref.Backend, ref.Model, settings)
+	return summaryTarget{
+		Provider:   summaryProvider,
+		Backend:    ref.Backend,
+		Model:      ref.Model,
+		Info:       info,
+		Limit:      info.ContextLimit,
+		Configured: true,
+	}, nil
 }
 
 func triggerName(force bool) string {

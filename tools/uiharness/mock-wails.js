@@ -510,7 +510,11 @@ Verfügbare Tools: {{tool_list}}`,
       scrapeAllowPrivateHosts: false,
       scrapeCacheHours: 168,
     },
-    compact: { enabled: true, threshold: 0.8, keepRecentTurns: 6, reserveForResponse: 1024, summaryTemperature: 0.2, maxSummaryTokens: 1200 },
+    // summaryModel is set, not left empty: a configured summary model is the
+    // state a reader has to be able to see, and the control that carries it is
+    // the one this fixture exists to render. The smaller non-reasoning model is
+    // the realistic choice — that is what the setting is for.
+    compact: { enabled: true, threshold: 0.8, keepRecentTurns: 6, reserveForResponse: 1024, summaryTemperature: 0.2, maxSummaryTokens: 1200, summaryModel: { backend: 'lmstudio', model: 'ornith-1.5-9b' } },
     sampler: { temperature: 0.7, topP: 0.9, maxTokens: 0, numCtx: 0 },
     defaultSystemPrompt: PROMPT_BODIES.research.en,
     // Same five built-ins, in the same order, as config.DefaultPresets(). The

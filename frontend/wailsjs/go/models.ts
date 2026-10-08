@@ -128,6 +128,7 @@ export namespace config {
 	    reserveForResponse: number;
 	    summaryTemperature: number;
 	    maxSummaryTokens: number;
+	    summaryModel: llm.Ref;
 	
 	    static createFrom(source: any = {}) {
 	        return new CompactSettings(source);
@@ -141,7 +142,26 @@ export namespace config {
 	        this.reserveForResponse = source["reserveForResponse"];
 	        this.summaryTemperature = source["summaryTemperature"];
 	        this.maxSummaryTokens = source["maxSummaryTokens"];
+	        this.summaryModel = this.convertValues(source["summaryModel"], llm.Ref);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class PromptPreset {
 	    id: string;
@@ -370,6 +390,20 @@ export namespace llm {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.contextLimit = source["contextLimit"];
 	        this.capabilities = source["capabilities"];
+	    }
+	}
+	export class Ref {
+	    backend: string;
+	    model: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Ref(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.backend = source["backend"];
+	        this.model = source["model"];
 	    }
 	}
 

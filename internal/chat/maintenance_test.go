@@ -613,3 +613,210 @@ func TestCompactAsksAToggleBackendNotToThink(t *testing.T) {
 		t.Errorf("think = %v, want false for a backend that accepts the toggle", req.Think)
 	}
 }
+
+// --- summarising: inline thinking and the summary model ---------------------
+
+// seedTurns writes the minimal foldable history: one user turn and its answer.
+func seedTurns(t *testing.T, st *store.Store) {
+	t.Helper()
+	for _, m := range []struct {
+		id   string
+		seq  int
+		role string
+		text string
+	}{
+		{"m1", 1, "user", "Erste Frage"},
+		{"m2", 2, "assistant", "Erste Antwort"},
+	} {
+		if err := st.CreateMessage(store.Message{
+			ID: m.id, ChatID: "chat-1", Seq: m.seq, Role: m.role, Content: m.text,
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func summariesOf(t *testing.T, st *store.Store) []store.Compaction {
+	t.Helper()
+	list, err := st.ListCompactions("chat-1")
+	if err != nil {
+		t.Fatalf("list compactions: %v", err)
+	}
+	return list
+}
+
+// engineWithSummaryModel builds an engine with a chat backend and, optionally, a
+// second backend used for summarisation, with the summary model set in the
+// settings as a user would set it.
+func engineWithSummaryModel(t *testing.T, st *store.Store, chatProvider, summaryProvider *fakeProvider,
+	ref llm.Ref) *Engine {
+
+	t.Helper()
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.Compact.SummaryModel = ref
+	registry := llm.NewRegistry(nil)
+	registry.Register(chatProvider)
+	if summaryProvider != nil {
+		registry.Register(summaryProvider)
+	}
+	log := &eventLog{}
+	return NewEngine(st, registry, nil, func() config.Settings { return settings }, log.emit)
+}
+
+// TestCompactStripsInlineThinkingFromASummary pins that a model which inlines its
+// deliberation in the content does not get that deliberation stored as the chat's
+// memory. The memory is re-read on every later turn, so private reasoning in it
+// would be permanent — and it is not what the user asked to remember.
+func TestCompactStripsInlineThinkingFromASummary(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedTurns(t, st)
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{{{Type: llm.EventDelta,
+			Text: "<think>Der Nutzer fragte nach Peru. Ich sollte Lima nennen.</think>\n\n" +
+				"## Festgestellte Fakten\n- Lima ist die Hauptstadt von Peru."}}},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	list := summariesOf(t, st)
+	if len(list) != 1 {
+		t.Fatalf("%d compactions, want 1", len(list))
+	}
+	got := list[0].Summary
+	if strings.Contains(got, "<think>") || strings.Contains(got, "Ich sollte Lima nennen") {
+		t.Errorf("the stored memory still carries the model's private thinking:\n%s", got)
+	}
+	if !strings.Contains(got, "Lima ist die Hauptstadt von Peru") {
+		t.Errorf("the stored memory lost the answer itself:\n%s", got)
+	}
+	if provider.requestCount() != 1 {
+		t.Errorf("%d summariser calls, want 1: stripping the thinking is not a retry",
+			provider.requestCount())
+	}
+}
+
+// TestCompactRetriesAnAnswerThatWasOnlyThinking pins the other half of the rule:
+// an answer made of nothing but an inline thinking block is not a summary. It is
+// treated as the reasoning-budget failure — retried with room for that thinking —
+// rather than stored as the chat's memory.
+func TestCompactRetriesAnAnswerThatWasOnlyThinking(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedTurns(t, st)
+
+	provider := &fakeProvider{
+		// A window wide enough that the retry can actually be given more room than
+		// the first attempt; on a small one the prompt alone leaves none.
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 32768, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "<analysis>Ich prüfe erst, ob die Frage schon beantwortet ist.</analysis>"}},
+			{{Type: llm.EventDelta, Text: "## Festgestellte Fakten\n- Lima ist die Hauptstadt von Peru."}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	list := summariesOf(t, st)
+	if len(list) != 1 {
+		t.Fatalf("%d compactions, want 1", len(list))
+	}
+	if strings.Contains(list[0].Summary, "Ich prüfe erst") {
+		t.Errorf("a thinking-only answer was stored as the chat's memory:\n%s", list[0].Summary)
+	}
+	if provider.requestCount() != 2 {
+		t.Fatalf("%d summariser calls, want a retry", provider.requestCount())
+	}
+	first, retry := provider.requestAt(0), provider.requestAt(1)
+	if retry.MaxTokens <= first.MaxTokens {
+		t.Errorf("retry budget %d, want more than the first attempt's %d: the thinking is what ate it",
+			retry.MaxTokens, first.MaxTokens)
+	}
+}
+
+// TestCompactRunsOnTheConfiguredSummaryModel pins the escape hatch for a model
+// that cannot be talked out of thinking: a user picks a different model for
+// summarisation, and it is that model's window that prices the call. A summary
+// budgeted against the chat model's window would be a request the summary model
+// cannot hold.
+func TestCompactRunsOnTheConfiguredSummaryModel(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedTurns(t, st)
+
+	chatProvider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+	}
+	// The helper backend mirrors LM Studio: it accepts the thinking toggle even
+	// though its model metadata advertises no reasoning capability.
+	summaryProvider := &fakeProvider{
+		id: "helper", name: "Helper", toggleThinking: true,
+		model:   llm.ModelInfo{ID: "helper-model", Backend: "helper", ContextLimit: 4096, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Gedächtnis."}}},
+	}
+	engine := engineWithSummaryModel(t, st, chatProvider, summaryProvider,
+		llm.Ref{Backend: "helper", Model: "helper-model"})
+
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if n := chatProvider.requestCount(); n != 0 {
+		t.Errorf("the chat's own model ran %d generations for the summary, want none", n)
+	}
+	req := summaryProvider.lastRequest()
+	if req.Model != "helper-model" {
+		t.Errorf("summarised on %q, want the configured model", req.Model)
+	}
+	if req.Think == nil || *req.Think {
+		t.Errorf("think = %v, want false: a separate summary model is chosen for exactly this",
+			req.Think)
+	}
+	if req.MaxTokens <= 0 || req.MaxTokens >= 8192 {
+		t.Errorf("summary budget = %d, want it bounded by the summary model's 4096-token window",
+			req.MaxTokens)
+	}
+
+	list := summariesOf(t, st)
+	if len(list) != 1 {
+		t.Fatalf("%d compactions, want 1", len(list))
+	}
+	if list[0].Backend != "helper" || list[0].Model != "helper-model" {
+		t.Errorf("compaction recorded %q/%q, want the model that actually wrote it",
+			list[0].Backend, list[0].Model)
+	}
+}
+
+// TestCompactReportsAnUnconfiguredSummaryBackend pins that the setting is never
+// silently ignored. Quietly falling back to the chat's own model would hide both
+// the mistake and its fix, and the user would be left wondering why a summary is
+// still empty.
+func TestCompactReportsAnUnconfiguredSummaryBackend(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedTurns(t, st)
+
+	chatProvider := &fakeProvider{
+		model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Gedächtnis."}}},
+	}
+	engine := engineWithSummaryModel(t, st, chatProvider, nil, llm.Ref{Backend: "ghost", Model: "x"})
+
+	_, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
+	if err == nil {
+		t.Fatal("a summary model on an unconfigured backend was accepted silently")
+	}
+	if !strings.Contains(err.Error(), "ghost") {
+		t.Errorf("error %q does not name the backend that is missing", err)
+	}
+	if n := chatProvider.requestCount(); n != 0 {
+		t.Errorf("the compaction ran on the chat's model anyway: %d generations", n)
+	}
+}

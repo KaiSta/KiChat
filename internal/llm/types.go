@@ -93,6 +93,12 @@ type Usage struct {
 	CompletionTokens   int `json:"completionTokens"`
 	TotalTokens        int `json:"totalTokens"`
 	CachedPromptTokens int `json:"cachedPromptTokens,omitempty"`
+	// ReasoningTokens is how much of the completion went to private thinking
+	// rather than to the answer. LM Studio's native route reports it directly and
+	// OpenAI-compatible servers put it in completion_tokens_details. It is the
+	// number that separates "the model answered nothing" from "the model thought
+	// until its budget ran out", which is a bug report and not a slow answer.
+	ReasoningTokens int `json:"reasoningTokens,omitempty"`
 }
 
 // GenerationStats captures speed measurements for one generation.

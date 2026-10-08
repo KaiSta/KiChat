@@ -833,7 +833,19 @@ function ContextTab({
   patch: (c: Partial<config.Settings>) => void
 }) {
   const t = useStore((s) => s.t)
+  const models = useStore((s) => s.models)
   const compact = draft.compact
+  // A model id may contain a slash, so a `backend/model` key would be ambiguous.
+  // The pair is encoded instead of concatenated, so the select can carry it as
+  // one opaque value.
+  const refValue = (backend: string, model: string) => JSON.stringify([backend, model])
+  const selectedRef = compact.summaryModel?.model
+    ? refValue(compact.summaryModel.backend, compact.summaryModel.model)
+    : ''
+  const candidates = useMemo(
+    () => [...models].sort((a, b) => a.backend.localeCompare(b.backend) || a.id.localeCompare(b.id)),
+    [models],
+  )
   return (
     <>
       <Section
@@ -848,6 +860,23 @@ function ContextTab({
           />
           {t('settings.autoCompact')}
         </label>
+        <Field label={t('settings.summaryModel')} hint={t('settings.summaryModelHint')}>
+          <select
+            className="select"
+            value={selectedRef}
+            onChange={(e) => {
+              const [backend, model] = JSON.parse(e.target.value) as [string, string]
+              patch({ compact: { ...compact, summaryModel: { backend, model } } })
+            }}
+          >
+            <option value="">{t('settings.summaryModelDefault')}</option>
+            {candidates.map((m) => (
+              <option key={`${m.backend}/${m.id}`} value={refValue(m.backend, m.id)}>
+                {m.id} ({m.backend})
+              </option>
+            ))}
+          </select>
+        </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label={`${t('settings.threshold')} (0–1)`}>
             <input

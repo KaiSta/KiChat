@@ -3,6 +3,8 @@ package llm
 import (
 	"context"
 	"os"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -176,4 +178,149 @@ func firstHead(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// TestLiveNativeReasoningOffIsTheRouteThatMakesASummaryPossible settles the one
+// claim only a real server can: that asking LM Studio's native route for
+// `reasoning: "off"` makes a reasoning model write an answer it would otherwise
+// spend its whole output budget thinking past. Both halves are measured — the
+// same prompt with the setting and without it — because "the summary is not
+// empty" on its own would also hold for a model that never reasons.
+//
+// The strict assertions are on the reasoning-off half, which is the route the
+// summariser now takes. The comparator is reported rather than asserted: whether
+// a model thinks its way past a small cap is a property of that model, and the
+// point of the test is to show the route works, not to require a particular
+// model to be bad at budgeting.
+func TestLiveNativeReasoningOffProducesASummary(t *testing.T) {
+	if os.Getenv("KICHAT_LIVE") != "1" {
+		t.Skip("set KICHAT_LIVE=1 to run against a live backend")
+	}
+	base := os.Getenv("KICHAT_LMSTUDIO")
+	if base == "" {
+		base = "http://localhost:1234"
+	}
+	p := newLMStudioProvider(base, "")
+
+	// A 4B model on a CPU measured ~0.3 tokens/s here, and a cold start JIT-loads
+	// it, so this is deliberately not a quick test.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	modelID := liveReasoningModel(t, ctx, p)
+	t.Logf("model=%s reasoning=%q", modelID, p.reasoningChoice[modelID])
+
+	messages := []Message{
+		{Role: RoleSystem, Content: "Du komprimierst einen Verlauf zu einem Gedächtnis. Antworte knapp."},
+		{Role: RoleUser, Content: "<conversation>\nNutzer: Hauptstadt von Peru?\n" +
+			"Assistent: Lima.\n</conversation>\n\nKomprimiere den Verlauf zu einem Gedächtnis."},
+	}
+
+	// Half one: the route the summariser takes.
+	off := false
+	stream, err := p.Chat(ctx, ChatRequest{Model: modelID, Messages: messages, MaxTokens: 64, Think: &off})
+	if err != nil {
+		t.Fatalf("reasoning-off chat: %v", err)
+	}
+	var text strings.Builder
+	var usage *Usage
+	var stats *GenerationStats
+	for ev := range stream {
+		switch ev.Type {
+		case EventDelta:
+			text.WriteString(ev.Text)
+		case EventReasoning:
+			// Expected to stay silent on this route; recorded for the log.
+		case EventUsage:
+			usage = ev.Usage
+		case EventDone:
+			stats = ev.Stats
+		case EventError:
+			t.Fatalf("reasoning-off stream error: %s", ev.Error)
+		}
+	}
+	if strings.TrimSpace(text.String()) == "" {
+		t.Fatalf("reasoning off produced no answer at all (usage=%+v stats=%+v)", usage, stats)
+	}
+	if usage == nil {
+		t.Fatal("no usage from a route that reports reasoning_output_tokens")
+	}
+	if usage.ReasoningTokens != 0 {
+		t.Errorf("reasoning tokens = %d, want 0 with the setting off", usage.ReasoningTokens)
+	}
+	if stats == nil || stats.Source != SourceLMStudio {
+		t.Errorf("stats = %+v, want LM Studio's own numbers", stats)
+	}
+	t.Logf("reasoning off: %d in / %d out (%d reasoning), stop=%q, text=%q",
+		usage.PromptTokens, usage.CompletionTokens, usage.ReasoningTokens,
+		stats.StopReason, firstHead(text.String(), 200))
+
+	// Half two: the same request as an ordinary (OpenAI-compatible) one, which is
+	// what compaction did before and cannot switch thinking off.
+	stream, err = p.Chat(ctx, ChatRequest{Model: modelID, Messages: messages, MaxTokens: 64})
+	if err != nil {
+		t.Fatalf("compat chat: %v", err)
+	}
+	var plain strings.Builder
+	var plainReasoning strings.Builder
+	var plainUsage *Usage
+	var plainStats *GenerationStats
+	for ev := range stream {
+		switch ev.Type {
+		case EventDelta:
+			plain.WriteString(ev.Text)
+		case EventReasoning:
+			plainReasoning.WriteString(ev.Text)
+		case EventUsage:
+			plainUsage = ev.Usage
+		case EventDone:
+			plainStats = ev.Stats
+		case EventError:
+			t.Fatalf("compat stream error: %s", ev.Error)
+		}
+	}
+	if plainUsage == nil || plainStats == nil {
+		t.Fatalf("compat route reported no numbers (usage=%+v stats=%+v)", plainUsage, plainStats)
+	}
+	t.Logf("thinking left on: %d in / %d out (%d reasoning reported), stop=%q, text=%q, reasoning=%q",
+		plainUsage.PromptTokens, plainUsage.CompletionTokens, plainUsage.ReasoningTokens,
+		plainStats.StopReason, firstHead(plain.String(), 200), firstHead(plainReasoning.String(), 200))
+	// A model that reasons to the last token and writes no answer is the reported
+	// failure — visible here as reasoning without text. Either way something must
+	// have come back, which is what makes this half a comparator rather than a
+	// second thing that could fail for its own reasons.
+	if strings.TrimSpace(plain.String()) == "" && strings.TrimSpace(plainReasoning.String()) == "" {
+		t.Errorf("the ordinary request returned neither an answer nor reasoning: %+v", plainUsage)
+	}
+}
+
+// liveReasoningModel picks a model that publishes a reasoning configuration,
+// preferring one that is already loaded so the test does not pay for a load it
+// does not need. It skips rather than fails when the server has none, because a
+// machine with only non-reasoning models cannot answer the question this test
+// asks.
+func liveReasoningModel(t *testing.T, ctx context.Context, p *openAICompatProvider) string {
+	t.Helper()
+	p.loadReasoningChoices(ctx)
+	if len(p.reasoningChoice) == 0 {
+		t.Skip("no model on this LM Studio publishes a reasoning configuration")
+	}
+	models, err := p.ListModels(ctx)
+	if err != nil {
+		t.Fatalf("list models: %v", err)
+	}
+	ids := make([]string, 0, len(p.reasoningChoice))
+	for id := range p.reasoningChoice {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, m := range models {
+		if m.State != StateLoaded {
+			continue
+		}
+		if _, ok := p.reasoningChoice[m.ID]; ok {
+			return m.ID
+		}
+	}
+	return ids[0]
 }

@@ -67,6 +67,14 @@ type CompactSettings struct {
 	ReserveForResponse int     `json:"reserveForResponse"`
 	SummaryTemperature float64 `json:"summaryTemperature"`
 	MaxSummaryTokens   int     `json:"maxSummaryTokens"`
+	// SummaryModel runs the summarisation on a model other than the chat's own.
+	// A reasoning model can spend the whole summary budget thinking before it
+	// writes a word — measured on a local reasoning model: every one of the 48
+	// output tokens went to reasoning and not a single message was produced — and
+	// not every backend lets thinking be switched off. A small instruction model
+	// sidesteps the question. Empty means the chat's own model, which is the
+	// previous behaviour and the right default: it is already loaded.
+	SummaryModel llm.Ref `json:"summaryModel"`
 }
 
 // SamplerSettings are the global generation defaults.
@@ -291,6 +299,12 @@ func (s *Settings) normalise() {
 	}
 	if s.Compact.MaxSummaryTokens <= 0 {
 		s.Compact.MaxSummaryTokens = 1200
+	}
+	// A half-filled summary model — a backend without a model, or the reverse —
+	// would look configured and then fail every compaction, so it counts as
+	// unset and the chat's own model is used, as before.
+	if s.Compact.SummaryModel.Backend == "" || s.Compact.SummaryModel.Model == "" {
+		s.Compact.SummaryModel = llm.Ref{}
 	}
 	if s.Sampler.Temperature <= 0 {
 		s.Sampler.Temperature = 0.7

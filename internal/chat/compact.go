@@ -398,6 +398,33 @@ const summaryMinTranscriptTokens = 1024
 // enough; the cap keeps a model whose thinking keeps getting longer from looping.
 const summaryAttempts = 3
 
+// thinkingBlock matches an inline chain-of-thought block, which is how a backend
+// with no separate reasoning channel delivers one. It is case-insensitive and
+// spans lines, because a thinking block is prose, not a tag pair on one line.
+var thinkingBlock = regexp.MustCompile(`(?is)<(?:think|thinking|analysis|reasoning)>.*?</(?:think|thinking|analysis|reasoning)>`)
+
+// danglingThinkingOpen matches a thinking block whose closing tag never arrived,
+// which is what a generation cut off mid-thought looks like.
+var danglingThinkingOpen = regexp.MustCompile(`(?is)<(?:think|thinking|analysis|reasoning)>.*$`)
+
+// stripThinking splits a model's answer into what it wants to say and what it
+// thought while saying it. The thinking is returned rather than dropped, because
+// a summary made of nothing but thinking is not an empty answer: it is the
+// reasoning-budget failure, and both the retry and the error message need to see
+// it to name the cause.
+func stripThinking(text string) (answer, thinking string) {
+	if !strings.Contains(text, "<") {
+		return strings.TrimSpace(text), ""
+	}
+	blocks := thinkingBlock.FindAllString(text, -1)
+	answer = thinkingBlock.ReplaceAllString(text, "")
+	if open := danglingThinkingOpen.FindString(answer); open != "" {
+		blocks = append(blocks, open)
+		answer = strings.TrimSuffix(answer, open)
+	}
+	return strings.TrimSpace(answer), strings.TrimSpace(strings.Join(blocks, "\n"))
+}
+
 // Summarize folds the plan's range into a memory summary. When a previous
 // summary exists it is merged in, which keeps the cost of repeated compaction
 // linear in the number of messages rather than quadratic.
@@ -452,8 +479,18 @@ func Summarize(ctx context.Context, p llm.Provider, model string, opts Summarize
 		if err != nil {
 			return "", fmt.Errorf("Zusammenfassung fehlgeschlagen: %w", err)
 		}
-		if text := strings.TrimSpace(out.text); text != "" {
-			return text, nil
+		// A backend without a separate reasoning channel inlines the model's
+		// deliberation in the content — `<think>…</think>`, `<analysis>…</analysis>`
+		// — and a summary that consisted of nothing but that would be stored as
+		// the chat's memory and re-read on every later turn. So the blocks are
+		// removed before the answer is judged, and what they contained is counted
+		// as reasoning, because that is what it is.
+		summary, thought := stripThinking(out.text)
+		if summary != "" {
+			return summary, nil
+		}
+		if thought != "" {
+			out.reasoning += thought
 		}
 		last = out
 		// Only a model that reasoned and ran out of budget is worth another look;
