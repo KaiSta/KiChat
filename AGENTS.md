@@ -230,6 +230,33 @@ as plain text brings the same three replies down to 46, 137 and 266 ms, a 45 kB 
 answer from 6.7 s of parsing to a single parse, and the harness reply to 256 remounts over
 887 rewrites.
 
+## Git commits
+
+The subject is `area: description` — lowercase, imperative, and it describes
+the behaviour change, not the files. The areas in use so far: `chat`, `llm`,
+`ui`, `research`, `docs`, `store`, `build`, `config`, `api`, `settings`,
+`secret`, `ingest`, `tools`, `icon` — a new area is fine when the change
+belongs nowhere else. A second effect joins with "and":
+
+```
+chat: make compaction work with a reasoning model
+research: report a refused search, and keep tests out of the keyring
+icon: draw the mark once, derive every surface from it, and make the taskbar one show
+```
+
+The body is prose, not a changelog: the failure or limitation that motivated
+the change, what was measured, what changed and why, and which checks stayed
+green. Numbers go in where they exist (237 ms of parsing → 266 ms, HTTP 422
+with `SUBSCRIPTION_TOKEN_INVALID`); a body that only lists the files is a
+stub. One commit is one coherent change, and the files are staged explicitly,
+not with `git add -A`.
+
+**Always `--no-pager`.** `git log`, `git diff` and `git show` open a pager,
+and in a non-interactive shell the pager blocks the command until someone
+presses a key: it looks hung, and its output lands in a temp file instead of
+the result. `git --no-pager log -1` and friends are the same commands without
+the hang.
+
 ## Conventions
 
 - Comments explain **why**, not what; user-facing strings go through
