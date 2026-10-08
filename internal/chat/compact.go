@@ -182,41 +182,41 @@ func PlanCompaction(in PlanInput) CompactPlan {
 		toSeq = keepFrom - 1
 	}
 
-	// Manual compaction with a target ratio: pull the cut later until the
-	// estimate fits, so "compact to 50%" actually means it. The reserve counts
-	// towards the target, because the number the meter shows for a chat after this
-	// run (`projected`) includes it — the auto threshold reads the projected ratio,
-	// so pricing the manual target without the reserve would make the same
-	// percentage mean two different window states.
+	// Manual compaction with a target ratio: fold turns until the estimate fits, so
+	// "compact to 50%" means it. The reserve counts towards the target because the
+	// meter's `projected` number, which the auto threshold reads, includes it.
 	if in.Force && in.Target > 0 && in.Budget.Limit > 0 && toSeq >= fromSeq {
 		budgetTarget := int(in.Target * float64(in.Budget.Limit))
-		remaining := in.Budget.System + in.Budget.Memory + in.Budget.ToolSchemas + in.Reserve
+		// Attachments are part of the request too and sit inside the region this
+		// cut keeps, so leaving them out prices the kept history too cheaply.
+		base := in.Budget.System + in.Budget.Memory + in.Budget.ToolSchemas +
+			in.Budget.Attachments + in.Reserve
+		kept := 0
 		for _, m := range in.Messages {
-			if m.Seq < keepFrom {
-				continue
+			if m.Seq >= keepFrom {
+				kept += llm.EstimateTokens(m.Content) + llm.EstimateTokens(m.Reasoning)/2
 			}
-			remaining += llm.EstimateTokens(m.Content) + llm.EstimateTokens(m.Reasoning)/2
 		}
 		summaryBudget := in.MaxSummaryTokens
 		if summaryBudget <= 0 {
 			summaryBudget = 1200
 		}
-		// Folding a turn removes the whole turn, so each candidate cut point is
-		// priced with its answer and tool traffic rather than only the prompt that
-		// starts it. Counting just the user message makes the estimate believe it
-		// has folded less than it has, and it then folds turns it did not need to.
+		// Folding a turn removes the whole turn, so every cut point is priced with
+		// its answer and tool traffic rather than only the prompt that starts it.
 		turnTokens := turnTokenSpans(in.Messages, userSeqs)
-		// Walk the cut point backwards (folding more) until it fits.
-		for i := len(userSeqs) - 1; i >= 0; i-- {
-			if remaining+summaryBudget <= budgetTarget {
+		// Walk outwards from the turn this cut begins with, so the figure and the
+		// cut always describe the same state: anchoring the cut at the i-th turn
+		// counted backwards from the end prices one cut and installs another.
+		for i := 0; i < len(userSeqs)-1; i++ {
+			if userSeqs[i] < keepFrom {
+				continue // an earlier compaction already folded this turn
+			}
+			if base+kept+summaryBudget <= budgetTarget {
 				break
 			}
-			if userSeqs[i]-1 < fromSeq {
-				break
-			}
-			toSeq = userSeqs[i] - 1
-			keepFrom = userSeqs[i]
-			remaining -= turnTokens[i]
+			kept -= turnTokens[i]
+			toSeq = userSeqs[i+1] - 1
+			keepFrom = userSeqs[i+1]
 		}
 	}
 

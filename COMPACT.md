@@ -203,8 +203,14 @@ outcomes exist — they fire in this order (`compact.go:167–183`, then `:223�
 
 ### 5.4 Manual targets: "→ 60 %" means 60 %
 
-With `Target > 0` the cut is **walked backwards** (folding more turns) until the estimate
-fits `Target × Limit` (`compact.go:191–221`). Two details make the promise honest:
+With `Target > 0` the cut is **walked outwards from the keep-turns boundary** — folding one
+turn per step, from the oldest kept turn towards the newest — until the estimate fits
+`Target × Limit` (`compact.go:191–221`). The walk has to price the cut it is about to
+install: the loop this replaced counted `i` backwards from the newest turn while folding
+forwards with the same `i`, so its figure and its cut described two different states. The
+cut could then be missed by a whole window in either direction — a 30 % target landing at
+60 %, a 50 % target folding *fewer* turns than the 60 % one, or a bottom target stopping at
+seven kept turns instead of the newest one. Three details make the promise honest:
 
 - **The reserve counts towards the target.** The meter's `projected` number includes it,
   and the auto threshold reads that projected ratio — so pricing the manual target without
@@ -213,7 +219,15 @@ fits `Target × Limit` (`compact.go:191–221`). Two details make the promise ho
   answer and the tool traffic up to the next user turn (`turnTokenSpans`, `compact.go:327`).
   Counting only the user message makes the estimate believe it has folded less than it
   has, and it then folds turns it did not need to.
-  Pinned by `TestPlanCompactionForcedTargetFoldsMore`.
+- **Attachments count towards the target** (`in.Budget.Attachments`). Inlined file text and
+  image payloads sit inside the region the cut keeps; leaving them out priced the kept
+  history too cheaply, and a chat carrying a 12 000-token file landed 22 points over its
+  60 % target.
+  Pinned by `TestPlanCompactionTargetFoldsToTheCutItPrices` (the resulting ratio, and that
+  no less folding would have fitted) and `TestPlanCompactionTargetCountsAttachments`, both
+  of which are sharper than `TestPlanCompactionForcedTargetFoldsMore`'s monotonicity — the
+  old walk was non-monotone, so asserting *more* folding below a higher target was not
+  enough.
 
 ### 5.5 The streaming guard
 
@@ -587,7 +601,14 @@ English and Chinese.
   `<conversation_memory>…</conversation_memory>` (`context.go:207`);
 - adds it to `budget.Memory` (`context.go:197`) and to the Context Inspector as a segment
   labelled **"Gedächtnis (Kompaktierung)"** with the detail `Zusammenfassung der Nachrichten
-  from–to` (`context.go:213`).
+  from–to` (`context.go:213`);
+- counts every attachment **once**. Inlined document text is charged to
+  `budget.Attachments` (`context.go:255`) and the message it was inlined into contributes
+  only its own content to `budget.History` (`context.go:233`, `:263`). Both are added up into
+  `Estimated`, so counting the text on both sides made the meter read half again as large as
+  the request it describes. The measured path needs the same care for the opposite reason: a
+  file attached to a message *newer* than the measurement was never in the measured prompt,
+  so it is added to the delta (`context.go:316–319`).
 
 So the memory is visible in the context inspector, counted in the meter, and clearly
 attributed to a range of message numbers.
@@ -709,6 +730,21 @@ assume are covered.
   (`ModelSwitcher.tsx:136`, `:394`), so the planner always decides.
 - **`Target` is ignored on the automatic path**, which is correct but easy to misread: auto
   compaction fires at the threshold and folds the keep-turns cut, without aiming at a ratio.
+- **The automatic path cannot rescue a chat the keep-turns cut leaves over the window.** The
+  cut is the floor, so a chat whose last `KeepRecentTurns` turns alone exceed the limit is
+  compacted *and stays over it*: measured with 1 910-token turns in an 8 192-token window,
+  auto folded to 179 % of the window and reported the chat as still over limit (576-token
+  turns land at 82 %, which is the case the threshold was designed for). The walk of §5.4
+  could be run with a target of 1.0 to fold past the floor, but that trades the keep-turns
+  guarantee for the window — a policy decision, not an arithmetic one, so it is recorded
+  rather than decided here.
+- **The meter's attachment figure is the stored count, not a re-derivation.** A document's
+  `TokenCount` is what ingestion measured, and it is charged to `budget.Attachments`
+  (`context.go:255`) on the way to `Estimated`; the `<document …>` wrapper and the base64
+  envelope around the text are therefore counted nowhere, leaving the meter a few tokens
+  short per file (the same order as the per-message framing that `History` has never
+  counted). Re-deriving the block would change what the Context Inspector reports as the
+  file's own cost, which is why it is recorded rather than fixed.
 - **The first crossing turn pays the latency.** Compaction runs in the send path, before the
   turn; there is no background or pre-emptive run, and a local CPU model takes minutes.
 - **One document, flat.** The memory is a single merge-targeted Markdown document; there is

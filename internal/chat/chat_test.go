@@ -274,6 +274,158 @@ func TestPlanCompactionForcedTargetFoldsMore(t *testing.T) {
 	}
 }
 
+// bigConversation builds turns big enough for the arithmetic of a target walk to
+// be visible: a 40-character turn never makes two candidate cuts differ, so a
+// walk that prices the wrong one still lands on the right answer by luck.
+func bigConversation(turns, chars int) []store.Message {
+	var out []store.Message
+	seq := 1
+	for i := 0; i < turns; i++ {
+		out = append(out, msg(seq, "user", "Frage Nummer "+strings.Repeat("x", chars)))
+		seq++
+		out = append(out, msg(seq, "assistant", "Antwort Nummer "+strings.Repeat("y", chars)))
+		seq++
+	}
+	return out
+}
+
+// keptCost is the figure the meter shows after a plan is applied: everything that
+// is not verbatim history, plus the turns the cut keeps, plus the memory the run
+// writes. A target ratio is a promise about this number.
+func keptCost(messages []store.Message, keepFrom int, base ContextBudget, summaryBudget int) int {
+	total := base.System + base.Memory + base.Attachments + base.ToolSchemas +
+		base.Reserve + summaryBudget
+	for _, m := range messages {
+		if m.Seq >= keepFrom {
+			total += llm.EstimateTokens(m.Content) + llm.EstimateTokens(m.Reasoning)/2
+		}
+	}
+	return total
+}
+
+func userSeqsOf(messages []store.Message) []int {
+	var out []int
+	for _, m := range messages {
+		if m.Role == "user" {
+			out = append(out, m.Seq)
+		}
+	}
+	return out
+}
+
+// TestPlanCompactionTargetFoldsToTheCutItPrices pins the promise behind the
+// slider: after a run at "compact to 50 %" the meter reads at most 50 %, and the
+// plan folded no turn more than that needed. The walk used to price one cut and
+// install another, so a 30 % target could end up at 60 %.
+func TestPlanCompactionTargetFoldsToTheCutItPrices(t *testing.T) {
+	const (
+		limit         = 20000
+		keepTurns     = 6
+		summaryBudget = 1200
+	)
+	messages := bigConversation(10, 4000)
+	userSeqs := userSeqsOf(messages)
+	base := ContextBudget{Limit: limit, System: 200, ToolSchemas: 100, Reserve: 1024}
+
+	plan := func(ratio float64) CompactPlan {
+		return PlanCompaction(PlanInput{
+			Messages: messages, Budget: base, Force: true, Target: ratio,
+			Threshold: 0.80, KeepRecentTurns: keepTurns, Reserve: base.Reserve,
+			MaxSummaryTokens: summaryBudget,
+		})
+	}
+
+	previousKeepFrom := 0
+	for _, ratio := range []float64{0.8, 0.7, 0.6, 0.5, 0.4, 0.3} {
+		target := int(ratio * limit)
+		got := plan(ratio)
+		if !got.Needed || got.ToSeq < got.FromSeq {
+			t.Fatalf("target %.1f: nothing was folded: %+v", ratio, got)
+		}
+		cost := keptCost(messages, got.KeepFromSeq, base, summaryBudget)
+		if cost > target {
+			t.Errorf("target %.1f: the cut costs %d tokens, more than the %d it promises",
+				ratio, cost, target)
+		}
+		kept := 0
+		for _, seq := range userSeqs {
+			if seq >= got.KeepFromSeq {
+				kept++
+			}
+		}
+		// Keeping one more turn must not have fitted either. The cut never keeps
+		// more than keepTurns turns, so no less folding was available at
+		// keepTurns.
+		if kept < keepTurns && kept < len(userSeqs) {
+			less := keptCost(messages, userSeqs[len(userSeqs)-kept-1], base, summaryBudget)
+			if less <= target {
+				t.Errorf("target %.1f: keeping %d turns fits (%d ≤ %d) but the plan kept %d",
+					ratio, kept+1, less, target, kept)
+			}
+		}
+		if got.KeepFromSeq < previousKeepFrom {
+			t.Errorf("target %.1f: folded less than the higher target before it (%d < %d)",
+				ratio, got.KeepFromSeq, previousKeepFrom)
+		}
+		previousKeepFrom = got.KeepFromSeq
+	}
+
+	// A target below what even the newest turn costs cannot be met. The run must
+	// then fold as far as it is allowed to, which is to the newest turn: a
+	// request with no verbatim history is still a request the model can answer.
+	floor := plan(0.05)
+	if want := userSeqs[len(userSeqs)-1]; floor.KeepFromSeq != want {
+		t.Errorf("KeepFromSeq = %d, want %d: the newest turn always stays verbatim",
+			floor.KeepFromSeq, want)
+	}
+}
+
+// TestPlanCompactionTargetCountsAttachments pins that a target prices the files
+// the request carries. They sit inside the region the cut keeps, and leaving them
+// out made the plan believe the window was emptier than it is.
+func TestPlanCompactionTargetCountsAttachments(t *testing.T) {
+	const (
+		limit         = 40000
+		keepTurns     = 6
+		summaryBudget = 1200
+		files         = 12000
+		target        = 0.6
+	)
+	messages := bigConversation(10, 4000)
+
+	plan := func(attachments int) (CompactPlan, ContextBudget) {
+		base := ContextBudget{
+			Limit: limit, System: 200, ToolSchemas: 100, Reserve: 1024,
+			Attachments: attachments,
+		}
+		return PlanCompaction(PlanInput{
+			Messages: messages, Budget: base, Force: true, Target: target,
+			Threshold: 0.80, KeepRecentTurns: keepTurns, Reserve: base.Reserve,
+			MaxSummaryTokens: summaryBudget,
+		}), base
+	}
+
+	withFiles, withBase := plan(files)
+	withoutFiles, withoutBase := plan(0)
+	if !withFiles.Needed || !withoutFiles.Needed {
+		t.Fatalf("both plans should compact: %+v / %+v", withFiles, withoutFiles)
+	}
+	if cost := keptCost(messages, withFiles.KeepFromSeq, withBase, summaryBudget); cost > int(target*limit) {
+		t.Errorf("with %d tokens of inlined files the cut costs %d, more than the %d it promises",
+			files, cost, int(target*limit))
+	}
+	if without := keptCost(messages, withoutFiles.KeepFromSeq, withoutBase, summaryBudget); without > int(target*limit) {
+		t.Errorf("without files the cut costs %d, more than the %d it promises",
+			without, int(target*limit))
+	}
+	// The files are inside the region the cut keeps, so paying for them can only
+	// ever mean folding more, never less.
+	if withFiles.KeepFromSeq < withoutFiles.KeepFromSeq {
+		t.Errorf("KeepFromSeq = %d with %d tokens of files, %d without: files in the kept history must be paid for",
+			withFiles.KeepFromSeq, files, withoutFiles.KeepFromSeq)
+	}
+}
+
 // generousBudget is a transcript allowance wide enough that only the behaviour
 // under test decides the outcome. Used where the budget itself is not the point.
 var generousBudget = TranscriptBudget{Total: 1 << 20, Block: 1 << 20}
@@ -620,6 +772,107 @@ func TestAssembleMeasurementDelta(t *testing.T) {
 	}
 	if exact.Budget.DeltaSince != 0 {
 		t.Fatalf("DeltaSince = %d, want 0", exact.Budget.DeltaSince)
+	}
+}
+
+// TestAssembleCountsInlinedDocumentTextOnce pins the meter against a double
+// count: the document text is charged to Attachments, so the message it was
+// inlined into must not carry it in History as well. Both are added up into the
+// number the meter shows, and counting a file twice made that number read half
+// again as large as the request it describes.
+func TestAssembleCountsInlinedDocumentTextOnce(t *testing.T) {
+	text := strings.Repeat("Inhalt. ", 100)
+	docTokens := llm.EstimateTokens(text)
+	messages := withAttachment(conversation(4), 1, "d1")
+
+	assembly := Assemble(AssemblyInput{
+		Chat:     asmChat("Du bist ein Assistent."),
+		Messages: messages,
+		Limit:    10000, LimitSource: "backend", Reserve: 1024,
+		Documents: []store.Document{{
+			ID: "d1", Title: "bericht.pdf", Text: text, TokenCount: docTokens,
+		}},
+	})
+
+	// History is the stored message content: what the fold has to be able to
+	// replace, and what the model reads before any attachment is appended.
+	wantHistory := 0
+	for _, m := range messages {
+		wantHistory += llm.EstimateTokens(m.Content) + llm.EstimateTokens(m.Reasoning)/2
+	}
+	budget := assembly.Budget
+	if budget.History != wantHistory {
+		t.Errorf("History = %d, want %d: inlined file text belongs to Attachments only",
+			budget.History, wantHistory)
+	}
+	if budget.Attachments != docTokens {
+		t.Errorf("Attachments = %d, want %d", budget.Attachments, docTokens)
+	}
+	if budget.Estimated != budget.System+budget.Memory+budget.Attachments+budget.History+budget.ToolSchemas {
+		t.Errorf("Estimated %d does not equal the sum of its parts", budget.Estimated)
+	}
+	// The text has to reach the model: the accounting was wrong, not the payload.
+	sent := false
+	for _, m := range assembly.Messages {
+		if strings.Contains(m.Content, text) {
+			sent = true
+		}
+	}
+	if !sent {
+		t.Error("inlined attachment text is missing from the request")
+	}
+	// Counted once, the estimate cannot exceed what the request actually costs.
+	if size := llm.EstimateMessagesTokens(assembly.Messages); budget.Estimated > size {
+		t.Errorf("Estimated = %d is larger than the request it describes (%d tokens)",
+			budget.Estimated, size)
+	}
+}
+
+// TestAssembleMeasurementDeltaCountsAttachments covers the other half of the
+// same accounting. Once the backend has reported prompt_tokens it is
+// authoritative for the messages it saw, so everything added since is added on
+// top — attachments included, because they travel in the next request.
+func TestAssembleMeasurementDeltaCountsAttachments(t *testing.T) {
+	plain := Assemble(AssemblyInput{
+		Chat:     asmChat("System."),
+		Messages: conversation(3), // seq 1..6
+		Limit:    10000,
+		Measured: 5000, MeasuredValid: true, MeasuredSeq: 4,
+	})
+
+	for _, tc := range []struct {
+		name      string
+		messages  []store.Message
+		documents []store.Document
+		want      int
+	}{
+		{
+			name:      "inlined document",
+			messages:  withAttachment(conversation(3), 5, "d1"),
+			documents: []store.Document{{ID: "d1", Title: "bericht.pdf", Text: strings.Repeat("Inhalt. ", 100), TokenCount: 900}},
+			want:      900,
+		},
+		{
+			name:      "image",
+			messages:  withImageAttachment(conversation(3), 5, "img1"),
+			documents: []store.Document{{ID: "img1", Title: "bild.png", Text: "Bilddaten", TokenCount: 1024}},
+			want:      llm.EstimateImageTokens(1),
+		},
+	} {
+		got := Assemble(AssemblyInput{
+			Chat:     asmChat("System."),
+			Messages: tc.messages,
+			Limit:    10000,
+			Measured: 5000, MeasuredValid: true, MeasuredSeq: 4,
+			Documents: tc.documents,
+		})
+		if !got.Budget.MeasuredValid {
+			t.Fatalf("%s: the measurement should still be valid", tc.name)
+		}
+		if diff := got.Budget.DeltaSince - plain.Budget.DeltaSince; diff != tc.want {
+			t.Errorf("%s: the delta grew by %d, want %d — the attachment is part of the next request",
+				tc.name, diff, tc.want)
+		}
 	}
 }
 

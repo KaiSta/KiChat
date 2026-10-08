@@ -227,6 +227,10 @@ func Assemble(in AssemblyInput) Assembly {
 			maxIncluded = m.Seq
 		}
 		lm := toLLMMessage(m)
+		// Priced before the attachment text is appended: inlined document text
+		// belongs to Attachments below, and counting it here as well made the
+		// meter read half again as large as the request it describes.
+		historyTokens := llm.EstimateTokens(lm.Content) + llm.EstimateTokens(lm.Reasoning)/2
 		if imgs := imagesByMessage[m.ID]; len(imgs) > 0 {
 			lm.Images = imgs
 			tokens := llm.EstimateImageTokens(len(imgs))
@@ -256,7 +260,7 @@ func Assemble(in AssemblyInput) Assembly {
 				Detail: fmt.Sprintf("%d Datei(en) in Nachricht #%d", len(docs), m.Seq),
 			})
 		}
-		budget.History += llm.EstimateTokens(lm.Content) + llm.EstimateTokens(lm.Reasoning)/2
+		budget.History += historyTokens
 		historyCount++
 		msgs = append(msgs, lm)
 	}
@@ -307,6 +311,12 @@ func Assemble(in AssemblyInput) Assembly {
 				continue
 			}
 			delta += llm.EstimateTokens(m.Content) + llm.EstimateTokens(m.Reasoning)/2
+			// Attachments of newer messages are part of the next request and no
+			// measurement can have counted them: they were added afterwards.
+			delta += llm.EstimateImageTokens(len(imagesByMessage[m.ID]))
+			for _, d := range inlineByMessage[m.ID] {
+				delta += d.TokenCount
+			}
 		}
 		budget.MeasuredSeq = in.MeasuredSeq
 		budget.DeltaSince = delta
