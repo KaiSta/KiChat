@@ -73,7 +73,7 @@ INSTALL_FILES = install -D -m 0755 $(BIN) $(1)$(PREFIX)/bin/$(APP) && \
 	install -D -m 0644 build/appicon.png $(1)$(PREFIX)/share/icons/hicolor/$(ICON_SIZE)/apps/$(APP).png && \
 	install -D -m 0644 build/appicon.png $(1)$(PREFIX)/share/pixmaps/$(APP).png
 
-.PHONY: all help deps frontend bindings build check fmt vet test typecheck run \
+.PHONY: all help deps frontend bindings icon build check fmt vet test typecheck run \
         install uninstall deb lint-deb clean distclean
 
 all: build
@@ -88,6 +88,7 @@ help:
 	@echo "  install     install into $(DESTDIR)$(PREFIX) (override PREFIX/DESTDIR)"
 	@echo "  uninstall   remove what install put there"
 	@echo "  bindings    regenerate frontend/wailsjs after a Go struct change"
+	@echo "  icon        regenerate build/appicon.png and icon.ico from build/appicon.svg"
 	@echo "  lint-deb    run lintian over the built package"
 	@echo "  clean       remove build output (distclean also drops node_modules)"
 
@@ -112,6 +113,18 @@ $(PEER_DEPS): frontend/package.json frontend/package-lock.json
 bindings:
 	$(WAILS) generate module
 	@chmod 644 frontend/wailsjs/go/main/* frontend/wailsjs/go/models.ts frontend/wailsjs/runtime/* 2>/dev/null || true
+
+# --- icon -------------------------------------------------------------------
+
+# The app icon is authored once as build/appicon.svg, and everything else is
+# derived from it, so the taskbar, the browser tab and the .deb never drift
+# apart. rsvg-convert (librsvg2-bin) and ImageMagick (convert) are required.
+icon:
+	@command -v rsvg-convert >/dev/null || { echo "rsvg-convert is required (librsvg2-bin)" >&2; exit 1; }
+	@command -v convert >/dev/null || { echo "convert is required (imagemagick)" >&2; exit 1; }
+	rsvg-convert -w 1024 -h 1024 build/appicon.svg -o build/appicon.png
+	convert build/appicon.png -define icon:auto-resize=256,128,64,48,32,24,16 build/windows/icon.ico
+	@echo "regenerated build/appicon.png and build/windows/icon.ico from build/appicon.svg"
 
 # --- build ------------------------------------------------------------------
 

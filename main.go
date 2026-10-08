@@ -6,10 +6,18 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/linux"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
+
+// Window and taskbar icon, embedded so it shows even when the app is not
+// installed via the .deb (which would otherwise rely on the hicolor icon
+// theme). The same file ships into /usr/share/icons in the package.
+//
+//go:embed build/appicon.png
+var appIcon []byte
 
 func main() {
 	// Create an instance of the app structure
@@ -28,8 +36,15 @@ func main() {
 		// Matches --bg of the dark theme, so the window does not flash white while
 		// the webview paints its first frame.
 		BackgroundColour: &options.RGBA{R: 13, G: 16, B: 23, A: 1},
-		OnStartup:        app.startup,
-		OnShutdown:       app.shutdown,
+		// SetWindowIcon drives the taskbar icon on Linux. WebviewGpuPolicy is
+		// pinned to Never: a non-nil Linux option otherwise falls back to the
+		// zero value (OnDemand) and would change GPU behaviour.
+		Linux: &linux.Options{
+			Icon:             appIcon,
+			WebviewGpuPolicy: linux.WebviewGpuPolicyNever,
+		},
+		OnStartup:  app.startup,
+		OnShutdown: app.shutdown,
 		Bind: []interface{}{
 			app,
 		},
