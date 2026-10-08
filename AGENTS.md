@@ -4,7 +4,8 @@ KiChat is a local-first desktop LLM research chat: `main.go` + `app.go` + `api.g
 top of Go packages in `internal/`, and a React 19 / TypeScript UI in `frontend/`.
 It is a **Wails v2** application (Go binary + webkit2gtk webview), talking to LM Studio
 (`:1234`) and Ollama (`:11434`), with Brave/DuckDuckGo web search and SQLite storage.
-`PLAN.md` describes the architecture and the reasoning behind it.
+`PLAN.md` describes the architecture and the reasoning behind it; `COMPACT.md` is the deep
+dive on context compaction (strategy, arithmetic, failure modes, where the code is).
 
 ## Environment (verified, not assumed)
 
