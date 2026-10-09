@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"kichat/internal/research"
 	"kichat/internal/secret"
 	"kichat/internal/store"
+	"kichat/internal/version"
 )
 
 // --- settings --------------------------------------------------------------
@@ -145,6 +147,31 @@ func (a *App) GetSecretStatus() (SecretStatus, error) {
 			"Offenlegung, aber nicht gegen einen Angreifer mit Zugriff auf dieses Benutzerkonto."
 	}
 	return status, nil
+}
+
+// AppInfo is the running build's identity, shown in Settings so a user can tell
+// which version they are on and what to quote in a bug report.
+type AppInfo struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	Date      string `json:"date"`
+	GoVersion string `json:"goVersion"`
+	Platform  string `json:"platform"`
+}
+
+// GetAppInfo returns the build identity.
+//
+// Unlike every other bound method it does not call ensure(): the version has to
+// answer even when initialisation failed, because that is exactly the moment
+// someone wants to know what they are running.
+func (a *App) GetAppInfo() AppInfo {
+	return AppInfo{
+		Version:   version.Version,
+		Commit:    version.Commit,
+		Date:      version.Date,
+		GoVersion: goruntime.Version(),
+		Platform:  goruntime.GOOS + "/" + goruntime.GOARCH,
+	}
 }
 
 // setBackendAPIKey stores one backend's key in the secret store and rebuilds the

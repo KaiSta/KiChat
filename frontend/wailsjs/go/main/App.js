@@ -26,6 +26,10 @@ export function DeleteCompaction(arg1, arg2) {
   return window['go']['main']['App']['DeleteCompaction'](arg1, arg2);
 }
 
+export function GetAppInfo() {
+  return window['go']['main']['App']['GetAppInfo']();
+}
+
 export function GetBudget(arg1, arg2, arg3) {
   return window['go']['main']['App']['GetBudget'](arg1, arg2, arg3);
 }

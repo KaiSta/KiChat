@@ -19,6 +19,8 @@ export function DeleteChat(arg1:string):Promise<void>;
 
 export function DeleteCompaction(arg1:string,arg2:string):Promise<void>;
 
+export function GetAppInfo():Promise<main.AppInfo>;
+
 export function GetBudget(arg1:string,arg2:string,arg3:string):Promise<chat.ContextBudget>;
 
 export function GetChat(arg1:string):Promise<store.Chat>;

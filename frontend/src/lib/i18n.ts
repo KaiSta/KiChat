@@ -162,6 +162,12 @@ const de = {
 
   'settings.title': 'Einstellungen',
   'settings.general': 'Allgemein',
+  'settings.about': 'Über',
+  'settings.version': 'Version',
+  'settings.buildDate': 'Stand',
+  'settings.platform': 'Plattform',
+  'settings.runtime': 'Laufzeit',
+  'settings.copyVersion': 'Versionsinfo kopieren',
   'settings.language': 'Sprache',
   'settings.languageHint':
     'Sprache der Oberfläche. Die mitgelieferten System-Prompts wechseln mit — selbst bearbeitete bleiben unverändert.',
@@ -426,6 +432,12 @@ const en: Record<keyof typeof de, string> = {
 
   'settings.title': 'Settings',
   'settings.general': 'General',
+  'settings.about': 'About',
+  'settings.version': 'Version',
+  'settings.buildDate': 'Build date',
+  'settings.platform': 'Platform',
+  'settings.runtime': 'Runtime',
+  'settings.copyVersion': 'Copy version info',
   'settings.language': 'Language',
   'settings.languageHint':
     'Language of the interface. The built-in system prompts follow it as well; a prompt you have edited stays as it is.',
@@ -687,6 +699,12 @@ const zh: Record<keyof typeof de, string> = {
 
   'settings.title': '设置',
   'settings.general': '通用',
+  'settings.about': '关于',
+  'settings.version': '版本',
+  'settings.buildDate': '构建日期',
+  'settings.platform': '平台',
+  'settings.runtime': '运行时',
+  'settings.copyVersion': '复制版本信息',
   'settings.language': '语言',
   'settings.languageHint': '界面语言。内置的系统提示词也会随之切换；你修改过的提示词保持不变。',
   'settings.theme': '主题',

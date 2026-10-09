@@ -411,6 +411,26 @@ export namespace llm {
 
 export namespace main {
 	
+	export class AppInfo {
+	    version: string;
+	    commit: string;
+	    date: string;
+	    goVersion: string;
+	    platform: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AppInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.commit = source["commit"];
+	        this.date = source["date"];
+	        this.goVersion = source["goVersion"];
+	        this.platform = source["platform"];
+	    }
+	}
 	export class AttachmentInput {
 	    chatId: string;
 	    path: string;

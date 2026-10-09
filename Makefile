@@ -36,6 +36,18 @@ comma := ,
 HARDEN         ?= 1
 HARDEN_GOFLAGS  = $(if $(filter 1,$(HARDEN)),-buildmode=pie,)
 HARDEN_LDFLAGS  = $(if $(filter 1,$(HARDEN)),-linkmode=external -extldflags=-Wl$(comma)-z$(comma)now,)
+
+# Version identity, linked into internal/version — that package's doc comment
+# records why renaming it silently stops these from matching. The date is the
+# commit's own date, not the build clock: a wall-clock timestamp would make two
+# builds of the same commit differ and waste the -trimpath guarantee above. A
+# missing git (no repo, a plain export) degrades to the package's own defaults
+# rather than to an empty value.
+GIT_SHA    := $(shell git rev-parse --short HEAD 2>/dev/null || true)
+GIT_DATE   := $(shell git show -s --format=%cI HEAD 2>/dev/null || true)
+VERSION_LDFLAGS = -X kichat/internal/version.Version=$(VERSION) \
+	  -X kichat/internal/version.Commit=$(if $(GIT_SHA),$(GIT_SHA),none) \
+	  -X kichat/internal/version.Date=$(if $(GIT_DATE),$(GIT_DATE),unknown)
 # Resolved rather than assumed: on this machine both wails and node live outside
 # the default PATH, which is why a bare `wails build` fails from a clean shell.
 WAILS ?= $(shell command -v wails 2>/dev/null || echo "$$($(GO) env GOPATH)/bin/wails")
@@ -47,9 +59,12 @@ NODE_DEPS := frontend/node_modules
 # for "the frontend dependencies are really usable", so it doubles as the stamp.
 PEER_DEPS := $(NODE_DEPS)/@tailwindcss/oxide-linux-x64-gnu
 
-# Packaging. VERSION is the only value to bump for a release; the package version
-# is $(VERSION) with no Debian revision, which is what a self-built package wants.
-VERSION   ?= 0.1.0
+# The version is authored once, in the VERSION file at the repo root, and every
+# surface is derived from it: the .deb's name, control and changelog, and the
+# string linked into the binary that Settings and --version show. The package
+# version is $(VERSION) with no Debian revision, which is what a self-built
+# package wants. `VERSION=x.y.z make ...` overrides all of it for a one-off.
+VERSION   ?= $(shell cat VERSION 2>/dev/null || echo 0.0.0-dev)
 DEB_ARCH  ?= $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
 PREFIX    ?= /usr
 DESTDIR   ?=
@@ -153,7 +168,7 @@ icon:
 # build the same bytes.
 build: frontend
 	GOFLAGS="$${GOFLAGS} $(HARDEN_GOFLAGS)" \
-	$(WAILS) build -tags $(WEBKIT_TAG) -trimpath $(if $(HARDEN_LDFLAGS),-ldflags '$(HARDEN_LDFLAGS)')
+	$(WAILS) build -tags $(WEBKIT_TAG) -trimpath -ldflags '$(VERSION_LDFLAGS) $(HARDEN_LDFLAGS)'
 	@# wails rewrites the generated bindings and the runtime files with the
 	@# executable bit set; the repo tracks them 644, so without this every build
 	@# leaves mode churn in `git status` that is not a change.

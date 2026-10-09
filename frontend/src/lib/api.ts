@@ -68,6 +68,7 @@ export namespace llm {
 }
 
 export namespace main {
+  export type AppInfo = Plain<Gen.main.AppInfo>
   export type ChatState = Plain<Gen.main.ChatState>
   export type SearchStatus = Plain<Gen.main.SearchStatus>
   export type SecretStatus = Plain<Gen.main.SecretStatus>

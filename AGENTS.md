@@ -230,6 +230,26 @@ as plain text brings the same three replies down to 46, 137 and 266 ms, a 45 kB 
 answer from 6.7 s of parsing to a single parse, and the harness reply to 256 remounts over
 887 rewrites.
 
+## Versioning
+
+The version is authored once, in `VERSION` at the repo root, and every surface is
+derived from it: `make build` links it into `internal/version` (read by Settings →
+General → About and by `kichat --version`), and `make deb` uses it for the package
+name, `control` and `changelog`. Bumping a release is one line in `VERSION`;
+`VERSION=x.y.z` on the make command line overrides it for a one-off.
+
+The commit and date linked in come from `git`, and the date is the *commit's* date,
+never the build clock — a wall-clock timestamp would break the byte-identical
+rebuilds `-trimpath` otherwise guarantees. Two traps:
+
+- **The linker path is the contract.** `-X kichat/internal/version.Version=…` in the
+  Makefile stops matching the moment that package or a variable is renamed, and every
+  build then silently reports `dev`. Keep the two in step.
+- **A pre-release needs Debian's `~`.** Write `VERSION` as `0.2.0~beta1`, not
+  `0.2.0-beta.1`: `~` sorts *before* the release (`0.2.0~beta1 < 0.2.0`), while the
+  dash form sorts *after* it, so `apt upgrade` would happily move a pre-release onto
+  the older-looking final.
+
 ## Git commits
 
 The subject is `area: description` — lowercase, imperative, and it describes
