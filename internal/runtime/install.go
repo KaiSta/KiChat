@@ -51,11 +51,30 @@ const (
 	// AcceleratorVulkan uses the GPU through Vulkan, which needs a driver but no
 	// vendor toolkit, so it is the portable way to get acceleration.
 	AcceleratorVulkan = "vulkan"
+	// AcceleratorROCm is AMD's, through HIP.
+	AcceleratorROCm = "rocm"
+	// AcceleratorCUDA is NVIDIA's. The release ships it per CUDA suite, and the
+	// newest suite that matches wins, so a user asking for "cuda" does not have to
+	// know which one their driver speaks.
+	AcceleratorCUDA = "cuda"
+	// AcceleratorSYCL is Intel's, through oneAPI.
+	AcceleratorSYCL = "sycl"
+	// AcceleratorOpenVINO is Intel's other one, for CPU and integrated GPU.
+	AcceleratorOpenVINO = "openvino"
+	// AcceleratorOpenCL is the Adreno build, published for Windows on arm64.
+	AcceleratorOpenCL = "opencl"
 
 	// userAgent identifies the client to GitHub, which refuses requests without
 	// one.
 	userAgent = "kichat-llama-runtime"
 )
+
+// Accelerators lists the build families in the order a picker should offer them:
+// the one that needs nothing first, then the portable GPU one, then the
+// vendor-specific ones.
+func Accelerators() []string {
+	return []string{AcceleratorCPU, AcceleratorVulkan, AcceleratorROCm, AcceleratorCUDA, AcceleratorSYCL, AcceleratorOpenVINO, AcceleratorOpenCL}
+}
 
 // Asset is one downloadable archive.
 type Asset struct {
@@ -64,6 +83,29 @@ type Asset struct {
 	URL    string
 	Size   int64
 	Digest string // "sha256:<hex>", empty when the API does not report one.
+	// Variant is the build family: cpu, vulkan, rocm, cuda, sycl, openvino, opencl.
+	Variant string
+	// Suite is the version the release carries for that family (`13.4` for CUDA,
+	// `10.0` for ROCm, `fp16` for SYCL), empty when the name pins nothing. It is
+	// kept because it is what tells two installations of one build apart.
+	Suite string
+}
+
+// Dir is the folder this build installs into.
+//
+// The family is part of the name, not just the build number: two families of one
+// release are two different installations, and folding them into one directory
+// would delete the CPU build the moment a user tried the ROCm one — and download
+// 600 MB again to go back.
+func (a Asset) Dir() string {
+	switch {
+	case a.Variant == "":
+		return a.Tag
+	case a.Suite == "":
+		return a.Tag + "-" + a.Variant
+	default:
+		return a.Tag + "-" + a.Variant + "-" + a.Suite
+	}
 }
 
 // Progress is reported while an install runs.
@@ -95,77 +137,192 @@ func NewInstaller(dir string) *Installer {
 	}
 }
 
-// AssetName is the archive llama.cpp publishes for a platform, or an error naming
-// what is not covered.
-//
-// The names are per platform rather than per operating-system convention: Linux
-// is "ubuntu", Windows says "win-cpu" where the others imply the CPU build, macOS
-// carries no accelerator at all (its builds already use Metal), and the extension
-// follows the asset rather than the host — every desktop Unix build is .tar.gz
-// while Windows is .zip, including when KiChat runs on Linux and fetches for
-// Windows. Exported because the settings UI names the build it would fetch.
-func AssetName(tag, goos, goarch, accel string) (string, error) {
+// variant is one build family llama.cpp publishes for a platform.
+type variant struct {
+	// ID is the name the setting stores and the picker offers.
+	ID string
+	// platform is the middle of the published archive name. A `*` stands where the
+	// release carries a suite version (`cuda-13.4`, `rocm-10.0`, `sycl-fp16`),
+	// because pinning one here would break the day the suite moves on — the app
+	// asks for the family and takes the newest the release actually publishes.
+	platform string
+	// ext follows the asset rather than the host: every desktop Unix build is
+	// .tar.gz and Windows is .zip, including when KiChat runs on Linux.
+	ext string
+}
+
+// variantsFor is the measured table of what llama.cpp publishes, read off release
+// b11535 (36 assets). It is per platform and per architecture because the
+// releases are: ROCm, SYCL and OpenVINO are x64 only, the CUDA arm64 build exists
+// where Vulkan's ARM one does, and macOS publishes a single Metal-enabled build
+// per architecture with no accelerator to choose.
+func variantsFor(goos, goarch string) ([]variant, error) {
+	switch goos {
+	case "linux":
+		switch goarch {
+		case "amd64":
+			return []variant{
+				{AcceleratorCPU, "ubuntu-x64", ".tar.gz"},
+				{AcceleratorVulkan, "ubuntu-vulkan-x64", ".tar.gz"},
+				{AcceleratorROCm, "ubuntu-rocm-*-x64", ".tar.gz"},
+				{AcceleratorCUDA, "ubuntu-cuda-*-x64", ".tar.gz"},
+				{AcceleratorSYCL, "ubuntu-sycl-*-x64", ".tar.gz"},
+				{AcceleratorOpenVINO, "ubuntu-openvino-*-x64", ".tar.gz"},
+			}, nil
+		case "arm64":
+			return []variant{
+				{AcceleratorCPU, "ubuntu-arm64", ".tar.gz"},
+				{AcceleratorVulkan, "ubuntu-vulkan-arm64", ".tar.gz"},
+				{AcceleratorCUDA, "ubuntu-cuda-*-arm64", ".tar.gz"},
+			}, nil
+		}
+		return nil, fmt.Errorf("für Linux auf %s wird llama.cpp nicht veröffentlicht", goarch)
+	case "darwin":
+		switch goarch {
+		case "arm64":
+			return []variant{{AcceleratorCPU, "macos-arm64", ".tar.gz"}}, nil
+		case "amd64":
+			return []variant{{AcceleratorCPU, "macos-x64", ".tar.gz"}}, nil
+		}
+		return nil, fmt.Errorf("macOS auf %s wird nicht veröffentlicht", goarch)
+	case "windows":
+		switch goarch {
+		case "amd64":
+			return []variant{
+				{AcceleratorCPU, "win-cpu-x64", ".zip"},
+				{AcceleratorVulkan, "win-vulkan-x64", ".zip"},
+				{AcceleratorROCm, "win-rocm-*-x64", ".zip"},
+				{AcceleratorCUDA, "win-cuda-*-x64", ".zip"},
+				{AcceleratorSYCL, "win-sycl-x64", ".zip"},
+				{AcceleratorOpenVINO, "win-openvino-*-x64", ".zip"},
+			}, nil
+		case "arm64":
+			return []variant{
+				{AcceleratorCPU, "win-cpu-arm64", ".zip"},
+				{AcceleratorVulkan, "win-vulkan-arm64", ".zip"},
+				{AcceleratorCUDA, "win-cuda-*-arm64", ".zip"},
+				{AcceleratorOpenCL, "win-opencl-adreno-arm64", ".zip"},
+			}, nil
+		}
+		return nil, fmt.Errorf("für Windows auf %s wird llama.cpp nicht veröffentlicht", goarch)
+	}
+	return nil, fmt.Errorf("für %s wird llama.cpp nicht veröffentlicht", goos)
+}
+
+// variantFor picks one family out of the table, refusing what this platform does
+// not publish rather than substituting a build the user did not ask for.
+func variantFor(goos, goarch, accel string) (variant, error) {
 	if accel == "" {
 		accel = AcceleratorCPU
 	}
-	var platform, ext string
-	switch goos {
-	case "linux":
-		arch, err := unixArch(goarch, "ubuntu")
-		if err != nil {
-			return "", err
-		}
-		platform, ext = "ubuntu-"+arch, ".tar.gz"
-		if accel == AcceleratorVulkan {
-			platform = "ubuntu-vulkan-" + arch
-		}
-	case "darwin":
-		// macOS builds are Metal-enabled and published one per architecture;
-		// there is no Vulkan build for them, so asking for one is an error
-		// rather than a silent fallback to a build the user did not ask for.
-		if accel != AcceleratorCPU {
-			return "", fmt.Errorf("für macOS gibt es keinen %s-Build", accel)
-		}
-		switch goarch {
-		case "arm64":
-			platform = "macos-arm64"
-		case "amd64":
-			platform = "macos-x64"
-		default:
-			return "", fmt.Errorf("macOS auf %s wird nicht veröffentlicht", goarch)
-		}
-		ext = ".tar.gz"
-	case "windows":
-		arch, err := unixArch(goarch, "windows")
-		if err != nil {
-			return "", err
-		}
-		platform, ext = "win-cpu-"+arch, ".zip"
-		if accel == AcceleratorVulkan {
-			platform = "win-vulkan-" + arch
-		}
-	default:
-		return "", fmt.Errorf("für %s wird llama.cpp nicht veröffentlicht", goos)
+	variants, err := variantsFor(goos, goarch)
+	if err != nil {
+		return variant{}, err
 	}
-	return fmt.Sprintf("llama-%s-bin-%s%s", tag, platform, ext), nil
+	for _, v := range variants {
+		if v.ID == accel {
+			return v, nil
+		}
+	}
+	return variant{}, fmt.Errorf("für %s/%s gibt es keinen %s-Build", goos, goarch, accel)
 }
 
-// unixArch maps Go's architecture names onto the ones llama.cpp uses.
-func unixArch(goarch, goos string) (string, error) {
-	switch goarch {
-	case "amd64":
-		return "x64", nil
-	case "arm64":
-		return "arm64", nil
-	default:
-		return "", fmt.Errorf("für %s auf %s wird llama.cpp nicht veröffentlicht", goos, goarch)
+// PublishedAccelerators lists the families this platform can actually fetch, in
+// the order the picker offers them, so the panel cannot offer a build that does
+// not exist.
+//
+// A platform with none answers with an empty list rather than nil: this feeds a
+// JSON array, and a nil slice marshals to `null`.
+func PublishedAccelerators(goos, goarch string) []string {
+	variants, err := variantsFor(goos, goarch)
+	if err != nil {
+		return []string{}
 	}
+	ids := make([]string, 0, len(variants))
+	for _, v := range variants {
+		ids = append(ids, v.ID)
+	}
+	return ids
 }
 
-// BinaryPath is where the launcher of one installed build lives. Windows keeps the
-// .exe suffix; nothing else does.
-func (i *Installer) BinaryPath(tag string) string {
-	return filepath.Join(i.Dir, tag, launcherName())
+// AssetName is the archive name the app asks for, or an error naming what is not
+// covered. A `*` stands for the suite version a release carries (see variant).
+func AssetName(tag, goos, goarch, accel string) (string, error) {
+	v, err := variantFor(goos, goarch, accel)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("llama-%s-bin-%s%s", tag, v.platform, v.ext), nil
+}
+
+// matchAssetName reports whether a published name is this variant, and returns the
+// segment the pattern left open — the suite version — or "" for an exact name.
+func matchAssetName(pattern, name string) (string, bool) {
+	p := strings.Split(pattern, "-")
+	n := strings.Split(name, "-")
+	if len(p) != len(n) {
+		return "", false
+	}
+	open := ""
+	for i := range p {
+		if p[i] == "*" {
+			open = n[i]
+			continue
+		}
+		if p[i] != n[i] {
+			return "", false
+		}
+	}
+	return open, true
+}
+
+// preferSuite reports whether a is a better answer than the current best for one
+// variant. A release carries several suites of the same family (cuda-12.8 and
+// cuda-13.4), and the newest is the one a user asking for "cuda" means. A segment
+// that is not a version — SYCL's fp16/fp32 — leaves the API's own order alone,
+// which is alphabetical and therefore stable.
+func preferSuite(candidate, best string) bool {
+	if best == "" {
+		return true
+	}
+	c, cok := dottedVersion(candidate)
+	b, bok := dottedVersion(best)
+	if !cok || !bok {
+		return false
+	}
+	for i := 0; i < len(c) && i < len(b); i++ {
+		if c[i] != b[i] {
+			return c[i] > b[i]
+		}
+	}
+	return len(c) > len(b)
+}
+
+// dottedVersion reads a version-like segment (`13.4`) into numbers. Anything else
+// is not a version, which the caller has to be able to tell apart from zero.
+func dottedVersion(s string) ([]int, bool) {
+	if s == "" {
+		return nil, false
+	}
+	parts := strings.Split(s, ".")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n := 0
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				return nil, false
+			}
+			n = n*10 + int(r-'0')
+		}
+		out = append(out, n)
+	}
+	return out, true
+}
+
+// BinaryPath is where the launcher of one installed build lives — the directory
+// name an Asset.Dir() produced. Windows keeps the .exe suffix; nothing else does.
+func (i *Installer) BinaryPath(dir string) string {
+	return filepath.Join(i.Dir, dir, launcherName())
 }
 
 func launcherName() string {
@@ -278,16 +435,31 @@ func (i *Installer) Latest(ctx context.Context, goos, goarch, accel string) (Ass
 	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
 		return Asset{}, fmt.Errorf("Release-Liste lesen: %w", err)
 	}
+	chosen, err := variantFor(goos, goarch, accel)
+	if err != nil {
+		return Asset{}, err
+	}
 	for _, r := range releases {
-		want, err := AssetName(r.Tag, goos, goarch, accel)
-		if err != nil {
-			return Asset{}, err
-		}
-		for _, a := range r.Assets {
-			if a.Name == want {
-				return Asset{Tag: r.Tag, Name: a.Name, URL: a.URL, Size: a.Size, Digest: a.Digest}, nil
+		want := fmt.Sprintf("llama-%s-bin-%s%s", r.Tag, chosen.platform, chosen.ext)
+		best := -1
+		suite := ""
+		for i, a := range r.Assets {
+			got, ok := matchAssetName(want, a.Name)
+			if !ok {
+				continue
+			}
+			if best < 0 || preferSuite(got, suite) {
+				best, suite = i, got
 			}
 		}
+		if best < 0 {
+			continue
+		}
+		a := r.Assets[best]
+		return Asset{
+			Tag: r.Tag, Name: a.Name, URL: a.URL, Size: a.Size, Digest: a.Digest,
+			Variant: chosen.ID, Suite: suite,
+		}, nil
 	}
 	return Asset{}, fmt.Errorf("kein llama.cpp-Build für %s/%s (%s) in den letzten %d Releases gefunden",
 		goos, goarch, accel, len(releases))
@@ -317,7 +489,7 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 	}
 	defer os.Remove(archive)
 
-	final := filepath.Join(i.Dir, asset.Tag)
+	final := filepath.Join(i.Dir, asset.Dir())
 	staging := final + ".installing"
 	if err := os.RemoveAll(staging); err != nil {
 		return "", err
@@ -341,7 +513,7 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 		return "", fmt.Errorf("Build an seinen Platz verschieben: %w", err)
 	}
 
-	binary := i.BinaryPath(asset.Tag)
+	binary := i.BinaryPath(asset.Dir())
 	if err := os.Chmod(binary, 0o755); err != nil {
 		return "", fmt.Errorf("llama-server ausführbar machen: %w", err)
 	}

@@ -374,7 +374,12 @@ function LocalModelSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const mine = status?.models.find((m) => m.backendId === backend.id)
+  // Read as an array even though the backend sends one: a nil Go slice marshals to
+  // JSON `null`, and a null here threw inside this section's render and took the
+  // whole Settings view down to the error boundary. The backend no longer sends it
+  // (pinned by runtime_status_test.go), and this is the second line of defence — a
+  // shape mistake should cost one row, not the window.
+  const mine = (status?.models ?? []).find((m) => m.backendId === backend.id)
   const state = mine?.state ?? 'stopped'
   const working = !!status?.busy || state === 'starting'
 
@@ -448,7 +453,10 @@ function LocalModelSection({
   const rescan = async (dir: string) => {
     setScanning(true)
     try {
-      setScan(await App.ScanModelFolder(dir))
+      const found = await App.ScanModelFolder(dir)
+      // `files` is read as an array the moment it arrives (see above): a null one
+      // would blank the view instead of reporting "no models".
+      setScan({ ...found, files: found?.files ?? [] })
       setScanError('')
     } catch (e) {
       setScan(null)
@@ -461,7 +469,7 @@ function LocalModelSection({
 
   useEffect(() => {
     void App.ModelFolders()
-      .then(setFolders)
+      .then((list) => setFolders(list ?? []))
       .catch(() => undefined)
   }, [modelDir])
 
@@ -481,6 +489,18 @@ function LocalModelSection({
   }
 
   const useFolder = (dir: string) => patch({ runtime: { ...draft.runtime, modelDir: dir } })
+
+  // The families this platform actually publishes, straight from the installer:
+  // ROCm and SYCL are x64 only and macOS ships one Metal-enabled build, so a list
+  // of its own would offer downloads that do not exist. A stored family this
+  // platform does not publish stays in the list and stays selected — swapping the
+  // user to CPU without saying so is the substitution the whole picker avoids;
+  // installing it reports what the platform has instead.
+  const published = status?.variants?.length ? status.variants : ['cpu', 'vulkan']
+  const chosenAccel = draft.runtime?.accelerator ?? 'cpu'
+  const accelOptions = published.includes(chosenAccel) ? published : [...published, chosenAccel]
+  const accelLabel = (id: string) =>
+    t(`settings.managed.accel${id.charAt(0).toUpperCase()}${id.slice(1)}`)
 
   const folderLabel = (kind: string) =>
     kind === 'lmstudio-configured'
@@ -543,6 +563,19 @@ function LocalModelSection({
         {status?.tag && <span className="mono text-[11px] faint">{status.tag}</span>}
       </div>
 
+      {/* What the launcher itself reports. The tag above is a name this app chose
+          for a download; this is the build actually on disk, which is the only
+          thing that describes a binary the user supplied instead. */}
+      <div className="mb-2 flex items-center gap-2 text-[11px]">
+        <span className="faint shrink-0">{t('settings.managed.version')}</span>
+        <span
+          className="mono min-w-0 flex-1 truncate"
+          title={status?.version || t('settings.managed.versionUnknown')}
+        >
+          {status?.version || t('settings.managed.versionUnknown')}
+        </span>
+      </div>
+
       {!status?.customBinary && (
         <div className="mb-2 flex items-center gap-2">
           <button type="button" className="btn btn-sm" disabled={!!status?.busy} onClick={() => void install()}>
@@ -565,11 +598,14 @@ function LocalModelSection({
           {t('settings.managed.accelerator')}
           <select
             className="input mono mt-1"
-            value={draft.runtime?.accelerator ?? 'cpu'}
+            value={chosenAccel}
             onChange={(e) => patch({ runtime: { ...draft.runtime, accelerator: e.target.value } })}
           >
-            <option value="cpu">{t('settings.managed.accelCpu')}</option>
-            <option value="vulkan">{t('settings.managed.accelVulkan')}</option>
+            {accelOptions.map((id) => (
+              <option key={id} value={id}>
+                {accelLabel(id)}
+              </option>
+            ))}
           </select>
         </label>
         <label className="text-[11px]">

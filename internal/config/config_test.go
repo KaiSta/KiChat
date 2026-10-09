@@ -603,6 +603,18 @@ func TestRuntimeSettingsAreUsableAsStored(t *testing.T) {
 		t.Error("the model path was not kept")
 	}
 
+	// Every family the app knows survives normalise. A value that quietly became
+	// the CPU build would mean a user who chose ROCm gets the CPU build on the next
+	// load, with nothing on screen saying so.
+	for _, accel := range Accelerators() {
+		s = Default()
+		s.Runtime = RuntimeSettings{Accelerator: accel}
+		s.normalise()
+		if s.Runtime.Accelerator != accel {
+			t.Errorf("accelerator %q became %q", accel, s.Runtime.Accelerator)
+		}
+	}
+
 	// An accelerator no release publishes must not reach a download URL.
 	s = Default()
 	s.Runtime = RuntimeSettings{Accelerator: "cuda-99", ReadySeconds: 99999}

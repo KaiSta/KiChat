@@ -57,6 +57,13 @@ type App struct {
 	serversMu sync.Mutex
 	servers   map[string]*rt.Server
 
+	// versions caches what each llama-server reported about itself. The status is
+	// polled while a model loads, so asking the binary again on every call would
+	// start a process every 1.2 seconds for an answer that does not change; a path
+	// is probed once and kept until a save says the binary may have been replaced.
+	versionMu sync.Mutex
+	versions  map[string]string
+
 	// install tracks a download in progress. It is read by the UI through a
 	// bound method rather than pushed, because a download outlives the call that
 	// asked for it and polling cannot miss the end of one.
@@ -246,6 +253,53 @@ func (a *App) onManagedState(backendID string, st rt.Status) {
 		runtime.LogErrorf(a.ctx, "Adresse des laufenden Servers speichern: %v", err)
 	}
 	a.rebuildServices(settings)
+}
+
+// versionFor returns the version a llama-server reports, asking it once per path.
+//
+// An empty answer means the binary could not be read — a damaged download, a
+// launcher that hangs, a path that is no longer there. That is kept as "no answer"
+// rather than raised: which version is installed is not something a user can act
+// on, the reason goes to the log, and the panel says unknown.
+func (a *App) versionFor(binary string) string {
+	if strings.TrimSpace(binary) == "" {
+		return ""
+	}
+	a.versionMu.Lock()
+	version, known := a.versions[binary]
+	a.versionMu.Unlock()
+	if known {
+		return version
+	}
+
+	// Long enough for a cold binary on a slow disk, short enough that a launcher
+	// which cannot start does not hold a status call open.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	version, err := rt.BinaryVersion(ctx, binary)
+	if err != nil {
+		version = ""
+		if a.ctx != nil {
+			runtime.LogWarningf(a.ctx, "Version von %s nicht lesbar: %v", binary, err)
+		}
+	}
+
+	a.versionMu.Lock()
+	if a.versions == nil {
+		a.versions = map[string]string{}
+	}
+	a.versions[binary] = version
+	a.versionMu.Unlock()
+	return version
+}
+
+// forgetVersions drops the cached version readings. Saving settings is what calls
+// it: the binary may have been replaced, and the refresh control next to the
+// backends is where a user says "look again".
+func (a *App) forgetVersions() {
+	a.versionMu.Lock()
+	a.versions = map[string]string{}
+	a.versionMu.Unlock()
 }
 
 // adoptManagedAddresses restores the address of every backend whose model the app

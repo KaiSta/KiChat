@@ -64,6 +64,9 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	// default prompt, happen here as well as on load: clearing the textarea and
 	// switching the language in the same save must not leave either undone.
 	s.LocalisePrompts()
+	// A save is also where "look again" happens: the launcher may have been
+	// replaced since its version was read.
+	a.forgetVersions()
 	// A Save must not hand a running managed model back an address it no longer
 	// listens on; see adoptManagedAddresses.
 	s = a.adoptManagedAddresses(s)
@@ -227,6 +230,10 @@ type RuntimeStatus struct {
 	Installed bool   `json:"installed"`
 	Tag       string `json:"tag,omitempty"`
 	Binary    string `json:"binary,omitempty"`
+	// Version is what the launcher reports about itself, which is the only thing
+	// that describes a binary the user supplied instead of the one the installer
+	// fetched — and the only way to tell two builds of "0.6.0-dev" apart.
+	Version string `json:"version,omitempty"`
 	// CustomBinary is the path a user gave instead of the installed build.
 	CustomBinary string `json:"customBinary,omitempty"`
 	Accelerator  string `json:"accelerator"`
@@ -239,9 +246,58 @@ type RuntimeStatus struct {
 	Done  int64  `json:"done"`
 	Total int64  `json:"total"`
 	Error string `json:"error,omitempty"`
+	// Variants are the build families this platform actually publishes, in the
+	// order to offer them. The picker is filled from here rather than from a list
+	// of its own, so it cannot offer a build that does not exist — ROCm and SYCL
+	// are x64 only, and macOS publishes a single Metal-enabled build per arch.
+	Variants []string `json:"variants"`
 	// Models carries one entry per id in the settings, so a row with no model
 	// configured still appears with the state to explain it.
 	Models []ManagedStatus `json:"models"`
+}
+
+// runtimeStatusBase is the part of the status that comes from the stored settings,
+// before anything live is filled in: the build families this platform publishes,
+// and one row per configured backend id.
+//
+// It is a function rather than inline code so a test can pin the shape of an idle
+// answer, because that shape is a trap: a nil slice marshals to JSON `null`, not
+// `[]`, and the panel reads these as arrays. On a fresh install nothing is
+// configured, so `Models` stayed nil, `status.models` arrived as null and
+// `status.models.find(...)` threw — taking the whole Settings view down to the
+// error boundary with "Cannot read properties of null (reading 'find')". That is
+// the same trap `chat.UnresolvedVars` set. The slices here are never nil.
+func runtimeStatusBase(settings config.Settings, goos, goarch string) RuntimeStatus {
+	status := RuntimeStatus{
+		Accelerator:  settings.Runtime.Accelerator,
+		ReadySeconds: settings.Runtime.ReadySeconds,
+		CustomBinary: settings.Runtime.BinaryPath,
+		Variants:     []string{},
+		Models:       []ManagedStatus{},
+	}
+	if variants := rt.PublishedAccelerators(goos, goarch); len(variants) > 0 {
+		status.Variants = variants
+	}
+	for _, id := range sortedRuntimeIDs(settings) {
+		mm := settings.Runtime.Models[id]
+		status.Models = append(status.Models, ManagedStatus{
+			BackendID: id, Enabled: mm.Enabled, ModelPath: mm.ModelPath,
+			CtxSize: mm.CtxSize, ExtraArgs: mm.ExtraArgs, State: rt.StateStopped,
+		})
+	}
+	return status
+}
+
+// sortedRuntimeIDs lists the configured managed backends in a stable order, so the
+// rows of the panel do not reshuffle between two status calls that found the same
+// thing.
+func sortedRuntimeIDs(settings config.Settings) []string {
+	ids := make([]string, 0, len(settings.Runtime.Models))
+	for id := range settings.Runtime.Models {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // GetRuntimeStatus reports the managed llama.cpp runtime.
@@ -250,11 +306,7 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 		return RuntimeStatus{}, err
 	}
 	settings := a.Settings()
-	status := RuntimeStatus{
-		Accelerator:  settings.Runtime.Accelerator,
-		ReadySeconds: settings.Runtime.ReadySeconds,
-		CustomBinary: settings.Runtime.BinaryPath,
-	}
+	status := runtimeStatusBase(settings, goruntime.GOOS, goruntime.GOARCH)
 	if tag, binary := a.installer.Find(); tag != "" {
 		status.Installed, status.Tag, status.Binary = true, tag, binary
 	}
@@ -263,28 +315,34 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 		// downloaded: that is the whole point of the field.
 		status.Installed = true
 	}
+	// The launcher in use, whichever of the two it is: a custom path replaces the
+	// installed build rather than sitting beside it, so it is the one that answers.
+	if status.Installed {
+		binary := status.Binary
+		if status.CustomBinary != "" {
+			binary = status.CustomBinary
+		}
+		status.Version = a.versionFor(binary)
+	}
 
 	a.installMu.Lock()
 	status.Busy, status.Phase, status.Done, status.Total, status.Error =
 		a.installBusy, a.installPhase, a.installDone, a.installTotal, a.installErr
 	a.installMu.Unlock()
 
-	ids := make([]string, 0, len(settings.Runtime.Models))
-	for id := range settings.Runtime.Models {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		mm := settings.Runtime.Models[id]
-		entry := ManagedStatus{
-			BackendID: id, Enabled: mm.Enabled, ModelPath: mm.ModelPath,
-			CtxSize: mm.CtxSize, ExtraArgs: mm.ExtraArgs, State: rt.StateStopped,
+	// The live state is filled into the rows the base already laid out, rather
+	// than appended a second time.
+	for i := range status.Models {
+		srv := a.existingServer(status.Models[i].BackendID)
+		if srv == nil {
+			continue
 		}
-		if srv := a.existingServer(id); srv != nil {
-			st := srv.Status()
-			entry.State, entry.Port, entry.URL, entry.Error, entry.Log = st.State, st.Port, st.URL, st.Error, st.Log
-		}
-		status.Models = append(status.Models, entry)
+		st := srv.Status()
+		status.Models[i].State = st.State
+		status.Models[i].Port = st.Port
+		status.Models[i].URL = st.URL
+		status.Models[i].Error = st.Error
+		status.Models[i].Log = st.Log
 	}
 	return status, nil
 }
@@ -331,18 +389,19 @@ func (a *App) installRuntime() {
 	}
 
 	// The build that was installed is written down, so the next start finds it
-	// through the settings rather than by picking whatever is newest.
+	// through the settings rather than by picking whatever is newest. The folder
+	// name carries the family, since two families are two installations.
 	a.settingsMu.Lock()
-	a.settings.Runtime.Tag = asset.Tag
+	a.settings.Runtime.Tag = asset.Dir()
 	updated := a.settings
 	a.settingsMu.Unlock()
 	if err := a.sanitize(updated).Save(a.store); err != nil {
-		a.finishInstall(asset.Tag, fmt.Errorf("Installation speichern: %w", err))
+		a.finishInstall(asset.Dir(), fmt.Errorf("Installation speichern: %w", err))
 		return
 	}
-	runtime.LogInfof(a.ctx, "llama-server %s installiert: %s", asset.Tag, binary)
+	runtime.LogInfof(a.ctx, "llama-server %s (%s) installiert: %s", asset.Dir(), asset.Variant, binary)
 	a.rebuildServices(updated)
-	a.finishInstall(asset.Tag, nil)
+	a.finishInstall(asset.Dir(), nil)
 }
 
 // recordInstallProgress is the installer's progress callback.
@@ -403,12 +462,14 @@ func (a *App) ModelFolders() []rt.ModelFolder {
 // panel asks for when it opens.
 func (a *App) ScanModelFolder(dir string) (rt.ModelFolderScan, error) {
 	if err := a.ensure(); err != nil {
-		return rt.ModelFolderScan{}, err
+		return rt.ModelFolderScan{Files: []rt.ModelFile{}}, err
 	}
 	if strings.TrimSpace(dir) == "" {
 		dir = a.defaultModelDir()
 	}
 	if dir == "" {
+		// A scan with no files is an empty list, not a null one: the panel reads
+		// `files.length` the moment the answer arrives.
 		return rt.ModelFolderScan{Files: []rt.ModelFile{}}, nil
 	}
 	return rt.ScanModelFolder(dir)

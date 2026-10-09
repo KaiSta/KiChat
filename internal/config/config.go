@@ -85,11 +85,25 @@ type ManagedModel struct {
 	ExtraArgs string `json:"extraArgs"`
 }
 
-// Accelerators the installer can fetch.
+// The build families the installer can fetch. They are spelled here rather than
+// imported from internal/runtime so the settings package stays free of it; the
+// two lists are pinned against each other by a test.
 const (
-	AccelCPU    = "cpu"
-	AccelVulkan = "vulkan"
+	AccelCPU      = "cpu"
+	AccelVulkan   = "vulkan"
+	AccelROCm     = "rocm"
+	AccelCUDA     = "cuda"
+	AccelSYCL     = "sycl"
+	AccelOpenVINO = "openvino"
+	AccelOpenCL   = "opencl"
 )
+
+// Accelerators is every family a settings blob may name. Which of them a given
+// platform publishes is a question for the installer, not for the stored value:
+// settings travel between machines.
+func Accelerators() []string {
+	return []string{AccelCPU, AccelVulkan, AccelROCm, AccelCUDA, AccelSYCL, AccelOpenVINO, AccelOpenCL}
+}
 
 // Defaults for the managed runtime.
 const (
@@ -333,7 +347,7 @@ func (s *Settings) normalise() {
 	if s.ModelOverrides == nil {
 		s.ModelOverrides = map[string]llm.ModelOverride{}
 	}
-	if s.Runtime.Accelerator != AccelVulkan {
+	if !IsAccelerator(s.Runtime.Accelerator) {
 		// Anything unrecognised falls back to the build that needs no GPU
 		// toolkit: shipping a stored value straight into a download URL would
 		// make the installer ask for an archive that may not exist.
@@ -467,6 +481,16 @@ func (s *Settings) LocalisePrompts() {
 	if s.DefaultSystemPrompt == "" || isShippedPrompt(PresetResearch, s.DefaultSystemPrompt) {
 		s.DefaultSystemPrompt = PromptBody(PresetResearch, s.Language)
 	}
+}
+
+// IsAccelerator reports whether a value names a build family this app knows.
+func IsAccelerator(value string) bool {
+	for _, a := range Accelerators() {
+		if a == value {
+			return true
+		}
+	}
+	return false
 }
 
 // CurrentPeriod returns the "YYYY-MM" bucket used by the search quota counter.

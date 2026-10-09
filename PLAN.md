@@ -22,7 +22,7 @@ numbers about what is being sent to the model.
 | Area | Delivered |
 | --- | --- |
 | Backends | LM Studio (`:1234`) and Ollama (`:11434`), plus DeepSeek and llama.cpp (`:9931`) shipped prepared-but-off, plus a generic OpenAI-compatible endpoint |
-| Local models | The llama.cpp entry can also be provided by KiChat itself: it fetches `llama-server` from llama.cpp's own releases, starts a GGUF of the user's choosing on a free port, and stops it with the app — started again on every launch while the switch is on. The GGUF does not have to be downloaded again: the picker lists what is already in the folder LM Studio uses |
+| Local models | The llama.cpp entry can also be provided by KiChat itself: it fetches `llama-server` from llama.cpp's own releases — CPU, Vulkan, ROCm, CUDA, SYCL, OpenVINO or the Adreno build, whichever the platform publishes — starts a GGUF of the user's choosing on a free port, and stops it with the app, started again on every launch while the switch is on. The GGUF does not have to be downloaded again: the picker lists what is already in the folder LM Studio uses |
 | Context | Automatic and manual compaction, live context-window fullness meter, per-segment inspector |
 | Research | Brave Search (API key) with DuckDuckGo fallback, page scraping with SSRF guard, optional search-before-answer |
 | Files | Attachments, PDF/office text extraction, chunked with BM25 retrieval over the chunks |
@@ -72,8 +72,9 @@ internal/
   ingest/          ingest.go, pdf.go (pdftotext), office.go (libreoffice), chunk.go
   tools/           Tool definitions and dispatch
   runtime/         The llama.cpp KiChat installs and runs itself
-    install.go       release lookup, digest-verified download, tar.gz/zip extraction
+    install.go       release lookup per build family, verified download, extraction
     supervise.go     one server per managed model: free port, /health, log tail, stop
+    version.go       what the launcher reports about itself (`--version`)
     discover.go      where LM Studio keeps its models, and a bounded scan of a folder
     proc_unix.go     process group and SIGTERM-then-SIGKILL (proc_windows.go is the pair)
   secret/          API key storage outside the repository
@@ -170,7 +171,23 @@ unwrapped once at install time so that every derived path — including the one 
 launcher is chmodded at — stays one level deep. GitHub's *latest* release is not the one
 to ask: since llama.cpp moved to versioned tags it points at a semver release with no
 binaries at all, so the release list is scanned for the first entry that actually
-publishes the asset. The download is checked against the sha256 GitHub reports for it,
+publishes the asset. Which *family* to fetch is a choice: the releases carry CPU, Vulkan,
+ROCm, CUDA, SYCL, OpenVINO and (for Windows on arm64) Adreno builds, and the table in
+`variantsFor` is the measured list per platform and architecture — ROCm, SYCL and
+OpenVINO are x64 only and macOS publishes one Metal-enabled build per architecture. A
+family whose name carries a suite version (`cuda-13.4`, `rocm-10.0`, `sycl-fp16`) is
+asked for with a wildcard and matched against what the release actually publishes, so
+the day the suite moves on nothing here needs editing; when a release carries several
+suites of one family the newest wins, and the `cudart-` bundles — the same build with the
+CUDA runtime folded in — are skipped rather than mistaken for it. Each family installs
+into its own directory (`b11535-rocm-10.0`), because folding them together would delete
+the CPU build the moment a user tried the ROCm one and re-download 600 MB to go back. A
+release tag is not a version either: `b11534` is a name this app
+chose for a download, it says nothing about a launcher the user supplied instead, and it
+is the *published* build rather than the one on disk after a rebuild — so the panel asks
+the binary itself and shows what it answers (measured on `b11535`: `0.6.0-dev (build
+11535, commit f39148a95)`), read once per path and again after a save, because a status call is polled
+while a model loads and spawning a process per poll would be its own bug. The download is checked against the sha256 GitHub reports for it,
 and extraction happens into `<tag>.installing` and is renamed into place only when it is
 complete, so an interrupted install leaves nothing that looks installed.
 
@@ -320,6 +337,18 @@ section as evidence it did not gather.
   calls `.length` on it, so opening the system-prompt tab threw and tripped the error
   boundary. The remaining API-visible slices already returned empty slices, and this one
   now does too. Both faults are pinned by tests rather than by inspection.
+- **…and it happened again, which is the point of the rule.** `GetRuntimeStatus` built
+  its rows with `append` into a nil slice, so on a machine with no managed model
+  configured — every fresh install — `status.models` arrived as `null`. The local-model
+  section reads it with `.find`, so opening Settings → Backends threw once and took the
+  whole view to the error boundary (`TypeError: Cannot read properties of null (reading
+  'find')`), which is what the report showed. The rows now come from
+  `runtimeStatusBase`, whose slices are never nil and whose JSON shape is pinned by
+  `runtime_status_test.go`; `PublishedAccelerators` answers an empty list on a platform
+  with no build for the same reason. The panel also reads the arrays defensively now, so
+  a shape mistake costs one row instead of the window — but the fix is the backend, and
+  the test is the guard. The harness did not catch this: its fixture always has a managed
+  model configured, so the idle answer the crash needs was never rendered there.
 - **The interface theme is stated, not implied.** The stylesheets declared no
   `color-scheme`, so WebKitGTK painted native form controls in its own default (light)
   scheme while the app's text stayed near-white — the settings dropdowns rendered as

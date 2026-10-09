@@ -966,8 +966,14 @@ Verfügbare Tools: {{tool_list}}`,
       installed: managed.installed,
       tag: managed.tag,
       binary: managed.binary,
+      // What the launcher reports about itself — the tag above is a name KiChat
+      // chose, this is the build on disk.
+      version: managed.installed ? '0.6.0-dev (build 11528, commit 50e3e3e48)' : '',
       customBinary: runtime.binaryPath || '',
       accelerator: runtime.accelerator || 'cpu',
+      // What this platform publishes. Linux/x64 is the widest of them, which is
+      // what the harness runs on, so the picker is exercised with every family.
+      variants: ['cpu', 'vulkan', 'rocm', 'cuda', 'sycl', 'openvino'],
       readySeconds: runtime.readySeconds || 180,
       busy: false,
       phase: '',

@@ -619,6 +619,7 @@ export namespace main {
 	    installed: boolean;
 	    tag?: string;
 	    binary?: string;
+	    version?: string;
 	    customBinary?: string;
 	    accelerator: string;
 	    readySeconds: number;
@@ -627,6 +628,7 @@ export namespace main {
 	    done: number;
 	    total: number;
 	    error?: string;
+	    variants: string[];
 	    models: ManagedStatus[];
 	
 	    static createFrom(source: any = {}) {
@@ -638,6 +640,7 @@ export namespace main {
 	        this.installed = source["installed"];
 	        this.tag = source["tag"];
 	        this.binary = source["binary"];
+	        this.version = source["version"];
 	        this.customBinary = source["customBinary"];
 	        this.accelerator = source["accelerator"];
 	        this.readySeconds = source["readySeconds"];
@@ -646,6 +649,7 @@ export namespace main {
 	        this.done = source["done"];
 	        this.total = source["total"];
 	        this.error = source["error"];
+	        this.variants = source["variants"];
 	        this.models = this.convertValues(source["models"], ManagedStatus);
 	    }
 	

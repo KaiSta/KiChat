@@ -174,12 +174,37 @@ Measured while verifying it, in case a number is ever needed again:
   the first release that actually publishes the asset. The lookup is unauthenticated and
   therefore limited to 60 requests an hour per address: a 403 with
   `X-RateLimit-Remaining: 0` is reported as exactly that, not as "llama.cpp is down".
+- **One release carries seven families, and the names are not a pattern you can
+guess.** Read off `b11535` and confirmed on `b11537` two days later, which is the point —
+  the families do not change, the tag does: `ubuntu-x64` / `ubuntu-arm64`, `ubuntu-vulkan-*`,
+  `ubuntu-rocm-*-x64` (10.0 today), `ubuntu-cuda-*-x64` (12.8 and 13.4 at once),
+  `ubuntu-sycl-fp16|fp32-x64`, `ubuntu-openvino-*-x64`, `win-cpu-x64`, `win-vulkan-*`,
+  `win-rocm-*-x64`, `win-cuda-*-x64`, `win-sycl-x64`, `win-openvino-*-x64`,
+  `win-opencl-adreno-arm64`, plus `macos-arm64` / `macos-x64` with no accelerator at all
+  and `cudart-llama-…` bundles that are a different asset with the CUDA runtime folded
+  in. ROCm, SYCL and OpenVINO are x64 only, so the picker is filled from
+  `runtime.PublishedAccelerators(goos, goarch)` rather than from a list of its own.
+  A family's suite is matched with a `*`, and the newest match wins. Every one of them was
+  resolved against the live listing: CPU 17.8 MB, Vulkan 31.8, ROCm 244.9, CUDA 152.8,
+  SYCL 55.5, OpenVINO 110.7 on linux/amd64, with the arm64 and macOS rows correctly
+  offering fewer.
+- **Adding a family means touching three lists, and a test holds them together.**
+  `config.Accelerators()`, `runtime.Accelerators()` and the `settings.managed.accel*`
+  labels in all three dictionaries, checked by `accelerator_test.go` in the root package
+  — a value that exists in one and not another is a build nobody can ask for, an option
+  that renders as a raw id, or a stored setting that silently becomes the CPU build.
 - **Every archive wraps its contents in its own directory** (`llama-b11528/`), and
   `llama-server` is a launcher whose code is in a sibling `libllama-server-impl.so`. The
   install flattens the wrapper and keeps the siblings — a build that lists models but
   cannot start is what the alternative produces.
 - **A load is minutes, and readiness is the server's own answer.** `/health` is 503 while
   the weights come in and 200 once the server can serve.
+- **The release tag is not the version, and asking the binary costs a process.** The
+  panel shows what `llama-server --version` answers (`0.6.0-dev (build 11535, commit
+  f39148a95)` for `b11535`), read once per path and again after a save, because the status
+  it belongs to is polled every 1.2 s while a model loads. Probing one that hangs needs
+  `exec.Cmd.WaitDelay`: killing the launcher does not kill a child it forked, and that
+  child holds the pipe the output is collected through — without it the probe took 30 s.
 - **A managed server has no API key and allows all origins**, which its own log points
   out. It binds to `127.0.0.1` only, so this is a local-origin exposure rather than a
   network one; it is recorded as a limitation in `PLAN.md` §8.
@@ -228,7 +253,13 @@ a purple **MOCK BRIDGE** badge, so a harness page is never mistaken for the real
 - `?crash=render` injects an unrenderable message to prove the error boundary still
   catches a render fault instead of leaving a blank window.
 - It is a mock: it proves rendering, state flow and event wiring, **not** backend
-  behaviour. Backend truth lives in the Go tests and the live tests above.
+  behaviour. Backend truth lives in the Go tests and the live tests above. What it
+  cannot see is the *shape of an idle answer*: its fixture always has a managed
+  llama.cpp model configured, so `GetRuntimeStatus` was only ever rendered with a
+  populated `models` array — while a real fresh install sent `null` (a nil Go slice
+  marshals to `null`, not `[]`) and Settings → Backends died on `.find` of null. When
+  adding a binding that returns a slice, render the empty case in the harness too, or
+  pin the JSON in a Go test the way `runtime_status_test.go` does.
 
 ### When the real window is needed
 
