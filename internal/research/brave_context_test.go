@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"kichat/internal/store"
 )
 
 // Trimmed recording of the documented /res/v1/llm/context shape. Kept offline so
@@ -424,6 +427,64 @@ func TestChainGroundedContextRejectsEmptyQuery(t *testing.T) {
 	chain := NewChain(nil, Options{}, "")
 	if _, err := chain.GroundedContext(context.Background(), "   ", SearchRequest{}, 0); !errors.Is(err, ErrEmptyQuery) {
 		t.Errorf("err = %v, want ErrEmptyQuery", err)
+	}
+}
+
+// braveSearchFixture is the minimum a web-search response needs for the chain to
+// accept it: one result with a description, which becomes the fallback snippet.
+const braveSearchFixture = `{"web":{"results":[{"title":"Ersatzquelle","url":"https://fallback.example/a","description":"Kurzbeschreibung als Ersatztext."}]}}`
+
+// TestGroundedContextFallbackCountsBraveOnce pins the quota accounting on the
+// fallback path. When the LLM-context route answers without sections the chain
+// falls back to a plain search, and that search counts its own Brave request as it
+// runs; the caching step then counted the same request again, so the displayed
+// monthly usage ran ahead of what Brave actually billed and could report a limit
+// that had not been reached.
+//
+// The two routes are told apart by their query: only the context route sends
+// maximum_number_of_tokens.
+func TestGroundedContextFallbackCountsBraveOnce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("maximum_number_of_tokens") != "" {
+			// Reached and answered — so it was billed — but with no sections, which
+			// is what forces the fallback.
+			_, _ = w.Write([]byte(`{"grounding":{},"sources":{}}`))
+			return
+		}
+		_, _ = w.Write([]byte(braveSearchFixture))
+	}))
+	defer srv.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	chain := NewChain(st, Options{
+		ProviderOrder: []string{"brave"},
+		BraveAPIKey:   "test-key",
+		CacheMinutes:  60,
+	}, srv.URL)
+	brave, ok := chain.providers["brave"].(*BraveProvider)
+	if !ok {
+		t.Fatal("brave provider not constructed")
+	}
+	brave.Endpoint = srv.URL
+	brave.ContextEndpoint = srv.URL
+
+	got, err := chain.GroundedContext(context.Background(), "wie tief ist das mittelmeer", SearchRequest{}, 4096)
+	if err != nil {
+		t.Fatalf("GroundedContext: %v", err)
+	}
+	if got.Provider != "brave" {
+		t.Fatalf("provider = %q, want the fallback search's own provider", got.Provider)
+	}
+	if got.Empty() {
+		t.Fatal("the fallback produced no sources")
+	}
+	if n := chain.BraveQueriesThisMonth(); n != 1 {
+		t.Errorf("brave queries counted = %d, want 1 — the fallback search counted itself and was counted again", n)
 	}
 }
 

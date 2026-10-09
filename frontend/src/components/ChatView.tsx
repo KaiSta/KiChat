@@ -104,9 +104,15 @@ export function ChatView() {
     }
 
     for (const m of chatState.messages) {
-      if (hidden.has(m.id)) continue
-      out.push({ kind: 'message', key: m.id, message: m })
       const compaction = byBoundary.get(m.seq)
+      if (!hidden.has(m.id)) {
+        out.push({ kind: 'message', key: m.id, message: m })
+      }
+      // The card is emitted whether or not its boundary message is hidden. The
+      // boundary is the last folded message, so it is always in `hidden` while
+      // the originals are collapsed — skipping the card with it removed the
+      // summary, the undo button and the only control that shows the originals
+      // again, leaving the user no way back short of a reload.
       if (compaction) {
         out.push({ kind: 'compaction', key: `c-${compaction.id}`, compaction })
       }

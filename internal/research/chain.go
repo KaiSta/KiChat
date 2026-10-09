@@ -256,7 +256,9 @@ func (c *Chain) GroundedContext(ctx context.Context, query string, req SearchReq
 	if brave != nil && brave.Available() {
 		grounded, err := brave.Context(ctx, req, maxTokens)
 		if err == nil && !grounded.Empty() {
-			grounded.Warning = mergeWarning(grounded.Warning, c.recordGrounded(cacheKey, opts, grounded))
+			// The context route was the request that was just made, so it is the one
+			// to count here.
+			grounded.Warning = mergeWarning(grounded.Warning, c.recordGrounded(cacheKey, opts, grounded, true))
 			return grounded, nil
 		}
 		switch {
@@ -308,17 +310,24 @@ func (c *Chain) GroundedContext(ctx context.Context, query string, req SearchReq
 	if grounded.Empty() {
 		return GroundedContext{}, fmt.Errorf("Recherche ohne verwertbare Inhalte: %s", strings.Join(reasons, " | "))
 	}
-	grounded.Warning = mergeWarning(grounded.Warning, c.recordGrounded(cacheKey, opts, grounded))
+	// Not counted here: the Search above already counted its own provider request,
+	// and this result is built from its output.
+	grounded.Warning = mergeWarning(grounded.Warning, c.recordGrounded(cacheKey, opts, grounded, false))
 	return grounded, nil
 }
 
-// recordGrounded caches a grounded result and counts the metered request. The
-// counter matters because the context route bills like any other Brave query, so
-// a failure to count it comes back as a warning the caller can show: a quota
-// display that silently lags behind the real bill is worse than a note about it.
-// Failing to cache is not reported — the content is already in hand, and the
-// only consequence is one more metered request later.
-func (c *Chain) recordGrounded(cacheKey string, opts Options, grounded GroundedContext) string {
+// recordGrounded caches a grounded result and, when the caller asks, counts the
+// metered request. The counter matters because the context route bills like any
+// other Brave query, so a failure to count it comes back as a warning the caller
+// can show: a quota display that silently lags behind the real bill is worse than
+// a note about it. Failing to cache is not reported — the content is already in
+// hand, and the only consequence is one more metered request later.
+//
+// Whether to count is the caller's decision, because only the caller knows
+// whether the request that produced this content has already been counted. The
+// fallback path builds its result out of a plain Search, which counts itself as
+// it runs, so counting here as well charged one Brave credit twice.
+func (c *Chain) recordGrounded(cacheKey string, opts Options, grounded GroundedContext, metered bool) string {
 	if c.store == nil {
 		return ""
 	}
@@ -332,7 +341,7 @@ func (c *Chain) recordGrounded(cacheKey string, opts Options, grounded GroundedC
 			ExpiresAt:    time.Now().Add(time.Duration(opts.CacheMinutes) * time.Minute),
 		})
 	}
-	if strings.HasPrefix(grounded.Provider, "brave") {
+	if metered && strings.HasPrefix(grounded.Provider, "brave") {
 		if _, err := c.store.IncrCounter("search:brave", config.CurrentPeriod()); err != nil {
 			return "Das monatliche Brave-Kontingent konnte nicht gezählt werden: " + err.Error()
 		}

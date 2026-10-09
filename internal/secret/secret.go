@@ -29,6 +29,13 @@ type Store struct {
 	keyFile  string
 	dataFile string
 
+	// The keyring calls are fields so the keyring path can be exercised without
+	// reaching the real one. A test store must never touch the per-user keyring:
+	// doing so once replaced a user's stored Brave key with a test fixture.
+	keyringGet    func(service, user string) (string, error)
+	keyringSet    func(service, user, password string) error
+	keyringDelete func(service, user string) error
+
 	mu       sync.Mutex
 	keyring  bool
 	fallback map[string]string
@@ -56,10 +63,13 @@ func newStore(dir string, useKeyring bool) (*Store, error) {
 		return nil, fmt.Errorf("Secret-Verzeichnis: %w", err)
 	}
 	s := &Store{
-		dir:      dir,
-		keyFile:  filepath.Join(dir, "secret.key"),
-		dataFile: filepath.Join(dir, "secrets.enc"),
-		fallback: map[string]string{},
+		dir:           dir,
+		keyFile:       filepath.Join(dir, "secret.key"),
+		dataFile:      filepath.Join(dir, "secrets.enc"),
+		fallback:      map[string]string{},
+		keyringGet:    keyring.Get,
+		keyringSet:    keyring.Set,
+		keyringDelete: keyring.Delete,
 	}
 	s.keyring = useKeyring
 	if err := s.loadFallback(); err != nil {
@@ -98,10 +108,19 @@ func (s *Store) Set(name, value string) error {
 
 	if s.keyring {
 		if value == "" {
-			_ = keyring.Delete(keyringService, name)
+			_ = s.keyringDelete(keyringService, name)
+			// Clear the file copy as well, and do not return early as this used to:
+			// a keyring write that failed once left the value in the encrypted
+			// fallback, and Get reads that whenever the keyring has nothing — so
+			// deleting only from the keyring reported success while the secret
+			// stayed readable.
+			if _, had := s.fallback[name]; had {
+				delete(s.fallback, name)
+				return s.saveFallback()
+			}
 			return nil
 		}
-		if err := keyring.Set(keyringService, name, value); err == nil {
+		if err := s.keyringSet(keyringService, name, value); err == nil {
 			return nil
 		}
 		// One refusal is not proof the keyring is gone: a locked collection or a
@@ -123,7 +142,7 @@ func (s *Store) Get(name string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.keyring {
-		if v, err := keyring.Get(keyringService, name); err == nil && v != "" {
+		if v, err := s.keyringGet(keyringService, name); err == nil && v != "" {
 			return v, true
 		}
 	}

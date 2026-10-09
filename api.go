@@ -531,12 +531,28 @@ func (a *App) AddAttachment(in AttachmentInput) (store.Attachment, error) {
 			})
 		}
 		if err := a.store.InsertChunks(out); err != nil {
+			// Indexing is what makes the attachment reachable through
+			// search_documents. Staying "indexed" after it failed would leave the
+			// text in the database but invisible to the tool, so the placement falls
+			// back to inline: the content still reaches the model, and the warning
+			// says why it is not searchable.
+			placement = store.PlacementInline
+			attachment.Placement = placement
 			attachment.Warning = strings.TrimSpace(attachment.Warning +
 				" Indizierung fehlgeschlagen: " + err.Error())
 		}
 	}
 
 	if err := a.store.CreateAttachment(attachment); err != nil {
+		// The document — the whole extracted text, and the parent of its chunks — is
+		// written first because the attachment references it. Losing the attachment
+		// must not leave that text behind with nothing pointing at it: it is the
+		// largest row in the database, and DeleteChat and DeleteAttachment both
+		// exist to stop exactly this leak.
+		if cleanupErr := a.store.DeleteDocument(document.ID); cleanupErr != nil {
+			return store.Attachment{}, fmt.Errorf("%w (Dokument %s konnte nicht aufgeräumt werden: %v)",
+				err, document.ID, cleanupErr)
+		}
 		return store.Attachment{}, err
 	}
 	a.emit(events.Attachments, map[string]any{"chatId": in.ChatID})
@@ -568,24 +584,34 @@ func (a *App) SetAttachmentPlacement(attachmentID, placement string) (store.Atta
 	if err != nil {
 		return store.Attachment{}, err
 	}
+	// An image's document text is the raw base64 of the file, so indexing it would
+	// fill the search index with encoded bytes. AddAttachment never indexes one;
+	// the switch has to refuse it for the same reason.
+	if placement == store.PlacementIndexed && attachment.Kind == string(ingest.KindImage) {
+		return store.Attachment{}, errors.New("Bilder werden nicht indiziert, sondern direkt übergeben")
+	}
 	attachment.Placement = placement
 	if placement == store.PlacementIndexed {
 		document, err := a.store.GetDocument(attachment.DocumentID)
-		if err == nil {
-			existing, _ := a.store.ListChunks(document.ID)
-			if len(existing) == 0 {
-				chunks := ingest.ChunkDocument(document.Text, ingest.DefaultChunkSpec())
-				out := make([]store.Chunk, 0, len(chunks))
-				for _, c := range chunks {
-					out = append(out, store.Chunk{
-						DocumentID: document.ID, ChatID: attachment.ChatID,
-						Ordinal: c.Ordinal, Heading: c.Heading, Page: c.Page,
-						Text: c.Text, Tokens: c.Tokens,
-					})
-				}
-				if err := a.store.InsertChunks(out); err != nil {
-					return store.Attachment{}, err
-				}
+		if err != nil {
+			// Marking the attachment indexed without its text would leave it
+			// unreachable through search_documents while the UI showed it as
+			// searchable.
+			return store.Attachment{}, fmt.Errorf("Dokument des Anhangs lesen: %w", err)
+		}
+		existing, _ := a.store.ListChunks(document.ID)
+		if len(existing) == 0 {
+			chunks := ingest.ChunkDocument(document.Text, ingest.DefaultChunkSpec())
+			out := make([]store.Chunk, 0, len(chunks))
+			for _, c := range chunks {
+				out = append(out, store.Chunk{
+					DocumentID: document.ID, ChatID: attachment.ChatID,
+					Ordinal: c.Ordinal, Heading: c.Heading, Page: c.Page,
+					Text: c.Text, Tokens: c.Tokens,
+				})
+			}
+			if err := a.store.InsertChunks(out); err != nil {
+				return store.Attachment{}, err
 			}
 		}
 	}

@@ -290,6 +290,60 @@ func TestToolRoundLimitIsReportedToTheUser(t *testing.T) {
 	}
 }
 
+// TestDoneEventReportsTheStoredStatus pins the status the turn ends with against
+// the status actually written to the reply row. A stream that died half-way stores
+// "failed"; the end-of-turn event used to say "complete" for it, so the event and
+// the row disagreed until something else refreshed the view from the database.
+func TestDoneEventReportsTheStoredStatus(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{{
+			{Type: llm.EventDelta, Text: "Halbe Antwort"},
+			{Type: llm.EventError, Error: "Die Verbindung wurde unterbrochen: unexpected EOF"},
+		}},
+	}
+	engine, captured := newTestEngine(t, st, provider)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Hallo"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("turn did not finish")
+	}
+
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := ""
+	for _, m := range messages {
+		if m.Role == string(llm.RoleAssistant) {
+			stored = m.Status
+		}
+	}
+	if stored != store.StatusFailed {
+		t.Fatalf("stored status = %q, want %q", stored, store.StatusFailed)
+	}
+
+	reported := ""
+	sawDone := false
+	for _, ev := range captured.snapshot() {
+		if ev.name == events.Done {
+			sawDone = true
+			reported, _ = ev.payload["status"].(string)
+		}
+	}
+	if !sawDone {
+		t.Fatal("no done event was emitted")
+	}
+	if reported != stored {
+		t.Errorf("done reported status %q while the row holds %q", reported, stored)
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

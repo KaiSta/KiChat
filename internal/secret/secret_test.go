@@ -1,10 +1,13 @@
 package secret
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zalando/go-keyring"
 )
 
 // newFallbackStore builds a store with the keyring switched off: the path a
@@ -86,6 +89,49 @@ func TestFallbackRoundTripAndRemoval(t *testing.T) {
 	}
 	if _, ok := corrupt.Get("brave"); ok {
 		t.Error("a corrupt blob should not yield a secret")
+	}
+}
+
+// TestClearingASecretAlsoClearsTheFallbackCopy pins the state a transient keyring
+// failure produces. Set writes to the encrypted file when keyring.Set refuses
+// once — a locked collection, a busy D-Bus — while the store still reports a
+// keyring, and Get then reads that file copy whenever the keyring has nothing.
+// Clearing only deleted from the keyring, so it reported success while the old
+// key stayed readable through the fallback.
+//
+// The keyring calls are stubbed rather than exercised: a test must never reach
+// the real keyring, and that is also what makes "the keyring refuses" testable at
+// all.
+func TestClearingASecretAlsoClearsTheFallbackCopy(t *testing.T) {
+	s := newFallbackStore(t)
+	s.keyring = true
+	s.keyringGet = func(string, string) (string, error) { return "", keyring.ErrNotFound }
+	s.keyringSet = func(string, string, string) error { return errors.New("keyring gesperrt") }
+	s.keyringDelete = func(string, string) error { return nil }
+
+	const key = "BSA-transient-keyring-value"
+	if err := s.Set("brave", key); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if got, ok := s.Get("brave"); !ok || got != key {
+		t.Fatalf("Get = %q, %v; want the value written to the fallback", got, ok)
+	}
+
+	if err := s.Set("brave", ""); err != nil {
+		t.Fatalf("Set(\"\"): %v", err)
+	}
+	if got, ok := s.Get("brave"); ok {
+		t.Fatalf("the cleared secret is still readable through the fallback: %q", got)
+	}
+
+	// The deletion has to reach the file, not just the in-memory map: a restart
+	// must not bring the key back.
+	reopened, err := NewIsolated(filepath.Dir(s.dataFile))
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+	if got, ok := reopened.Get("brave"); ok {
+		t.Fatalf("the cleared secret came back after a restart: %q", got)
 	}
 }
 
