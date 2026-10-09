@@ -5,6 +5,7 @@ import {store} from '../models';
 import {chat} from '../models';
 import {llm} from '../models';
 import {config} from '../models';
+import {runtime} from '../models';
 import {research} from '../models';
 
 export function ActiveGenerations():Promise<Array<string>>;
@@ -33,11 +34,15 @@ export function GetHealth():Promise<Array<llm.HealthStatus>>;
 
 export function GetPromptVariables():Promise<Array<main.PromptVariable>>;
 
+export function GetRuntimeStatus():Promise<main.RuntimeStatus>;
+
 export function GetSearchStatus():Promise<main.SearchStatus>;
 
 export function GetSecretStatus():Promise<main.SecretStatus>;
 
 export function GetSettings():Promise<config.Settings>;
+
+export function InstallLlamaRuntime():Promise<void>;
 
 export function ListChats(arg1:boolean):Promise<Array<store.Chat>>;
 
@@ -47,9 +52,15 @@ export function ListCompactions(arg1:string):Promise<Array<store.Compaction>>;
 
 export function ListModels(arg1:boolean):Promise<Array<llm.ModelInfo>>;
 
+export function ModelFolders():Promise<Array<runtime.ModelFolder>>;
+
 export function OpenExternal(arg1:string):Promise<void>;
 
 export function PickFiles():Promise<Array<string>>;
+
+export function PickManagedModelFile(arg1:string):Promise<string>;
+
+export function PickModelFolder(arg1:string):Promise<string>;
 
 export function PreviewSystemPrompt(arg1:string):Promise<string>;
 
@@ -62,6 +73,8 @@ export function RemoveAttachment(arg1:string):Promise<void>;
 export function RenameChat(arg1:string,arg2:string):Promise<void>;
 
 export function SaveSettings(arg1:config.Settings):Promise<config.Settings>;
+
+export function ScanModelFolder(arg1:string):Promise<runtime.ModelFolderScan>;
 
 export function Scrape(arg1:string,arg2:number):Promise<research.ScrapeResult>;
 
@@ -77,11 +90,17 @@ export function SetBackendAPIKey(arg1:string,arg2:string):Promise<void>;
 
 export function SetBraveKey(arg1:string):Promise<void>;
 
+export function SetManagedModel(arg1:string,arg2:config.ManagedModel):Promise<void>;
+
 export function SetModelOverride(arg1:string,arg2:string,arg3:llm.ModelOverride):Promise<void>;
 
 export function Settings():Promise<config.Settings>;
 
+export function StartManagedModel(arg1:string):Promise<void>;
+
 export function StopGeneration(arg1:string):Promise<boolean>;
+
+export function StopManagedModel(arg1:string):Promise<void>;
 
 export function TestBraveKey(arg1:string):Promise<research.SearchOutcome>;
 

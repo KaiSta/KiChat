@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"kichat/internal/ingest"
 	"kichat/internal/llm"
 	"kichat/internal/research"
+	rt "kichat/internal/runtime"
 	"kichat/internal/secret"
 	"kichat/internal/store"
 	"kichat/internal/tools"
@@ -45,6 +48,24 @@ type App struct {
 	settings   config.Settings
 
 	dataDir string
+
+	// installer fetches llama-server; servers holds one supervisor per backend
+	// entry that KiChat runs itself. The two are separate because the binaries
+	// are shared by every managed entry.
+	installer *rt.Installer
+
+	serversMu sync.Mutex
+	servers   map[string]*rt.Server
+
+	// install tracks a download in progress. It is read by the UI through a
+	// bound method rather than pushed, because a download outlives the call that
+	// asked for it and polling cannot miss the end of one.
+	installMu    sync.Mutex
+	installBusy  bool
+	installPhase string
+	installDone  int64
+	installTotal int64
+	installErr   string
 }
 
 // NewApp creates the application.
@@ -55,12 +76,17 @@ func (a *App) startup(ctx context.Context) {
 	if err := a.ensure(); err != nil {
 		runtime.LogErrorf(ctx, "Initialisierung fehlgeschlagen: %v", err)
 	}
+	a.startEnabledModels()
 }
 
 func (a *App) shutdown(ctx context.Context) {
 	if a.engine != nil {
 		a.engine.StopAll()
 	}
+	// Stopping the managed servers is not optional: they are child processes, and
+	// a llama-server left behind holds its model in memory with nothing left in
+	// the UI to stop it.
+	a.stopAllManaged()
 	if a.store != nil {
 		a.store.Close()
 	}
@@ -108,8 +134,169 @@ func (a *App) init() error {
 	a.settingsMu.Unlock()
 
 	a.extractor = ingest.New()
+	a.installer = rt.NewInstaller(filepath.Join(a.dataDir, "runtime"))
+	a.installer.OnProgress = a.recordInstallProgress
+	a.servers = map[string]*rt.Server{}
 	a.rebuildServices(settings)
 	return nil
+}
+
+// startEnabledModels starts every managed model the user left switched on. It is
+// what makes "the app runs the model" true across restarts: nothing else has to
+// be started by hand.
+func (a *App) startEnabledModels() {
+	for id, mm := range a.Settings().Runtime.Models {
+		if !mm.Enabled || mm.ModelPath == "" {
+			continue
+		}
+		if err := a.startManagedModel(id); err != nil {
+			// Not fatal to the app: the failure is on the entry's status, where
+			// the user can read what to fix.
+			runtime.LogErrorf(a.ctx, "Modell %s starten: %v", id, err)
+		}
+	}
+}
+
+// startManagedModel starts the server of one managed backend.
+func (a *App) startManagedModel(backendID string) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	settings := a.Settings()
+	mm, ok := settings.Runtime.Models[backendID]
+	if !ok {
+		return fmt.Errorf("für %s ist kein eigenes Modell eingerichtet", backendID)
+	}
+	binary, err := a.llamaServerPath(settings)
+	if err != nil {
+		return err
+	}
+
+	srv := a.serverFor(backendID, settings)
+	return srv.Start(rt.Options{
+		Binary: binary,
+		Model:  mm.ModelPath,
+		Ctx:    mm.CtxSize,
+		Extra:  rt.SplitArgs(mm.ExtraArgs),
+	})
+}
+
+// llamaServerPath resolves the launcher: the user's own copy if they gave one,
+// otherwise the build the installer fetched.
+func (a *App) llamaServerPath(settings config.Settings) (string, error) {
+	if p := strings.TrimSpace(settings.Runtime.BinaryPath); p != "" {
+		return p, nil
+	}
+	tag, binary := a.installer.Find()
+	if tag == "" || binary == "" {
+		return "", errors.New("llama-server ist noch nicht installiert")
+	}
+	return binary, nil
+}
+
+// serverFor returns the supervisor of one backend, creating it if needed.
+func (a *App) serverFor(backendID string, settings config.Settings) *rt.Server {
+	a.serversMu.Lock()
+	defer a.serversMu.Unlock()
+	if a.servers == nil {
+		a.servers = map[string]*rt.Server{}
+	}
+	srv, ok := a.servers[backendID]
+	if !ok {
+		srv = rt.NewServer(backendID)
+		// The id is captured rather than read back from the status: the handler
+		// outlives the settings snapshot it was created from.
+		id := backendID
+		srv.SetStateHandler(func(st rt.Status) { a.onManagedState(id, st) })
+		a.servers[backendID] = srv
+	}
+	srv.SetReadyTimeout(time.Duration(settings.Runtime.ReadySeconds) * time.Second)
+	return srv
+}
+
+// onManagedState follows a managed server's address into its backend entry.
+//
+// A managed server listens on a port chosen when it starts, so the backend the
+// user set up cannot hold its address in advance: it has to be written when the
+// server is up, and persisted, so the row in Settings and the chat's registry
+// both name the server that is actually running. Nothing happens on the way down:
+// the address stays as the last one, and the health check reports what it finds.
+func (a *App) onManagedState(backendID string, st rt.Status) {
+	if st.State != rt.StateRunning || st.URL == "" {
+		return
+	}
+	a.settingsMu.Lock()
+	changed := false
+	for i := range a.settings.Backends {
+		if a.settings.Backends[i].ID != backendID {
+			continue
+		}
+		if a.settings.Backends[i].BaseURL != st.URL || !a.settings.Backends[i].Enabled {
+			a.settings.Backends[i].BaseURL = st.URL
+			a.settings.Backends[i].Enabled = true
+			changed = true
+		}
+	}
+	settings := a.settings
+	a.settingsMu.Unlock()
+	if !changed {
+		return
+	}
+	if err := a.sanitize(settings).Save(a.store); err != nil {
+		runtime.LogErrorf(a.ctx, "Adresse des laufenden Servers speichern: %v", err)
+	}
+	a.rebuildServices(settings)
+}
+
+// adoptManagedAddresses restores the address of every backend whose model the app
+// is running itself.
+//
+// A managed server picks its port when it starts, and it is the app that writes
+// the address it settled on into the backend entry. A settings view opened before
+// that start still holds the previous one, so its Save would put a dead address
+// back and the running model would look unreachable until it was started again.
+// While the app owns the server it owns the address, so the field is restored here
+// rather than trusted from the caller. Nothing happens for a backend the app is not
+// running, which is where a hand-started server's address belongs to the user.
+func (a *App) adoptManagedAddresses(s config.Settings) config.Settings {
+	a.serversMu.Lock()
+	defer a.serversMu.Unlock()
+	for i := range s.Backends {
+		srv := a.servers[s.Backends[i].ID]
+		if srv == nil {
+			continue
+		}
+		st := srv.Status()
+		if st.State != rt.StateRunning || st.URL == "" {
+			continue
+		}
+		s.Backends[i].BaseURL = st.URL
+		s.Backends[i].Enabled = true
+	}
+	return s
+}
+
+// stopAllManaged stops every server the app started.
+func (a *App) stopAllManaged() {
+	a.serversMu.Lock()
+	servers := make([]*rt.Server, 0, len(a.servers))
+	for _, srv := range a.servers {
+		servers = append(servers, srv)
+	}
+	a.serversMu.Unlock()
+	for _, srv := range servers {
+		if err := srv.Stop(); err != nil {
+			runtime.LogErrorf(a.ctx, "llama-server beenden: %v", err)
+		}
+	}
+}
+
+// managedStatus is one managed entry as the UI asks for it.
+type managedStatus struct {
+	BackendID string    `json:"backendId"`
+	Running   bool      `json:"running"`
+	Status    rt.Status `json:"status"`
+	Model     string    `json:"model"`
 }
 
 // rebuildServices (re)creates the objects that depend on settings.
@@ -135,6 +322,15 @@ func (a *App) rebuildServices(settings config.Settings) {
 
 	a.toolSvc = tools.New(a.store, a.chain, a.scraper)
 	a.engine = chat.NewEngine(a.store, a.registry, a.toolSvc, a.Settings, a.emit)
+	// Servers survive a settings save: rebuilding services must not restart a
+	// model that is already loaded, it only updates the settings each one runs
+	// with. So this creates the supervisors that are missing and touches nothing
+	// else.
+	for id, mm := range settings.Runtime.Models {
+		if mm.Enabled || mm.ModelPath != "" {
+			a.serverFor(id, settings)
+		}
+	}
 }
 
 func (a *App) emit(name string, payload any) {

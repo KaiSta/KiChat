@@ -163,6 +163,24 @@ export namespace config {
 		    return a;
 		}
 	}
+	export class ManagedModel {
+	    enabled: boolean;
+	    modelPath: string;
+	    ctxSize: number;
+	    extraArgs: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ManagedModel(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.modelPath = source["modelPath"];
+	        this.ctxSize = source["ctxSize"];
+	        this.extraArgs = source["extraArgs"];
+	    }
+	}
 	export class PromptPreset {
 	    id: string;
 	    name: string;
@@ -180,6 +198,46 @@ export namespace config {
 	        this.prompt = source["prompt"];
 	        this.builtIn = source["builtIn"];
 	    }
+	}
+	export class RuntimeSettings {
+	    tag: string;
+	    binaryPath: string;
+	    accelerator: string;
+	    readySeconds: number;
+	    modelDir: string;
+	    models: Record<string, ManagedModel>;
+	
+	    static createFrom(source: any = {}) {
+	        return new RuntimeSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.tag = source["tag"];
+	        this.binaryPath = source["binaryPath"];
+	        this.accelerator = source["accelerator"];
+	        this.readySeconds = source["readySeconds"];
+	        this.modelDir = source["modelDir"];
+	        this.models = this.convertValues(source["models"], ManagedModel, true);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class SamplerSettings {
 	    temperature: number;
@@ -254,6 +312,7 @@ export namespace config {
 	    toolIterations: number;
 	    toolTokenBudget: number;
 	    nativeTools: boolean;
+	    runtime: RuntimeSettings;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -275,6 +334,7 @@ export namespace config {
 	        this.toolIterations = source["toolIterations"];
 	        this.toolTokenBudget = source["toolTokenBudget"];
 	        this.nativeTools = source["nativeTools"];
+	        this.runtime = this.convertValues(source["runtime"], RuntimeSettings);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -509,6 +569,36 @@ export namespace main {
 	        this.toSeq = source["toSeq"];
 	    }
 	}
+	export class ManagedStatus {
+	    backendId: string;
+	    enabled: boolean;
+	    modelPath: string;
+	    ctxSize: number;
+	    extraArgs: string;
+	    state: string;
+	    port: number;
+	    url: string;
+	    error?: string;
+	    log?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ManagedStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.backendId = source["backendId"];
+	        this.enabled = source["enabled"];
+	        this.modelPath = source["modelPath"];
+	        this.ctxSize = source["ctxSize"];
+	        this.extraArgs = source["extraArgs"];
+	        this.state = source["state"];
+	        this.port = source["port"];
+	        this.url = source["url"];
+	        this.error = source["error"];
+	        this.log = source["log"];
+	    }
+	}
 	export class PromptVariable {
 	    name: string;
 	    key: string;
@@ -524,6 +614,58 @@ export namespace main {
 	        this.key = source["key"];
 	        this.description = source["description"];
 	    }
+	}
+	export class RuntimeStatus {
+	    installed: boolean;
+	    tag?: string;
+	    binary?: string;
+	    customBinary?: string;
+	    accelerator: string;
+	    readySeconds: number;
+	    busy: boolean;
+	    phase?: string;
+	    done: number;
+	    total: number;
+	    error?: string;
+	    models: ManagedStatus[];
+	
+	    static createFrom(source: any = {}) {
+	        return new RuntimeStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.installed = source["installed"];
+	        this.tag = source["tag"];
+	        this.binary = source["binary"];
+	        this.customBinary = source["customBinary"];
+	        this.accelerator = source["accelerator"];
+	        this.readySeconds = source["readySeconds"];
+	        this.busy = source["busy"];
+	        this.phase = source["phase"];
+	        this.done = source["done"];
+	        this.total = source["total"];
+	        this.error = source["error"];
+	        this.models = this.convertValues(source["models"], ManagedStatus);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class SearchStatus {
 	    providers: Record<string, boolean>;
@@ -662,6 +804,79 @@ export namespace research {
 	        this.provider = source["provider"];
 	        this.cached = source["cached"];
 	        this.warning = source["warning"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
+export namespace runtime {
+	
+	export class ModelFile {
+	    path: string;
+	    name: string;
+	    model: string;
+	    size: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelFile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.name = source["name"];
+	        this.model = source["model"];
+	        this.size = source["size"];
+	    }
+	}
+	export class ModelFolder {
+	    path: string;
+	    kind: string;
+	    exists: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelFolder(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.kind = source["kind"];
+	        this.exists = source["exists"];
+	    }
+	}
+	export class ModelFolderScan {
+	    dir: string;
+	    files: ModelFile[];
+	    truncated: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelFolderScan(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.dir = source["dir"];
+	        this.files = this.convertValues(source["files"], ModelFile);
+	        this.truncated = source["truncated"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

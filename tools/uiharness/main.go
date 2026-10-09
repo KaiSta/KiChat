@@ -54,21 +54,14 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8791", "listen address")
 	flag.Parse()
 
-	indexPath := filepath.Join(*dir, "index.html")
-	raw, err := os.ReadFile(indexPath)
-	if err != nil {
-		log.Fatalf("cannot read %s: %v\nBuild the frontend first (wails build, or cd frontend && npm run build).", indexPath, err)
-	}
-	// The modules are deferred, so a classic script in <head> always runs first
-	// and window.go exists before the app bundle touches it.
-	patched := strings.Replace(string(raw), "</head>", banner+"</head>", 1)
-	if patched == string(raw) {
-		log.Fatalf("%s has no </head>; the mock bridge cannot be injected", indexPath)
+	if _, err := os.Stat(filepath.Join(*dir, "index.html")); err != nil {
+		log.Fatalf("cannot read %s: %v\nBuild the frontend first (wails build, or cd frontend && npm run build).",
+			filepath.Join(*dir, "index.html"), err)
 	}
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           &handler{dir: *dir, index: patched},
+		Handler:           &handler{dir: *dir},
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Printf("KiChat UI harness — mock bridge, no backend")
@@ -80,17 +73,42 @@ func main() {
 }
 
 type handler struct {
-	dir   string
-	index string
+	dir string
+}
+
+// page reads the built index.html and injects the mock bridge into it. The
+// modules are deferred, so a classic script in <head> always runs first and
+// window.go exists before the app bundle touches it.
+func (h *handler) page() (string, error) {
+	path := filepath.Join(h.dir, "index.html")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	patched := strings.Replace(string(raw), "</head>", banner+"</head>", 1)
+	if patched == string(raw) {
+		return "", fmt.Errorf("%s has no </head>; the mock bridge cannot be injected", path)
+	}
+	return patched, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/", "/index.html":
+		// Read per request rather than once at startup: the page names a hashed
+		// bundle, so an index.html captured before a rebuild points the browser at
+		// the previous one and an edited UI appears not to have changed at all.
+		// Restarting is what the embedded mock needs; a frontend rebuild is not.
+		page, err := h.page()
+		if err != nil {
+			log.Printf("%-4s %s -> 500: %v", r.Method, r.URL.Path, err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		// A stale harness page is worse than none: the mock changes as the UI does.
 		w.Header().Set("Cache-Control", "no-store")
-		fmt.Fprint(w, h.index)
+		fmt.Fprint(w, page)
 		log.Printf("%-4s %s (index, mock injected)", r.Method, r.URL.Path)
 		return
 	case "/__mock-wails.js":

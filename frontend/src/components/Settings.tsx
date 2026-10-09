@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { App, formatNumber, toDate, type config, type llm, type main } from '../lib/api'
+import { App, formatBytes, formatNumber, toDate, type config, type llm, type main, type runtime } from '../lib/api'
 import { useStore } from '../store'
 import { asLang, LANGS } from '../lib/i18n'
 
@@ -317,6 +317,416 @@ function AboutSection({ info }: { info: main.AppInfo | null }) {
 }
 
 /* -------------------------------------------------------------------------
+ * Local models (llama.cpp that KiChat runs itself)
+ * ---------------------------------------------------------------------- */
+
+/**
+ * LocalModelSection is the half of a backend that KiChat provides rather than
+ * contacts: it fetches llama-server, starts it on a port of its own choosing with
+ * a GGUF the user picked, and stops it again.
+ *
+ * The status is polled rather than pushed. A download or a model load outlives the
+ * call that asked for it, and polling cannot miss the end of one — an event sent
+ * while the window was reloading would be lost, and the row would sit on "starting"
+ * until something else happened to refresh it.
+ */
+function LocalModelSection({
+  backend,
+  draft,
+  patch,
+}: {
+  backend: llm.BackendConfig
+  draft: config.Settings
+  patch: (c: Partial<config.Settings>) => void
+}) {
+  const t = useStore((s) => s.t)
+  const [status, setStatus] = useState<main.RuntimeStatus | null>(null)
+  const [error, setError] = useState('')
+  // Where models may already be, and what was found in the folder in use. The
+  // folder itself is a setting; which folders exist is a question asked of the
+  // machine, because LM Studio's own choice of folder is a setting of its own.
+  const [folders, setFolders] = useState<runtime.ModelFolder[]>([])
+  const [scan, setScan] = useState<runtime.ModelFolderScan | null>(null)
+  const [scanError, setScanError] = useState('')
+  const [scanning, setScanning] = useState(false)
+  // The state a managed server was last seen in, so a change can be told from a
+  // poll that found the same thing again.
+  const lastState = useRef<string | null>(null)
+  const saved = draft.runtime?.models?.[backend.id]
+  const [model, setModel] = useState<config.ManagedModel>(() => ({
+    enabled: saved?.enabled ?? false,
+    modelPath: saved?.modelPath ?? '',
+    ctxSize: saved?.ctxSize ?? 8192,
+    extraArgs: saved?.extraArgs ?? '',
+  }))
+
+  const refresh = async () => {
+    try {
+      setStatus(await App.GetRuntimeStatus())
+      setError('')
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const mine = status?.models.find((m) => m.backendId === backend.id)
+  const state = mine?.state ?? 'stopped'
+  const working = !!status?.busy || state === 'starting'
+
+  // Only poll while something is actually moving: an idle window should not ask
+  // the backend for status twice a second for the rest of the session.
+  useEffect(() => {
+    if (!working) return
+    const id = window.setInterval(() => void refresh(), 1200)
+    return () => window.clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [working])
+
+  // A managed server changes the entry it belongs to: the address it landed on is
+  // written into the backend row and the registry is rebuilt around it. The row
+  // above and the model switcher keep showing the previous answer until they are
+  // read again, so the transition is what says to re-read them — polling the same
+  // state twice must not turn into a permanent extra round trip.
+  useEffect(() => {
+    const previous = lastState.current
+    lastState.current = state
+    if (previous === null || previous === state) return
+    void useStore.getState().refreshHealth()
+    void useStore.getState().refreshModels()
+  }, [state])
+
+  const update = (changes: Partial<config.ManagedModel>) => {
+    const next: config.ManagedModel = { ...model, ...changes }
+    setModel(next)
+    // Mirrored into the settings draft as well, so the panel's own Save persists
+    // the fields the user typed even if they never press a start button.
+    const models = { ...(draft.runtime?.models ?? {}), [backend.id]: next }
+    patch({ runtime: { ...draft.runtime, models } })
+    return next
+  }
+
+  const commit = async (next: config.ManagedModel) => {
+    setError('')
+    try {
+      await App.SetManagedModel(backend.id, next)
+    } catch (e) {
+      setError(String(e))
+    }
+    await refresh()
+  }
+
+  const install = async () => {
+    setError('')
+    try {
+      await App.InstallLlamaRuntime()
+    } catch (e) {
+      setError(String(e))
+    }
+    await refresh()
+  }
+
+  const chooseModel = async () => {
+    try {
+      const picked = await App.PickManagedModelFile(t('settings.managed.pickTitle'))
+      if (picked) update({ modelPath: picked })
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  // An empty folder is not "no folder": it asks the backend for the folder it
+  // would use, which is LM Studio's when the user never chose one. That is what
+  // makes the models a user already has show up without anyone configuring
+  // anything.
+  const modelDir = draft.runtime?.modelDir ?? ''
+
+  const rescan = async (dir: string) => {
+    setScanning(true)
+    try {
+      setScan(await App.ScanModelFolder(dir))
+      setScanError('')
+    } catch (e) {
+      setScan(null)
+      setScanError(t('settings.managed.folderMissing'))
+      void e
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  useEffect(() => {
+    void App.ModelFolders()
+      .then(setFolders)
+      .catch(() => undefined)
+  }, [modelDir])
+
+  useEffect(() => {
+    void rescan(modelDir)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelDir])
+
+  const chooseFolder = async () => {
+    try {
+      const picked = await App.PickModelFolder(t('settings.managed.folderPickTitle'))
+      if (!picked) return
+      patch({ runtime: { ...draft.runtime, modelDir: picked } })
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  const useFolder = (dir: string) => patch({ runtime: { ...draft.runtime, modelDir: dir } })
+
+  const folderLabel = (kind: string) =>
+    kind === 'lmstudio-configured'
+      ? t('settings.managed.folderLmStudioConfigured')
+      : kind === 'lmstudio'
+        ? t('settings.managed.folderLmStudio')
+        : kind === 'lmstudio-legacy'
+          ? t('settings.managed.folderLmStudioLegacy')
+          : kind === 'lmstudio-bundled'
+            ? t('settings.managed.folderLmStudioBundled')
+            : t('settings.managed.folderCustom')
+
+  const start = async () => {
+    // The fields are saved first: starting with a context size the panel does not
+    // show would be a server the user did not configure.
+    await commit(model)
+    try {
+      await App.StartManagedModel(backend.id)
+    } catch (e) {
+      setError(String(e))
+    }
+    await refresh()
+  }
+
+  const toggle = async (on: boolean) => {
+    const next = update({ enabled: on })
+    await commit(next)
+    if (on) {
+      try {
+        await App.StartManagedModel(backend.id)
+      } catch (e) {
+        setError(String(e))
+      }
+      await refresh()
+    }
+  }
+
+  const stop = async () => {
+    try {
+      await App.StopManagedModel(backend.id)
+    } catch (e) {
+      setError(String(e))
+    }
+    await refresh()
+  }
+
+  const percent =
+    status && status.total > 0 ? Math.min(100, Math.round((status.done / status.total) * 100)) : 0
+
+  return (
+    <div className="mt-3 rounded-md p-3" style={{ background: 'var(--surface)' }}>
+      <div className="mb-2 text-[12px] font-semibold">{t('settings.managed.title')}</div>
+      <div className="mb-2 text-[11px] faint">{t('settings.managed.hint')}</div>
+
+      <div className="mb-2 flex items-center gap-2">
+        <span className="badge">{status?.installed ? t('settings.managed.installed') : t('settings.managed.notInstalled')}</span>
+        <span className="mono min-w-0 flex-1 truncate text-[11px]" title={status?.binary ?? status?.customBinary ?? ''}>
+          {status?.customBinary || status?.binary || t('settings.managed.noBinary')}
+        </span>
+        {status?.tag && <span className="mono text-[11px] faint">{status.tag}</span>}
+      </div>
+
+      {!status?.customBinary && (
+        <div className="mb-2 flex items-center gap-2">
+          <button type="button" className="btn btn-sm" disabled={!!status?.busy} onClick={() => void install()}>
+            {status?.busy ? t('settings.managed.installing') : t('settings.managed.install')}
+          </button>
+          {status?.busy && (
+            <span className="text-[11px] faint">
+              {status.phase === 'downloading'
+                ? `${t('settings.managed.downloading')} ${percent}%`
+                : status.phase === 'extracting'
+                  ? t('settings.managed.extracting')
+                  : t('settings.managed.preparing')}
+            </span>
+          )}
+        </div>
+      )}
+
+      <div className="mb-2 grid grid-cols-2 gap-2">
+        <label className="text-[11px]">
+          {t('settings.managed.accelerator')}
+          <select
+            className="input mono mt-1"
+            value={draft.runtime?.accelerator ?? 'cpu'}
+            onChange={(e) => patch({ runtime: { ...draft.runtime, accelerator: e.target.value } })}
+          >
+            <option value="cpu">{t('settings.managed.accelCpu')}</option>
+            <option value="vulkan">{t('settings.managed.accelVulkan')}</option>
+          </select>
+        </label>
+        <label className="text-[11px]">
+          {t('settings.managed.binaryPath')}
+          <input
+            className="input mono mt-1"
+            placeholder={t('settings.managed.binaryPlaceholder')}
+            value={draft.runtime?.binaryPath ?? ''}
+            onChange={(e) => patch({ runtime: { ...draft.runtime, binaryPath: e.target.value } })}
+          />
+        </label>
+      </div>
+
+      <label className="mb-2 flex items-center gap-2 text-[12px]">
+        <input type="checkbox" checked={!!model.enabled} onChange={(e) => void toggle(e.target.checked)} />
+        {t('settings.managed.enable')}
+      </label>
+
+      <div className="mb-2 flex items-center gap-2">
+        <input
+          className="input mono flex-1"
+          placeholder={t('settings.managed.modelPlaceholder')}
+          value={model.modelPath}
+          onChange={(e) => update({ modelPath: e.target.value })}
+        />
+        <button type="button" className="btn btn-sm" onClick={() => void chooseModel()}>
+          {t('settings.managed.choose')}
+        </button>
+      </div>
+
+      {/* A user who already has LM Studio has models on disk. Listing them here is
+          what turns "pick a GGUF from anywhere" into "use the one you already
+          downloaded", without KiChat copying or re-downloading anything. */}
+      <div className="mb-2 rounded-md p-2" style={{ background: 'var(--surface-2)' }}>
+        <div className="mb-1 text-[11px]">{t('settings.managed.folder')}</div>
+        <div className="mb-1 flex items-center gap-2">
+          <input
+            className="input mono flex-1"
+            placeholder={folders.find((f) => f.exists)?.path ?? t('settings.managed.modelPlaceholder')}
+            value={modelDir}
+            onChange={(e) => patch({ runtime: { ...draft.runtime, modelDir: e.target.value } })}
+          />
+          <button type="button" className="btn btn-sm" onClick={() => void chooseFolder()}>
+            {t('settings.managed.folderPick')}
+          </button>
+        </div>
+        {folders.filter((f) => f.exists).length > 0 && (
+          <div className="mb-1 flex flex-wrap gap-1">
+            {folders
+              .filter((f) => f.exists)
+              .map((f) => (
+                <button
+                  key={f.path}
+                  type="button"
+                  className={`btn btn-sm ${f.path === modelDir ? '' : 'btn-ghost'}`}
+                  title={f.path}
+                  onClick={() => useFolder(f.path)}
+                >
+                  {folderLabel(f.kind)}
+                </button>
+              ))}
+          </div>
+        )}
+        {scan && scan.files.length > 0 ? (
+          <div className="max-h-40 overflow-auto rounded-md" style={{ border: '1px solid var(--border)' }}>
+            {scan.files.map((file) => (
+              <button
+                key={file.path}
+                type="button"
+                className="flex w-full items-center gap-2 px-2 py-1 text-left text-[11px]"
+                style={{ background: file.path === model.modelPath ? 'var(--surface-2)' : 'transparent' }}
+                title={file.path}
+                onClick={() => update({ modelPath: file.path })}
+              >
+                <span className="mono min-w-0 flex-1 truncate">{file.name}</span>
+                <span className="faint max-w-[40%] truncate">{file.model}</span>
+                <span className="mono faint shrink-0">{formatBytes(file.size)}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="text-[11px] faint">
+            {scanning
+              ? t('settings.managed.folderScanning')
+              : scanError || t('settings.managed.folderEmpty')}
+          </div>
+        )}
+        {scan && scan.files.length > 0 && (
+          <div className="mt-1 text-[11px] faint">
+            {formatNumber(scan.files.length)}{' '}
+            {t(scan.files.length === 1 ? 'settings.managed.folderModel' : 'settings.managed.folderModels')}
+            {scan.truncated ? ` — ${t('settings.managed.folderTruncated')}` : ''}
+          </div>
+        )}
+      </div>
+
+      <div className="mb-2 grid grid-cols-2 gap-2">
+        <label className="text-[11px]">
+          {t('settings.managed.ctx')}
+          <input
+            className="input mono mt-1"
+            type="number"
+            min={2048}
+            step={1024}
+            value={model.ctxSize}
+            onChange={(e) => update({ ctxSize: Number(e.target.value) || 0 })}
+          />
+        </label>
+        <label className="text-[11px]">
+          {t('settings.managed.extra')}
+          <input
+            className="input mono mt-1"
+            placeholder="--n-gpu-layers 99"
+            value={model.extraArgs}
+            onChange={(e) => update({ extraArgs: e.target.value })}
+          />
+        </label>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button type="button" className="btn btn-sm" disabled={!status?.installed || !model.modelPath} onClick={() => void start()}>
+          {t('settings.managed.start')}
+        </button>
+        <button type="button" className="btn btn-sm" disabled={state === 'stopped'} onClick={() => void stop()}>
+          {t('settings.managed.stop')}
+        </button>
+        <span className={`badge ${state === 'running' ? 'badge-ok' : state === 'failed' ? 'badge-danger' : ''}`}>
+          {t(`settings.managed.state.${state}`)}
+        </span>
+        {mine?.url && <span className="mono min-w-0 flex-1 truncate text-[11px] faint">{mine.url}</span>}
+      </div>
+
+      {mine?.error && (
+        <div className="mt-2 whitespace-pre-wrap text-[11px]" style={{ color: 'var(--danger)' }}>
+          {mine.error}
+        </div>
+      )}
+      {error && (
+        <div className="mt-2 text-[11px]" style={{ color: 'var(--danger)' }}>
+          {error}
+        </div>
+      )}
+      {status?.error && (
+        <div className="mt-2 text-[11px]" style={{ color: 'var(--danger)' }}>
+          {status.error}
+        </div>
+      )}
+      {state === 'starting' && mine?.log?.length ? (
+        <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap text-[10px] faint">
+          {mine.log.join('\n')}
+        </pre>
+      ) : null}
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------
  * Backends
  * ---------------------------------------------------------------------- */
 
@@ -397,6 +807,11 @@ function BackendsTab({
                 <div className="mt-2 text-[11px]" style={{ color: 'var(--danger)' }}>
                   {status.error}
                 </div>
+              )}
+              {/* Only the kind that KiChat knows how to run itself gets the
+                  controls; every other entry stays an address it contacts. */}
+              {backend.kind === 'llamacpp' && (
+                <LocalModelSection backend={backend} draft={draft} patch={patch} />
               )}
             </div>
           )

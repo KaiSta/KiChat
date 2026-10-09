@@ -22,6 +22,7 @@ numbers about what is being sent to the model.
 | Area | Delivered |
 | --- | --- |
 | Backends | LM Studio (`:1234`) and Ollama (`:11434`), plus DeepSeek and llama.cpp (`:9931`) shipped prepared-but-off, plus a generic OpenAI-compatible endpoint |
+| Local models | The llama.cpp entry can also be provided by KiChat itself: it fetches `llama-server` from llama.cpp's own releases, starts a GGUF of the user's choosing on a free port, and stops it with the app — started again on every launch while the switch is on. The GGUF does not have to be downloaded again: the picker lists what is already in the folder LM Studio uses |
 | Context | Automatic and manual compaction, live context-window fullness meter, per-segment inspector |
 | Research | Brave Search (API key) with DuckDuckGo fallback, page scraping with SSRF guard, optional search-before-answer |
 | Files | Attachments, PDF/office text extraction, chunked with BM25 retrieval over the chunks |
@@ -70,6 +71,11 @@ internal/
                    scrape.go (SSRF + robots guards), util.go
   ingest/          ingest.go, pdf.go (pdftotext), office.go (libreoffice), chunk.go
   tools/           Tool definitions and dispatch
+  runtime/         The llama.cpp KiChat installs and runs itself
+    install.go       release lookup, digest-verified download, tar.gz/zip extraction
+    supervise.go     one server per managed model: free port, /health, log tail, stop
+    discover.go      where LM Studio keeps its models, and a bounded scan of a folder
+    proc_unix.go     process group and SIGTERM-then-SIGKILL (proc_windows.go is the pair)
   secret/          API key storage outside the repository
 frontend/src/
   main.tsx         React root; imports style.css
@@ -148,6 +154,64 @@ FTS5 with BM25 was verified working before committing to it.
 carries an explicit anti-prompt-injection clause, and page fetching has SSRF and
 robots.txt guards.
 
+**KiChat runs the model itself when asked to.** A user whose only local model server is
+one they started by hand has to start it before every session, and the app can neither
+know which GGUF is loaded nor stop it afterwards. So the llama.cpp entry carries a
+second half that the app provides rather than contacts: it fetches `llama-server` from
+llama.cpp's own releases, starts it on a free port with a GGUF the user picked, and stops
+it with the app. Four decisions follow from that.
+
+*The archive is unpacked whole, not a single binary out of it.* `llama-server` is a
+17 KB launcher whose code is in a `libllama-server-impl.so` beside it, next to
+`libllama.so`, `libggml*.so` and the symlinks that name them; an install that kept only
+the launcher would produce a build that lists models and cannot start. Every published
+archive also wraps its contents in its own directory (`llama-b11528/`), which is
+unwrapped once at install time so that every derived path — including the one the
+launcher is chmodded at — stays one level deep. GitHub's *latest* release is not the one
+to ask: since llama.cpp moved to versioned tags it points at a semver release with no
+binaries at all, so the release list is scanned for the first entry that actually
+publishes the asset. The download is checked against the sha256 GitHub reports for it,
+and extraction happens into `<tag>.installing` and is renamed into place only when it is
+complete, so an interrupted install leaves nothing that looks installed.
+
+*A managed server's address cannot live in settings in advance.* The port is chosen at
+start, so when a server reports ready the address it settled on is written into the
+backend entry, the entry is enabled, the settings are saved and the services are rebuilt.
+That is what makes the row in settings and the chat's registry name the server that is
+actually running, and it is also why the address survives a restart of the app: it is
+persisted, even though it will be replaced by the next start.
+
+*Readiness is the server's own answer, not the process existing.* A model load takes
+minutes, so `Start` returns as soon as the process exists and the state is reported as it
+changes. `/health` answers 503 while the weights are coming in and 200 once the server can
+serve, which is exactly the distinction needed — a running process says nothing about
+whether a chat would work. The start is not tied to the request that asked for it either:
+that caller is long gone by the time the model is up.
+
+*Models a user already has are used, not downloaded again.* Asking someone with 40 GB of
+GGUF files in LM Studio to fetch another copy to run in KiChat would be an absurd answer
+to "run this locally", so the picker lists what is already on disk. The folder to offer
+first is the one **LM Studio's own setting names** — read out of `~/.lmstudio/settings.json`
+as a single field, since it is another application's private file and all that is wanted
+from it is a hint — and only then `~/.lmstudio/models`, its pre-0.3.x location, and the
+models it bundles. The measured reason for that order: on the machine this was written
+on, `~/.lmstudio/models` exists and is **empty** while that setting points at a folder on
+another drive holding six chat models, so "the first folder that exists" reports no
+models on a machine full of them. The scan stops at a depth and a file count and says
+when it did, because a folder can be a drive root or a network share; it descends into no
+hidden directory (LM Studio's housekeeping lives in `.internal`), and it skips `mmproj-*`
+files, which carry the same extension as a model and which llama-server refuses to load.
+
+*Saving a model does not start it.* It used to, and that turned every edited field — the
+context size, the extra arguments — into a restart of a model that may have taken minutes
+to load. Starting and stopping are their own calls, and switching a model off stops it,
+because a multi-gigabyte model left in memory with no row that offers to stop it is the
+worse failure. The runtime lives in `Config/RuntimeDirectory` (`~/.config/kichat/runtime`),
+not in the repository and not in the database, and the binaries are shared by every
+managed entry while the model choice is per entry. The same release archives are used for
+every platform, so the format follows the *asset's* name rather than the host's: Windows
+ships `.zip` even when the app runs on Linux.
+
 **The frontend type layer wraps the generated bindings.** Wails generates TS *classes*
 with a `convertValues` helper on any type containing nested structs, which makes object
 spreads and hand-built literals fail `tsc`. `lib/api.ts` defines a recursive `Plain<T>`
@@ -190,6 +254,31 @@ composer and submitted), and the database confirmed the result:
 `ttft_ms=2194`, `stats_source=estimated`, `stop_reason=stop`. The UI rendered the stats
 row and the context meter switched from the estimated `1.450` to the **measured**
 `1.713 / 48.128 ctx`.
+
+**The managed runtime, against the real thing.** `internal/runtime` was exercised end to
+end on this machine, not against a fixture: the release lookup returned
+`llama-b11534-bin-ubuntu-x64.tar.gz` (17,799,838 bytes, `sha256:d065dfb7…`), the download
+matched that digest, the archive unpacked to 50 files and 10 symlinks and flattened to
+one level, and `llama-server --version` answered `version 0.6.0-dev (build 11534, commit
+50e3e3e48)`. Started against a real GGUF it reported `starting` and then `running` on
+`http://127.0.0.1:46815` in under a second, `/health` answered `200 {"status":"ok"}`,
+the app's own provider listed the model as `state=loaded`, and the chat path was refused
+with `the current context does not support logits computation` — the right answer for the
+embedding-only model that run used, and proof that the request reached the server. `Stop`
+left no process behind (checked with `kill -0`), the status went back to `stopped` with no
+PID, and a second start came up on a different port (`43567`) and stopped cleanly again.
+A day later the release had moved to `b11535`; the same sequence ran green against it,
+which is what the number in this paragraph is doing here — the tag moves, the behaviour
+does not.
+
+**A real chat on a model KiChat started itself.** Not a fixture and not an embedding
+model: `llama-server` `b11535` was installed by the installer, started on
+`LFM2.5-1.2B-Instruct-Q8_0.gguf` (1.25 GB, taken from the folder LM Studio's setting
+names), and answered through the app's own provider — `starting` → `running` in seconds,
+`/health` 200, the listing reporting `loaded` with a 4,096-token window, and a turn back
+in 5.4 s with `prompt=33 completion=26` plus llama.cpp's own timings (`6.2 tok/s`, ttft
+1366 ms, `source llamacpp`, `stop`): *"The Mariana Trench is the deepest sea, reaching
+about 36,000 feet (10,994 meters) deep."*
 
 **Context inspector** — opened from the UI, showing the segment breakdown:
 System-Prompt 1,067 + Tool-Schema 835, response reserve 1,874, limit source `Backend`,
@@ -357,6 +446,29 @@ wails build                    # when webkit2gtk-4.0 is available
   The Brave client builds its own request, so a key echoed back by that endpoint would
   reach the UI unredacted; Brave's documented rejection body does not echo the key, so
   this is a gap in the guard rather than an observed leak.
+- **The LM Studio folder is read out of an unofficial file.** Its location comes from
+  `downloadsFolder` in `~/.lmstudio/settings.json`, which is that application's private
+  state and can change shape between releases. Nothing breaks when it does — the hint is
+  dropped and the platform defaults are offered instead — but a user who moved their
+  models with a future LM Studio would have to point the picker at the folder once by
+  hand.
+- **A vision model is offered without its projector.** The scanner deliberately skips
+  `mmproj-*` files because `llama-server` cannot load one as a model, so a multimodal GGUF
+  selected from the list starts as a text-only server: pairing the projector through
+  `--mmproj` is something the user has to add under *Further arguments* for now.
+- **A managed llama-server can outlive a hard kill.** A clean quit stops every server it
+  started, and each runs in its own process group so the shutdown reaches the whole tree.
+  A `SIGKILL` to the app, though, leaves the server running with its model in memory and
+  no row left to stop it — nothing here reparents the child (a `Pdeathsig` would be the
+  way on Linux, and Windows would need a job object). The servers are on the loopback
+  interface only, so what is lost is memory, not exposure.
+- **A managed server accepts requests from anything on the machine.** `llama-server`
+  starts without an API key and, as its own log says, with CORS allowing all origins, so
+  another local process — or a web page in the user's browser — can use the model while it
+  is up. Chatting with a local model is what the feature is for, which is why this was not
+  closed by generating a key the entry then has to carry; it would need `--api-key` plus
+  the key stored like every other secret, and the readiness probe re-checked against a
+  keyed `/health`.
 - **A fresh clone does not build on Node 18 / npm 9** (see §6). This is a toolchain
   limitation rather than a defect in the repository, but it does mean the repository
   alone is not sufficient to build on the machine it was developed on.
@@ -396,11 +508,17 @@ event-name constants now live in `internal/events` so a mismatch fails the build
    trustworthy rather than merely plausible.
 7. **MCP client**, so tools come from the ecosystem instead of being hardcoded.
 8. **Multi-model arena** — one prompt across several local models, side by side.
-9. **Automatic model fallback** when a backend is down or the context does not fit.
-10. **Cross-chat memory** backed by the same FTS index.
-11. **SourcesPanel UI** for the existing `scrapeIntoChat` binding.
-12. Vision support for the VLM models already listed by LM Studio.
-13. Remaining exploratory ideas: document generation, model benchmarking, branching
+9. **Model download inside the app.** The picker now lists the GGUF files a user already
+   has — LM Studio's folder first — so nobody has to fetch a file twice, but a *fresh*
+   machine still has nothing to list. A search over Hugging Face's GGUF repos, a
+   digest-checked download into `~/.config/kichat/models`, and the same progress row the
+   installer already has would close the last gap between "install KiChat" and "chat with
+   a local model".
+10. **Automatic model fallback** when a backend is down or the context does not fit.
+11. **Cross-chat memory** backed by the same FTS index.
+12. **SourcesPanel UI** for the existing `scrapeIntoChat` binding.
+13. Vision support for the VLM models already listed by LM Studio.
+14. Remaining exploratory ideas: document generation, model benchmarking, branching
     conversations, and scheduled watch tasks.
 
 ---

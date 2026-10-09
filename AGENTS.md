@@ -152,6 +152,53 @@ is not retried after it; "no results (layout may have changed)" is reserved for 
 that really has no hits. A working Brave key, a different provider, or a different
 network is the way out.
 
+## The managed runtime (opt-in, fetches llama.cpp)
+
+`internal/runtime` is the one package that installs software: it downloads
+`llama-server` from llama.cpp's own releases into `~/.config/kichat/runtime/<tag>/` and
+starts it for a model the user picked. Nothing runs at startup unless a managed entry is
+switched on, and no check downloads anything — the package's tests build their own
+archives and serve them from an `httptest` server.
+
+Measured while verifying it, in case a number is ever needed again:
+
+- The Linux CPU asset is around **17.8 MB** whatever the build is — measured on
+  `llama-b11534-bin-ubuntu-x64.tar.gz` (17,799,838 bytes, `sha256:d065dfb7…`) and again
+  on `b11535` a day later, which is the point: the tag moves, the size does not. It
+  unpacks to 50 files and 10 symlinks and its launcher answers
+  `version: 0.6.0-dev (build 11534, commit 50e3e3e48)`. The largest desktop builds are
+  ~590 MB, which is why the download has a progress row rather than a blocker.
+- **GitHub's `latest` release carries no binaries.** Since llama.cpp moved to versioned
+  tags, `latest` points at a semver release whose only asset is a `nightly-tag.txt`; the
+  archives live on the per-build releases (`b11534`). The listing is therefore scanned for
+  the first release that actually publishes the asset. The lookup is unauthenticated and
+  therefore limited to 60 requests an hour per address: a 403 with
+  `X-RateLimit-Remaining: 0` is reported as exactly that, not as "llama.cpp is down".
+- **Every archive wraps its contents in its own directory** (`llama-b11528/`), and
+  `llama-server` is a launcher whose code is in a sibling `libllama-server-impl.so`. The
+  install flattens the wrapper and keeps the siblings — a build that lists models but
+  cannot start is what the alternative produces.
+- **A load is minutes, and readiness is the server's own answer.** `/health` is 503 while
+  the weights come in and 200 once the server can serve.
+- **A managed server has no API key and allows all origins**, which its own log points
+  out. It binds to `127.0.0.1` only, so this is a local-origin exposure rather than a
+  network one; it is recorded as a limitation in `PLAN.md` §8.
+- **LM Studio's models folder is not where you think it is.** `~/.lmstudio/models`
+  exists on this machine and is **empty**, while `~/.lmstudio/settings.json` has
+  `downloadsFolder` pointing at `/mnt/<uuid>/lmstudio`, which holds six chat models —
+  `publisher/model/file.gguf`, two or three levels deep, each model's `mmproj-*.gguf`
+  projectors beside it. So the folder to offer first is the one LM Studio's own setting
+  names, not the first candidate that exists; the helpers are in
+  `internal/runtime/discover.go` and the whole thing is unit-tested against temporary
+  homes.
+- **A managed chat was measured, not assumed.** `LFM2.5-1.2B-Instruct-Q8_0.gguf`
+  (1.25 GB, from the folder above) started under `b11535`, `/health` went 200, the
+  provider listed it as `loaded` with a 4,096-token window, and a real turn came back in
+  5.4 s with `prompt=33 completion=26` and llama.cpp's own timings (`6.2 tok/s`, ttft
+  1366 ms, `source llamacpp`). Models llama.cpp cannot load at all are a different
+  matter: the bundled `nomic-embed-text-v1.5` starts and answers `/health` but refuses
+  `/v1/chat/completions` with "the current context does not support logits computation".
+
 ## Verifying the UI
 
 ### Preferred: the mock-bridge harness

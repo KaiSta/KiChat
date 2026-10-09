@@ -236,6 +236,18 @@
       error: 'llm: backend unavailable: no API key configured',
       models: 0,
     },
+    // llama.cpp is stopped until something starts it: a managed server, or a
+    // user running llama-server by hand. Refused is what the row shows in
+    // between, and it is the state the local-model section is there to end.
+    {
+      id: 'llamacpp',
+      name: 'llama.cpp',
+      kind: 'llamacpp',
+      baseUrl: 'http://127.0.0.1:9931',
+      ok: false,
+      error: 'llm: backend unavailable: connection refused',
+      models: 0,
+    },
   ]
 
   /*
@@ -491,7 +503,19 @@ Verfügbare Tools: {{tool_list}}`,
       { id: 'lmstudio', name: 'LM Studio', kind: 'lmstudio', baseUrl: 'http://127.0.0.1:1234', enabled: true },
       { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', enabled: false },
       { id: 'deepseek', name: 'DeepSeek', kind: 'deepseek', baseUrl: 'https://api.deepseek.com', enabled: false },
+      // llama.cpp ships disabled on the port its server now defaults to, and it
+      // is the one kind KiChat can run itself — without this entry the whole
+      // local-model section has nothing to render, which is how a fixture that
+      // predates a backend quietly hides the UI for it.
+      { id: 'llamacpp', name: 'llama.cpp', kind: 'llamacpp', baseUrl: 'http://127.0.0.1:9931', enabled: false },
     ],
+    runtime: {
+      tag: '',
+      binaryPath: '',
+      accelerator: 'cpu',
+      readySeconds: 180,
+      models: {},
+    },
     modelOverrides: {},
     search: {
       providerOrder: ['brave', 'duckduckgo'],
@@ -877,6 +901,128 @@ Verfügbare Tools: {{tool_list}}`,
   // depends on exactly that difference.
   const copy = (value) => JSON.parse(JSON.stringify(value))
 
+  // One managed llama.cpp model, so the local-model section has something to
+  // render and to act on. It is assigned to rather than read, so a console can
+  // drive a download or a start while the harness runs.
+  const managed = {
+    installed: false,
+    tag: '',
+    binary: '',
+    state: 'stopped',
+    port: 0,
+    error: '',
+    log: [],
+  }
+
+  /*
+   * The app does not leave a managed server as an extra that the row above knows
+   * nothing about: when one comes up, app.go writes the address it landed on into
+   * that backend's entry, enables it, and rebuilds the providers around it. That is
+   * why a row reading "connection refused" becomes reachable and its model turns up
+   * in the switcher. The mock follows it, so the harness shows the state the app
+   * actually reaches rather than a running server beside a row pointing at a dead
+   * port.
+   */
+  const MANAGED_BACKEND = 'llamacpp'
+
+  function followManagedServer(url) {
+    const entry = settings.backends.find((b) => b.id === MANAGED_BACKEND)
+    if (entry) {
+      entry.baseUrl = url
+      entry.enabled = Boolean(url) || entry.enabled
+    }
+    const row = health.find((h) => h.id === MANAGED_BACKEND)
+    if (row) {
+      row.baseUrl = url
+      row.ok = Boolean(url)
+      row.models = url ? 1 : 0
+      if (url) delete row.error
+      else row.error = 'llm: backend unavailable: connection refused'
+    }
+    const listed = models.findIndex((m) => m.backend === MANAGED_BACKEND)
+    if (listed >= 0) models.splice(listed, 1)
+    if (url) {
+      const mm = ((settings.runtime || {}).models || {})[MANAGED_BACKEND] || {}
+      models.push({
+        // llama.cpp names the loaded model by the path of the file it read, and
+        // the provider passes that through as the id.
+        id: mm.modelPath || '/models/Qwen3-4B-Q4_K_M.gguf',
+        backend: MANAGED_BACKEND,
+        arch: 'qwen3',
+        quantization: 'Q4_K_M',
+        state: 'loaded',
+        type: 'llm',
+        contextLimit: mm.ctxSize || 8192,
+        maxContextLimit: mm.ctxSize || 8192,
+        capabilities: [],
+      })
+    }
+  }
+
+  const runtimeStatus = () => {
+    const runtime = settings.runtime || {}
+    const models = runtime.models || {}
+    return {
+      installed: managed.installed,
+      tag: managed.tag,
+      binary: managed.binary,
+      customBinary: runtime.binaryPath || '',
+      accelerator: runtime.accelerator || 'cpu',
+      readySeconds: runtime.readySeconds || 180,
+      busy: false,
+      phase: '',
+      done: 0,
+      total: 0,
+      error: '',
+      models: Object.keys(models).map((id) => {
+        const mm = models[id] || {}
+        return {
+          backendId: id,
+          enabled: Boolean(mm.enabled),
+          modelPath: mm.modelPath || '',
+          ctxSize: mm.ctxSize || 0,
+          extraArgs: mm.extraArgs || '',
+          state: managed.state,
+          port: managed.port,
+          url: managed.port ? `http://127.0.0.1:${managed.port}` : '',
+          error: managed.error,
+          log: managed.log,
+        }
+      }),
+    }
+  }
+
+  /*
+   * Where models may already be, and what is in them. The first entry is LM
+   * Studio's own setting naming a folder on another drive while its default
+   * `models` directory sits empty — the shape that makes "offer the first folder
+   * that exists" report no models on a machine full of them, so the fixture keeps
+   * both. Files are named and sized like real ones so the list is readable at a
+   * glance and a 5 GB row looks like a 5 GB row.
+   */
+  const modelFolders = [
+    { path: '/mnt/models/lmstudio', kind: 'lmstudio-configured', exists: true },
+    { path: '/home/mock/.lmstudio/models', kind: 'lmstudio', exists: true },
+    { path: '/home/mock/.cache/lm-studio/models', kind: 'lmstudio-legacy', exists: false },
+    { path: '/home/mock/.lmstudio/.internal/bundled-models', kind: 'lmstudio-bundled', exists: true },
+  ]
+
+  const modelTree = {
+    '/mnt/models/lmstudio': [
+      { model: 'lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF', name: 'Ministral-3-3B-Instruct-2512-Q4_K_M.gguf', size: 2146498240 },
+      { model: 'lmstudio-community/LFM2.5-2.6B-GGUF', name: 'LFM2.5-2.6B-Q4_K_M.gguf', size: 1674454368 },
+      { model: 'empero-ai/Qwen3.8-4B-Distill-GGUF', name: 'Qwen3.8-4B-Q4_K_M.gguf', size: 2783446304 },
+    ],
+    '/home/mock/.lmstudio/models': [],
+    '/home/mock/.lmstudio/.internal/bundled-models': [
+      { model: 'nomic-ai/nomic-embed-text-v1.5-GGUF', name: 'nomic-embed-text-v1.5.Q4_K_M.gguf', size: 84106624 },
+    ],
+  }
+
+  // The folder the backend would fall back to, which is the first one that is
+  // actually there.
+  const defaultModelFolder = () => (modelFolders.find((f) => f.exists) || {}).path || ''
+
   const App = {
     GetSettings: () => Promise.resolve(copy(settings)),
     SaveSettings: (next) => {
@@ -884,15 +1030,30 @@ Verfügbare Tools: {{tool_list}}`,
       // Mirrors the backend, which localises the untouched built-in prompts on
       // save and hands the stored settings back so the view can adopt them.
       localisePrompts(settings)
+      // app.go restores a running managed server's address on save: the port is
+      // chosen when it starts, and a panel opened before that still holds the one
+      // before it. Without this the harness would show the stale field winning.
+      if (managed.state === 'running' && managed.port) {
+        const entry = settings.backends.find((b) => b.id === MANAGED_BACKEND)
+        if (entry) {
+          entry.baseUrl = `http://127.0.0.1:${managed.port}`
+          entry.enabled = true
+        }
+      }
       console.log('[harness] settings saved:', settings.language)
       return Promise.resolve(copy(settings))
     },
-    GetHealth: () => Promise.resolve(health),
+    // Both of these copy. The fixtures are mutated while the page runs — a managed
+    // server changes its row, the re-check changes a loaded window — and handing
+    // back the live array makes zustand's set() see the same reference it already
+    // holds, so the view would not re-render. The real bindings answer with freshly
+    // decoded JSON, so a copy is also the faithful shape.
+    GetHealth: () => Promise.resolve(copy(health)),
     // force is what the re-check button sends: re-read the backend rather than
     // answering from the listing taken earlier in the session.
     ListModels: (force) => {
       if (force) applyLoadedWindow()
-      return Promise.resolve(models)
+      return Promise.resolve(copy(models))
     },
     ListChats: () => Promise.resolve(chats),
     GetChat: (id) => Promise.resolve(chats.find((c) => c.id === id)),
@@ -963,6 +1124,81 @@ Verfügbare Tools: {{tool_list}}`,
 
     GetSearchStatus: () => Promise.resolve(searchStatus),
     GetSecretStatus: () => Promise.resolve({ backend: 'file', keyring: false, braveKeySet }),
+
+    // The managed llama.cpp runtime. Starting is staged over two states because
+    // that is the part of the flow worth seeing: "starting" is what a real model
+    // load reports for its first seconds, and it is the state the poll has to
+    // pick up.
+    GetRuntimeStatus: () => Promise.resolve(copy(runtimeStatus())),
+    InstallLlamaRuntime: () => {
+      managed.installed = true
+      managed.tag = 'b11528'
+      managed.binary = '/home/mock/.config/kichat/runtime/b11528/llama-server'
+      console.log('[harness] llama-server installed')
+      return Promise.resolve(null)
+    },
+    PickManagedModelFile: () => Promise.resolve('/models/Qwen3-4B-Q4_K_M.gguf'),
+    // Empty means "the folder the backend would use", which is what the panel
+    // asks for when it opens, before the user has chosen anything.
+    ModelFolders: () => Promise.resolve(copy(modelFolders)),
+    PickModelFolder: () => Promise.resolve('/mnt/models/lmstudio'),
+    ScanModelFolder: (dir) => {
+      const root = dir || defaultModelFolder()
+      const files = (modelTree[root] || []).map((f) => ({
+        path: `${root}/${f.model}/${f.name}`,
+        name: f.name,
+        model: f.model,
+        size: f.size,
+      }))
+      return Promise.resolve({ dir: root, files, truncated: false })
+    },
+    SetManagedModel: (backendId, mm) => {
+      const runtime = settings.runtime || {}
+      settings.runtime = {
+        ...runtime,
+        models: { ...(runtime.models || {}), [backendId]: copy(mm) },
+      }
+      if (!mm.enabled && managed.state !== 'stopped') {
+        managed.state = 'stopped'
+        managed.port = 0
+        // Switching a model off stops it, and a stopped server is not reachable
+        // any more — the address stays as the last one, which is what the row
+        // then reports as refused.
+        followManagedServer('')
+      }
+      return Promise.resolve(null)
+    },
+    StartManagedModel: (backendId) => {
+      const mm = ((settings.runtime || {}).models || {})[backendId] || {}
+      if (!managed.installed) {
+        managed.state = 'failed'
+        managed.error = 'llama-server ist noch nicht installiert'
+        return Promise.resolve(null)
+      }
+      if (!mm.modelPath) {
+        managed.state = 'failed'
+        managed.error = 'kein Modell ausgewählt'
+        return Promise.resolve(null)
+      }
+      managed.error = ''
+      managed.state = 'starting'
+      managed.log = ['llama-server gestartet', 'loading model …']
+      managed.port = 0
+      setTimeout(() => {
+        managed.state = 'running'
+        managed.port = 38121
+        managed.log = ['loading model …', 'Modell geladen, Server bereit']
+        followManagedServer(`http://127.0.0.1:${managed.port}`)
+      }, 800)
+      return Promise.resolve(null)
+    },
+    StopManagedModel: () => {
+      managed.state = 'stopped'
+      managed.port = 0
+      managed.log = []
+      followManagedServer('')
+      return Promise.resolve(null)
+    },
     // A plainly fake commit so a harness build is never mistaken for a release
     // in a pasted bug report, while still exercising the Settings About rows.
     GetAppInfo: () =>

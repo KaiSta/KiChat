@@ -34,6 +34,9 @@ export namespace config {
   export type SamplerSettings = Plain<Gen.config.SamplerSettings>
   export type PromptPreset = Plain<Gen.config.PromptPreset>
   export type Settings = Plain<Gen.config.Settings>
+  /** The llama.cpp KiChat installs and runs itself. */
+  export type RuntimeSettings = Plain<Gen.config.RuntimeSettings>
+  export type ManagedModel = Plain<Gen.config.ManagedModel>
 }
 
 export namespace llm {
@@ -67,6 +70,12 @@ export namespace llm {
   }
 }
 
+export namespace runtime {
+  export type ModelFolder = Plain<Gen.runtime.ModelFolder>
+  export type ModelFile = Plain<Gen.runtime.ModelFile>
+  export type ModelFolderScan = Plain<Gen.runtime.ModelFolderScan>
+}
+
 export namespace main {
   export type AppInfo = Plain<Gen.main.AppInfo>
   export type ChatState = Plain<Gen.main.ChatState>
@@ -75,6 +84,8 @@ export namespace main {
   export type PromptVariable = Plain<Gen.main.PromptVariable>
   export type CompactRequest = Plain<Gen.main.CompactRequest>
   export type AttachmentInput = Plain<Gen.main.AttachmentInput>
+  export type RuntimeStatus = Plain<Gen.main.RuntimeStatus>
+  export type ManagedStatus = Plain<Gen.main.ManagedStatus>
 }
 
 export namespace research {
@@ -195,6 +206,16 @@ export function formatTokens(n: number | undefined | null): string {
 export function formatNumber(n: number | undefined | null): string {
   if (n === undefined || n === null || Number.isNaN(n)) return '–'
   return n.toLocaleString()
+}
+
+/** A file size in the unit a model list needs: gigabytes for a GGUF, megabytes
+ * below that. Decimal units rather than binary, because that is what LM Studio
+ * and every model card report, so the same file does not appear as 4.37 GB in
+ * one place and 4.07 GB in the other. */
+export function formatBytes(n: number | undefined | null): string {
+  if (n === undefined || n === null || Number.isNaN(n) || n <= 0) return '–'
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`
+  return `${Math.round(n / 1e6)} MB`
 }
 
 export function formatSpeed(tokensPerSecond: number | undefined | null): string {

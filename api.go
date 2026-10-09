@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"kichat/internal/ingest"
 	"kichat/internal/llm"
 	"kichat/internal/research"
+	rt "kichat/internal/runtime"
 	"kichat/internal/secret"
 	"kichat/internal/store"
 	"kichat/internal/version"
@@ -62,6 +64,9 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	// default prompt, happen here as well as on load: clearing the textarea and
 	// switching the language in the same save must not leave either undone.
 	s.LocalisePrompts()
+	// A Save must not hand a running managed model back an address it no longer
+	// listens on; see adoptManagedAddresses.
+	s = a.adoptManagedAddresses(s)
 	// Commit each backend key through the secret store, then reconcile the
 	// snapshot from what is actually stored so the registry sees the real key on
 	// the next rebuild rather than the draft's blank.
@@ -199,6 +204,302 @@ func (a *App) setBackendAPIKey(backendID, key string) error {
 // SetBackendAPIKey stores an API key for one backend. Empty clears it.
 func (a *App) SetBackendAPIKey(backendID, apiKey string) error {
 	return a.setBackendAPIKey(backendID, apiKey)
+}
+
+// ManagedStatus is one model KiChat runs itself, as the UI reads it.
+type ManagedStatus struct {
+	BackendID string   `json:"backendId"`
+	Enabled   bool     `json:"enabled"`
+	ModelPath string   `json:"modelPath"`
+	CtxSize   int      `json:"ctxSize"`
+	ExtraArgs string   `json:"extraArgs"`
+	State     string   `json:"state"`
+	Port      int      `json:"port"`
+	URL       string   `json:"url"`
+	Error     string   `json:"error,omitempty"`
+	Log       []string `json:"log,omitempty"`
+}
+
+// RuntimeStatus is everything the UI needs about the llama.cpp KiChat would run:
+// whether a launcher is available, where it came from, and what each managed entry
+// is doing.
+type RuntimeStatus struct {
+	Installed bool   `json:"installed"`
+	Tag       string `json:"tag,omitempty"`
+	Binary    string `json:"binary,omitempty"`
+	// CustomBinary is the path a user gave instead of the installed build.
+	CustomBinary string `json:"customBinary,omitempty"`
+	Accelerator  string `json:"accelerator"`
+	ReadySeconds int    `json:"readySeconds"`
+	// Busy, Phase, Done and Total describe an install in progress. The UI polls
+	// this rather than listening for an event: a download outlives the call that
+	// started it, and polling cannot miss its end.
+	Busy  bool   `json:"busy"`
+	Phase string `json:"phase,omitempty"`
+	Done  int64  `json:"done"`
+	Total int64  `json:"total"`
+	Error string `json:"error,omitempty"`
+	// Models carries one entry per id in the settings, so a row with no model
+	// configured still appears with the state to explain it.
+	Models []ManagedStatus `json:"models"`
+}
+
+// GetRuntimeStatus reports the managed llama.cpp runtime.
+func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
+	if err := a.ensure(); err != nil {
+		return RuntimeStatus{}, err
+	}
+	settings := a.Settings()
+	status := RuntimeStatus{
+		Accelerator:  settings.Runtime.Accelerator,
+		ReadySeconds: settings.Runtime.ReadySeconds,
+		CustomBinary: settings.Runtime.BinaryPath,
+	}
+	if tag, binary := a.installer.Find(); tag != "" {
+		status.Installed, status.Tag, status.Binary = true, tag, binary
+	}
+	if status.CustomBinary != "" {
+		// A path the user gave counts as installed even when nothing was
+		// downloaded: that is the whole point of the field.
+		status.Installed = true
+	}
+
+	a.installMu.Lock()
+	status.Busy, status.Phase, status.Done, status.Total, status.Error =
+		a.installBusy, a.installPhase, a.installDone, a.installTotal, a.installErr
+	a.installMu.Unlock()
+
+	ids := make([]string, 0, len(settings.Runtime.Models))
+	for id := range settings.Runtime.Models {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		mm := settings.Runtime.Models[id]
+		entry := ManagedStatus{
+			BackendID: id, Enabled: mm.Enabled, ModelPath: mm.ModelPath,
+			CtxSize: mm.CtxSize, ExtraArgs: mm.ExtraArgs, State: rt.StateStopped,
+		}
+		if srv := a.existingServer(id); srv != nil {
+			st := srv.Status()
+			entry.State, entry.Port, entry.URL, entry.Error, entry.Log = st.State, st.Port, st.URL, st.Error, st.Log
+		}
+		status.Models = append(status.Models, entry)
+	}
+	return status, nil
+}
+
+// existingServer returns the supervisor of one backend, or nil. It is read under
+// the lock because a status call runs while a server may be starting.
+func (a *App) existingServer(backendID string) *rt.Server {
+	a.serversMu.Lock()
+	defer a.serversMu.Unlock()
+	return a.servers[backendID]
+}
+
+// InstallLlamaRuntime fetches llama-server. It returns as soon as the download is
+// under way — the archive is tens to hundreds of megabytes, and a bound method that
+// blocked for minutes would freeze the window that called it. GetRuntimeStatus
+// reports the progress and the outcome.
+func (a *App) InstallLlamaRuntime() error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	a.installMu.Lock()
+	if a.installBusy {
+		a.installMu.Unlock()
+		return errors.New("ein Download läuft bereits")
+	}
+	a.installBusy, a.installPhase, a.installErr, a.installDone, a.installTotal = true, "lookup", "", 0, 0
+	a.installMu.Unlock()
+	go a.installRuntime()
+	return nil
+}
+
+// installRuntime is the download itself, on its own goroutine.
+func (a *App) installRuntime() {
+	settings := a.Settings()
+	asset, err := a.installer.Latest(a.ctx, goruntime.GOOS, goruntime.GOARCH, settings.Runtime.Accelerator)
+	if err != nil {
+		a.finishInstall("", err)
+		return
+	}
+	binary, err := a.installer.Install(a.ctx, asset)
+	if err != nil {
+		a.finishInstall("", err)
+		return
+	}
+
+	// The build that was installed is written down, so the next start finds it
+	// through the settings rather than by picking whatever is newest.
+	a.settingsMu.Lock()
+	a.settings.Runtime.Tag = asset.Tag
+	updated := a.settings
+	a.settingsMu.Unlock()
+	if err := a.sanitize(updated).Save(a.store); err != nil {
+		a.finishInstall(asset.Tag, fmt.Errorf("Installation speichern: %w", err))
+		return
+	}
+	runtime.LogInfof(a.ctx, "llama-server %s installiert: %s", asset.Tag, binary)
+	a.rebuildServices(updated)
+	a.finishInstall(asset.Tag, nil)
+}
+
+// recordInstallProgress is the installer's progress callback.
+func (a *App) recordInstallProgress(p rt.Progress) {
+	a.installMu.Lock()
+	a.installPhase = p.Phase
+	a.installDone, a.installTotal = p.Done, p.Total
+	a.installMu.Unlock()
+}
+
+func (a *App) finishInstall(tag string, err error) {
+	a.installMu.Lock()
+	a.installBusy = false
+	if err != nil {
+		a.installErr = err.Error()
+		a.installPhase = ""
+	} else {
+		a.installErr = ""
+		a.installPhase = "done"
+	}
+	a.installMu.Unlock()
+}
+
+// PickManagedModelFile asks for the GGUF to run. The title is passed in rather
+// than chosen here, so it follows the UI language like every other string.
+func (a *App) PickManagedModelFile(title string) (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: title,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "GGUF", Pattern: "*.gguf"},
+		},
+	})
+}
+
+// ModelFolders lists the folders a model may already be in, most likely first,
+// each saying whether it is there. A user who already has LM Studio has models on
+// disk, and re-downloading a 5 GB file to run it in KiChat instead would be an
+// absurd answer to that.
+func (a *App) ModelFolders() []rt.ModelFolder {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	folders := rt.LMStudioFolders(home)
+	if chosen := strings.TrimSpace(a.Settings().Runtime.ModelDir); chosen != "" {
+		// The folder the user picked is offered first: it is the one they asked
+		// for, whatever LM Studio does with its own.
+		folders = append([]rt.ModelFolder{{Path: chosen, Kind: rt.FolderCustom, Exists: rt.IsDir(chosen)}}, folders...)
+	}
+	return folders
+}
+
+// ScanModelFolder lists the GGUF files in one folder. An empty dir means "the one
+// the user chose, or LM Studio's if they never chose one", which is what the
+// panel asks for when it opens.
+func (a *App) ScanModelFolder(dir string) (rt.ModelFolderScan, error) {
+	if err := a.ensure(); err != nil {
+		return rt.ModelFolderScan{}, err
+	}
+	if strings.TrimSpace(dir) == "" {
+		dir = a.defaultModelDir()
+	}
+	if dir == "" {
+		return rt.ModelFolderScan{Files: []rt.ModelFile{}}, nil
+	}
+	return rt.ScanModelFolder(dir)
+}
+
+// PickModelFolder asks for a folder to look for models in.
+func (a *App) PickModelFolder(title string) (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+}
+
+// defaultModelDir is the folder to look in when nothing was chosen: the first
+// place LM Studio keeps models that is actually there.
+func (a *App) defaultModelDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	for _, folder := range rt.LMStudioFolders(home) {
+		if folder.Exists {
+			return folder.Path
+		}
+	}
+	return ""
+}
+
+// SetManagedModel saves what one backend should run. An empty model path switches
+// the entry off rather than leaving a half-configured server behind.
+func (a *App) SetManagedModel(backendID string, mm config.ManagedModel) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return errors.New("kein Backend angegeben")
+	}
+	mm.ModelPath = strings.TrimSpace(mm.ModelPath)
+	mm.ExtraArgs = strings.TrimSpace(mm.ExtraArgs)
+	if mm.CtxSize != 0 && mm.CtxSize < config.MinCtxSize {
+		mm.CtxSize = config.MinCtxSize
+	}
+	if mm.ModelPath == "" {
+		mm.Enabled = false
+	}
+
+	// A model that was just switched off has to stop running: leaving it up would
+	// keep a multi-gigabyte model in memory with no row that offers to stop it.
+	if !mm.Enabled {
+		if srv := a.existingServer(backendID); srv != nil {
+			if err := srv.Stop(); err != nil {
+				return err
+			}
+		}
+	}
+
+	a.settingsMu.Lock()
+	if a.settings.Runtime.Models == nil {
+		a.settings.Runtime.Models = map[string]config.ManagedModel{}
+	}
+	a.settings.Runtime.Models[backendID] = mm
+	updated := a.settings
+	a.settingsMu.Unlock()
+
+	if err := a.sanitize(updated).Save(a.store); err != nil {
+		return err
+	}
+	a.rebuildServices(updated)
+	// Saving a model does not start it. It used to, and that turned every edited
+	// field — the context size, the extra arguments — into a restart of a model
+	// that may have taken minutes to load. Starting is its own call, so the UI
+	// says when it wants one.
+	return nil
+}
+
+// StartManagedModel starts the managed server of one backend.
+func (a *App) StartManagedModel(backendID string) error {
+	return a.startManagedModel(backendID)
+}
+
+// StopManagedModel stops it.
+func (a *App) StopManagedModel(backendID string) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	srv := a.existingServer(backendID)
+	if srv == nil {
+		return nil
+	}
+	return srv.Stop()
 }
 
 // SetBraveKey stores the Brave Search API key. It is kept separate from

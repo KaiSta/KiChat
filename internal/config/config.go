@@ -5,6 +5,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"kichat/internal/llm"
@@ -32,7 +33,71 @@ type Settings struct {
 	ToolIterations      int                          `json:"toolIterations"`
 	ToolTokenBudget     int                          `json:"toolTokenBudget"`
 	NativeTools         bool                         `json:"nativeTools"`
+	// Runtime is the llama.cpp that KiChat runs itself, as opposed to the one a
+	// user started and pointed a backend at. Every field here describes a
+	// capability the app provides rather than a server it contacts, which is why
+	// none of it lives on BackendConfig.
+	Runtime RuntimeSettings `json:"runtime"`
 }
+
+// RuntimeSettings configures the llama.cpp binaries KiChat installs and the
+// servers it starts.
+//
+// It is deliberately one section rather than fields on a backend: the binaries
+// and the download are shared, while which model to run is per backend entry.
+// ManagedModels is keyed by backend id for that reason.
+type RuntimeSettings struct {
+	// Tag is the llama.cpp build whose binaries were installed, empty when none
+	// is. It is the directory name in the runtime folder, so it is also how an
+	// install is found again after a restart.
+	Tag string `json:"tag"`
+	// BinaryPath overrides the downloaded binary with one the user installed
+	// themselves — a distro package, a build with an accelerator this app does
+	// not fetch, or a copy on a network share.
+	BinaryPath string `json:"binaryPath"`
+	// Accelerator chooses which published build to fetch.
+	Accelerator string `json:"accelerator"`
+	// ReadySeconds is how long a started server may take to load its model before
+	// it is given up on. Loading a large model from a slow disk is minutes, not
+	// seconds, so this is generous by default and the wait is reported.
+	ReadySeconds int `json:"readySeconds"`
+	// ModelDir is the folder the model picker looks in. It is remembered rather
+	// than derived because a user with a second drive would otherwise have to
+	// find the folder again in every session; detection fills it when nothing was
+	// chosen, and it is never used to start anything on its own.
+	ModelDir string `json:"modelDir"`
+	// Models is one entry per backend KiChat starts itself.
+	Models map[string]ManagedModel `json:"models"`
+}
+
+// ManagedModel is one model KiChat runs on its own.
+type ManagedModel struct {
+	// Enabled starts this model when the app starts, and is what makes the
+	// backend reachable without the user running anything.
+	Enabled bool `json:"enabled"`
+	// ModelPath is the GGUF file to load.
+	ModelPath string `json:"modelPath"`
+	// CtxSize is the context window to load it with; 0 lets the server choose,
+	// which is llama.cpp's own `-c` default of "loaded from model".
+	CtxSize int `json:"ctxSize"`
+	// ExtraArgs is the rest of the command line, for the flags this app has no
+	// field for (--n-gpu-layers, --flash-attn, a chat template).
+	ExtraArgs string `json:"extraArgs"`
+}
+
+// Accelerators the installer can fetch.
+const (
+	AccelCPU    = "cpu"
+	AccelVulkan = "vulkan"
+)
+
+// Defaults for the managed runtime.
+const (
+	DefaultReadySeconds = 180
+	// MinCtxSize is the smallest window worth starting a model with: below it a
+	// chat with a system prompt and a scraped page cannot fit.
+	MinCtxSize = 2048
+)
 
 // SearchSettings configures web search and scraping.
 type SearchSettings struct {
@@ -112,6 +177,11 @@ func Default() Settings {
 		Theme:          "dark",
 		Backends:       llm.DefaultBackendConfigs(),
 		ModelOverrides: map[string]llm.ModelOverride{},
+		Runtime: RuntimeSettings{
+			Accelerator:  AccelCPU,
+			ReadySeconds: DefaultReadySeconds,
+			Models:       map[string]ManagedModel{},
+		},
 		Search: SearchSettings{
 			ProviderOrder:        []string{"brave", "duckduckgo"},
 			Country:              "DE",
@@ -262,6 +332,37 @@ func (s *Settings) normalise() {
 	}
 	if s.ModelOverrides == nil {
 		s.ModelOverrides = map[string]llm.ModelOverride{}
+	}
+	if s.Runtime.Accelerator != AccelVulkan {
+		// Anything unrecognised falls back to the build that needs no GPU
+		// toolkit: shipping a stored value straight into a download URL would
+		// make the installer ask for an archive that may not exist.
+		s.Runtime.Accelerator = AccelCPU
+	}
+	if s.Runtime.ReadySeconds <= 0 {
+		s.Runtime.ReadySeconds = DefaultReadySeconds
+	}
+	if s.Runtime.ReadySeconds < 15 {
+		s.Runtime.ReadySeconds = 15
+	}
+	if s.Runtime.ReadySeconds > 1800 {
+		s.Runtime.ReadySeconds = 1800
+	}
+	// A named folder is kept even when it is not there right now: a drive that is
+	// not mounted during one session is still the folder the user means, and
+	// clearing it would quietly undo their choice.
+	s.Runtime.ModelDir = strings.TrimSpace(s.Runtime.ModelDir)
+	if s.Runtime.Models == nil {
+		s.Runtime.Models = map[string]ManagedModel{}
+	}
+	for id, mm := range s.Runtime.Models {
+		// A window below the minimum is not a smaller budget, it is a model that
+		// cannot hold a conversation; 0 keeps its own meaning of "let the server
+		// choose", which is a valid choice rather than a missing one.
+		if mm.CtxSize != 0 && mm.CtxSize < MinCtxSize {
+			mm.CtxSize = MinCtxSize
+		}
+		s.Runtime.Models[id] = mm
 	}
 	if len(s.Search.ProviderOrder) == 0 {
 		s.Search.ProviderOrder = []string{"brave", "duckduckgo"}

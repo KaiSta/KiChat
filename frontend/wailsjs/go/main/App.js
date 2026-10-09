@@ -54,6 +54,10 @@ export function GetPromptVariables() {
   return window['go']['main']['App']['GetPromptVariables']();
 }
 
+export function GetRuntimeStatus() {
+  return window['go']['main']['App']['GetRuntimeStatus']();
+}
+
 export function GetSearchStatus() {
   return window['go']['main']['App']['GetSearchStatus']();
 }
@@ -64,6 +68,10 @@ export function GetSecretStatus() {
 
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
+}
+
+export function InstallLlamaRuntime() {
+  return window['go']['main']['App']['InstallLlamaRuntime']();
 }
 
 export function ListChats(arg1) {
@@ -82,12 +90,24 @@ export function ListModels(arg1) {
   return window['go']['main']['App']['ListModels'](arg1);
 }
 
+export function ModelFolders() {
+  return window['go']['main']['App']['ModelFolders']();
+}
+
 export function OpenExternal(arg1) {
   return window['go']['main']['App']['OpenExternal'](arg1);
 }
 
 export function PickFiles() {
   return window['go']['main']['App']['PickFiles']();
+}
+
+export function PickManagedModelFile(arg1) {
+  return window['go']['main']['App']['PickManagedModelFile'](arg1);
+}
+
+export function PickModelFolder(arg1) {
+  return window['go']['main']['App']['PickModelFolder'](arg1);
 }
 
 export function PreviewSystemPrompt(arg1) {
@@ -112,6 +132,10 @@ export function RenameChat(arg1, arg2) {
 
 export function SaveSettings(arg1) {
   return window['go']['main']['App']['SaveSettings'](arg1);
+}
+
+export function ScanModelFolder(arg1) {
+  return window['go']['main']['App']['ScanModelFolder'](arg1);
 }
 
 export function Scrape(arg1, arg2) {
@@ -142,6 +166,10 @@ export function SetBraveKey(arg1) {
   return window['go']['main']['App']['SetBraveKey'](arg1);
 }
 
+export function SetManagedModel(arg1, arg2) {
+  return window['go']['main']['App']['SetManagedModel'](arg1, arg2);
+}
+
 export function SetModelOverride(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetModelOverride'](arg1, arg2, arg3);
 }
@@ -150,8 +178,16 @@ export function Settings() {
   return window['go']['main']['App']['Settings']();
 }
 
+export function StartManagedModel(arg1) {
+  return window['go']['main']['App']['StartManagedModel'](arg1);
+}
+
 export function StopGeneration(arg1) {
   return window['go']['main']['App']['StopGeneration'](arg1);
+}
+
+export function StopManagedModel(arg1) {
+  return window['go']['main']['App']['StopManagedModel'](arg1);
 }
 
 export function TestBraveKey(arg1) {

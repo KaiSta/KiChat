@@ -543,3 +543,83 @@ func TestLoadReadsKeysFromTheSecretStore(t *testing.T) {
 		}
 	})
 }
+
+// TestRuntimeSettingsAreUsableAsStored pins the managed-llama.cpp section the way
+// every other settings field is pinned: a blob written before the section existed
+// decodes over Default(), and whatever survives that has to be something the
+// installer and the supervisor can act on.
+//
+// The accelerator in particular is not cosmetic: it is interpolated into the
+// archive name that gets downloaded, so a stored value that is not a published
+// build would ask GitHub for a file that does not exist.
+func TestRuntimeSettingsAreUsableAsStored(t *testing.T) {
+	// A blob from before the field: the zero values are what normalise sees.
+	s := Default()
+	s.Runtime = RuntimeSettings{}
+	s.normalise()
+	if s.Runtime.Accelerator != AccelCPU {
+		t.Errorf("accelerator = %q, want the build that needs no GPU toolkit", s.Runtime.Accelerator)
+	}
+	if s.Runtime.ReadySeconds != DefaultReadySeconds {
+		t.Errorf("ready seconds = %d, want %d", s.Runtime.ReadySeconds, DefaultReadySeconds)
+	}
+	if s.Runtime.Models == nil {
+		t.Error("models map is nil, want an empty map so a managed entry can be added")
+	}
+	if s.Runtime.ModelDir != "" {
+		t.Errorf("model dir = %q, want empty: an unset folder means \"use the one that is there\", not a path invented at normalise time", s.Runtime.ModelDir)
+	}
+
+	// A chosen folder survives even when it is not mounted right now, because
+	// clearing it would quietly undo the user's choice; surrounding space does not.
+	s = Default()
+	s.Runtime = RuntimeSettings{ModelDir: "  /mnt/models  "}
+	s.normalise()
+	if s.Runtime.ModelDir != "/mnt/models" {
+		t.Errorf("model dir = %q, want the trimmed path kept", s.Runtime.ModelDir)
+	}
+
+	// The GPU build survives, and the two points where the wait is absurd are
+	// clamped rather than used as given.
+	s = Default()
+	s.Runtime = RuntimeSettings{
+		Accelerator:  AccelVulkan,
+		ReadySeconds: 2,
+		Models: map[string]ManagedModel{
+			"llamacpp": {ModelPath: "/models/a.gguf", CtxSize: 512},
+		},
+	}
+	s.normalise()
+	if s.Runtime.Accelerator != AccelVulkan {
+		t.Errorf("accelerator = %q, want the stored %q kept", s.Runtime.Accelerator, AccelVulkan)
+	}
+	if s.Runtime.ReadySeconds < 15 {
+		t.Errorf("ready seconds = %d, want the wait clamped up to something a model can load in", s.Runtime.ReadySeconds)
+	}
+	if got := s.Runtime.Models["llamacpp"].CtxSize; got != MinCtxSize {
+		t.Errorf("ctx size = %d, want it clamped up to %d: below that a system prompt and a source cannot fit", got, MinCtxSize)
+	}
+	if s.Runtime.Models["llamacpp"].ModelPath != "/models/a.gguf" {
+		t.Error("the model path was not kept")
+	}
+
+	// An accelerator no release publishes must not reach a download URL.
+	s = Default()
+	s.Runtime = RuntimeSettings{Accelerator: "cuda-99", ReadySeconds: 99999}
+	s.normalise()
+	if s.Runtime.Accelerator != AccelCPU {
+		t.Errorf("accelerator = %q, want the unknown value replaced", s.Runtime.Accelerator)
+	}
+	if s.Runtime.ReadySeconds > 1800 {
+		t.Errorf("ready seconds = %d, want it clamped down", s.Runtime.ReadySeconds)
+	}
+
+	// Zero keeps its own meaning here: "let the server choose its window" is a
+	// choice, not a missing value.
+	s = Default()
+	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {CtxSize: 0}}}
+	s.normalise()
+	if got := s.Runtime.Models["llamacpp"].CtxSize; got != 0 {
+		t.Errorf("ctx size = %d, want 0 left alone as \"the server decides\"", got)
+	}
+}
