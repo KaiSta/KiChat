@@ -8,6 +8,27 @@ The structure is:
 * darwin - macOS specific files
 * windows - Windows specific files
 
+## Icon
+
+The mark is authored once as `appicon.svg`, and `make icon` derives the rest from it
+(that target is what needs `rsvg-convert` and ImageMagick's `convert`):
+
+- `appicon.png` - 1024 px. `wails build` embeds it as the window and taskbar icon
+  (`main.go`), and `icon.ico` is resized from it.
+- `windows/icon.ico` - the icon the Windows build and its installer use.
+
+What `make install` copies into a prefix is a different pair, because an icon-theme
+lookup follows its own rules:
+
+- `$PREFIX/share/icons/hicolor/scalable/apps/kichat.svg` - one file that answers every
+  request a desktop makes, 16 px through 1024 px.
+- `$PREFIX/share/pixmaps/kichat.png` - the unthemed base directory, for lookups that
+  predate the icon theme.
+
+`packaging/kichat.desktop` names both through the basename they share, `Icon=kichat`.
+The comment on `INSTALL_FILES` in the Makefile records why the directory named after the
+PNG's real pixel size is deliberately not used.
+
 ## Mac
 
 The `darwin` directory holds files specific to Mac builds.

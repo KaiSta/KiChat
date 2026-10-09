@@ -68,6 +68,13 @@ var ErrEmptyQuery = errors.New("empty search query")
 // and the user has to be told to fix the key instead.
 var ErrInvalidKey = errors.New("search provider rejected the API key")
 
+// ErrBlocked means the provider answered an automated request with an anti-bot
+// interstitial instead of results. Neither waiting nor repairing a selector
+// helps: the request has to come from a client the provider trusts, or from a
+// different provider, and until then the truth is that the search was refused
+// rather than empty.
+var ErrBlocked = errors.New("search provider blocked the request as automation")
+
 // httpError mirrors the backend HTTP error for search providers.
 type httpError struct {
 	StatusCode int

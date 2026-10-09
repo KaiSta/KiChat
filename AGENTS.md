@@ -116,6 +116,8 @@ What each live test buys:
 - `TestLiveBraveContextClampsLongQuery` — local clamping beats the API's 422.
 - `TestLiveBraveChainUsesContext` — the chain picks the context route, not the fallback.
 - `TestLiveBraveBadKeyIsNotMisclassified` — a rejected key is not reported as a throttle.
+  It sends no working credential, so it cannot succeed and cannot consume credit; it
+  checks both wordings the API uses for one and the same rejection (below).
 - `TestLiveSearchFirstTurn` — settings → chain → context → seeded prompt → LM Studio,
   and asserts the context payload is bigger than the headline listing it replaces.
 - `TestLiveDeepSeek` — the three claims the provider makes that only the real service
@@ -128,9 +130,27 @@ What each live test buys:
 
 **Never put an API key in a tracked file.** Pass it in the environment; the app itself
 stores it through `internal/secret` (`~/.config/kichat/`). Measured facts worth keeping:
-a rejected key comes back as **HTTP 422 "The provided API key is invalid."** (not 401),
-and a used-up balance vs a momentary throttle can only be told apart by the error
-envelope's `code` (`QUOTA_LIMITED` / `RATE_LIMITED`), because both can arrive as 429.
+a rejected key comes back as **HTTP 422 with `code: "SUBSCRIPTION_TOKEN_INVALID"`** (not
+401), and its free-text `detail` varies with the shape of the value sent — a key-shaped
+one draws "The provided API key is invalid.", anything else "The provided subscription
+token is invalid." So the **code** is what classifies it; matching on the wording misses
+half of the failures and reports them as plain server errors (which is what the real
+`websearch` failure that prompted this fix looked like). A used-up balance vs a momentary
+throttle can likewise only be told apart by the envelope's `code` (`QUOTA_LIMITED` /
+`RATE_LIMITED`), because both can arrive as 429.
+
+**DuckDuckGo's HTML endpoints can be refused outright, and the refusal looks like an
+empty page.** Measured here: both `html.duckduckgo.com/html/` and
+`lite.duckduckgo.com/lite/` answered **HTTP 202** — not an error status — with the
+anti-bot interstitial ("Unfortunately, bots use DuckDuckGo too… Select all squares
+containing a duck") and no result nodes, for GET and POST, with a Firefox or a Chrome
+user agent, with referer and language headers set. Nothing in the request shape changed
+it: the check is on the client, so pacing or a HEAD/GET variation is not a workaround.
+That is why a block is detected by the interstitial's own markup (`anomaly.js`,
+`challenge-form`, `anomaly-modal`) and reported as `ErrBlocked`, and why the lite layout
+is not retried after it; "no results (layout may have changed)" is reserved for a page
+that really has no hits. A working Brave key, a different provider, or a different
+network is the way out.
 
 ## Verifying the UI
 
@@ -188,6 +208,75 @@ was actually measured here:
   miss opens a modal GTK file dialog that swallows all further input.
 - Prefer the harness, or keyboard navigation, for anything but a final look.
 
+### Pinning the streaming renderer
+
+`node tools/streamcheck/check.mjs` (Node 22.18+, for its TypeScript support; needs
+`cd frontend && npm install` first) renders every prefix of four sample replies twice —
+once the way a finished message is rendered, once the way an arriving one is — and fails
+if the visible text differs, if the pieces `frontend/src/lib/stream.ts` cuts would change
+as the text grows (the memo depends on their being append-only), or if a line is lost in
+the split. It imports the real module directly, runs in under a second, and is **not**
+part of `make check`.
+
+The numbers behind that shape, from the parser and from the real UI. With this app's
+pipeline, re-parsing the whole reply on every delta and on every throttle commit cost
+237 ms of parsing for a 4 kB answer, 1.7 s for a 12 kB one and 6 s for a 24 kB one
+(`node` + `react-dom/server` over the real plugins). Driving the mock-bridge harness in
+headless Chromium over CDP, with the fixture reply enlarged to ~5 kB so the run is worth
+measuring, one streamed reply tore down and rebuilt 4511 elements and rewrote the message
+9576 times — that is the stutter and the flicker, while the rest of the window stays still.
+Parsing each settled piece once, throttling the live piece and showing an open code fence
+as plain text brings the same three replies down to 46, 137 and 266 ms, a 45 kB code-only
+answer from 6.7 s of parsing to a single parse, and the harness reply to 256 remounts over
+887 rewrites.
+
+## Versioning
+
+The version is authored once, in `VERSION` at the repo root, and every surface is
+derived from it: `make build` links it into `internal/version` (read by Settings →
+General → About and by `kichat --version`), and `make deb` uses it for the package
+name, `control` and `changelog`. Bumping a release is one line in `VERSION`;
+`VERSION=x.y.z` on the make command line overrides it for a one-off.
+
+The commit and date linked in come from `git`, and the date is the *commit's* date,
+never the build clock — a wall-clock timestamp would break the byte-identical
+rebuilds `-trimpath` otherwise guarantees. Two traps:
+
+- **The linker path is the contract.** `-X kichat/internal/version.Version=…` in the
+  Makefile stops matching the moment that package or a variable is renamed, and every
+  build then silently reports `dev`. Keep the two in step.
+- **A pre-release needs Debian's `~`.** Write `VERSION` as `0.2.0~beta1`, not
+  `0.2.0-beta.1`: `~` sorts *before* the release (`0.2.0~beta1 < 0.2.0`), while the
+  dash form sorts *after* it, so `apt upgrade` would happily move a pre-release onto
+  the older-looking final.
+
+## Git commits
+
+The subject is `area: description` — lowercase, imperative, and it describes
+the behaviour change, not the files. The areas in use so far: `chat`, `llm`,
+`ui`, `research`, `docs`, `store`, `build`, `config`, `api`, `settings`,
+`secret`, `ingest`, `tools`, `icon` — a new area is fine when the change
+belongs nowhere else. A second effect joins with "and":
+
+```
+chat: make compaction work with a reasoning model
+research: report a refused search, and keep tests out of the keyring
+icon: draw the mark once, derive every surface from it, and make the taskbar one show
+```
+
+The body is prose, not a changelog: the failure or limitation that motivated
+the change, what was measured, what changed and why, and which checks stayed
+green. Numbers go in where they exist (237 ms of parsing → 266 ms, HTTP 422
+with `SUBSCRIPTION_TOKEN_INVALID`); a body that only lists the files is a
+stub. One commit is one coherent change, and the files are staged explicitly,
+not with `git add -A`.
+
+**Always `--no-pager`.** `git log`, `git diff` and `git show` open a pager,
+and in a non-interactive shell the pager blocks the command until someone
+presses a key: it looks hung, and its output lands in a temp file instead of
+the result. `git --no-pager log -1` and friends are the same commands without
+the hang.
+
 ## Conventions
 
 - Comments explain **why**, not what; user-facing strings go through
@@ -198,5 +287,11 @@ was actually measured here:
   fully populated default, so absent fields keep their default (pinned by
   `internal/config/config_test.go`). Do not change an existing field's type.
 - Tests pin behaviour (what the user or the model sees), not implementation details.
+- **A test must never reach the real keyring or the real `~/.config/kichat` data.** The
+  keyring is a per-user global resource and `secret.New` probes it, so a test store built
+  with `New` wrote its fixtures into the keyring of whoever ran the suite: a stored Brave
+  key became the string `brave-key`, the app read that back at startup and every search
+  came back as a rejected key (422 `SUBSCRIPTION_TOKEN_INVALID`). Tests use
+  `secret.NewIsolated(dir)`, which keeps every secret in the temp dir and never probes.
 - `.freebuff/` is gitignored scratch space; `frontend/dist`, `build/bin` and `node_modules`
   are build output.

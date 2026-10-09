@@ -33,6 +33,11 @@ type generateResult struct {
 	ToolCalls        []llm.ToolCall
 	Stats            *llm.GenerationStats
 	Usage            *llm.Usage
+	// Status is the status of the last reply row that was written. It travels
+	// back to the caller so the end-of-turn event can report the same thing the
+	// database holds: reporting "complete" for a reply stored as failed made the
+	// event and the row disagree until something else refreshed them.
+	Status string
 }
 
 // persist reports a write that failed rather than dropping it on the floor. An
@@ -113,6 +118,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			row.Status = store.StatusCancelled
 			row.Content = ""
 			e.persist(in.Chat.ID, "Der Abbruch", e.Store.UpdateMessage(row))
+			result.Status = row.Status
 			return result, err
 		}
 
@@ -156,6 +162,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// the transcript is replayable even if the process dies mid-tool.
 		row.ToolCallsJSON = encodeToolCalls(calls)
 		e.persist(in.Chat.ID, "Die Antwort", e.Store.UpdateMessage(row))
+		result.Status = row.Status
 
 		result.Text = joinText(result.Text, text)
 		result.Reasoning = joinText(result.Reasoning, reasoning)

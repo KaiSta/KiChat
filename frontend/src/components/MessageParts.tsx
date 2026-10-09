@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { App, formatDuration, formatNumber, formatSpeed } from '../lib/api'
 import type { store as storeTypes } from '../lib/api'
+import { useThrottled } from '../lib/stream'
 import { useStore } from '../store'
 
 /* -------------------------------------------------------------------------
@@ -213,19 +214,29 @@ function summariseArgs(raw: string): string {
 
 export function ReasoningBlock({ text, streaming }: { text: string; streaming: boolean }) {
   const t = useStore((s) => s.t)
-  if (!text.trim()) return null
+  // Thinking arrives as fast as the answer does, and it is plain text: the
+  // cost here is laying out a growing block, so it is committed on the same
+  // ration and the memo below keeps it from being laid out twice.
+  const shown = useThrottled(text, streaming, 120)
+  if (!shown.trim()) return null
   return (
     <details className="collapsible mb-2" open={streaming}>
       <summary className="text-[12px] faint">{t('chat.reasoning')}</summary>
-      <div
-        className="mt-1 rounded p-2 text-[12px] whitespace-pre-wrap"
-        style={{ background: 'var(--surface-2)', color: 'var(--text-dim)' }}
-      >
-        {text}
-      </div>
+      <ReasoningText text={shown} />
     </details>
   )
 }
+
+const ReasoningText = memo(function ReasoningText({ text }: { text: string }) {
+  return (
+    <div
+      className="mt-1 rounded p-2 text-[12px] whitespace-pre-wrap"
+      style={{ background: 'var(--surface-2)', color: 'var(--text-dim)' }}
+    >
+      {text}
+    </div>
+  )
+})
 
 /* -------------------------------------------------------------------------
  * Compaction

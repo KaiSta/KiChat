@@ -963,6 +963,16 @@ Verfügbare Tools: {{tool_list}}`,
 
     GetSearchStatus: () => Promise.resolve(searchStatus),
     GetSecretStatus: () => Promise.resolve({ backend: 'file', keyring: false, braveKeySet }),
+    // A plainly fake commit so a harness build is never mistaken for a release
+    // in a pasted bug report, while still exercising the Settings About rows.
+    GetAppInfo: () =>
+      Promise.resolve({
+        version: '0.1.0-harness',
+        commit: 'harness',
+        date: '2026-10-09T11:45:00+02:00',
+        goVersion: 'go mock',
+        platform: 'mock/harness',
+      }),
     SetBraveKey: (key) => {
       braveKeySet = Boolean(key && key.trim())
       searchStatus.providers.brave = braveKeySet

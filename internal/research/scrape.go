@@ -431,7 +431,9 @@ func isPrivateIP(ip net.IP) bool {
 		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() {
 		return true
 	}
-	// Carrier-grade NAT and the documentation ranges are also off limits.
+	// Carrier-grade NAT is not "private" by Go's definition, but 100.64.0.0/10 is
+	// not a routable public address either, and it is where several providers put
+	// their customers.
 	if v4 := ip.To4(); v4 != nil {
 		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
 			return true

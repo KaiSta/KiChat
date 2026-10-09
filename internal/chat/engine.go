@@ -270,9 +270,18 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 	})
 	handle.messageID = result.PrimaryMessageID
 
-	status := store.StatusComplete
-	if ctx.Err() != nil {
-		status = store.StatusInterrupted
+	// The reply's own status is the honest one to publish: generate already
+	// distinguished an interrupted answer from one the backend stopped delivering
+	// and from a request that never started, and the stored row carries whichever
+	// it was. Reporting "complete" for those made the end-of-turn event disagree
+	// with the row until something else refreshed the view from the database.
+	status := result.Status
+	if status == "" {
+		if ctx.Err() != nil {
+			status = store.StatusInterrupted
+		} else {
+			status = store.StatusComplete
+		}
 	}
 
 	if genErr != nil && ctx.Err() == nil {

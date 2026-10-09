@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"kichat/internal/store"
 )
 
 // Trimmed recording of the documented /res/v1/llm/context shape. Kept offline so
@@ -188,6 +191,26 @@ func TestBraveFailureClassification(t *testing.T) {
 			want:   ErrInvalidKey,
 		},
 		{
+			// The same rejection, measured, with the envelope the API really
+			// sends and the other wording it uses: the detail varies with the
+			// shape of the value sent, the code does not. Classifying on the
+			// wording reported this one as "brave: Unprocessable Entity The
+			// provided subscription token is invalid." — a server fault the user
+			// had no way to act on.
+			name:   "rejected token as 422, full envelope",
+			status: http.StatusUnprocessableEntity,
+			body: `{"type":"ErrorResponse","error":{"id":"3c3bbca5-0bff-4ef5-b70d-75ce40c9473f","status":422,` +
+				`"detail":"The provided subscription token is invalid.","meta":{"component":"authentication"},` +
+				`"code":"SUBSCRIPTION_TOKEN_INVALID"},"time":1791488101}`,
+			want: ErrInvalidKey,
+		},
+		{
+			name:   "rejected token as 422, code only",
+			status: http.StatusUnprocessableEntity,
+			body:   `{"error":{"status":422,"detail":"The provided subscription token is invalid.","code":"SUBSCRIPTION_TOKEN_INVALID"}}`,
+			want:   ErrInvalidKey,
+		},
+		{
 			name:   "invalid key as 401",
 			status: http.StatusUnauthorized,
 			body:   `{"error":{"status":401,"code":"INTERNAL"}}`,
@@ -205,10 +228,30 @@ func TestBraveFailureClassification(t *testing.T) {
 			if tc.want == ErrQuotaExhausted && errors.Is(err, ErrRateLimited) {
 				t.Error("quota error also matched ErrRateLimited")
 			}
-			if tc.want == ErrInvalidKey && (errors.Is(err, ErrRateLimited) || errors.Is(err, ErrQuotaExhausted)) {
-				t.Error("a rejected key was classified as a throttle or an exhausted balance")
+			if tc.want == ErrInvalidKey {
+				if errors.Is(err, ErrRateLimited) || errors.Is(err, ErrQuotaExhausted) {
+					t.Error("a rejected key was classified as a throttle or an exhausted balance")
+				}
+				// The detail is Brave's, so the message has to carry the action
+				// that fixes it or it reads like a fault the app should retry.
+				if !strings.Contains(err.Error(), "Einstellungen") {
+					t.Errorf("err = %v, want it to point at the settings", err)
+				}
 			}
 		})
+	}
+
+	// A 422 about the request rather than the credential is not a key problem:
+	// it is answered by clamping the query, and reporting it as a bad key would
+	// send the user to the settings for nothing.
+	requestErr := classifyBraveFailure(http.StatusUnprocessableEntity,
+		[]byte(`{"error":{"status":422,"detail":"The request was rejected.","code":"VALIDATION"}}`))
+	if errors.Is(requestErr, ErrInvalidKey) {
+		t.Errorf("a 422 about the request was classified as a key rejection: %v", requestErr)
+	}
+	var requestHTTP *httpError
+	if !errors.As(requestErr, &requestHTTP) || requestHTTP.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("err = %v, want an httpError keeping the 422", requestErr)
 	}
 
 	// Anything that is neither a throttle nor a key problem stays an httpError
@@ -384,6 +427,64 @@ func TestChainGroundedContextRejectsEmptyQuery(t *testing.T) {
 	chain := NewChain(nil, Options{}, "")
 	if _, err := chain.GroundedContext(context.Background(), "   ", SearchRequest{}, 0); !errors.Is(err, ErrEmptyQuery) {
 		t.Errorf("err = %v, want ErrEmptyQuery", err)
+	}
+}
+
+// braveSearchFixture is the minimum a web-search response needs for the chain to
+// accept it: one result with a description, which becomes the fallback snippet.
+const braveSearchFixture = `{"web":{"results":[{"title":"Ersatzquelle","url":"https://fallback.example/a","description":"Kurzbeschreibung als Ersatztext."}]}}`
+
+// TestGroundedContextFallbackCountsBraveOnce pins the quota accounting on the
+// fallback path. When the LLM-context route answers without sections the chain
+// falls back to a plain search, and that search counts its own Brave request as it
+// runs; the caching step then counted the same request again, so the displayed
+// monthly usage ran ahead of what Brave actually billed and could report a limit
+// that had not been reached.
+//
+// The two routes are told apart by their query: only the context route sends
+// maximum_number_of_tokens.
+func TestGroundedContextFallbackCountsBraveOnce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("maximum_number_of_tokens") != "" {
+			// Reached and answered — so it was billed — but with no sections, which
+			// is what forces the fallback.
+			_, _ = w.Write([]byte(`{"grounding":{},"sources":{}}`))
+			return
+		}
+		_, _ = w.Write([]byte(braveSearchFixture))
+	}))
+	defer srv.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	chain := NewChain(st, Options{
+		ProviderOrder: []string{"brave"},
+		BraveAPIKey:   "test-key",
+		CacheMinutes:  60,
+	}, srv.URL)
+	brave, ok := chain.providers["brave"].(*BraveProvider)
+	if !ok {
+		t.Fatal("brave provider not constructed")
+	}
+	brave.Endpoint = srv.URL
+	brave.ContextEndpoint = srv.URL
+
+	got, err := chain.GroundedContext(context.Background(), "wie tief ist das mittelmeer", SearchRequest{}, 4096)
+	if err != nil {
+		t.Fatalf("GroundedContext: %v", err)
+	}
+	if got.Provider != "brave" {
+		t.Fatalf("provider = %q, want the fallback search's own provider", got.Provider)
+	}
+	if got.Empty() {
+		t.Fatal("the fallback produced no sources")
+	}
+	if n := chain.BraveQueriesThisMonth(); n != 1 {
+		t.Errorf("brave queries counted = %d, want 1 — the fallback search counted itself and was counted again", n)
 	}
 }
 

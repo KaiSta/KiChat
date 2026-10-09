@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { App, formatNumber, type config, type llm, type main } from '../lib/api'
+import { App, formatNumber, toDate, type config, type llm, type main } from '../lib/api'
 import { useStore } from '../store'
 import { asLang, LANGS } from '../lib/i18n'
 
@@ -129,6 +129,11 @@ function GeneralTab({
   const setLang = useStore((s) => s.setLang)
   const theme = useStore((s) => s.theme)
   const setTheme = useStore((s) => s.setTheme)
+  const [info, setInfo] = useState<main.AppInfo | null>(null)
+
+  useEffect(() => {
+    void App.GetAppInfo().then(setInfo).catch(() => undefined)
+  }, [])
 
   return (
     <>
@@ -247,7 +252,67 @@ function GeneralTab({
           </Field>
         </div>
       </Section>
+
+      <AboutSection info={info} />
     </>
+  )
+}
+
+/* -------------------------------------------------------------------------
+ * About
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The build identity: which version is running, and enough provenance to quote
+ * in a bug report. The copy button exists because the usual way to answer "what
+ * version are you on?" is a screenshot — this makes it one click of text.
+ */
+function AboutSection({ info }: { info: main.AppInfo | null }) {
+  const t = useStore((s) => s.t)
+  const [copied, setCopied] = useState(false)
+  // The row only appears once the backend has answered, so a failed bridge
+  // shows nothing rather than a row of blanks.
+  if (!info) return null
+
+  // The commit is what makes the version actionable, so it travels with it. A
+  // build with no commit (the package defaults) shows the bare version.
+  const version = info.commit && info.commit !== 'none' ? `${info.version} (${info.commit})` : info.version
+  const built = toDate(info.date)?.toLocaleString() ?? info.date
+  const rows: { label: string; value: string }[] = [
+    { label: t('settings.version'), value: version },
+    { label: t('settings.buildDate'), value: built },
+    { label: t('settings.platform'), value: info.platform },
+    { label: t('settings.runtime'), value: info.goVersion },
+  ]
+
+  return (
+    <Section title={t('settings.about')}>
+      <div className="space-y-1 text-[12px]">
+        {rows.map((row) => (
+          <div key={row.label} className="flex items-center gap-3">
+            <span className="faint w-24 shrink-0">{row.label}</span>
+            <span className="mono min-w-0 flex-1 truncate" title={row.value}>
+              {row.value}
+            </span>
+          </div>
+        ))}
+      </div>
+      <button
+        type="button"
+        className="btn btn-sm mt-3"
+        onClick={() => {
+          navigator.clipboard?.writeText(`${version} · ${info.platform} · ${built}`).then(
+            () => {
+              setCopied(true)
+              window.setTimeout(() => setCopied(false), 1500)
+            },
+            () => undefined,
+          )
+        }}
+      >
+        {copied ? t('chat.copied') : t('settings.copyVersion')}
+      </button>
+    </Section>
   )
 }
 

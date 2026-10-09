@@ -143,6 +143,13 @@ func TestLiveBraveChainUsesContext(t *testing.T) {
 // exhausted balance from a throttle, so a plain authentication failure must not
 // be reported as either. A misclassification would make the app retry a key that
 // will never work, or fall back as if the plan were used up.
+//
+// Both shapes of rejected credential are checked because the API words them
+// differently — measured, a key-shaped value is answered with "The provided API
+// key is invalid." and any other value with "The provided subscription token is
+// invalid." — while the status and the code stay the same. The second wording is
+// what a revoked or mistyped key produced in the field, and it used to be
+// reported as a server fault.
 func TestLiveBraveBadKeyIsNotMisclassified(t *testing.T) {
 	liveBraveKey(t) // only the gating (KICHAT_LIVE + a key present) is reused
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -160,6 +167,13 @@ func TestLiveBraveBadKeyIsNotMisclassified(t *testing.T) {
 		t.Errorf("err = %v, want it to match ErrInvalidKey so the UI can say the key is wrong", err)
 	}
 	t.Logf("invalid key -> %v", err)
+
+	notKeyShaped := NewBraveProvider("not-a-brave-looking-token", "")
+	if _, err := notKeyShaped.Context(ctx, SearchRequest{Query: "Mittelmeer Tiefe"}, 1024); !errors.Is(err, ErrInvalidKey) {
+		t.Errorf("err = %v, want ErrInvalidKey for the other wording as well", err)
+	} else {
+		t.Logf("invalid token -> %v", err)
+	}
 }
 
 func kindsOf(sources []GroundedSource) map[string]int {

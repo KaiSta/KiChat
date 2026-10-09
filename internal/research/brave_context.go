@@ -45,6 +45,14 @@ const (
 const (
 	braveCodeQuota       = "QUOTA_LIMITED"
 	braveCodeRateLimited = "RATE_LIMITED"
+	// braveCodeSubscriptionTokenInvalid is what a rejected credential comes back
+	// as. Measured against the real API (both routes, 422): the code is stable,
+	// the free-text detail is not — a key-shaped value is answered with "The
+	// provided API key is invalid." and anything else with "The provided
+	// subscription token is invalid.". Classifying on the wording therefore
+	// misses half of the failures, so the code decides and the wording is only a
+	// fallback for a response without an envelope.
+	braveCodeSubscriptionTokenInvalid = "SUBSCRIPTION_TOKEN_INVALID"
 )
 
 // GroundedSource is one URL with the chunks Brave extracted for a query.
@@ -295,14 +303,19 @@ func classifyBraveFailure(status int, body []byte) error {
 		return fmt.Errorf("%w: %s", ErrQuotaExhausted, detail)
 	case braveCodeRateLimited:
 		return fmt.Errorf("%w: %s", ErrRateLimited, detail)
+	case braveCodeSubscriptionTokenInvalid:
+		return braveKeyRejected(detail)
 	}
 	// A rejected key is worth its own error: measured against the real API it
-	// arrives as 422 "The provided API key is invalid.", not the 401 the
-	// reference suggests, so the status alone would be filed as a generic
-	// server error and the user would never be told to fix the key.
+	// arrives as 422, not the 401 the reference suggests, so the status alone
+	// would be filed as a generic server error and the user would never be told
+	// to fix the key. The status is only a fallback for an envelope without a
+	// code: a 422 that blames the credential is the same authentication failure,
+	// while one that blames the request — an over-long query, say — is fixed by
+	// clamping and must keep its own error.
 	if status == http.StatusUnauthorized || status == http.StatusForbidden ||
-		(status == http.StatusUnprocessableEntity && strings.Contains(strings.ToLower(detail), "api key")) {
-		return fmt.Errorf("%w: %s", ErrInvalidKey, detail)
+		(status == http.StatusUnprocessableEntity && namesCredential(detail)) {
+		return braveKeyRejected(detail)
 	}
 	if status == http.StatusTooManyRequests {
 		return fmt.Errorf("%w: %s", ErrRateLimited, detail)
@@ -313,6 +326,24 @@ func classifyBraveFailure(status int, body []byte) error {
 		Body:       detail,
 		Provider:   "brave",
 	}
+}
+
+// braveKeyRejected wraps a rejected credential. The detail Brave sends is in
+// English, so the one action that can fix it is appended in the app's language:
+// the message a user reads should point at the settings instead of looking like
+// a server fault.
+func braveKeyRejected(detail string) error {
+	return fmt.Errorf("%w: %s (Brave-API-Key in den Einstellungen prüfen)", ErrInvalidKey, detail)
+}
+
+// namesCredential reports whether an envelope's detail blames the credential
+// rather than the request. Both wordings are real, for the same failure: a
+// key-shaped value is answered with "The provided API key is invalid." and any
+// other value with "The provided subscription token is invalid.", so matching on
+// one of them leaves the other classified as a server error.
+func namesCredential(detail string) bool {
+	d := strings.ToLower(detail)
+	return strings.Contains(d, "api key") || strings.Contains(d, "subscription token")
 }
 
 func mustJSON(v any) []byte {
