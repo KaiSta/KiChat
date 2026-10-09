@@ -369,7 +369,7 @@ func TestNormaliseAddsMissingBackendsWithoutClobberingEdits(t *testing.T) {
 		t.Error("the repaired DeepSeek entry is enabled")
 	}
 
-	// llama.cpp arrives the same way, and is also shipped off — 8080 is its
+	// llama.cpp arrives the same way, and is also shipped off — 9931 is its
 	// documented default but not a port llama-server owns the way LM Studio owns
 	// 1234, and the server is normally started by hand on a port the user picked.
 	llama, ok := byID["llamacpp"]

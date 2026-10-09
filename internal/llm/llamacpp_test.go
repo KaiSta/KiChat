@@ -579,3 +579,165 @@ func TestLlamaCppFallsBackToTheRootChatPath(t *testing.T) {
 		t.Errorf("/v1/chat/completions tried %d times over two chats, want once: a 404 must retire it", got)
 	}
 }
+
+// TestLlamaCppAV1BaseURLAsksForTheV1PathOnly is the regression test for a wasted
+// request on the first message of every session. The chat paths were built by
+// appending the OpenAI route to whatever the user typed, so a base URL that
+// already named /v1 produced `/v1/v1/chat/completions` as the first attempt: a
+// request certain to 404, sent once before the fallback rescued the turn, and
+// invisible afterwards because the reply arrived as though nothing had happened.
+//
+// The address a proxy exposes is the /v1 one, so this is the base URL a user is
+// most likely to paste in.
+func TestLlamaCppAV1BaseURLAsksForTheV1PathOnly(t *testing.T) {
+	var doubled, real atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/v1/chat/completions":
+			doubled.Add(1)
+			http.NotFound(w, r)
+		case "/v1/chat/completions":
+			real.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+		case "/props":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, llamaCppPropsBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	p := newLlamaCppProvider("llamacpp", "llama.cpp", srv.URL+"/v1", "")
+	if got := p.chatPaths[0]; got != srv.URL+"/v1/chat/completions" {
+		t.Errorf("first chat path = %q, want the address the user gave", got)
+	}
+	if got := replyFrom(t, p); got != "ok" {
+		t.Fatalf("reply = %q, want the answer from /v1/chat/completions", got)
+	}
+	if n := doubled.Load(); n != 0 {
+		t.Errorf("the doubled /v1/v1 path was requested %d time(s)", n)
+	}
+	if n := real.Load(); n != 1 {
+		t.Errorf("/v1/chat/completions was requested %d times, want 1", n)
+	}
+}
+
+// TestLlamaCppAMultiModelListingLoadsOnlyTheModelPropsNames is the regression test
+// for the router shape. `--models-dir` makes one server answer for every model it
+// discovered, up to `--models-max` at once and loaded on demand, while /props
+// describes only the instance it names in `model_path`. That one reading used to
+// be handed to every row, so each row was reported as loaded with the loaded
+// model's window — a window the server never allocated for it, and the exact
+// over-promise this provider exists to prevent: measured on a two-model listing,
+// the smaller model was given a limit of 8192 while its own trained ceiling was
+// 4096.
+func TestLlamaCppAMultiModelListingLoadsOnlyTheModelPropsNames(t *testing.T) {
+	listing := `{"data":[` +
+		`{"id":"/models/small.gguf","meta":{"n_ctx_train":4096}},` +
+		`{"id":"/models/big.gguf","meta":{"n_ctx_train":32768}}]}`
+	props := `{"default_generation_settings":{"n_ctx":8192},` +
+		`"model_path":"/models/big.gguf",` +
+		`"chat_template":"{%- if enable_thinking is defined %}{%- endif %}",` +
+		`"chat_template_caps":{"supports_tool_calls":true}}`
+	srv, _ := llamaCppServer(t, listing, props, http.StatusOK)
+
+	models, err := newLlamaCppProvider("llamacpp", "llama.cpp", srv.URL, "").ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("listed %d models, want the two the router serves: %+v", len(models), models)
+	}
+	byID := map[string]ModelInfo{}
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+
+	// The instance /props names is the loaded one, and the window is its own.
+	big := byID["/models/big.gguf"]
+	if big.State != StateLoaded || big.ContextLimit != 8192 || !big.Has(CapTools) {
+		t.Errorf("the model /props names = %+v, want loaded with the 8192 window and its template's caps", big)
+	}
+
+	// The other model was discovered, not loaded, and the loaded window does not
+	// belong to it.
+	small := byID["/models/small.gguf"]
+	if small.State != StateNotLoaded {
+		t.Errorf("state = %q for a model the server never called loaded, want %q", small.State, StateNotLoaded)
+	}
+	if small.ContextLimit != 0 {
+		t.Errorf("ContextLimit = %d for a model the loaded window does not belong to, want it unset", small.ContextLimit)
+	}
+	// Its own ceiling still arrives from the listing, which needs no /props.
+	if small.MaxContext != 4096 {
+		t.Errorf("MaxContext = %d, want the trained 4096", small.MaxContext)
+	}
+	// Tools were claimed from the *loaded* model's template, which says nothing
+	// about this one.
+	if small.Has(CapTools) {
+		t.Errorf("claimed tools from another model's template: %v", small.Capabilities)
+	}
+}
+
+// TestLlamaCppAMultiModelListingWithoutPropsClaimsNoWindow covers the router whose
+// /props is absent or failing. Nothing may be called loaded just because it was
+// discovered, and no window may be invented for anyone: the app's own conservative
+// default is the safe answer when the server says nothing at all.
+func TestLlamaCppAMultiModelListingWithoutPropsClaimsNoWindow(t *testing.T) {
+	listing := `{"data":[{"id":"a.gguf","meta":{"n_ctx_train":4096}},` +
+		`{"id":"b.gguf","meta":{"n_ctx_train":32768}}]}`
+	srv, _ := llamaCppServer(t, listing, "", http.StatusNotFound)
+
+	models, err := newLlamaCppProvider("llamacpp", "llama.cpp", srv.URL, "").ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	for _, m := range models {
+		if m.State != StateNotLoaded {
+			t.Errorf("%s: state = %q, want %q without a /props to name the loaded one", m.ID, m.State, StateNotLoaded)
+		}
+		if m.ContextLimit != 0 {
+			t.Errorf("%s: ContextLimit = %d, want it unset without /props", m.ID, m.ContextLimit)
+		}
+	}
+}
+
+// TestLlamaCppAnUnnamedLoadedModelLeavesEveryRowAlone is the case where /props
+// answers but does not say which model it describes. Claiming the window for the
+// first row would be a guess about which model is loaded, and a wrong guess here
+// is again a window the server refuses; leaving every row without one costs the
+// optimisation and keeps the answer honest.
+func TestLlamaCppAnUnnamedLoadedModelLeavesEveryRowAlone(t *testing.T) {
+	listing := `{"data":[{"id":"a.gguf"},{"id":"b.gguf"}]}`
+	props := `{"default_generation_settings":{"n_ctx":8192},"chat_template_caps":{"supports_tool_calls":true}}`
+	srv, _ := llamaCppServer(t, listing, props, http.StatusOK)
+
+	models, err := newLlamaCppProvider("llamacpp", "llama.cpp", srv.URL, "").ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	for _, m := range models {
+		if m.State != StateNotLoaded || m.ContextLimit != 0 {
+			t.Errorf("%s: state=%q window=%d, want neither claimed without a model_path to attribute them to",
+				m.ID, m.State, m.ContextLimit)
+		}
+	}
+}
+
+// TestLlamaCppDefaultAddressMatchesUpstreamsPort pins the address the shipped entry
+// offers, because it is the first thing a user meets. llama.cpp moved its server
+// default from 8080 to 9931 (b10240, the number's neighbours on a developer machine
+// being far less busy), so an address left on 8080 sends someone who enables this
+// entry to a port nothing answers on — and 8080 is the port most likely to be
+// answering with something else entirely.
+func TestLlamaCppDefaultAddressMatchesUpstreamsPort(t *testing.T) {
+	if LlamaCppDefaultBaseURL != "http://127.0.0.1:9931" {
+		t.Errorf("LlamaCppDefaultBaseURL = %q, want the port llama-server documents", LlamaCppDefaultBaseURL)
+	}
+	// An entry that arrives with no address has to reach the same place.
+	if got := newLlamaCppProvider("llamacpp", "llama.cpp", "", "").baseURL; got != LlamaCppDefaultBaseURL {
+		t.Errorf("provider base URL for an empty setting = %q, want %q", got, LlamaCppDefaultBaseURL)
+	}
+}

@@ -251,7 +251,7 @@ func (s *Settings) normalise() {
 				// shows the address the app would actually use.
 				s.Backends[i].BaseURL = llm.DeepSeekDefaultBaseURL
 			case "llamacpp":
-				// Same reason as DeepSeek: 8080 is llama-server's documented
+				// Same reason as DeepSeek: 9931 is llama-server's documented
 				// default, and an empty field would otherwise hide it.
 				s.Backends[i].BaseURL = llm.LlamaCppDefaultBaseURL
 			}

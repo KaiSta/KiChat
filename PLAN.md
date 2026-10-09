@@ -21,7 +21,7 @@ numbers about what is being sent to the model.
 
 | Area | Delivered |
 | --- | --- |
-| Backends | LM Studio (`:1234`) and Ollama (`:11434`), plus DeepSeek and llama.cpp (`:8080`) shipped prepared-but-off, plus a generic OpenAI-compatible endpoint |
+| Backends | LM Studio (`:1234`) and Ollama (`:11434`), plus DeepSeek and llama.cpp (`:9931`) shipped prepared-but-off, plus a generic OpenAI-compatible endpoint |
 | Context | Automatic and manual compaction, live context-window fullness meter, per-segment inspector |
 | Research | Brave Search (API key) with DuckDuckGo fallback, page scraping with SSRF guard, optional search-before-answer |
 | Files | Attachments, PDF/office text extraction, chunked with BM25 retrieval over the chunks |

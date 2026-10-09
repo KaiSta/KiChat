@@ -303,12 +303,14 @@ func MergeOverrides(models []ModelInfo, overrides map[string]ModelOverride) []Mo
 // race and quietly become the default for new chats. A user who wants it turns
 // it on and pastes a key in Settings.
 //
-// llama.cpp ships disabled as well, and for a different reason: 127.0.0.1:8080 is
-// its documented default but not a port it owns the way LM Studio owns 1234 or
-// Ollama owns 11434. It is the most contested port on a developer's machine, and
-// `llama-server` is normally started by hand, often on a port the user picked. So
-// the address is offered rather than probed: a user who runs llama-server enables
-// this entry and points it at the port they used.
+// llama.cpp ships disabled as well, and for a different reason: 127.0.0.1:9931 is
+// its documented default today, but it is a default rather than a port the server
+// owns the way LM Studio owns 1234 or Ollama owns 11434. `llama-server` is
+// normally started by hand, on a port the user picked (and on 8080 on any Docker
+// setup, which maps it explicitly), so the same machine can host several of them
+// and none of them has to be on the number this offers. The address is therefore
+// offered rather than probed: a user who runs llama-server enables this entry and
+// points it at the port they used.
 func DefaultBackendConfigs() []BackendConfig {
 	return []BackendConfig{
 		{

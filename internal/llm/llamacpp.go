@@ -47,10 +47,20 @@ import (
 // template can do.
 
 // LlamaCppDefaultBaseURL is where llama-server listens when it is not told
-// otherwise: `--host` defaults to 127.0.0.1 and `--port` to 8080. It is exported
-// so a settings blob with the entry half-filled can be repaired to the same
-// address the provider would use.
-const LlamaCppDefaultBaseURL = "http://127.0.0.1:8080"
+// otherwise: `--host` defaults to 127.0.0.1 and `--port` to 9931.
+//
+// The port was 8080 for years and moved in the b10240 build, to a number whose
+// neighbours on a developer machine are far less busy. A build from before that
+// still answers on 8080, and the Docker instructions still map 8080 — but the
+// address this offers is the one a current server actually listens on, because a
+// stale default is what a user sees first: enable the entry, ask for the model
+// list, and get a connection error from a port that nothing was ever going to
+// answer on. Correcting the address is the user's call, not a hurdle to get past
+// before the entry can work at all.
+//
+// It is exported so a settings blob with the entry half-filled can be repaired to
+// the same address the provider would use.
+const LlamaCppDefaultBaseURL = "http://127.0.0.1:9931"
 
 // newLlamaCppProvider builds the llama.cpp provider. An empty base URL falls back
 // to the documented default, so a half-filled settings entry still works.
@@ -65,12 +75,21 @@ func newLlamaCppProvider(id, name, baseURL, apiKey string) *openAICompatProvider
 	if name == "" {
 		name = "llama.cpp"
 	}
-	// A base URL that already names /v1 must not be given it twice, and a base
-	// without one needs the OpenAI path as the fallback: llama-server answers
-	// both /v1/chat/completions and /chat/completions, and a 404 retires the
-	// first permanently.
+	// A base URL that already names /v1 must not be given it twice — the user may
+	// well have pasted the address their proxy exposes — and a base without one
+	// needs the OpenAI path as the fallback: llama-server answers both
+	// /v1/chat/completions and /chat/completions, and a 404 retires the first
+	// permanently.
+	//
+	// The two cases are spelled out rather than appended blindly, because
+	// appending to a /v1 base produces /v1/v1/chat/completions as the first
+	// attempt: a request that is certain to 404, sent on the first message of
+	// every session, with the fallback quietly hiding it afterwards.
 	chatPaths := []string{baseURL + "/v1/chat/completions"}
-	if fallback := baseURL + "/chat/completions"; fallback != chatPaths[0] {
+	if strings.HasSuffix(baseURL, "/v1") {
+		chatPaths = []string{baseURL + "/chat/completions"}
+	}
+	if fallback := baseURL + "/chat/completions"; chatPaths[len(chatPaths)-1] != fallback {
 		chatPaths = append(chatPaths, fallback)
 	}
 	// /props and /v1/models hang off the server root, never off a /v1 base.
@@ -200,11 +219,48 @@ func (p *openAICompatProvider) fromLlamaCppEntry(m llamaCppModelEntry) ModelInfo
 // supply, and is a no-op for every other backend. A failure to read /props never
 // fails the listing: the models are what the caller asked for, and everything
 // here is an enrichment.
+//
+// Which rows the reading belongs to is the part that is easy to get wrong, and it
+// is not the same question for the two shapes of server this kind reaches. A
+// direct `llama-server -m model.gguf` serves exactly one model, does not answer
+// before its weights are resident, and loads it with the window /props reports:
+// that single row is loaded, and the window is its own.
+//
+// A router (`--models-dir`) serves every model it discovered and loads them on
+// demand, up to `--models-max` at once, so a listing with several rows does not
+// say that all of them are loaded — and /props describes only the instance it
+// names in `model_path`. Handing that one window to every row is how a model gets
+// promised a window the server will refuse, which is the failure this provider
+// exists to prevent; so with more than one row only the row /props names is
+// loaded and only that row gets the window, and the others fall back to the app's
+// own conservative default.
 func (p *openAICompatProvider) enrichLlamaCpp(ctx context.Context, models []ModelInfo) []ModelInfo {
 	if p.modelsFlavour != flavourLlamaCpp || p.propsPath == "" {
 		return models
 	}
 	props := p.propsFor(ctx)
+
+	// The rows the /props reading applies to. A direct server is one row by
+	// definition; a router is one row only when /props names it, and nothing is
+	// claimed when it cannot be told which one is loaded.
+	var targets []int
+	if len(models) == 1 {
+		targets = append(targets, 0)
+		models[0].State = StateLoaded
+	} else {
+		loaded := -1
+		if props != nil {
+			loaded = llamaCppLoadedIndex(props, models)
+		}
+		for i := range models {
+			models[i].State = StateNotLoaded
+			if i == loaded {
+				models[i].State = StateLoaded
+				targets = append(targets, i)
+			}
+		}
+	}
+
 	if props == nil {
 		return models
 	}
@@ -219,7 +275,7 @@ func (p *openAICompatProvider) enrichLlamaCpp(ctx context.Context, models []Mode
 		supportsTools = v
 	}
 	thinking := llamaCppTemplateTogglesThinking(props.ChatTemplate)
-	for i := range models {
+	for _, i := range targets {
 		if props.DefaultGenerationSettings.NCtx > 0 {
 			// The window the model is loaded with is the one a prompt has to fit
 			// in, and the whole reason this provider exists: `-c` defaults to
@@ -241,6 +297,45 @@ func (p *openAICompatProvider) enrichLlamaCpp(ctx context.Context, models []Mode
 		}
 	}
 	return models
+}
+
+// llamaCppLoadedIndex names the listing row a /props reading belongs to, or -1
+// when it cannot be told.
+//
+// `model_path` is the file behind the loaded instance, while a row's id is that
+// path unless `--alias` replaced it, so the id is compared first and the file
+// name second. An alias therefore matches by neither and leaves the reading
+// unused: the window the app then falls back to is a conservative default rather
+// than one belonging to a different model, which is the safe way round.
+func llamaCppLoadedIndex(props *llamaCppProps, models []ModelInfo) int {
+	if props == nil || props.ModelPath == "" {
+		return -1
+	}
+	for i := range models {
+		if models[i].ID == props.ModelPath {
+			return i
+		}
+	}
+	wanted := modelFileBase(props.ModelPath)
+	if wanted == "" {
+		return -1
+	}
+	for i := range models {
+		if modelFileBase(models[i].ID) == wanted {
+			return i
+		}
+	}
+	return -1
+}
+
+// modelFileBase is the last element of a model path, splitting on both
+// separators: a server started on Windows reports `C:\models\x.gguf` while the
+// same model reached over a network share arrives as `/models/x.gguf`.
+func modelFileBase(name string) string {
+	if i := strings.LastIndexAny(name, `\/`); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 // propsFor returns the cached /props reading, fetching it once. A missing route
