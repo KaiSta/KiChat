@@ -58,19 +58,39 @@ DEB_FILE  := build/deb/$(APP)_$(VERSION)_$(DEB_ARCH).deb
 
 # Every file the package owns, in one place: a plain `make install` and the
 # staged copy inside the .deb must never drift apart, so both call this.
-# The icon goes in the directory that matches its real pixel size (1024x1024 —
-# measured, not assumed), because lintian's icon-size-and-directory-name-mismatch
-# compares the two, and the icon theme index keys off the directory name. This
-# system's hicolor/index.theme does not list a 1024x1024 directory, so the
-# pixmaps copy is not redundant belt-and-braces: it is the by-name lookup that
-# still resolves when the themed lookup finds nothing.
-ICON_SIZE = 1024x1024
+#
+# The icon is installed where the icon-theme algorithm can reach it, which is
+# not the same thing as "in the directory named after its pixel size". Measured
+# on this system (GTK 3.24 against hicolor 0.17): a PNG in
+# hicolor/1024x1024/apps — its true pixel size, and what lintian's
+# icon-size-and-directory-name-mismatch asks for — is invisible to
+# Gtk.IconTheme.lookup_icon() at *every* size. 16, 22, 24, 32, 48, 64, 96, 128,
+# 256, 512 and 1024 all come back NULL, because the lookup only walks the
+# directories hicolor/index.theme declares, and that file lists no 1024x1024
+# directory at all (grep: 0 hits) — a 1024 px raster's declared home is
+# 512x512@2/apps, not a size no theme defines. The only reason the old layout
+# still showed a mark is GTK's legacy /usr/share/pixmaps fallback, and that is
+# not a themed directory: Cinnamon's menu applet swaps an app icon it cannot
+# find in a theme for application-x-executable (commit e83f7786, "no themed
+# icon available for the app"), so an install that races the app-list rebuild
+# can leave the menu showing a gear for as long as that button lives, while the
+# window list — built later, and through the pixmaps path — shows the real one.
+#
+# An SVG under hicolor/scalable/apps answers every size from a single file,
+# which is what the spec recommends ("an svg icon in
+# $prefix/share/icons/hicolor/scalable/apps means most desktops will have one
+# icon that works for all sizes") and what mintinstall, Mint's own installer,
+# ships. Measured here: with the SVG in scalable/apps, lookups for 16 through
+# 1024 all resolve to it, even with the pixmaps copy present, because themes are
+# searched before unthemed directories. The pixmaps copy stays for
+# implementations that predate the theme lookup — /usr/share/pixmaps is a base
+# directory of the same spec rather than a theme.
 INSTALL_FILES = install -D -m 0755 $(BIN) $(1)$(PREFIX)/bin/$(APP) && \
 	install -D -m 0644 packaging/kichat.desktop $(1)$(PREFIX)/share/applications/$(APP).desktop && \
 	install -d -m 0755 $(1)$(PREFIX)/share/man/man1 && \
 	gzip -9nc packaging/kichat.1 > $(1)$(PREFIX)/share/man/man1/$(APP).1.gz && \
 	chmod 0644 $(1)$(PREFIX)/share/man/man1/$(APP).1.gz && \
-	install -D -m 0644 build/appicon.png $(1)$(PREFIX)/share/icons/hicolor/$(ICON_SIZE)/apps/$(APP).png && \
+	install -D -m 0644 build/appicon.svg $(1)$(PREFIX)/share/icons/hicolor/scalable/apps/$(APP).svg && \
 	install -D -m 0644 build/appicon.png $(1)$(PREFIX)/share/pixmaps/$(APP).png
 
 .PHONY: all help deps frontend bindings icon build check fmt vet test typecheck run \
@@ -174,11 +194,16 @@ $(BIN):
 install: $(BIN)
 	$(call INSTALL_FILES,$(DESTDIR))
 
+# The 1024x1024 entry is not a path this Makefile installs any more, it is the
+# one it installed before the icon moved to scalable/apps: dpkg drops it on
+# upgrade, and a hand-run uninstall should not leave a file behind in a
+# directory only this package ever used.
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/$(APP) \
 	      $(DESTDIR)$(PREFIX)/share/applications/$(APP).desktop \
 	      $(DESTDIR)$(PREFIX)/share/man/man1/$(APP).1.gz \
-	      $(DESTDIR)$(PREFIX)/share/icons/hicolor/$(ICON_SIZE)/apps/$(APP).png \
+	      $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/$(APP).svg \
+	      $(DESTDIR)$(PREFIX)/share/icons/hicolor/1024x1024/apps/$(APP).png \
 	      $(DESTDIR)$(PREFIX)/share/pixmaps/$(APP).png \
 	      $(DESTDIR)$(PREFIX)/share/lintian/overrides/$(APP) \
 	      $(DESTDIR)$(PREFIX)/share/doc/$(APP)/copyright \

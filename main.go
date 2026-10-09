@@ -13,8 +13,11 @@ import (
 var assets embed.FS
 
 // Window and taskbar icon, embedded so it shows even when the app is not
-// installed via the .deb (which would otherwise rely on the hicolor icon
-// theme). The same file ships into /usr/share/icons in the package.
+// installed via the .deb (where the desktop would otherwise have to find the
+// mark through the icon theme). The package ships the mark in the two forms a
+// theme lookup can reach — the SVG in hicolor/scalable/apps and this PNG in
+// /usr/share/pixmaps; INSTALL_FILES in the Makefile records why a size-named
+// hicolor directory is not one of them.
 //
 //go:embed build/appicon.png
 var appIcon []byte
