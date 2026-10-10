@@ -52,10 +52,22 @@ type CompactResult struct {
 // would summarise half an answer and freeze that fragment into memory. The
 // automatic run is triggered by a turn and is the caller that may do it.
 func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions) (CompactResult, error) {
-	if e.IsRunning(chatID) {
+	// A manual compaction is a turn in every way that matters: it reads the whole
+	// transcript, it writes, it can run for minutes, and Stop has to be able to end
+	// it. So it claims the chat like one. That claim is what refuses a chat that is
+	// already generating — and, the other way round, what keeps a new message from
+	// starting beside a compaction that is summarising the history it would be
+	// appended to. It used to check IsRunning and then run unregistered, so Stop
+	// could not reach it and a message sent during one landed in the fold.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	handle := &turnHandle{cancel: cancel, chatID: chatID}
+	if !e.turns.claim(chatID, handle) {
 		return CompactResult{}, errors.New("für diesen Chat läuft noch eine Generierung — " +
 			"kompaktieren ist möglich, sobald sie fertig ist")
 	}
+	defer e.turns.release(chatID, handle)
+
 	settings := e.Settings()
 	chat, err := e.Store.GetChat(chatID)
 	if err != nil {

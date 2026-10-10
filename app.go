@@ -44,6 +44,20 @@ type App struct {
 	extractor *ingest.Extractor
 	secrets   *secret.Store
 
+	// servicesMu guards the five services above that a settings save replaces
+	// wholesale: registry, chain, scraper, toolSvc and engine. A bound method can be
+	// running on another goroutine while that replacement happens, so reading the
+	// field as it was being assigned was a data race; every read goes through one of
+	// the accessors below and every write happens inside rebuildServices.
+	//
+	// Replacing the engine is safe for a reply in flight only because the turn state
+	// is not part of it — see turns.
+	servicesMu sync.RWMutex
+
+	// turns is the turn state every engine this app builds shares, so a rebuild
+	// cannot orphan a generation that is already running. See chat.TurnState.
+	turns *chat.TurnState
+
 	settingsMu sync.RWMutex
 	settings   config.Settings
 
@@ -106,8 +120,14 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	if a.engine != nil {
-		a.engine.StopAll()
+	// Cancelling is not enough on its own: a turn that is between two writes would
+	// go on to write to a database that is about to be closed. The wait is short
+	// because it is a courtesy, not a guarantee — a tool call stuck in a syscall
+	// cannot be waited out.
+	if engine := a.currentEngine(); engine != nil {
+		if !engine.StopAllAndWait(3 * time.Second) {
+			runtime.LogWarningf(ctx, "laufende Generierungen wurden nach dem Abbruch nicht rechtzeitig beendet")
+		}
 	}
 	// Stopping the managed servers is not optional: they are child processes, and
 	// a llama-server left behind holds its model in memory with nothing left in
@@ -163,6 +183,7 @@ func (a *App) init() error {
 	a.installer = rt.NewInstaller(filepath.Join(a.dataDir, "runtime"))
 	a.installer.OnProgress = a.recordInstallProgress
 	a.servers = map[string]*rt.Server{}
+	a.turns = chat.NewTurnState()
 	a.rebuildServices(settings)
 	return nil
 }
@@ -497,9 +518,15 @@ type managedStatus struct {
 }
 
 // rebuildServices (re)creates the objects that depend on settings.
+//
+// It runs under servicesMu because a bound method may be reading one of them on
+// another goroutine — that is what makes it safe to reach them through the
+// accessors below. The engine it installs shares a.turns with the one it replaces,
+// so a reply that is streaming right now keeps its claim on its chat: Stop still
+// finds it and a second message is still refused.
 func (a *App) rebuildServices(settings config.Settings) {
-	a.registry = llm.NewRegistry(settings.Backends)
-	a.chain = research.NewChain(a.store, research.Options{
+	registry := llm.NewRegistry(settings.Backends)
+	chain := research.NewChain(a.store, research.Options{
 		ProviderOrder: settings.Search.ProviderOrder,
 		BraveAPIKey:   settings.Search.BraveAPIKey,
 		Country:       settings.Search.Country,
@@ -509,7 +536,7 @@ func (a *App) rebuildServices(settings config.Settings) {
 		CacheMinutes:  settings.Search.CacheMinutes,
 	}, "")
 
-	a.scraper = research.NewScraper(a.store, research.ScrapeOptions{
+	scraper := research.NewScraper(a.store, research.ScrapeOptions{
 		MaxBytes:          settings.Search.ScrapeMaxBytes,
 		Timeout:           time.Duration(settings.Search.ScrapeTimeoutSeconds) * time.Second,
 		RespectRobots:     settings.Search.ScrapeRespectRobots,
@@ -517,8 +544,15 @@ func (a *App) rebuildServices(settings config.Settings) {
 		CacheHours:        settings.Search.ScrapeCacheHours,
 	}, a.extractor.PDFExtractorFunc())
 
-	a.toolSvc = tools.New(a.store, a.chain, a.scraper)
-	a.engine = chat.NewEngine(a.store, a.registry, a.toolSvc, a.Settings, a.emit)
+	toolService := tools.New(a.store, chain, scraper)
+	// A nil turns is only possible before init has run; NewEngineWithState makes its
+	// own in that case, so a half-initialised app cannot panic here.
+	engine := chat.NewEngineWithState(a.store, registry, toolService, a.Settings, a.emit, a.turns)
+
+	a.servicesMu.Lock()
+	a.registry, a.chain, a.scraper, a.toolSvc, a.engine = registry, chain, scraper, toolService, engine
+	a.servicesMu.Unlock()
+
 	// Servers survive a settings save: rebuilding services must not restart a
 	// model that is already loaded, it only updates the settings each one runs
 	// with. So this creates the supervisors that are missing and touches nothing
@@ -528,6 +562,34 @@ func (a *App) rebuildServices(settings config.Settings) {
 			a.serverFor(id, settings)
 		}
 	}
+}
+
+// currentEngine is the engine in use, read under the lock that guards it.
+func (a *App) currentEngine() *chat.Engine {
+	a.servicesMu.RLock()
+	defer a.servicesMu.RUnlock()
+	return a.engine
+}
+
+// currentRegistry is the provider registry in use.
+func (a *App) currentRegistry() *llm.Registry {
+	a.servicesMu.RLock()
+	defer a.servicesMu.RUnlock()
+	return a.registry
+}
+
+// currentChain is the search chain in use.
+func (a *App) currentChain() *research.Chain {
+	a.servicesMu.RLock()
+	defer a.servicesMu.RUnlock()
+	return a.chain
+}
+
+// currentScraper is the page scraper in use.
+func (a *App) currentScraper() *research.Scraper {
+	a.servicesMu.RLock()
+	defer a.servicesMu.RUnlock()
+	return a.scraper
 }
 
 func (a *App) emit(name string, payload any) {
@@ -564,7 +626,7 @@ func (a *App) SendMessage(req SendMessageRequest) error {
 	if req.Regenerate {
 		return a.Regenerate(req.ChatID, req.Backend, req.Model)
 	}
-	return a.engine.Send(chat.TurnRequest{
+	return a.currentEngine().Send(chat.TurnRequest{
 		ChatID:        req.ChatID,
 		Text:          req.Text,
 		AttachmentIDs: req.AttachmentIDs,
@@ -578,7 +640,7 @@ func (a *App) Regenerate(chatID, backend, model string) error {
 	if err := a.ensure(); err != nil {
 		return err
 	}
-	return a.engine.Send(chat.TurnRequest{
+	return a.currentEngine().Send(chat.TurnRequest{
 		ChatID:     chatID,
 		Backend:    backend,
 		Model:      model,
@@ -591,7 +653,7 @@ func (a *App) StopGeneration(chatID string) bool {
 	if err := a.ensure(); err != nil {
 		return false
 	}
-	return a.engine.Stop(chatID)
+	return a.currentEngine().Stop(chatID)
 }
 
 // ActiveGenerations lists chats currently generating.
@@ -599,7 +661,7 @@ func (a *App) ActiveGenerations() []string {
 	if err := a.ensure(); err != nil {
 		return nil
 	}
-	return a.engine.ActiveChats()
+	return a.currentEngine().ActiveChats()
 }
 
 // ListChats returns all chats, most recent first.
@@ -664,7 +726,7 @@ func (a *App) firstAvailableModel() (string, string) {
 // embedding-only models filtered out of the picker.
 func (a *App) visibleModels(ctx context.Context) []llm.ModelInfo {
 	settings := a.Settings()
-	models := llm.MergeOverrides(a.registry.ListModels(ctx, false), settings.ModelOverrides)
+	models := llm.MergeOverrides(a.currentRegistry().ListModels(ctx, false), settings.ModelOverrides)
 	out := make([]llm.ModelInfo, 0, len(models))
 	for _, m := range models {
 		if m.Type == "embeddings" {
@@ -711,7 +773,7 @@ func (a *App) UpdateChat(c store.Chat) (store.Chat, error) {
 	// A model or backend change invalidates the recorded prompt size, because a
 	// different tokenizer makes the old count meaningless.
 	if existing.Backend != c.Backend || existing.Model != c.Model {
-		a.engine.InvalidateMeasurement(c.ID)
+		a.currentEngine().InvalidateMeasurement(c.ID)
 	}
 	if err := a.store.UpdateChat(c); err != nil {
 		return store.Chat{}, err
@@ -737,11 +799,11 @@ func (a *App) DeleteChat(chatID string) error {
 	if err := a.ensure(); err != nil {
 		return err
 	}
-	a.engine.Stop(chatID)
+	a.currentEngine().Stop(chatID)
 	if err := a.store.DeleteChat(chatID); err != nil {
 		return err
 	}
-	a.engine.InvalidateMeasurement(chatID)
+	a.currentEngine().InvalidateMeasurement(chatID)
 	a.emit(events.ChatsChanged, map[string]any{})
 	return nil
 }
@@ -794,18 +856,23 @@ func (a *App) GetChatState(chatID string) (ChatState, error) {
 		Attachments: attachments,
 		Documents:   documents,
 		Budget:      budget,
-		Running:     a.engine.IsRunning(chatID),
+		Running:     a.currentEngine().IsRunning(chatID),
 	}, nil
 }
 
 // GetBudget computes the context budget for a chat, optionally for a different
 // model than the one currently selected. That is what lets the model switcher
 // warn about a smaller window before the user commits to the switch.
+//
+// The budget is computed from the catalogue already in hand, never by asking the
+// backends: this is a preview that the UI awaits while a chat opens, and a listing
+// request there could stall the window behind a slow one (see
+// chat.Engine.PreviewBudget).
 func (a *App) GetBudget(chatID, backend, model string) (chat.ContextBudget, error) {
 	if err := a.ensure(); err != nil {
 		return chat.ContextBudget{}, err
 	}
-	return a.engine.PreviewBudget(context.Background(), chatID, backend, model)
+	return a.currentEngine().PreviewBudget(context.Background(), chatID, backend, model)
 }
 
 // newID returns a fresh identifier.

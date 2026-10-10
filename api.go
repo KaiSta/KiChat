@@ -1131,7 +1131,7 @@ func (a *App) GetHealth() ([]llm.HealthStatus, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	return a.registry.Health(ctx), nil
+	return a.currentRegistry().Health(ctx), nil
 }
 
 // ListModels returns the merged cross-backend model catalogue.
@@ -1142,7 +1142,7 @@ func (a *App) ListModels(forceRefresh bool) ([]llm.ModelInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 	if forceRefresh {
-		a.registry.Invalidate()
+		a.currentRegistry().Invalidate()
 	}
 	return a.visibleModels(ctx), nil
 }
@@ -1168,7 +1168,7 @@ func (a *App) SetModelOverride(backend, model string, ov llm.ModelOverride) erro
 	if err := a.store.PutModelOverride(backend, model, ov); err != nil {
 		return err
 	}
-	a.registry.Invalidate()
+	a.currentRegistry().Invalidate()
 	return settings.Save(a.store)
 }
 
@@ -1246,7 +1246,7 @@ func (a *App) CompactNow(req CompactRequest) (chat.CompactResult, error) {
 	// is a backstop against a stuck backend, not a budget the work has to fit in.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	result, err := a.engine.Compact(ctx, req.ChatID, chat.CompactOptions{
+	result, err := a.currentEngine().Compact(ctx, req.ChatID, chat.CompactOptions{
 		Force:   true,
 		Focus:   req.Focus,
 		Target:  req.Target,
@@ -1297,7 +1297,7 @@ func (a *App) DeleteCompaction(chatID, compactionID string) error {
 	if err := a.store.DeleteCompactionsFrom(chatID, target); err != nil {
 		return err
 	}
-	a.engine.InvalidateMeasurement(chatID)
+	a.currentEngine().InvalidateMeasurement(chatID)
 	return nil
 }
 
@@ -1533,7 +1533,7 @@ func (a *App) Search(query string) (research.SearchOutcome, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	outcome, err := a.chain.Search(ctx, query, research.SearchRequest{})
+	outcome, err := a.currentChain().Search(ctx, query, research.SearchRequest{})
 	if err != nil {
 		return research.SearchOutcome{}, err
 	}
@@ -1550,7 +1550,7 @@ func (a *App) Scrape(url string, maxTokens int) (research.ScrapeResult, error) {
 	if maxTokens <= 0 {
 		maxTokens = 12000
 	}
-	return a.scraper.Scrape(ctx, url, maxTokens)
+	return a.currentScraper().Scrape(ctx, url, maxTokens)
 }
 
 // ScrapeIntoChat scrapes a page and attaches it to a chat as an indexed or
@@ -1564,7 +1564,7 @@ func (a *App) ScrapeIntoChat(chatID, pageURL string, maxTokens int) (store.Attac
 	if maxTokens <= 0 {
 		maxTokens = 12000
 	}
-	result, err := a.scraper.Scrape(ctx, pageURL, maxTokens)
+	result, err := a.currentScraper().Scrape(ctx, pageURL, maxTokens)
 	if err != nil {
 		return store.Attachment{}, err
 	}
@@ -1625,9 +1625,9 @@ func (a *App) GetSearchStatus() (SearchStatus, error) {
 	}
 	settings := a.Settings()
 	return SearchStatus{
-		Providers:    a.chain.ProviderAvailability(),
+		Providers:    a.currentChain().ProviderAvailability(),
 		Order:        settings.Search.ProviderOrder,
-		BraveQueries: a.chain.BraveQueriesThisMonth(),
+		BraveQueries: a.currentChain().BraveQueriesThisMonth(),
 		// Brave's metered plan gives $5 of free credit per month at
 		// $5 per 1,000 requests, so about a thousand queries.
 		BraveQuotaEst: 1000,

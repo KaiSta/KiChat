@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,6 +43,11 @@ type TurnRequest struct {
 }
 
 // Engine drives conversations.
+//
+// The state that outlives one Engine value — which chats have a turn in flight,
+// and what the backend last reported a prompt to cost — lives in a TurnState
+// instead of in this struct, because the app rebuilds its Engine when settings are
+// saved or a managed server comes up and a reply in flight has to survive that.
 type Engine struct {
 	Store    *store.Store
 	Registry *llm.Registry
@@ -51,57 +55,56 @@ type Engine struct {
 	Settings func() config.Settings
 	Emit     func(name string, payload any)
 
-	mu           sync.Mutex
-	active       map[string]*turnHandle
-	measurements map[string]Measurement
+	turns *TurnState
 }
 
+// turnHandle is one claimed chat: how to cancel its turn, and which chat it is.
 type turnHandle struct {
-	cancel    context.CancelFunc
-	messageID string
-	chatID    string
+	cancel context.CancelFunc
+	chatID string
 }
 
-// NewEngine builds an engine.
+// NewEngine builds an engine with a turn state of its own.
 func NewEngine(st *store.Store, registry *llm.Registry, toolService *tools.Service,
 	settings func() config.Settings, emit func(string, any)) *Engine {
+	return NewEngineWithState(st, registry, toolService, settings, emit, NewTurnState())
+}
+
+// NewEngineWithState builds an engine that claims its turns in an existing state.
+//
+// This is what the app uses. Every engine it builds shares one TurnState, so a
+// rebuild can replace the services without losing the turn that is running on the
+// engine it replaces — Stop still finds it, and a second message still gets refused.
+func NewEngineWithState(st *store.Store, registry *llm.Registry, toolService *tools.Service,
+	settings func() config.Settings, emit func(string, any), turns *TurnState) *Engine {
+	if turns == nil {
+		turns = NewTurnState()
+	}
 	return &Engine{
-		Store:        st,
-		Registry:     registry,
-		Tools:        toolService,
-		Settings:     settings,
-		Emit:         emit,
-		active:       map[string]*turnHandle{},
-		measurements: map[string]Measurement{},
+		Store:    st,
+		Registry: registry,
+		Tools:    toolService,
+		Settings: settings,
+		Emit:     emit,
+		turns:    turns,
 	}
 }
 
 // IsRunning reports whether a chat currently has a generation in flight.
 func (e *Engine) IsRunning(chatID string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	_, ok := e.active[chatID]
-	return ok
+	return e.turns.running(chatID)
 }
 
 // ActiveChats lists chats with a generation in flight.
 func (e *Engine) ActiveChats() []string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := make([]string, 0, len(e.active))
-	for id := range e.active {
-		out = append(out, id)
-	}
-	return out
+	return e.turns.chats()
 }
 
 // Stop cancels a running turn. The partial reply is kept and marked
 // interrupted, and any tool call left in flight is closed off so the next
 // request is still valid.
 func (e *Engine) Stop(chatID string) bool {
-	e.mu.Lock()
-	handle, ok := e.active[chatID]
-	e.mu.Unlock()
+	handle, ok := e.turns.handle(chatID)
 	if !ok {
 		return false
 	}
@@ -112,15 +115,17 @@ func (e *Engine) Stop(chatID string) bool {
 
 // StopAll cancels every running turn.
 func (e *Engine) StopAll() {
-	e.mu.Lock()
-	handles := make([]*turnHandle, 0, len(e.active))
-	for _, h := range e.active {
-		handles = append(handles, h)
-	}
-	e.mu.Unlock()
-	for _, h := range handles {
+	for _, h := range e.turns.handles() {
 		h.cancel()
 	}
+}
+
+// StopAllAndWait cancels every running turn and waits up to d for them to unwind,
+// reporting whether they all did. Shutdown uses it so a cancelled turn cannot go on
+// writing to a store that is about to be closed.
+func (e *Engine) StopAllAndWait(d time.Duration) bool {
+	e.StopAll()
+	return e.turns.waitIdle(d)
 }
 
 func (e *Engine) emitStatus(chatID, phase string) {
@@ -138,53 +143,44 @@ func (e *Engine) emit(name string, payload any) {
 
 // Measurement returns the last recorded measurement for a chat.
 func (e *Engine) Measurement(chatID string) (Measurement, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	m, ok := e.measurements[chatID]
-	return m, ok
+	return e.turns.measurement(chatID)
 }
 
 func (e *Engine) setMeasurement(chatID string, m Measurement) {
-	e.mu.Lock()
-	e.measurements[chatID] = m
-	e.mu.Unlock()
+	e.turns.setMeasurement(chatID, m)
 }
 
 // InvalidateMeasurement drops the recorded prompt size, which is required after
 // a model switch: a different tokenizer makes the old number meaningless.
 func (e *Engine) InvalidateMeasurement(chatID string) {
-	e.mu.Lock()
-	delete(e.measurements, chatID)
-	e.mu.Unlock()
+	e.turns.invalidateMeasurement(chatID)
 }
 
 // Send starts a turn. It returns immediately; progress arrives as events.
 func (e *Engine) Send(req TurnRequest) error {
-	e.mu.Lock()
-	if _, busy := e.active[req.ChatID]; busy {
-		e.mu.Unlock()
-		return errors.New("für diesen Chat läuft bereits eine Generierung")
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	handle := &turnHandle{cancel: cancel, chatID: req.ChatID}
-	e.active[req.ChatID] = handle
-	e.mu.Unlock()
+	// The claim is the only decision about whether the chat is free: checking and
+	// reserving are one step, so a rebuild that replaced this engine cannot leave a
+	// second turn able to start beside the first.
+	if !e.turns.claim(req.ChatID, handle) {
+		cancel()
+		return errors.New("für diesen Chat läuft bereits eine Generierung")
+	}
 
 	go func() {
 		defer func() {
 			cancel()
-			e.mu.Lock()
-			delete(e.active, req.ChatID)
-			e.mu.Unlock()
+			e.turns.release(req.ChatID, handle)
 			e.emitStatus(req.ChatID, "idle")
 		}()
-		e.runTurn(ctx, req, handle)
+		e.runTurn(ctx, req)
 	}()
 	return nil
 }
 
 // runTurn performs one full exchange, including any tool iterations.
-func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandle) {
+func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	settings := e.Settings()
 	chat, err := e.Store.GetChat(req.ChatID)
 	if err != nil {
@@ -268,7 +264,6 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest, handle *turnHandl
 		UseNative:   useNativeTools,
 		MaxToolIter: settings.ToolIterations,
 	})
-	handle.messageID = result.PrimaryMessageID
 
 	// The reply's own status is the honest one to publish: generate already
 	// distinguished an interrupted answer from one the backend stopped delivering
