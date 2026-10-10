@@ -368,9 +368,17 @@ func (s *Server) Stop() error {
 }
 
 // markStopped records that nothing is running any more.
+//
+// A row that already says "failed" keeps saying it. Stopping a server that failed
+// to become ready — which the readiness timeout does, right after it reports the
+// failure — must not downgrade that to "stopped": the reason would survive in
+// Error while the state contradicted it, and a load that timed out is not the same
+// thing as a server the user stopped.
 func (s *Server) markStopped() {
 	s.mu.Lock()
-	s.status.State = StateStopped
+	if s.status.State != StateFailed {
+		s.status.State = StateStopped
+	}
 	s.status.PID = 0
 	s.status.Port = 0
 	s.status.URL = ""
