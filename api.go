@@ -56,10 +56,27 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	if err := a.ensure(); err != nil {
 		return config.Settings{}, err
 	}
-	// The draft only ever carries a boolean about the Brave key (GetSettings
-	// blanks the secret), so an empty BraveAPIKey means "leave the stored key
-	// alone".
-	s.Search.BraveAPIKey = a.Settings().Search.BraveAPIKey
+	// The record the draft is merged against. The draft only ever carries a boolean
+	// about the Brave key (GetSettings blanks the secret), and it never carries the
+	// installed build at all, so both are read from here.
+	recorded := a.Settings()
+	// An empty BraveAPIKey means "leave the stored key alone".
+	s.Search.BraveAPIKey = recorded.Search.BraveAPIKey
+	// The installed build is the installer's record, and no control in the panel edits
+	// the tag. A download writes it from its own goroutine, after the bound call that
+	// started it returned, so a draft the view read before that still names the build
+	// the install replaced. Two tags that differ therefore say the draft predates the
+	// install — which also means its source and family are the ones the install
+	// superseded and not a choice the user just made — so the recorded runtime wins
+	// whole. Without this, saving an unrelated setting put the replaced build back (the
+	// next start ran the old llama.cpp while the panel showed the new one) or stranded
+	// a fork install under a reverted upstream source. A draft whose tag already matches
+	// is current, and its source and family are the pickers' own.
+	if strings.TrimSpace(s.Runtime.Tag) != strings.TrimSpace(recorded.Runtime.Tag) {
+		s.Runtime.Distribution = recorded.Runtime.Distribution
+		s.Runtime.Accelerator = recorded.Runtime.Accelerator
+	}
+	s.Runtime.Tag = recorded.Runtime.Tag
 	// Moving the untouched prompts to the new language, and repairing an empty
 	// default prompt, happen here as well as on load: clearing the textarea and
 	// switching the language in the same save must not leave either undone.

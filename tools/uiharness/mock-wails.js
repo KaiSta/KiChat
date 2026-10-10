@@ -1106,6 +1106,11 @@ Verfügbare Tools: {{tool_list}}`,
     settings.runtime.distribution = 'prism'
     managed.installed = true
     managed.tag = installedFork()
+    // The recorded build, which is the settings' copy as well as the status's: the
+    // real installer writes the tag into the settings, and the panel then reads both
+    // from the same record. Without this the fixture would show a status tag the
+    // settings never heard of, a state the app does not produce.
+    settings.runtime.tag = managed.tag
     managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
     console.warn('[harness] source injection active: the build on disk is the PrismML fork')
   }
@@ -1126,6 +1131,9 @@ Verfügbare Tools: {{tool_list}}`,
   if (updateParam && !managed.installed) {
     managed.installed = true
     managed.tag = `${olderTag()}-${(settings.runtime || {}).accelerator || 'cpu'}`
+    // The recorded build: the settings' copy as well as the status's, the way the
+    // installer leaves them.
+    settings.runtime.tag = managed.tag
     managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
     console.warn(`[harness] update injection active: the published build is ${publishedTag}`)
   }
@@ -1500,6 +1508,9 @@ Verfügbare Tools: {{tool_list}}`,
       }
       managed.installed = true
       managed.tag = tag
+      // The real installer records the tag in the settings as well as reporting it in
+      // the status; the two are one record, and the panel compares them.
+      settings.runtime.tag = tag
       managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
       // The build just downloaded is the published one, so the cached reading stops
       // offering it — the same thing the backend records after an install.

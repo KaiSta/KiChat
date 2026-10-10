@@ -104,6 +104,15 @@ interface State {
   setTheme: (theme: 'dark' | 'light') => void
   setView: (view: 'chat' | 'settings') => void
 
+  /**
+   * Re-read the settings blob. An install writes the recorded build — its tag, the
+   * source and the family — from the backend's own goroutine, after the bound call
+   * that started it has already returned. A snapshot read before that would be saved
+   * back over the record on the next full save, so the view has to ask again when it
+   * notices the two disagree.
+   */
+  refreshSettings: () => Promise<void>
+
   refreshModels: (force?: boolean) => Promise<void>
   refreshHealth: () => Promise<void>
   loadChats: () => Promise<void>
@@ -239,6 +248,18 @@ export const useStore = create<State>((set, get) => {
         const next = { ...settings, theme }
         set({ settings: next })
         void App.SaveSettings(next).catch(() => undefined)
+      }
+    },
+
+    // The install is the one writer of the recorded build, and it runs behind a
+    // bound method that has already returned by the time the download finishes.
+    // Re-reading is how the rest of the view learns about it; the Settings draft
+    // follows the store, so the pickers end up naming the build that is really there.
+    refreshSettings: async () => {
+      try {
+        set({ settings: await App.GetSettings() })
+      } catch {
+        // A re-read is a courtesy; a failure must not take the view down.
       }
     },
 

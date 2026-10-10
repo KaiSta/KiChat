@@ -488,6 +488,28 @@ function LocalModelSection({
     void useStore.getState().refreshModels()
   }, [state])
 
+  // An install writes the build it fetched — its tag, the source and the family —
+  // straight into the settings, from the backend's goroutine, without this view
+  // knowing. The draft here and the store's snapshot were read before that, so saving
+  // them back would undo the install: the app would start the build the update
+  // replaced while the panel showed the new one. When the status names a build the
+  // store's copy does not, adopt the backend's. It is a comparison rather than a
+  // "busy went false" edge because a fast install can finish between two polls, and it
+  // settles: the refresh changes the store, not the status, so it runs at most once
+  // per build the status names.
+  useEffect(() => {
+    if (!status) return
+    const stored = useStore.getState().settings?.runtime
+    if (
+      (status.tag ?? '') !== (stored?.tag ?? '') ||
+      (status.distribution ?? '') !== (stored?.distribution ?? '') ||
+      (status.accelerator ?? '') !== (stored?.accelerator ?? '')
+    ) {
+      void useStore.getState().refreshSettings()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.tag, status?.distribution, status?.accelerator])
+
   const update = (changes: Partial<config.ManagedModel>) => {
     const next: config.ManagedModel = { ...model, ...changes }
     setModel(next)
