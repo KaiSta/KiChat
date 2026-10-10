@@ -287,6 +287,12 @@ func (s *Scraper) Scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 		return ScrapeResult{}, fmt.Errorf("kein lesbarer Inhalt gefunden (%s)", contentType)
 	}
 
+	// The cache keeps the whole page, not the slice this caller asked for: the
+	// token budget belongs to the request, not to the page. Storing the trimmed
+	// copy made a page first read with a small budget permanently small — a later
+	// caller asking for more got the old, shorter text back and nothing said so.
+	fullMarkdown := result.Markdown
+
 	// Token-bounded truncation with an explicit marker, so the model knows the
 	// text was cut rather than just ending.
 	trimToTokens(&result, maxTokens)
@@ -296,8 +302,8 @@ func (s *Scraper) Scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 			URLHash:   urlHash,
 			URL:       clean,
 			Title:     result.Title,
-			ContentMD: result.Markdown,
-			Tokens:    result.Tokens,
+			ContentMD: fullMarkdown,
+			Tokens:    llm.EstimateTokens(fullMarkdown),
 			FetchedAt: time.Now(),
 			ExpiresAt: time.Now().Add(time.Duration(opts.CacheHours) * time.Hour),
 		})

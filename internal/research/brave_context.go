@@ -175,7 +175,7 @@ func (b *BraveProvider) Context(ctx context.Context, req SearchRequest, maxToken
 	}
 	if v := resp.Header.Get("X-RateLimit-Remaining"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
-			b.lastQuota = n
+			b.lastQuota.Store(int64(n))
 		}
 	}
 

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,7 +29,10 @@ type BraveProvider struct {
 	ContextEndpoint string
 	limiter         *rateLimiter
 	client          *http.Client
-	lastQuota       int
+	// lastQuota is the remaining-requests header of the last response. It is an
+	// atomic because a provider is shared through the chain and the header is
+	// written on the request goroutine while a status call may read it.
+	lastQuota atomic.Int64
 }
 
 // NewBraveProvider builds a Brave provider. The endpoint is overridable for
@@ -53,7 +57,7 @@ func (b *BraveProvider) Available() bool   { return strings.TrimSpace(b.APIKey) 
 func (b *BraveProvider) RequiresKey() bool { return true }
 
 // LastQuota reports the remaining requests when the API exposes it.
-func (b *BraveProvider) LastQuota() int { return b.lastQuota }
+func (b *BraveProvider) LastQuota() int { return int(b.lastQuota.Load()) }
 
 type braveResponse struct {
 	Web *struct {
@@ -162,7 +166,7 @@ func (b *BraveProvider) Search(ctx context.Context, req SearchRequest) ([]Search
 	}
 	if v := resp.Header.Get("X-RateLimit-Remaining"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
-			b.lastQuota = n
+			b.lastQuota.Store(int64(n))
 		}
 	}
 
