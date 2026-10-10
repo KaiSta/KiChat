@@ -708,6 +708,16 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 			return "", fmt.Errorf("CUDA-Laufzeit entpacken: %w", err)
 		}
 	}
+	// The launcher is made executable before the move, not after. A chmod that
+	// failed on the renamed directory would leave a complete build on disk while
+	// the install reported an error and recorded nothing, so the next start would
+	// use it without the app ever having said it was installed.
+	if launcher, _ := i.launcherUnder(staging); launcher != "" {
+		if err := os.Chmod(launcher, 0o755); err != nil {
+			os.RemoveAll(staging)
+			return "", fmt.Errorf("llama-server ausführbar machen: %w", err)
+		}
+	}
 	// A previous install of the same build is replaced wholesale: mixing files
 	// from two archives is how a stale library gets loaded.
 	if err := os.RemoveAll(final); err != nil {
@@ -718,12 +728,8 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 		return "", fmt.Errorf("Build an seinen Platz verschieben: %w", err)
 	}
 
-	binary := i.BinaryPath(asset.Dir())
-	if err := os.Chmod(binary, 0o755); err != nil {
-		return "", fmt.Errorf("llama-server ausführbar machen: %w", err)
-	}
 	i.report(Progress{Phase: "done"})
-	return binary, nil
+	return i.BinaryPath(asset.Dir()), nil
 }
 
 // addRuntimeBundle unpacks a companion archive into the build directory itself.
