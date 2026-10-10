@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { timeAgo } from './lib/api'
+import { modelLabel, timeAgo } from './lib/api'
 import { LANGS } from './lib/i18n'
 import { useStore } from './store'
 import { ChatView } from './components/ChatView'
@@ -196,8 +196,15 @@ function Sidebar() {
                     <span className="truncate">{c.title || t('chat.empty.title')}</span>
                   </div>
                   <div className="faint flex items-center gap-2 text-[11px]">
-                    <span className="mono truncate" style={{ maxWidth: '8rem' }}>
-                      {c.model || '–'}
+                    {/* The chat list says which model a conversation is on. A local
+                        model's id is a path, so the name is what is shown and the
+                        id is the tooltip. */}
+                    <span
+                      className="mono truncate"
+                      style={{ maxWidth: '8rem' }}
+                      title={c.model || undefined}
+                    >
+                      {modelLabel(c.model) || '–'}
                     </span>
                     <span>·</span>
                     <span>{timeAgo(c.updatedAt, lang)}</span>

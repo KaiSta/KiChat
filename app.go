@@ -64,6 +64,12 @@ type App struct {
 	versionMu sync.Mutex
 	versions  map[string]string
 
+	// deviceCache holds the other per-binary reading, for the same reason: which
+	// compute devices a launcher can use is a question for a process, and the
+	// answer does not change while the app runs.
+	deviceMu    sync.Mutex
+	deviceCache map[string]deviceReading
+
 	// install tracks a download in progress. It is read by the UI through a
 	// bound method rather than pushed, because a download outlives the call that
 	// asked for it and polling cannot miss the end of one.
@@ -181,18 +187,30 @@ func (a *App) startManagedModel(backendID string) error {
 
 	srv := a.serverFor(backendID, settings)
 	return srv.Start(rt.Options{
-		Binary: binary,
-		Model:  mm.ModelPath,
-		Ctx:    mm.CtxSize,
-		Extra:  rt.SplitArgs(mm.ExtraArgs),
+		Binary:         binary,
+		Model:          mm.ModelPath,
+		Ctx:            mm.CtxSize,
+		FlashAttention: mm.FlashAttention,
+		CacheTypeK:     mm.CacheTypeK,
+		CacheTypeV:     mm.CacheTypeV,
+		Extra:          rt.SplitArgs(mm.ExtraArgs),
 	})
 }
 
 // llamaServerPath resolves the launcher: the user's own copy if they gave one,
 // otherwise the build the installer fetched.
+//
+// The tagged build is preferred over the newest one. Install writes the tag of
+// what it just fetched, and that is the build the picker shows; falling straight
+// through to Find's newest would run a different family than the panel names the
+// moment two families are installed. A tag whose directory is gone falls back, so
+// a deleted build is not a dead end.
 func (a *App) llamaServerPath(settings config.Settings) (string, error) {
 	if p := strings.TrimSpace(settings.Runtime.BinaryPath); p != "" {
 		return p, nil
+	}
+	if binary, ok := a.installer.Launcher(settings.Runtime.Tag); ok {
+		return binary, nil
 	}
 	tag, binary := a.installer.Find()
 	if tag == "" || binary == "" {
@@ -296,10 +314,80 @@ func (a *App) versionFor(binary string) string {
 // forgetVersions drops the cached version readings. Saving settings is what calls
 // it: the binary may have been replaced, and the refresh control next to the
 // backends is where a user says "look again".
+//
+// The device readings go with them: they are the same kind of answer about the
+// same process, and a save is the moment the launcher may have become a different
+// build — one with an accelerator where the last had none.
 func (a *App) forgetVersions() {
 	a.versionMu.Lock()
 	a.versions = map[string]string{}
 	a.versionMu.Unlock()
+	a.deviceMu.Lock()
+	a.deviceCache = map[string]deviceReading{}
+	a.deviceMu.Unlock()
+}
+
+// deviceReading is one cached `--list-devices` answer: the devices, why they could
+// not be read, and — when there are none — the shared objects the build's own
+// accelerator backend cannot resolve.
+//
+// The three are kept apart because "this build uses no GPU", "this build did not
+// answer" and "this build cannot load its backend here" are different things to a
+// user: the first is a working CPU setup, the second is a launcher to look at, and
+// the third has a cause worth naming.
+type deviceReading struct {
+	devices []rt.Device
+	// missingLibs is what the loader cannot give the accelerator backend, e.g.
+	// "libamdhip64.so.7" for a ROCm 10 build on a ROCm 5.7 machine. It is read only
+	// when the device list came back empty, which is the only case where it says
+	// anything.
+	missingLibs []string
+	err         string
+}
+
+// devicesFor returns the compute devices a launcher reports, asking it once per
+// path. Neither list is ever nil, because the panel reads them as arrays.
+func (a *App) devicesFor(binary string) deviceReading {
+	if strings.TrimSpace(binary) == "" {
+		return deviceReading{devices: []rt.Device{}, missingLibs: []string{}}
+	}
+	a.deviceMu.Lock()
+	reading, known := a.deviceCache[binary]
+	a.deviceMu.Unlock()
+	if known {
+		return reading
+	}
+
+	// Long enough for a cold binary on a slow disk, short enough that a launcher
+	// which cannot start does not hold a status call open.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	devices, err := rt.BinaryDevices(ctx, binary)
+	reading = deviceReading{devices: devices, missingLibs: []string{}, err: ""}
+	if err != nil {
+		reading.devices, reading.err = []rt.Device{}, err.Error()
+		if a.ctx != nil {
+			runtime.LogWarningf(a.ctx, "Geräte von %s nicht lesbar: %v", binary, err)
+		}
+	} else if len(devices) == 0 {
+		// A build that answered "no devices" has said everything it is going to
+		// say: a backend that failed to load is not an error to llama.cpp, it just
+		// is not there. The loader's own dependency check is where the reason is,
+		// and it is what tells a ROCm 10 build apart from a ROCm 5.7 machine.
+		reading.missingLibs = rt.MissingLibraries(ctx, filepath.Dir(binary))
+		if a.ctx != nil && len(reading.missingLibs) > 0 {
+			runtime.LogWarningf(a.ctx, "Backend von %s nicht ladbar: %s fehlen",
+				binary, strings.Join(reading.missingLibs, ", "))
+		}
+	}
+
+	a.deviceMu.Lock()
+	if a.deviceCache == nil {
+		a.deviceCache = map[string]deviceReading{}
+	}
+	a.deviceCache[binary] = reading
+	a.deviceMu.Unlock()
+	return reading
 }
 
 // adoptManagedAddresses restores the address of every backend whose model the app

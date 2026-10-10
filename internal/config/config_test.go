@@ -635,3 +635,56 @@ func TestRuntimeSettingsAreUsableAsStored(t *testing.T) {
 		t.Errorf("ctx size = %d, want 0 left alone as \"the server decides\"", got)
 	}
 }
+
+// Flash attention and the KV cache type are optional additions to a managed
+// model, so a settings blob written before they existed carries neither. An empty
+// field has to mean the server's own default rather than a flag, and a value this
+// build does not recognise must not reach `--flash-attn`/`--cache-type-k/-v`,
+// where llama-server would reject it at startup.
+func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
+	// Absent fields keep their meaning: "auto" and f16, the server's own defaults.
+	s := Default()
+	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {ModelPath: "/a.gguf"}}}
+	s.normalise()
+	mm := s.Runtime.Models["llamacpp"]
+	if mm.FlashAttention != FlashAuto {
+		t.Errorf("flash attention = %q, want %q for an absent field", mm.FlashAttention, FlashAuto)
+	}
+	if mm.CacheTypeK != CacheTypeF16 || mm.CacheTypeV != CacheTypeF16 {
+		t.Errorf("cache types = %q/%q, want f16/f16 for absent fields", mm.CacheTypeK, mm.CacheTypeV)
+	}
+
+	// Every value the picker can store survives normalise untouched — a choice
+	// that quietly became the default would be the setting not working.
+	for _, mode := range FlashAttentionModes() {
+		s = Default()
+		s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {FlashAttention: mode}}}
+		s.normalise()
+		if got := s.Runtime.Models["llamacpp"].FlashAttention; got != mode {
+			t.Errorf("flash attention %q became %q", mode, got)
+		}
+	}
+	for _, ct := range CacheTypes() {
+		s = Default()
+		s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {CacheTypeK: ct, CacheTypeV: ct}}}
+		s.normalise()
+		got := s.Runtime.Models["llamacpp"]
+		if got.CacheTypeK != ct || got.CacheTypeV != ct {
+			t.Errorf("cache type %q became %q/%q", ct, got.CacheTypeK, got.CacheTypeV)
+		}
+	}
+
+	// Junk falls back to the default rather than being passed on.
+	s = Default()
+	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
+		FlashAttention: "maybe", CacheTypeK: "q3_k", CacheTypeV: "  ",
+	}}}
+	s.normalise()
+	mm = s.Runtime.Models["llamacpp"]
+	if mm.FlashAttention != FlashAuto {
+		t.Errorf("flash attention = %q, want an unknown value replaced by %q", mm.FlashAttention, FlashAuto)
+	}
+	if mm.CacheTypeK != CacheTypeF16 || mm.CacheTypeV != CacheTypeF16 {
+		t.Errorf("cache types = %q/%q, want unknown values replaced by f16", mm.CacheTypeK, mm.CacheTypeV)
+	}
+}

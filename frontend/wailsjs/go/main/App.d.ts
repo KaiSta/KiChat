@@ -42,7 +42,7 @@ export function GetSecretStatus():Promise<main.SecretStatus>;
 
 export function GetSettings():Promise<config.Settings>;
 
-export function InstallLlamaRuntime():Promise<void>;
+export function InstallLlamaRuntime(arg1:string):Promise<void>;
 
 export function ListChats(arg1:boolean):Promise<Array<store.Chat>>;
 

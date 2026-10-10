@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { App, formatNumber, formatPercentSafe, usageTone, type chat, type llm } from '../lib/api'
+import {
+  App,
+  formatNumber,
+  formatPercentSafe,
+  modelFolder,
+  modelLabel,
+  usageTone,
+  type chat,
+  type llm,
+} from '../lib/api'
 import { useStore } from '../store'
 
 /* -------------------------------------------------------------------------
@@ -364,6 +373,41 @@ export function ModelSwitcher() {
   }, [filtered])
 
   /**
+   * How often a model name repeats, per backend. A file name alone can collide —
+   * two publishers ship the same quantization — and the picker is where that has to
+   * stay visible, so a repeated name is shown with its folder. Counted over every
+   * model rather than the filtered list, so the labels do not shift while a user
+   * types.
+   */
+  const repeats = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const m of models) {
+      const key = `${m.backend}/${modelLabel(m.id)}`
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return counts
+  }, [models])
+
+  /** The model's name, without the path it happens to live at. */
+  const labelFor = (m: llm.ModelInfo) => modelLabel(m.id)
+
+  /**
+   * What to add when two models in one backend share a file name, and nothing when
+   * they do not — two publishers shipping the same quantization is the ordinary
+   * case, and a list of two identical rows is what has to be avoided. The publisher
+   * is short and is what a user recognises, and a model without one (a GGUF from the
+   * managed runtime, keyed by its path) falls back to the folder it sits in.
+   *
+   * Measured in the harness: the *folder* is the wrong segment for this — two
+   * publishers both call theirs `Ornith-1.5-9B-GGUF`, so qualifying by it produced
+   * two identical labels again.
+   */
+  const qualifierFor = (m: llm.ModelInfo) => {
+    if ((repeats.get(`${m.backend}/${modelLabel(m.id)}`) ?? 0) < 2) return ''
+    return m.publisher || modelFolder(m.id)
+  }
+
+  /**
    * Selecting a model checks the conversation against that model's window first.
    * Switching to a model with a smaller context would otherwise fail on the next
    * request with an opaque backend error.
@@ -402,7 +446,10 @@ export function ModelSwitcher() {
     }
   }
 
-  const label = current ? current.id : chatState?.chat.model || t('model.switch')
+  // The id is what the app stores and what the tooltip shows; the button reads as
+  // the model's name, because that is what the conversation is with.
+  const fullId = current?.id ?? chatState?.chat.model ?? ''
+  const label = current ? labelFor(current) : modelLabel(fullId) || t('model.switch')
 
   return (
     <div className="relative" ref={boxRef}>
@@ -420,7 +467,10 @@ export function ModelSwitcher() {
               current?.state === 'loaded' ? 'var(--ok)' : current ? 'var(--text-faint)' : 'var(--danger)',
           }}
         />
-        <span className="max-w-[16rem] truncate mono">{label}</span>
+        <span className="max-w-[16rem] truncate mono" title={fullId || undefined}>
+          {label}
+        </span>
+        {current && qualifierFor(current) && <span className="faint">{qualifierFor(current)}</span>}
         {current && current.contextLimit > 0 && (
           <span className="faint">{formatNumber(current.contextLimit)}</span>
         )}
@@ -466,6 +516,8 @@ export function ModelSwitcher() {
                   <ModelRow
                     key={`${m.backend}/${m.id}`}
                     model={m}
+                    label={labelFor(m)}
+                    qualifier={qualifierFor(m)}
                     active={m.backend === chatState?.chat.backend && m.id === chatState?.chat.model}
                     onClick={() => void choose(m)}
                   />
@@ -476,7 +528,12 @@ export function ModelSwitcher() {
 
           {candidate && (
             <div className="mt-2 rounded p-2 text-[12px]" style={{ background: 'var(--surface-2)' }}>
-              <div className="mb-1 font-semibold mono truncate">{candidate.id}</div>
+              <div className="mb-1 flex items-baseline gap-2" title={candidate.id}>
+                <span className="font-semibold mono truncate">{labelFor(candidate)}</span>
+                {qualifierFor(candidate) && (
+                  <span className="faint shrink-0">{qualifierFor(candidate)}</span>
+                )}
+              </div>
               {preview && preview.limit > 0 ? (
                 <>
                   <div className="muted">
@@ -523,10 +580,16 @@ export function ModelSwitcher() {
 
 function ModelRow({
   model,
+  label,
+  qualifier,
   active,
   onClick,
 }: {
   model: llm.ModelInfo
+  /** The model's name, without its path; the full id is the tooltip. */
+  label: string
+  /** Shown beside the name when two models share it, e.g. the publisher. */
+  qualifier: string
   active: boolean
   onClick: () => void
 }) {
@@ -543,7 +606,10 @@ function ModelRow({
         style={{ background: model.state === 'loaded' ? 'var(--ok)' : 'var(--text-faint)' }}
         title={model.state === 'loaded' ? t('model.loaded') : t('model.notLoaded')}
       />
-      <span className="min-w-0 flex-1 truncate mono">{model.id}</span>
+      <span className="min-w-0 flex-1 truncate mono" title={model.id}>
+        {label}
+      </span>
+      {qualifier && <span className="faint shrink-0">{qualifier}</span>}
       {model.quantization && <span className="faint shrink-0">{model.quantization}</span>}
       {model.contextLimit > 0 && (
         <span className="faint shrink-0" title={t('model.context')}>

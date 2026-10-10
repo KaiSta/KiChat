@@ -80,8 +80,18 @@ type ManagedModel struct {
 	// CtxSize is the context window to load it with; 0 lets the server choose,
 	// which is llama.cpp's own `-c` default of "loaded from model".
 	CtxSize int `json:"ctxSize"`
+	// FlashAttention selects llama.cpp's flash attention, which speeds up long
+	// contexts and shrinks the attention memory: "auto" (the server's own
+	// default), "on" or "off". Empty is normalised to "auto".
+	FlashAttention string `json:"flashAttention"`
+	// CacheTypeK and CacheTypeV quantise the KV cache, trading precision for
+	// memory: a q8_0 cache is roughly half an f16 one, q4_0 roughly a quarter.
+	// They are separate because K tolerates more compression than V. "f16" is
+	// llama.cpp's own default and is passed through as such.
+	CacheTypeK string `json:"cacheTypeK"`
+	CacheTypeV string `json:"cacheTypeV"`
 	// ExtraArgs is the rest of the command line, for the flags this app has no
-	// field for (--n-gpu-layers, --flash-attn, a chat template).
+	// field for (--n-gpu-layers, a chat template).
 	ExtraArgs string `json:"extraArgs"`
 }
 
@@ -103,6 +113,85 @@ const (
 // settings travel between machines.
 func Accelerators() []string {
 	return []string{AccelCPU, AccelVulkan, AccelROCm, AccelCUDA, AccelSYCL, AccelOpenVINO, AccelOpenCL}
+}
+
+// Flash attention modes. "auto" is llama.cpp's own default and is the value a
+// missing or unrecognised field falls back to.
+const (
+	FlashAuto = "auto"
+	FlashOn   = "on"
+	FlashOff  = "off"
+)
+
+// KV cache types, spelled as llama.cpp's `--cache-type-k/-v` accepts them. F16 is
+// the server's own default; the rest trade precision for memory.
+const (
+	CacheTypeF16    = "f16"
+	CacheTypeBF16   = "bf16"
+	CacheTypeQ8_0   = "q8_0"
+	CacheTypeQ5_1   = "q5_1"
+	CacheTypeQ5_0   = "q5_0"
+	CacheTypeQ4_1   = "q4_1"
+	CacheTypeQ4_0   = "q4_0"
+	CacheTypeIQ4_NL = "iq4_nl"
+	CacheTypeF32    = "f32"
+)
+
+// FlashAttentionModes is every value the flash-attention field may hold, in the
+// order a picker should offer them: the server's own choice first.
+func FlashAttentionModes() []string {
+	return []string{FlashAuto, FlashOn, FlashOff}
+}
+
+// CacheTypes is every KV cache type, roughly from most to least precise, with
+// F16 — the server default — first.
+func CacheTypes() []string {
+	return []string{
+		CacheTypeF16, CacheTypeBF16, CacheTypeQ8_0, CacheTypeQ5_1, CacheTypeQ5_0,
+		CacheTypeQ4_1, CacheTypeQ4_0, CacheTypeIQ4_NL, CacheTypeF32,
+	}
+}
+
+// IsFlashAttention reports whether a value names a flash-attention mode.
+func IsFlashAttention(value string) bool {
+	for _, v := range FlashAttentionModes() {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+
+// IsCacheType reports whether a value names a KV cache type.
+func IsCacheType(value string) bool {
+	for _, v := range CacheTypes() {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+
+// normaliseFlashAttention maps an absent or unrecognised value onto the server's
+// own default. An empty field is what an installation that predates this setting
+// carries, and it must mean "auto" rather than a flag the server did not ask for.
+func normaliseFlashAttention(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !IsFlashAttention(value) {
+		return FlashAuto
+	}
+	return value
+}
+
+// normaliseCacheType maps an absent or unrecognised cache type onto F16, the
+// server's own default. A stored type this build does not know would be passed to
+// `--cache-type-k/-v` and rejected at startup, so it is repaired here instead.
+func normaliseCacheType(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !IsCacheType(value) {
+		return CacheTypeF16
+	}
+	return value
 }
 
 // Defaults for the managed runtime.
@@ -376,6 +465,9 @@ func (s *Settings) normalise() {
 		if mm.CtxSize != 0 && mm.CtxSize < MinCtxSize {
 			mm.CtxSize = MinCtxSize
 		}
+		mm.FlashAttention = normaliseFlashAttention(mm.FlashAttention)
+		mm.CacheTypeK = normaliseCacheType(mm.CacheTypeK)
+		mm.CacheTypeV = normaliseCacheType(mm.CacheTypeV)
 		s.Runtime.Models[id] = mm
 	}
 	if len(s.Search.ProviderOrder) == 0 {

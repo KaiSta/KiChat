@@ -22,6 +22,20 @@ const (
 	StateFailed   = "failed"
 )
 
+// The two flags that describe a start in terms of memory rather than size, plus
+// the sentinel that means "leave the server's own default alone". They are
+// spelled here as well as in the settings package so neither has to import the
+// other; the values are llama.cpp's own and are pinned by a test.
+const (
+	// FlashAttentionOn and FlashAttentionOff are the explicit modes; "auto" and
+	// an empty value both mean the server decides and are not passed.
+	FlashAttentionOn  = "on"
+	FlashAttentionOff = "off"
+	// CacheTypeF16 is llama.cpp's default KV cache type. Passing it is a no-op, so
+	// it is omitted rather than sent.
+	CacheTypeF16 = "f16"
+)
+
 // Options describe one server to start.
 type Options struct {
 	// Binary is the llama-server launcher, absolute.
@@ -30,6 +44,13 @@ type Options struct {
 	Model string
 	// Ctx is the context window to load it with; 0 lets the server choose.
 	Ctx int
+	// FlashAttention is `--flash-attn`: "on", "off", or empty/"auto" for the
+	// server's own default, which is not passed as a flag.
+	FlashAttention string
+	// CacheTypeK and CacheTypeV are `--cache-type-k`/`-v`. Empty and "f16" are
+	// the server's own default and are not passed.
+	CacheTypeK string
+	CacheTypeV string
 	// Extra is the rest of the user's command line, already split.
 	Extra []string
 	// Host defaults to 127.0.0.1. A server is only ever started on the loopback
@@ -159,9 +180,14 @@ func (s *Server) Start(opts Options) error {
 
 	args := opts.args()
 	cmd := exec.Command(opts.Binary, args...)
-	// The archive is unpacked whole, and the launcher finds its libraries as
-	// siblings, so the process has to run from its own directory.
+	// The build is started from its own directory and with the library path that
+	// directory needs; see serverEnv, which is where the CUDA runtime bundle and
+	// the ROCm libraries are made findable. The published archives carry rpath
+	// `$ORIGIN`, so the build's own libraries are found wherever the process was
+	// started from — the working directory is set for the relative paths in a
+	// user's own arguments, not for the loader.
 	cmd.Dir = dirOf(opts.Binary)
+	cmd.Env = serverEnv(opts.Binary)
 	cmd.Stdout = s.log.writer()
 	cmd.Stderr = s.log.writer()
 	startInOwnGroup(cmd)
@@ -359,6 +385,21 @@ func (o Options) args() []string {
 	}
 	if o.Ctx > 0 {
 		args = append(args, "-c", strconv.Itoa(o.Ctx))
+	}
+	// Only the explicit flash-attention modes are passed. The default is "auto",
+	// and asking for "auto" should not turn into a flag the server might read
+	// differently on a build that spells it another way.
+	switch o.FlashAttention {
+	case FlashAttentionOn, FlashAttentionOff:
+		args = append(args, "--flash-attn", o.FlashAttention)
+	}
+	// F16 is a no-op that only makes the command line longer, so it is left out.
+	// Whatever else the settings hold was validated before it got here.
+	if k := strings.TrimSpace(o.CacheTypeK); k != "" && k != CacheTypeF16 {
+		args = append(args, "--cache-type-k", k)
+	}
+	if v := strings.TrimSpace(o.CacheTypeV); v != "" && v != CacheTypeF16 {
+		args = append(args, "--cache-type-v", v)
 	}
 	return append(args, o.Extra...)
 }

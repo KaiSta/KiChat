@@ -167,6 +167,9 @@ export namespace config {
 	    enabled: boolean;
 	    modelPath: string;
 	    ctxSize: number;
+	    flashAttention: string;
+	    cacheTypeK: string;
+	    cacheTypeV: string;
 	    extraArgs: string;
 	
 	    static createFrom(source: any = {}) {
@@ -178,6 +181,9 @@ export namespace config {
 	        this.enabled = source["enabled"];
 	        this.modelPath = source["modelPath"];
 	        this.ctxSize = source["ctxSize"];
+	        this.flashAttention = source["flashAttention"];
+	        this.cacheTypeK = source["cacheTypeK"];
+	        this.cacheTypeV = source["cacheTypeV"];
 	        this.extraArgs = source["extraArgs"];
 	    }
 	}
@@ -580,6 +586,7 @@ export namespace main {
 	    url: string;
 	    error?: string;
 	    log?: string[];
+	    modelBytes: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new ManagedStatus(source);
@@ -597,6 +604,7 @@ export namespace main {
 	        this.url = source["url"];
 	        this.error = source["error"];
 	        this.log = source["log"];
+	        this.modelBytes = source["modelBytes"];
 	    }
 	}
 	export class PromptVariable {
@@ -621,6 +629,10 @@ export namespace main {
 	    binary?: string;
 	    version?: string;
 	    customBinary?: string;
+	    devices: string[];
+	    devicesError?: string;
+	    devicesMissingLibs: string[];
+	    deviceFreeBytes: number;
 	    accelerator: string;
 	    readySeconds: number;
 	    busy: boolean;
@@ -629,6 +641,8 @@ export namespace main {
 	    total: number;
 	    error?: string;
 	    variants: string[];
+	    flashAttentionModes: string[];
+	    cacheTypes: string[];
 	    models: ManagedStatus[];
 	
 	    static createFrom(source: any = {}) {
@@ -642,6 +656,10 @@ export namespace main {
 	        this.binary = source["binary"];
 	        this.version = source["version"];
 	        this.customBinary = source["customBinary"];
+	        this.devices = source["devices"];
+	        this.devicesError = source["devicesError"];
+	        this.devicesMissingLibs = source["devicesMissingLibs"];
+	        this.deviceFreeBytes = source["deviceFreeBytes"];
 	        this.accelerator = source["accelerator"];
 	        this.readySeconds = source["readySeconds"];
 	        this.busy = source["busy"];
@@ -650,6 +668,8 @@ export namespace main {
 	        this.total = source["total"];
 	        this.error = source["error"];
 	        this.variants = source["variants"];
+	        this.flashAttentionModes = source["flashAttentionModes"];
+	        this.cacheTypes = source["cacheTypes"];
 	        this.models = this.convertValues(source["models"], ManagedStatus);
 	    }
 	

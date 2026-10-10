@@ -89,6 +89,12 @@ type Asset struct {
 	// `10.0` for ROCm, `fp16` for SYCL), empty when the name pins nothing. It is
 	// kept because it is what tells two installations of one build apart.
 	Suite string
+	// Companion is the runtime bundle that has to be unpacked into the same
+	// directory, when the family publishes one. CUDA does: its build archive holds
+	// no CUDA library at all and its backend links libcudart/libcublas, which ship
+	// as a separate `cudart-llama-…` asset. Nil for the families whose runtime is
+	// the system's (ROCm, Vulkan, SYCL, OpenVINO).
+	Companion *Asset
 }
 
 // Dir is the folder this build installs into.
@@ -126,6 +132,10 @@ type Installer struct {
 
 	// OnProgress is called as an install proceeds. It may be nil.
 	OnProgress func(Progress)
+	// SuiteCheck decides whether a build family and suite can run on this machine,
+	// and why not when it cannot. It is a field so a test can answer for a machine
+	// that is not this one; nil means the real check (SuiteUsable).
+	SuiteCheck func(variant, suite string) (bool, string)
 }
 
 // NewInstaller builds an installer rooted at dir.
@@ -149,6 +159,17 @@ type variant struct {
 	// ext follows the asset rather than the host: every desktop Unix build is
 	// .tar.gz and Windows is .zip, including when KiChat runs on Linux.
 	ext string
+	// runtime is the template of the companion archive that carries the libraries
+	// this build does not bundle, with {tag} and {platform} filled in. Empty when
+	// the family's runtime comes from the system.
+	//
+	// Measured off b11538: the Linux CUDA builds come with
+	// `cudart-llama-b11538-bin-ubuntu-cuda-13.4-x64.tar.gz` (440 MB for 13.4,
+	// 594 MB for 12.8), and the Windows ones with
+	// `cudart-llama-bin-win-cuda-13.4-x64.zip` — the tag is in the Linux name and
+	// not in the Windows one, which is why this is a template per row rather than
+	// one name built from the platform.
+	runtime string
 }
 
 // variantsFor is the measured table of what llama.cpp publishes, read off release
@@ -162,46 +183,46 @@ func variantsFor(goos, goarch string) ([]variant, error) {
 		switch goarch {
 		case "amd64":
 			return []variant{
-				{AcceleratorCPU, "ubuntu-x64", ".tar.gz"},
-				{AcceleratorVulkan, "ubuntu-vulkan-x64", ".tar.gz"},
-				{AcceleratorROCm, "ubuntu-rocm-*-x64", ".tar.gz"},
-				{AcceleratorCUDA, "ubuntu-cuda-*-x64", ".tar.gz"},
-				{AcceleratorSYCL, "ubuntu-sycl-*-x64", ".tar.gz"},
-				{AcceleratorOpenVINO, "ubuntu-openvino-*-x64", ".tar.gz"},
+				{AcceleratorCPU, "ubuntu-x64", ".tar.gz", ""},
+				{AcceleratorVulkan, "ubuntu-vulkan-x64", ".tar.gz", ""},
+				{AcceleratorROCm, "ubuntu-rocm-*-x64", ".tar.gz", ""},
+				{AcceleratorCUDA, "ubuntu-cuda-*-x64", ".tar.gz", "cudart-llama-{tag}-bin-{platform}"},
+				{AcceleratorSYCL, "ubuntu-sycl-*-x64", ".tar.gz", ""},
+				{AcceleratorOpenVINO, "ubuntu-openvino-*-x64", ".tar.gz", ""},
 			}, nil
 		case "arm64":
 			return []variant{
-				{AcceleratorCPU, "ubuntu-arm64", ".tar.gz"},
-				{AcceleratorVulkan, "ubuntu-vulkan-arm64", ".tar.gz"},
-				{AcceleratorCUDA, "ubuntu-cuda-*-arm64", ".tar.gz"},
+				{AcceleratorCPU, "ubuntu-arm64", ".tar.gz", ""},
+				{AcceleratorVulkan, "ubuntu-vulkan-arm64", ".tar.gz", ""},
+				{AcceleratorCUDA, "ubuntu-cuda-*-arm64", ".tar.gz", "cudart-llama-{tag}-bin-{platform}"},
 			}, nil
 		}
 		return nil, fmt.Errorf("für Linux auf %s wird llama.cpp nicht veröffentlicht", goarch)
 	case "darwin":
 		switch goarch {
 		case "arm64":
-			return []variant{{AcceleratorCPU, "macos-arm64", ".tar.gz"}}, nil
+			return []variant{{AcceleratorCPU, "macos-arm64", ".tar.gz", ""}}, nil
 		case "amd64":
-			return []variant{{AcceleratorCPU, "macos-x64", ".tar.gz"}}, nil
+			return []variant{{AcceleratorCPU, "macos-x64", ".tar.gz", ""}}, nil
 		}
 		return nil, fmt.Errorf("macOS auf %s wird nicht veröffentlicht", goarch)
 	case "windows":
 		switch goarch {
 		case "amd64":
 			return []variant{
-				{AcceleratorCPU, "win-cpu-x64", ".zip"},
-				{AcceleratorVulkan, "win-vulkan-x64", ".zip"},
-				{AcceleratorROCm, "win-rocm-*-x64", ".zip"},
-				{AcceleratorCUDA, "win-cuda-*-x64", ".zip"},
-				{AcceleratorSYCL, "win-sycl-x64", ".zip"},
-				{AcceleratorOpenVINO, "win-openvino-*-x64", ".zip"},
+				{AcceleratorCPU, "win-cpu-x64", ".zip", ""},
+				{AcceleratorVulkan, "win-vulkan-x64", ".zip", ""},
+				{AcceleratorROCm, "win-rocm-*-x64", ".zip", ""},
+				{AcceleratorCUDA, "win-cuda-*-x64", ".zip", "cudart-llama-bin-{platform}"},
+				{AcceleratorSYCL, "win-sycl-x64", ".zip", ""},
+				{AcceleratorOpenVINO, "win-openvino-*-x64", ".zip", ""},
 			}, nil
 		case "arm64":
 			return []variant{
-				{AcceleratorCPU, "win-cpu-arm64", ".zip"},
-				{AcceleratorVulkan, "win-vulkan-arm64", ".zip"},
-				{AcceleratorCUDA, "win-cuda-*-arm64", ".zip"},
-				{AcceleratorOpenCL, "win-opencl-adreno-arm64", ".zip"},
+				{AcceleratorCPU, "win-cpu-arm64", ".zip", ""},
+				{AcceleratorVulkan, "win-vulkan-arm64", ".zip", ""},
+				{AcceleratorCUDA, "win-cuda-*-arm64", ".zip", "cudart-llama-bin-{platform}"},
+				{AcceleratorOpenCL, "win-opencl-adreno-arm64", ".zip", ""},
 			}, nil
 		}
 		return nil, fmt.Errorf("für Windows auf %s wird llama.cpp nicht veröffentlicht", goarch)
@@ -360,6 +381,24 @@ func (i *Installer) Find() (tag, binary string) {
 	return tag, binary
 }
 
+// Launcher reports the llama-server of one named build directory, whether or not
+// it is the newest one there. An empty or unknown name answers false, so a caller
+// that has a recorded build in mind can fall back to Find when it is gone.
+//
+// BinaryPath is enough here because an install flattens the archive's wrapper
+// directory; a build left a level deeper by an unusual archive is still reachable
+// through Find.
+func (i *Installer) Launcher(dir string) (string, bool) {
+	if strings.TrimSpace(dir) == "" {
+		return "", false
+	}
+	path := i.BinaryPath(dir)
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return path, true
+	}
+	return "", false
+}
+
 // launcherUnder finds the launcher of one installed build, and its file info.
 //
 // The direct path is what an install produces. The second shape is looked for as
@@ -443,26 +482,87 @@ func (i *Installer) Latest(ctx context.Context, goos, goarch, accel string) (Ass
 		want := fmt.Sprintf("llama-%s-bin-%s%s", r.Tag, chosen.platform, chosen.ext)
 		best := -1
 		suite := ""
-		for i, a := range r.Assets {
+		refused := ""
+		for index, a := range r.Assets {
 			got, ok := matchAssetName(want, a.Name)
 			if !ok {
 				continue
 			}
+			// A suite this machine cannot run is not a candidate, however new it
+			// is: llama.cpp reports no device for a mismatched driver or runtime
+			// and no error either, so the model would quietly run on the CPU.
+			if usable, why := i.suiteCheck(chosen.ID, got); !usable {
+				refused = why
+				continue
+			}
 			if best < 0 || preferSuite(got, suite) {
-				best, suite = i, got
+				best, suite = index, got
 			}
 		}
 		if best < 0 {
+			if refused != "" {
+				return Asset{}, fmt.Errorf("kein %s-Build für diese Maschine möglich — %s", chosen.ID, refused)
+			}
 			continue
 		}
 		a := r.Assets[best]
-		return Asset{
+		asset := Asset{
 			Tag: r.Tag, Name: a.Name, URL: a.URL, Size: a.Size, Digest: a.Digest,
 			Variant: chosen.ID, Suite: suite,
-		}, nil
+		}
+		asset.Companion = i.companionFor(r, chosen, suite)
+		return asset, nil
 	}
 	return Asset{}, fmt.Errorf("kein llama.cpp-Build für %s/%s (%s) in den letzten %d Releases gefunden",
 		goos, goarch, accel, len(releases))
+}
+
+// suiteCheck asks the real machine whether a family and suite can run here, unless
+// a test has answered for it.
+func (i *Installer) suiteCheck(variant, suite string) (bool, string) {
+	if i.SuiteCheck != nil {
+		return i.SuiteCheck(variant, suite)
+	}
+	return SuiteUsable(variant, suite)
+}
+
+// companionFor finds the runtime bundle that belongs to a build, when the family
+// publishes one and this machine does not already provide those libraries.
+//
+// It is looked up by the name the release itself uses rather than by pattern, so a
+// build and its runtime cannot end up from different suites: the CUDA 13 backend
+// links libcudart.so.13, which only the 13.4 bundle carries.
+func (i *Installer) companionFor(r release, chosen variant, suite string) *Asset {
+	if chosen.runtime == "" || suite == "" {
+		return nil
+	}
+	if chosen.ID == AcceleratorCUDA && cudaRuntimePresent(suite) {
+		// A CUDA toolkit on this machine already answers for these sonames, and the
+		// bundle is hundreds of megabytes.
+		return nil
+	}
+	name := companionName(chosen.runtime, r.Tag, chosen.platform, suite) + chosen.ext
+	for _, a := range r.Assets {
+		if a.Name == name {
+			return &Asset{
+				Tag: r.Tag, Name: a.Name, URL: a.URL, Size: a.Size, Digest: a.Digest,
+				Variant: chosen.ID, Suite: suite,
+			}
+		}
+	}
+	// A release without a bundle is used as it is: the machine may have its own
+	// CUDA toolkit, and when it does not, the panel names the libraries that are
+	// missing instead of the install failing late.
+	return nil
+}
+
+// companionName fills the open suite segment into a platform pattern and the tag
+// into a name template, which is what addresses a companion archive by its
+// published name. The tag is in the Linux CUDA bundle's name and not in the
+// Windows one, hence the template per platform row.
+func companionName(template, tag, platform, suite string) string {
+	concrete := strings.Replace(platform, "*", suite, 1)
+	return strings.NewReplacer("{tag}", tag, "{platform}", concrete).Replace(template)
 }
 
 // Install downloads and unpacks one asset, and returns the launcher to run.
@@ -483,11 +583,42 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	archive, err := i.download(ctx, asset)
+	// Both archives are reported against one total when the release named their
+	// sizes, so a CUDA install — 153 MB of build plus 440 MB of runtime — shows one
+	// bar that moves instead of two that each start over. A size the API did not
+	// give leaves the total at zero, which each download then answers on its own:
+	// a bar that reports one archive at a time rather than a percentage above 100.
+	total := int64(0)
+	if asset.Size > 0 {
+		total = asset.Size
+		if asset.Companion != nil && asset.Companion.Size > 0 {
+			total += asset.Companion.Size
+		}
+	}
+	archive, written, err := i.download(ctx, asset, 0, total)
 	if err != nil {
 		return "", err
 	}
 	defer os.Remove(archive)
+
+	var companionArchive string
+	if asset.Companion != nil {
+		// The bundle's progress starts where the build's ended. The offset is the
+		// measured size of the first download rather than the API's figure, so a
+		// release that reported no size still cannot make the bar jump backwards;
+		// and with no combined total the two are reported one after the other
+		// instead, which is why the offset is dropped in that case.
+		base := int64(0)
+		if total > 0 {
+			base = written
+		}
+		path, _, err := i.download(ctx, *asset.Companion, base, total)
+		if err != nil {
+			return "", err
+		}
+		companionArchive = path
+		defer os.Remove(path)
+	}
 
 	final := filepath.Join(i.Dir, asset.Dir())
 	staging := final + ".installing"
@@ -502,6 +633,12 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 	if err := flattenSingleRoot(staging); err != nil {
 		os.RemoveAll(staging)
 		return "", fmt.Errorf("Archivwurzel auflösen: %w", err)
+	}
+	if companionArchive != "" {
+		if err := i.addRuntimeBundle(companionArchive, format, staging); err != nil {
+			os.RemoveAll(staging)
+			return "", fmt.Errorf("CUDA-Laufzeit entpacken: %w", err)
+		}
 	}
 	// A previous install of the same build is replaced wholesale: mixing files
 	// from two archives is how a stale library gets loaded.
@@ -521,62 +658,118 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 	return binary, nil
 }
 
+// addRuntimeBundle unpacks a companion archive into the build directory itself.
+//
+// The libraries have to land *beside* the launcher rather than in a subdirectory of
+// their own: the archives are built with rpath `$ORIGIN`, so that directory is the
+// only place the loader looks without an environment variable to help it.
+func (i *Installer) addRuntimeBundle(archive string, format archiveFormat, buildDir string) error {
+	sub := buildDir + ".runtime"
+	if err := os.RemoveAll(sub); err != nil {
+		return err
+	}
+	defer os.RemoveAll(sub)
+	if err := extract(archive, format, sub); err != nil {
+		return err
+	}
+	if err := flattenSingleRoot(sub); err != nil {
+		return err
+	}
+	return mergeInto(sub, buildDir)
+}
+
+// mergeInto moves the contents of one unpacked directory into another, replacing
+// files that are already there. Directories are merged rather than replaced, so a
+// bundle that nests its libraries keeps its layout.
+func mergeInto(from, into string) error {
+	entries, err := os.ReadDir(from)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		src := filepath.Join(from, entry.Name())
+		dst := filepath.Join(into, entry.Name())
+		if !entry.IsDir() {
+			_ = os.Remove(dst)
+			if err := os.Rename(src, dst); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			return err
+		}
+		if err := mergeInto(src, dst); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // download fetches the archive into the runtime directory and verifies its
-// digest, returning the file it landed in.
-func (i *Installer) download(ctx context.Context, asset Asset) (string, error) {
+// digest, returning the file it landed in and how much was written. Its progress is
+// reported against the whole install: base is what was already downloaded, total the
+// size of everything that install will fetch.
+func (i *Installer) download(ctx context.Context, asset Asset, base, total int64) (string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.URL, nil)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := i.Client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("Build herunterladen: %w", err)
+		return "", 0, fmt.Errorf("Build herunterladen: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Build herunterladen: HTTP %d", resp.StatusCode)
+		return "", 0, fmt.Errorf("Build herunterladen: HTTP %d", resp.StatusCode)
 	}
 
-	total := asset.Size
-	if total == 0 {
-		total = resp.ContentLength
+	// expected is this archive's own size, which is what the completeness check
+	// below compares against. total is the whole install's, which is what the
+	// progress bar shows while two archives are being fetched.
+	expected := asset.Size
+	if expected == 0 {
+		expected = resp.ContentLength
+	}
+	if total <= 0 {
+		total = expected
 	}
 	path := filepath.Join(i.Dir, asset.Name+".part")
 	f, err := os.Create(path)
 	if err != nil {
-		return "", fmt.Errorf("Download-Datei anlegen: %w", err)
+		return "", 0, fmt.Errorf("Download-Datei anlegen: %w", err)
 	}
 
 	sum := sha256.New()
 	written, err := copyWithProgress(io.MultiWriter(f, sum), resp.Body, total, func(done int64) {
-		i.report(Progress{Phase: "downloading", Done: done, Total: total})
+		i.report(Progress{Phase: "downloading", Done: base + done, Total: total})
 	})
 	closeErr := f.Close()
 	if err != nil {
 		os.Remove(path)
-		return "", fmt.Errorf("Build herunterladen: %w", err)
+		return "", 0, fmt.Errorf("Build herunterladen: %w", err)
 	}
 	if closeErr != nil {
 		os.Remove(path)
-		return "", closeErr
+		return "", 0, closeErr
 	}
-	if total > 0 && written != total {
+	if expected > 0 && written != expected {
 		// A truncated download that still ends cleanly would otherwise unpack
 		// into a broken install.
 		os.Remove(path)
-		return "", fmt.Errorf("Download unvollständig: %d von %d Bytes", written, total)
+		return "", 0, fmt.Errorf("Download unvollständig: %d von %d Bytes", written, expected)
 	}
 
 	if want := normaliseDigest(asset.Digest); want != "" {
 		got := hex.EncodeToString(sum.Sum(nil))
 		if !strings.EqualFold(got, want) {
 			os.Remove(path)
-			return "", fmt.Errorf("Prüfsumme stimmt nicht: erwartet %s, erhalten %s", want, got)
+			return "", 0, fmt.Errorf("Prüfsumme stimmt nicht: erwartet %s, erhalten %s", want, got)
 		}
 	}
-	return path, nil
+	return path, written, nil
 }
 
 // normaliseDigest turns the API's "sha256:<hex>" into the bare hex it compares

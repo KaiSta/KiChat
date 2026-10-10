@@ -70,8 +70,8 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
-export function InstallLlamaRuntime() {
-  return window['go']['main']['App']['InstallLlamaRuntime']();
+export function InstallLlamaRuntime(arg1) {
+  return window['go']['main']['App']['InstallLlamaRuntime'](arg1);
 }
 
 export function ListChats(arg1) {

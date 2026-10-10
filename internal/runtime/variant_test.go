@@ -67,7 +67,14 @@ func TestLatestTakesTheNewestSuiteOfTheFamily(t *testing.T) {
 		fmt.Fprint(w, body)
 	}))
 	defer srv.Close()
-	inst := &Installer{Dir: t.TempDir(), APIBase: srv.URL, Client: srv.Client()}
+	// Whether this machine can run a suite is a separate question with its own tests
+	// (gpu_test.go, companion_test.go); this one is about which suite is chosen. It is
+	// answered as a machine that can run all of them, because this machine has no
+	// NVIDIA driver and no ROCm 10, and either would refuse the install.
+	inst := &Installer{
+		Dir: t.TempDir(), APIBase: srv.URL, Client: srv.Client(),
+		SuiteCheck: func(string, string) (bool, string) { return true, "" },
+	}
 
 	cuda, err := inst.Latest(context.Background(), "linux", "amd64", AcceleratorCUDA)
 	if err != nil {

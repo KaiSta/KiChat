@@ -31,6 +31,11 @@ func BinaryVersion(ctx context.Context, binary string) (string, error) {
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
+	// The same environment a server is started with: a HIP build cannot load its
+	// backend without the ROCm library path, and a probe that answered "no
+	// version" for an installed build would be reading its own environment, not
+	// the build's. See serverEnv.
+	cmd.Env = serverEnv(binary)
 	// Cancelling the context kills the launcher, but not a child it forked — and a
 	// child inherits the pipe this collects through, so Wait would sit there until
 	// that child exits. Measured with a launcher that sleeps: without this the

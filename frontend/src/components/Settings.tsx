@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { App, formatBytes, formatNumber, toDate, type config, type llm, type main, type runtime } from '../lib/api'
+import {
+  App,
+  formatBytes,
+  formatNumber,
+  modelLabel,
+  toDate,
+  type config,
+  type llm,
+  type main,
+  type runtime,
+} from '../lib/api'
 import { useStore } from '../store'
 import { asLang, LANGS } from '../lib/i18n'
 
@@ -357,6 +367,9 @@ function LocalModelSection({
     enabled: saved?.enabled ?? false,
     modelPath: saved?.modelPath ?? '',
     ctxSize: saved?.ctxSize ?? 8192,
+    flashAttention: saved?.flashAttention ?? 'auto',
+    cacheTypeK: saved?.cacheTypeK ?? 'f16',
+    cacheTypeV: saved?.cacheTypeV ?? 'f16',
     extraArgs: saved?.extraArgs ?? '',
   }))
 
@@ -428,7 +441,10 @@ function LocalModelSection({
   const install = async () => {
     setError('')
     try {
-      await App.InstallLlamaRuntime()
+      // The selected build, not the saved one: the picker edits the draft, and
+      // downloading the stored family here is how "I picked ROCm" used to install
+      // the CPU build. The backend records the family it really fetched.
+      await App.InstallLlamaRuntime(chosenAccel)
     } catch (e) {
       setError(String(e))
     }
@@ -502,6 +518,15 @@ function LocalModelSection({
   const accelLabel = (id: string) =>
     t(`settings.managed.accel${id.charAt(0).toUpperCase()}${id.slice(1)}`)
 
+  // Filled from the backend, like the accelerator picker: a value the app cannot
+  // pass to llama-server must not be offered here.
+  const flashModes = status?.flashAttentionModes?.length ? status.flashAttentionModes : ['auto', 'on', 'off']
+  const cacheTypes = status?.cacheTypes?.length ? status.cacheTypes : ['f16']
+  const flashLabel = (id: string) =>
+    t(`settings.managed.flash${id.charAt(0).toUpperCase()}${id.slice(1)}`)
+  const cacheLabel = (id: string) =>
+    t(`settings.managed.cache${id.charAt(0).toUpperCase()}${id.slice(1)}`)
+
   const folderLabel = (kind: string) =>
     kind === 'lmstudio-configured'
       ? t('settings.managed.folderLmStudioConfigured')
@@ -550,6 +575,33 @@ function LocalModelSection({
   const percent =
     status && status.total > 0 ? Math.min(100, Math.round((status.done / status.total) * 100)) : 0
 
+  // The selected model's weights against the memory the reported devices have
+  // free. It is the file size and not an estimate of the whole footprint — that is
+  // the only part this app can measure without loading the model — so the verdict
+  // reads "does not fit in full", which is the cautious direction.
+  //
+  // The stored row's size is used when it is the file on screen; a model picked
+  // but not yet saved has no row yet, and the folder scan has already measured it,
+  // so a stale size from the previous file cannot produce a stale warning.
+  const selectedBytes =
+    mine && mine.modelPath === model.modelPath && mine.modelBytes > 0
+      ? mine.modelBytes
+      : ((scan?.files ?? []).find((f) => f.path === model.modelPath)?.size ?? 0)
+
+  // The scanned entry the chosen path points at. It carries what the path cannot:
+  // the model's own name, the folder it came from and its size.
+  const pickedFile = (scan?.files ?? []).find((f) => f.path === model.modelPath)
+  // What the app has actually stored, against the draft this panel edits. A pick in
+  // the list below changes the draft, and the header's Save (or a start) is what
+  // makes it real — so a pick that is not yet saved has to say so rather than look
+  // like the model in use. Starting saves first, which is why this clears on start.
+  const storedPath = useStore((s) => s.settings?.runtime?.models?.[backend.id]?.modelPath) ?? ''
+  const modelPending = !!model.modelPath && model.modelPath !== storedPath
+  const deviceFreeBytes = status?.deviceFreeBytes ?? 0
+  // A CPU family is not a mistake to warn about, and a build that reported no
+  // memory has nothing to compare against — that case already has its own row.
+  const tooLarge = chosenAccel !== 'cpu' && deviceFreeBytes > 0 && selectedBytes > deviceFreeBytes
+
   return (
     <div className="mt-3 rounded-md p-3" style={{ background: 'var(--surface)' }}>
       <div className="mb-2 text-[12px] font-semibold">{t('settings.managed.title')}</div>
@@ -575,6 +627,49 @@ function LocalModelSection({
           {status?.version || t('settings.managed.versionUnknown')}
         </span>
       </div>
+
+      {/* Which compute devices the installed build can actually use. This is what
+          makes a silent CPU fallback visible: a GPU build that finds no device,
+          or a CPU build kept by mistake, says so here instead of only showing up
+          as a model that feels slow. */}
+      {status?.installed && (
+        <div className="mb-2 flex items-start gap-2 text-[11px]">
+          <span className="faint shrink-0">{t('settings.managed.devices')}</span>
+          {status.devices?.length ? (
+            <div className="min-w-0 flex-1 space-y-0.5">
+              {status.devices.map((d) => (
+                <div key={d} className="mono truncate" title={d}>
+                  {d}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="min-w-0 flex-1">
+              <span
+                className="block"
+                style={chosenAccel !== 'cpu' && !status.devicesError ? { color: 'var(--danger)' } : undefined}
+              >
+                {status.devicesError ||
+                  (chosenAccel !== 'cpu'
+                    ? t('settings.managed.devicesNoneGpu')
+                    : t('settings.managed.devicesNone'))}
+              </span>
+              {/* Why there is no device, when the build itself is the reason. A
+                  GPU build whose own runtime libraries are missing reports no
+                  device and no error, so without this the row can only say "none"
+                  — which is what sends someone looking at their card instead of at
+                  their ROCm version. */}
+              {!!status.devicesMissingLibs?.length && (
+                <span className="mt-0.5 block" style={{ color: 'var(--danger)' }}>
+                  {t('settings.managed.devicesMissingLibs', {
+                    libs: (status.devicesMissingLibs ?? []).join(', '),
+                  })}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {!status?.customBinary && (
         <div className="mb-2 flex items-center gap-2">
@@ -636,6 +731,30 @@ function LocalModelSection({
         </button>
       </div>
 
+      {/* The field above holds a path, and a path is not how anyone recognises a
+          model. Picking in the list below used to change nothing but that string,
+          which is why a click read as "did that do anything?" — so the choice is
+          stated here by name, with the folder and size the folder scan measured and
+          the full path kept as the tooltip. */}
+      {model.modelPath && (
+        <div className="mb-2 flex items-center gap-2 text-[11px]">
+          {/* The same accent as the marked row below, so the two read as one
+              statement rather than as a state badge and a tick. */}
+          <span className="shrink-0" style={{ color: 'var(--accent)' }}>
+            ✓
+          </span>
+          <span className="faint shrink-0">{t('settings.managed.selected')}</span>
+          <span className="mono min-w-0 truncate" title={model.modelPath}>
+            {modelLabel(pickedFile?.name ?? model.modelPath)}
+          </span>
+          {pickedFile && <span className="faint max-w-[40%] truncate">{pickedFile.model}</span>}
+          {pickedFile && <span className="mono faint shrink-0">{formatBytes(pickedFile.size)}</span>}
+          {modelPending && (
+            <span className="badge badge-warn shrink-0">{t('settings.managed.unsaved')}</span>
+          )}
+        </div>
+      )}
+
       {/* A user who already has LM Studio has models on disk. Listing them here is
           what turns "pick a GGUF from anywhere" into "use the one you already
           downloaded", without KiChat copying or re-downloading anything. */}
@@ -671,20 +790,42 @@ function LocalModelSection({
         )}
         {scan && scan.files.length > 0 ? (
           <div className="max-h-40 overflow-auto rounded-md" style={{ border: '1px solid var(--border)' }}>
-            {scan.files.map((file) => (
-              <button
-                key={file.path}
-                type="button"
-                className="flex w-full items-center gap-2 px-2 py-1 text-left text-[11px]"
-                style={{ background: file.path === model.modelPath ? 'var(--surface-2)' : 'transparent' }}
-                title={file.path}
-                onClick={() => update({ modelPath: file.path })}
-              >
-                <span className="mono min-w-0 flex-1 truncate">{file.name}</span>
-                <span className="faint max-w-[40%] truncate">{file.model}</span>
-                <span className="mono faint shrink-0">{formatBytes(file.size)}</span>
-              </button>
-            ))}
+            {scan.files.map((file) => {
+              const picked = file.path === model.modelPath
+              return (
+                <button
+                  key={file.path}
+                  type="button"
+                  aria-current={picked ? 'true' : undefined}
+                  className="flex w-full items-center gap-2 px-2 py-1 text-left text-[11px] transition-colors hover:bg-[var(--surface-3)]"
+                  // A tint rather than a surface colour: the picked row used to be
+                  // `--surface-2`, which is exactly the colour of the box it sits in,
+                  // so the selection was invisible in this very list.
+                  style={
+                    picked
+                      ? { background: 'color-mix(in srgb, var(--accent) 16%, transparent)' }
+                      : undefined
+                  }
+                  title={file.path}
+                  onClick={() => update({ modelPath: file.path })}
+                >
+                  <span
+                    className="shrink-0"
+                    style={{ width: '0.75rem', color: 'var(--accent)' }}
+                    aria-hidden="true"
+                  >
+                    {picked ? '✓' : ''}
+                  </span>
+                  <span
+                    className={`mono min-w-0 flex-1 truncate ${picked ? 'font-semibold' : ''}`}
+                  >
+                    {file.name}
+                  </span>
+                  <span className="faint max-w-[40%] truncate">{file.model}</span>
+                  <span className="mono faint shrink-0">{formatBytes(file.size)}</span>
+                </button>
+              )
+            })}
           </div>
         ) : (
           <div className="text-[11px] faint">
@@ -724,6 +865,70 @@ function LocalModelSection({
           />
         </label>
       </div>
+
+      {/* Flash attention and a quantised KV cache trade memory for precision, and
+          the choice only takes effect on the next start — a running server is
+          not reconfigured from here. */}
+      <div className="mb-2 grid grid-cols-3 gap-2">
+        <label className="text-[11px]">
+          {t('settings.managed.flashAttention')}
+          <select
+            className="input mono mt-1"
+            value={model.flashAttention}
+            onChange={(e) => update({ flashAttention: e.target.value })}
+          >
+            {flashModes.map((id) => (
+              <option key={id} value={id}>
+                {flashLabel(id)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[11px]">
+          {t('settings.managed.cacheTypeK')}
+          <select
+            className="input mono mt-1"
+            value={model.cacheTypeK}
+            onChange={(e) => update({ cacheTypeK: e.target.value })}
+          >
+            {cacheTypes.map((id) => (
+              <option key={id} value={id}>
+                {cacheLabel(id)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[11px]">
+          {t('settings.managed.cacheTypeV')}
+          <select
+            className="input mono mt-1"
+            value={model.cacheTypeV}
+            onChange={(e) => update({ cacheTypeV: e.target.value })}
+          >
+            {cacheTypes.map((id) => (
+              <option key={id} value={id}>
+                {cacheLabel(id)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="mb-2 text-[11px] faint">{t('settings.managed.cacheHint')}</div>
+
+      {/* Before the Start button, because this is the last moment it can be said
+          without a model already loading: the weights alone are bigger than what
+          the devices have free, so part or all of the model is going to be
+          computed on the CPU. A file smaller than the free memory is not a
+          promise that it fits — the KV cache needs its share too — which is why
+          only the failing direction is shown. */}
+      {tooLarge && (
+        <div className="mb-2 text-[11px]" style={{ color: 'var(--danger)' }}>
+          {t('settings.managed.tooLarge', {
+            model: formatBytes(selectedBytes),
+            free: formatBytes(deviceFreeBytes),
+          })}
+        </div>
+      )}
 
       <div className="flex items-center gap-2">
         <button type="button" className="btn btn-sm" disabled={!status?.installed || !model.modelPath} onClick={() => void start()}>

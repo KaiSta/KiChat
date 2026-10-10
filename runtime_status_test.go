@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -103,6 +105,83 @@ func TestGetRuntimeStatusOnAFreshInstall(t *testing.T) {
 	}
 	if len(status.Models) != 0 {
 		t.Errorf("a fresh install has no managed model, got %+v", status.Models)
+	}
+}
+
+// The panel's size warning is a comparison of two numbers, and both have to reach
+// it from the backend: the model file's size and the free memory the launcher's own
+// devices report, in bytes. This walks the real bound method over a stub launcher
+// and a real file, so the two cannot come out in different units — the MiB against
+// bytes mistake would make a 2 GiB model look small next to a card with 600 MiB
+// left, which is the one error that would silently delete the warning.
+func TestRuntimeStatusMeasuresTheModelAgainstTheDeviceMemory(t *testing.T) {
+	dir := t.TempDir()
+	launcher := filepath.Join(dir, "llama-server")
+	// A card with 600 MiB free out of 20464 MiB: another process is holding the
+	// rest. That is the state the warning is for, and it is a state the model
+	// cannot be blamed for.
+	script := "#!/bin/sh\n" +
+		"[ \"$1\" = \"--list-devices\" ] || exit 3\n" +
+		"printf 'Available devices:\\n  Test0: A Card (20464 MiB, 600 MiB free)\\n'\n"
+	if err := os.WriteFile(launcher, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	model := filepath.Join(dir, "weights.gguf")
+	// Truncated rather than written: the size is all that is read, and 2 GiB of
+	// zeros in a temp dir would be a test that costs disk space for nothing.
+	if err := os.WriteFile(model, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(model, 2<<30); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := config.Default()
+	settings.Runtime.BinaryPath = launcher
+	settings.Runtime.Models = map[string]config.ManagedModel{
+		"llamacpp": {Enabled: true, ModelPath: model},
+	}
+	a := &App{settings: settings, installer: rt.NewInstaller(t.TempDir())}
+	a.initOnce.Do(func() {})
+
+	status, err := a.GetRuntimeStatus()
+	if err != nil {
+		t.Fatalf("GetRuntimeStatus: %v", err)
+	}
+	if want := int64(600) << 20; status.DeviceFreeBytes != want {
+		t.Errorf("deviceFreeBytes = %d, want %d — the 600 MiB the device reported, in bytes", status.DeviceFreeBytes, want)
+	}
+	if len(status.Models) != 1 {
+		t.Fatalf("got %d rows, want the one configured backend: %+v", len(status.Models), status.Models)
+	}
+	if got := status.Models[0].ModelBytes; got != 2<<30 {
+		t.Errorf("modelBytes = %d, want the 2 GiB file on disk", got)
+	}
+	// The comparison itself, at the sizes above: this is what the panel paints
+	// red. It is asserted here because the arithmetic is the behaviour, not the
+	// layout.
+	if status.Models[0].ModelBytes <= status.DeviceFreeBytes {
+		t.Error("a 2 GiB model did not come out larger than 600 MiB of free device memory")
+	}
+}
+
+// A path that is not there is 0 bytes rather than a failure: the panel reads 0 as
+// "unknown" and offers no verdict, which is also what a row with no model
+// configured looks like.
+func TestRuntimeStatusLeavesAnUnreadableModelUnmeasured(t *testing.T) {
+	settings := config.Default()
+	settings.Runtime.Models = map[string]config.ManagedModel{
+		"llamacpp": {Enabled: true, ModelPath: filepath.Join(t.TempDir(), "gone.gguf")},
+	}
+	a := &App{settings: settings, installer: rt.NewInstaller(t.TempDir())}
+	a.initOnce.Do(func() {})
+
+	status, err := a.GetRuntimeStatus()
+	if err != nil {
+		t.Fatalf("GetRuntimeStatus: %v", err)
+	}
+	if len(status.Models) != 1 || status.Models[0].ModelBytes != 0 {
+		t.Errorf("rows = %+v, want one row with no size for a file that is not there", status.Models)
 	}
 }
 

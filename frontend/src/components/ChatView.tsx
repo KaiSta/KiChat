@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { OnFileDrop, OnFileDropOff } from '../../wailsjs/runtime/runtime'
-import { App, formatNumber, type store as storeTypes } from '../lib/api'
+import { App, formatNumber, modelLabel, type store as storeTypes } from '../lib/api'
 import { messageText, pendingAttachments, useStore } from '../store'
 import { ContextInspector, ContextMeter, ContextRecheck, ModelSwitcher } from './ModelSwitcher'
 import { AttachmentChips, CompactionCard, MessageStats, ReasoningBlock, ToolCallCard } from './MessageParts'
@@ -357,7 +357,14 @@ function MessageRow({
         <span className="font-semibold" style={{ color: isUser ? 'var(--text-dim)' : 'var(--accent)' }}>
           {isUser ? t('chat.you') : t('chat.assistant')}
         </span>
-        {!isUser && message.model && <span className="faint mono">{message.model}</span>}
+        {/* The model that answered, by name: a managed model's id is a file path, and
+            a transcript is not the place to read one. The detail row below the
+            message keeps the full id for whoever needs it. */}
+        {!isUser && message.model && (
+          <span className="faint mono" title={message.model}>
+            {modelLabel(message.model)}
+          </span>
+        )}
         {folded && <span className="badge" title={t('compact.title')}>🗜</span>}
         {/* A reply the backend stopped delivering is not a finished answer, and it
             has to say so next to the text rather than only in a toast that is gone

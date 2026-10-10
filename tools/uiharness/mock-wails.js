@@ -185,6 +185,12 @@
    * override is what makes the model's window the number on screen, which is the
    * situation the button exists for.
    */
+  // The id a local model carries in the wild when it is a file: LM Studio keys a
+  // model on disk by publisher, folder and file name. The first chat is on this one,
+  // so the switcher and the transcript both have to read as the model's name with the
+  // path kept for the tooltip.
+  const PATH_MODEL_ID = 'ornith-ai/Ornith-1.5-9B-GGUF/Ornith-1.5-9B-Q8_0.gguf'
+
   const models = [
     {
       id: 'swift-1.5-qwen3.8-27b-gsq-rco',
@@ -209,6 +215,45 @@
       contextLimit: 131072,
       maxContextLimit: 262144,
       capabilities: ['tool_use', 'vision'],
+    },
+    // In the wild an id is often a path: a managed llama.cpp server answers with the
+    // GGUF path it was started with, and LM Studio keys a file on disk as
+    // `publisher/model/file.gguf`. The fixture carries both shapes — plus two
+    // publishers shipping the same file name — because the chat is supposed to show
+    // the name and the tooltip the id, and a collision has to stay tellable apart.
+    {
+      id: '/home/kai/models/Qwen3-8B-Q4_K_M.gguf',
+      backend: 'llamacpp',
+      arch: 'qwen3',
+      quantization: 'Q4_K_M',
+      state: 'loaded',
+      type: 'llm',
+      contextLimit: 32768,
+      maxContextLimit: 32768,
+      capabilities: ['tool_use'],
+      parameterCount: '8B',
+    },
+    {
+      id: PATH_MODEL_ID,
+      backend: 'lmstudio',
+      publisher: 'ornith-ai',
+      arch: 'qwen35',
+      quantization: 'Q8_0',
+      state: 'not-loaded',
+      type: 'llm',
+      contextLimit: 4096,
+      maxContextLimit: 4096,
+    },
+    {
+      id: 'empero-ai/Ornith-1.5-9B-GGUF/Ornith-1.5-9B-Q8_0.gguf',
+      backend: 'lmstudio',
+      publisher: 'empero-ai',
+      arch: 'qwen35',
+      quantization: 'Q8_0',
+      state: 'not-loaded',
+      type: 'llm',
+      contextLimit: 4096,
+      maxContextLimit: 4096,
     },
   ]
 
@@ -638,7 +683,7 @@ Verfügbare Tools: {{tool_list}}`,
       createdAt: now(),
       updatedAt: now(),
       backend: 'lmstudio',
-      model: models[0].id,
+      model: PATH_MODEL_ID,
       systemPrompt: settings.defaultSystemPrompt,
       systemPromptPreset: 'research',
       temperature: 0.7,
@@ -675,6 +720,7 @@ Verfügbare Tools: {{tool_list}}`,
     message('chat-markdown', 'user', 'Wie tief ist das Mittelmeer?'),
     message('chat-markdown', 'assistant', MARKDOWN_REPLY, {
       seq: 1,
+      model: PATH_MODEL_ID,
       reasoning: REASONING,
       promptTokens: 1713,
       completionTokens: 207,
@@ -744,6 +790,21 @@ Verfügbare Tools: {{tool_list}}`,
   if (new URLSearchParams(location.search).get('crash') === 'render') {
     messages.get('chat-markdown').splice(1, 0, null)
     console.warn('[harness] crash injection active: a null message is in chat-markdown')
+  }
+
+  // ?devices= is the other state the device row has to handle, since the fixture
+  // itself carries a Vulkan device: `none` is an installed build that reports no
+  // accelerator — the silent CPU fallback the row exists to make visible — and
+  // `libs` is the same empty list with a reason, which is the state measured on
+  // this machine (a ROCm 10 build against a ROCm 5.7 system).
+  const devicesParam = new URLSearchParams(location.search).get('devices')
+  const missingLibs = devicesParam === 'libs'
+  const noDevices = devicesParam === 'none' || missingLibs
+  if (noDevices) {
+    console.warn(
+      '[harness] device injection active: the launcher reports no accelerator' +
+        (missingLibs ? ', and names the libraries its backend cannot load' : ''),
+    )
   }
 
   const searchStatus = {
@@ -959,6 +1020,63 @@ Verfügbare Tools: {{tool_list}}`,
     }
   }
 
+  /*
+   * ?fit= is how a configured GPU model is reached at all, since the default
+   * fixture has none. Both values install the Vulkan build and select one file:
+   * `fits` leaves the card with its 18.4 GiB free, `large` keeps 600 MiB — so the
+   * panel's size warning has a state where it must appear and a neighbouring one
+   * where it must stay silent, which is the pair that catches a comparison that is
+   * off by a unit or a sign.
+   */
+  const fit = new URLSearchParams(location.search).get('fit')
+  const fitLarge = fit === 'large'
+  if (fit === 'large' || fit === 'fits') {
+    managed.installed = true
+    managed.tag = 'b11528-vulkan'
+    managed.binary = '/home/mock/.config/kichat/runtime/b11528-vulkan/llama-server'
+    settings.runtime.accelerator = 'vulkan'
+    // The path is the one the folder scan below reports, so the size the panel
+    // would measure and the size the scan lists are the same file.
+    settings.runtime.models[MANAGED_BACKEND] = {
+      enabled: true,
+      modelPath:
+        '/mnt/models/lmstudio/lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf',
+      ctxSize: 8192,
+      extraArgs: '',
+    }
+    console.warn(
+      fitLarge
+        ? '[harness] fit injection active: the model is larger than the free device memory'
+        : '[harness] fit injection active: the model fits in the free device memory',
+    )
+  }
+
+  // An empty device list only means something next to an installed launcher, so
+  // `?devices=` installs one — the row it renders sits behind that flag. The tag is
+  // the build whose measurement produced the state: the CPU build answers "(none)"
+  // because it has no accelerator, the ROCm build because its backend cannot load.
+  if (noDevices) {
+    managed.installed = true
+    managed.tag = missingLibs ? 'b11538-rocm-10.0' : 'b11538-cpu'
+    managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
+    if (missingLibs) {
+      // The picked family is the one whose build was installed: a ROCm install is
+      // what a missing ROCm runtime is missing from.
+      settings.runtime.accelerator = 'rocm'
+    }
+  }
+
+  // What GetRuntimeStatus measures: it stats the configured model path. The tree
+  // below is where the fixture's files live, so their sizes are the ones the panel
+  // compares against the device memory.
+  const sizeOfModel = (path) => {
+    for (const files of Object.values(modelTree)) {
+      const hit = files.find((f) => `${path}`.endsWith(f.name))
+      if (hit) return hit.size
+    }
+    return 0
+  }
+
   const runtimeStatus = () => {
     const runtime = settings.runtime || {}
     const models = runtime.models || {}
@@ -974,6 +1092,31 @@ Verfügbare Tools: {{tool_list}}`,
       // What this platform publishes. Linux/x64 is the widest of them, which is
       // what the harness runs on, so the picker is exercised with every family.
       variants: ['cpu', 'vulkan', 'rocm', 'cuda', 'sycl', 'openvino'],
+      // The flash-attention modes and KV cache types the pickers are filled from.
+      // The harness has to carry them too, or the KV dropdowns render with a
+      // single f16 option and look broken rather than unconfigured.
+      flashAttentionModes: ['auto', 'on', 'off'],
+      cacheTypes: ['f16', 'bf16', 'q8_0', 'q5_1', 'q5_0', 'q4_1', 'q4_0', 'iq4_nl', 'f32'],
+      // What the installed build can use. Measured shape of `--list-devices` on
+      // the Vulkan build; `?devices=none` empties it for the CPU-only case the
+      // panel has to render as a warning, and `?fit=large` nearly fills the card
+      // so a model that does not match its memory has a state to be seen in.
+      devices: noDevices
+        ? []
+        : [
+            `Vulkan0: AMD Radeon RX 7900 XT (RADV NAVI31) (20464 MiB, ${
+              fitLarge ? 600 : 18400
+            } MiB free)`,
+          ],
+      devicesError: '',
+      // What the loader cannot give the build's accelerator backend, which is what
+      // `ldd` on its libggml-hip.so answers on a machine with older ROCm libraries.
+      devicesMissingLibs: missingLibs
+        ? ['libamdhip64.so.7', 'libhipblas.so.3', 'librocblas.so.5']
+        : [],
+      // The free memory the device lines above report, in bytes, which is what the
+      // panel measures a model file against.
+      deviceFreeBytes: noDevices ? 0 : (fitLarge ? 600 : 18400) * 1024 * 1024,
       readySeconds: runtime.readySeconds || 180,
       busy: false,
       phase: '',
@@ -993,6 +1136,9 @@ Verfügbare Tools: {{tool_list}}`,
           url: managed.port ? `http://127.0.0.1:${managed.port}` : '',
           error: managed.error,
           log: managed.log,
+          // GetRuntimeStatus stats the file, so what the fixture's own tree says
+          // about it is the measured size.
+          modelBytes: sizeOfModel(mm.modelPath),
         }
       }),
     }
@@ -1136,11 +1282,17 @@ Verfügbare Tools: {{tool_list}}`,
     // load reports for its first seconds, and it is the state the poll has to
     // pick up.
     GetRuntimeStatus: () => Promise.resolve(copy(runtimeStatus())),
-    InstallLlamaRuntime: () => {
+    // The family is a parameter, mirroring the real binding: the picker edits the
+    // draft, so the download has to be told what to fetch. Recording it in the
+    // settings is what lets the harness check that picking a build downloads it.
+    InstallLlamaRuntime: (accelerator) => {
+      const runtime = settings.runtime || {}
+      const family = accelerator || runtime.accelerator || 'cpu'
+      settings.runtime = { ...runtime, accelerator: family }
       managed.installed = true
-      managed.tag = 'b11528'
-      managed.binary = '/home/mock/.config/kichat/runtime/b11528/llama-server'
-      console.log('[harness] llama-server installed')
+      managed.tag = `b11528-${family}`
+      managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
+      console.log('[harness] llama-server installed', family)
       return Promise.resolve(null)
     },
     PickManagedModelFile: () => Promise.resolve('/models/Qwen3-4B-Q4_K_M.gguf'),

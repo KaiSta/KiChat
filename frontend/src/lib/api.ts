@@ -218,6 +218,37 @@ export function formatBytes(n: number | undefined | null): string {
   return `${Math.round(n / 1e6)} MB`
 }
 
+/**
+ * The name a model is known by, without the path it happens to live at.
+ *
+ * A local model's id *is* its path: the managed llama.cpp server answers with the
+ * GGUF file path unless it was started with `--alias`, and LM Studio keys its files
+ * as `publisher/model/file.gguf`. A conversation is about which model answered, not
+ * where the weights are stored, so the chat shows this name and keeps the id for
+ * the tooltip and for the metrics detail where a path is what a user is after. An id
+ * that is already a name — Ollama's `llama3:8b`, an alias, a hosted model — comes
+ * back unchanged.
+ */
+export function modelLabel(id: string | undefined | null): string {
+  if (!id) return ''
+  const name = id.split(/[\\/]/).filter(Boolean).pop() ?? id
+  // The extension is packaging, not identity: `Qwen3-8B-Q4_K_M.gguf` is the model.
+  return name.replace(/\.(gguf|safetensors|bin|ggml|onnx|mlx)$/i, '') || name
+}
+
+/**
+ * The folder a path-shaped model id sits in, empty for an id that is only a name.
+ *
+ * Used only to tell two models with the same file name apart — publishers ship the
+ * same quantization under the same name — so a path does not appear in front of
+ * every model that is not ambiguous.
+ */
+export function modelFolder(id: string | undefined | null): string {
+  if (!id) return ''
+  const parts = id.split(/[\\/]/).filter(Boolean)
+  return parts.length > 1 ? parts[parts.length - 2] : ''
+}
+
 export function formatSpeed(tokensPerSecond: number | undefined | null): string {
   if (!tokensPerSecond || tokensPerSecond <= 0) return '–'
   if (tokensPerSecond >= 100) return `${Math.round(tokensPerSecond)}`

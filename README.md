@@ -73,6 +73,123 @@ also that `--no-save` keeps it out of `package-lock.json`, so the command has to
 repeated after any change to the lockfile, and a machine that only runs
 `npm install` will not pick it up.
 
+## ROCm (AMD GPUs)
+
+The managed llama.cpp ROCm build (`ubuntu-rocm-*`) carries **no** runtime of its own:
+its `libggml-hip.so` links `libamdhip64`, `libhipblas` and `librocblas`, and those have
+to come from the system — there is no runtime bundle for this family, unlike CUDA (see
+below). Pick *ROCm (AMD GPU)* as the **Build** in the model's settings, and install a
+matching ROCm first — otherwise the backend cannot load, llama.cpp reports no device and
+the model quietly runs on the CPU.
+
+**The versions have to line up.** Ubuntu 24.04 (noble, and Mint 22 on top of it) ships
+ROCm 5.7, which provides `libamdhip64.so.5`, while the published ROCm assets ask for
+`libamdhip64.so.7`, `libhipblas.so.3` and `librocblas.so.5`. Those sonames come from
+ROCm 7.x, and the HIP soname has stayed at `.7` since, so any 7.x or newer user-space
+runs the `rocm-10.0` build. KiChat checks this before it downloads anything: with no
+matching HIP runtime it refuses the 245 MB build and names both versions instead.
+
+Measured on 2026-10-10 with ROCm 7.2.4 for noble on a Radeon RX 7900 XT: the three
+sonames are exactly what `hip-runtime-amd`, `hipblas` and `rocblas` install.
+
+```sh
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2.4 noble main" \
+  | sudo tee /etc/apt/sources.list.d/rocm.list
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends rocm-hip-runtime hipblas rocblas
+```
+
+That is 17 packages — measured on this machine at **3.1 GB to download and 7.5 GB
+unpacked**, most of it `rocm-llvm`, `comgr` and `rocblas`. It is user-space only: the
+same transaction upgraded nothing and removed nothing. The `amdgpu` module, `/dev/kfd`
+and `/dev/dri/renderD128` are the kernel's and are already there. Your user still has to
+be in the `render` group (and usually `video`) to open them.
+
+**AMD's repository has to outrank Ubuntu's.** Ubuntu also packages `rocminfo`, at
+`5.7.1` — a version that sorts *above* AMD's `1.0.0.70204` — so without a pin apt keeps
+Ubuntu's copy and the two stacks mix. AMD's own installer writes the same pin:
+
+```sh
+printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 600\n' \
+  | sudo tee /etc/apt/preferences.d/rocm-pin-600
+```
+
+**Then check it, on the machine and in the app:**
+
+```sh
+rocminfo | grep -E "Marketing Name|gfx11"   # -> AMD Radeon RX 7900 XT / gfx1100
+```
+
+The GPU has to be one that ROCm version supports (`gfx1100` is the 7900 XT). After
+that, restart KiChat or press Save / the refresh arrow in Settings → Backends — a running
+instance caches its device probe per binary path — and start the model. The panel then
+reads `ROCm0: AMD Radeon RX 7900 XT (20464 MiB, 20364 MiB free)` instead of a CPU
+fallback. Measured here: the same 9.8 GB Q8_0 model answered at **65 tok/s on the ROCm
+build against 4.8 tok/s on the CPU build**, with `offloaded 34/34 layers to GPU` in the
+log.
+
+**Where KiChat looks for the libraries.** AMD's packages unpack into
+`/opt/rocm-<version>/lib` and register nothing with the loader — `ldconfig -p` has no
+`libamdhip64.so.7` — so KiChat resolves the directory itself (`ROCM_PATH`, then
+`/opt/rocm`, then the versioned `/opt/rocm-*` trees, newest first) and starts
+`llama-server` with it on `LD_LIBRARY_PATH`. The device, library and version probes get
+the same environment, so the panel describes the build's situation rather than the app's.
+
+**If the panel still says it found no device**, it also names what the build's backend
+cannot resolve (`libamdhip64.so.7, libhipblas.so.3, …`): those sonames did not arrive,
+so the install above did not land or the pin was skipped. Otherwise use *Vulkan (GPU)*
+instead — it needs no ROCm and runs on every card RADV supports.
+
+## CUDA (NVIDIA GPUs)
+
+The CUDA build has the same hole in it. Its `libggml-cuda.so` links `libcudart.so.13`,
+`libcublas.so.13` and the driver's own `libcuda.so.1`, and the build archive carries
+none of them: unpacked on its own, `ldd libggml-cuda.so` answers `libcudart.so.13 => not
+found`, `libcublas.so.13 => not found` and `libcuda.so.1 => not found`. Measured on
+b11538 and again on b11541: 152.8 MB, 62 entries, exactly one of them CUDA-named — its
+own backend, whose runpath is `$ORIGIN`.
+
+**What differs from ROCm: llama.cpp does publish the runtime for CUDA.** The same
+release carries `cudart-llama-b11541-bin-ubuntu-cuda-13.4-x64.tar.gz`: 440.2 MB for
+13.4 and 594.4 MB for 12.8, against 152.8 MB and 172.0 MB for the two builds themselves.
+KiChat fetches it in the same step, under one progress bar over both archives. It is
+unpacked *beside* the launcher rather than anywhere else, because that runpath is the
+only place the build looks: the bundle's own wrapper directory is flattened, leaving
+`libcudart.so.13`, `libcublas.so.13` and `libcublasLt.so.13` next to `llama-server`.
+A CUDA install is therefore 152.8 + 440.2 = **593 MB fetched by the app itself** —
+while ROCm fetches a 245 MB build and then needs 3.1 GB of AMD user-space by hand.
+
+The bundle is skipped when the machine already has one: if the loader's own index names
+both `libcudart.so.<major>` and `libcublas.so.<major>`, a CUDA toolkit is installed and
+the 440 MB is left alone. (Windows takes the same bundle as
+`cudart-llama-bin-win-cuda-13.4-x64.zip`, 423.5 MB, with no build tag in its name.)
+
+**The driver is the part that is never bundled, and its version picks the build.**
+`libcuda.so.1` comes from the NVIDIA driver and appears in no archive, and a build
+cannot initialise on a driver older than its major's minimum — NVIDIA's compatibility
+table:
+
+| CUDA | oldest driver |
+| --- | --- |
+| 13.x | 580 |
+| 12.x | 525 |
+| 11.x | 450 |
+
+A release publishes several suites at once — b11541 carries `cuda-12.8-x64` and
+`cuda-13.4-x64` — and KiChat takes the newest suite this machine can run, reading the
+driver version from `/proc/driver/nvidia/version`. A 570 driver therefore gets 12.8
+rather than a 13.4 build that would find no device and run the model on the CPU; a
+machine with no driver at all (`libcuda.so.1` missing from `ldconfig -p`) is refused
+before the download starts, and told that the driver is what is missing.
+
+**Check it the way the ROCm one is checked.** Restart KiChat or press Save / the
+refresh arrow in Settings → Backends, then start the model: the panel reads
+`CUDA0: NVIDIA GeForce …`. A build that reports no device while its libraries do
+resolve is one whose driver is too old for it.
+
 ## Where data lives
 
 | What | Location |

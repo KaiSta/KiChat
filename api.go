@@ -221,6 +221,11 @@ type ManagedStatus struct {
 	URL       string   `json:"url"`
 	Error     string   `json:"error,omitempty"`
 	Log       []string `json:"log,omitempty"`
+	// ModelBytes is the size of the GGUF on disk, 0 when it cannot be read. The
+	// panel measures it against DeviceFreeBytes, because it is the one part of a
+	// model's memory use this app can know without loading it — the weights have to
+	// fit before the KV cache is even considered.
+	ModelBytes int64 `json:"modelBytes"`
 }
 
 // RuntimeStatus is everything the UI needs about the llama.cpp KiChat would run:
@@ -236,8 +241,30 @@ type RuntimeStatus struct {
 	Version string `json:"version,omitempty"`
 	// CustomBinary is the path a user gave instead of the installed build.
 	CustomBinary string `json:"customBinary,omitempty"`
-	Accelerator  string `json:"accelerator"`
-	ReadySeconds int    `json:"readySeconds"`
+	// Devices are the compute devices the launcher in use reports, e.g.
+	// "Vulkan0: AMD Radeon RX 7900 XT (RADV NAVI31) (20464 MiB, 18418 MiB free)".
+	// An installed build with an empty list sees no accelerator and will run on the
+	// CPU — which is what makes a silent fallback visible instead of a model that
+	// just feels slow.
+	Devices []string `json:"devices"`
+	// DevicesError says why the list could not be read at all. It is kept apart
+	// from an empty list because "uses no GPU" and "did not answer" call for
+	// different things from a user.
+	DevicesError string `json:"devicesError,omitempty"`
+	// DevicesMissingLibs names the shared objects the launcher's accelerator
+	// backend needs and this machine does not have, e.g. "libamdhip64.so.7" for a
+	// build made for ROCm 10 on a machine with ROCm 5.7. An empty device list beside
+	// these is not a mystery: the backend cannot be loaded at all, and that is why
+	// no device is reported and the model runs on the CPU. Only filled when the
+	// device list came back empty.
+	DevicesMissingLibs []string `json:"devicesMissingLibs"`
+	// DeviceFreeBytes is the free memory the devices reported, added up across
+	// them because llama.cpp splits a model over several devices. 0 means unknown:
+	// either there is no accelerator, or the build named its devices without their
+	// memory. A model file larger than this cannot be placed on the GPUs whole.
+	DeviceFreeBytes int64  `json:"deviceFreeBytes"`
+	Accelerator     string `json:"accelerator"`
+	ReadySeconds    int    `json:"readySeconds"`
 	// Busy, Phase, Done and Total describe an install in progress. The UI polls
 	// this rather than listening for an event: a download outlives the call that
 	// started it, and polling cannot miss its end.
@@ -251,6 +278,12 @@ type RuntimeStatus struct {
 	// of its own, so it cannot offer a build that does not exist — ROCm and SYCL
 	// are x64 only, and macOS publishes a single Metal-enabled build per arch.
 	Variants []string `json:"variants"`
+	// FlashAttentionModes and CacheTypes are the values a managed model may carry
+	// for `--flash-attn` and `--cache-type-k/-v`. The pickers are filled from here
+	// for the same reason as Variants: a value the backend cannot pass must not be
+	// offered.
+	FlashAttentionModes []string `json:"flashAttentionModes"`
+	CacheTypes          []string `json:"cacheTypes"`
 	// Models carries one entry per id in the settings, so a row with no model
 	// configured still appears with the state to explain it.
 	Models []ManagedStatus `json:"models"`
@@ -269,11 +302,15 @@ type RuntimeStatus struct {
 // the same trap `chat.UnresolvedVars` set. The slices here are never nil.
 func runtimeStatusBase(settings config.Settings, goos, goarch string) RuntimeStatus {
 	status := RuntimeStatus{
-		Accelerator:  settings.Runtime.Accelerator,
-		ReadySeconds: settings.Runtime.ReadySeconds,
-		CustomBinary: settings.Runtime.BinaryPath,
-		Variants:     []string{},
-		Models:       []ManagedStatus{},
+		Accelerator:         settings.Runtime.Accelerator,
+		ReadySeconds:        settings.Runtime.ReadySeconds,
+		CustomBinary:        settings.Runtime.BinaryPath,
+		Variants:            []string{},
+		FlashAttentionModes: config.FlashAttentionModes(),
+		CacheTypes:          config.CacheTypes(),
+		Devices:             []string{},
+		DevicesMissingLibs:  []string{},
+		Models:              []ManagedStatus{},
 	}
 	if variants := rt.PublishedAccelerators(goos, goarch); len(variants) > 0 {
 		status.Variants = variants
@@ -286,6 +323,33 @@ func runtimeStatusBase(settings config.Settings, goos, goarch string) RuntimeSta
 		})
 	}
 	return status
+}
+
+// deviceTexts is the device entries as the panel shows them: the line the server
+// printed, which already carries the id, the card name and its memory. Rebuilding
+// that sentence from the parsed fields would be this app inventing a description
+// of hardware it did not detect.
+func deviceTexts(devices []rt.Device) []string {
+	out := make([]string, 0, len(devices))
+	for _, d := range devices {
+		out = append(out, d.Raw)
+	}
+	return out
+}
+
+// modelFileSize is the size of a GGUF on disk, and 0 when there is nothing to
+// measure. 0 is also what an unreadable path gives, which is the honest answer for
+// it: a file this app cannot stat is not one it should guess about, and the panel
+// reads 0 as "no verdict" rather than as an empty model.
+func modelFileSize(path string) int64 {
+	if strings.TrimSpace(path) == "" {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return 0
+	}
+	return info.Size()
 }
 
 // sortedRuntimeIDs lists the configured managed backends in a stable order, so the
@@ -323,6 +387,27 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 			binary = status.CustomBinary
 		}
 		status.Version = a.versionFor(binary)
+		// Which compute devices this build can use. A caller that sees an empty
+		// list next to an installed launcher is looking at a model that will run
+		// on the CPU, whether the build has no accelerator or its runtime is
+		// missing.
+		reading := a.devicesFor(binary)
+		status.Devices, status.DevicesError = deviceTexts(reading.devices), reading.err
+		status.DeviceFreeBytes = int64(rt.FreeDeviceMemoryMiB(reading.devices)) << 20
+		if reading.missingLibs != nil {
+			status.DevicesMissingLibs = reading.missingLibs
+		}
+	}
+
+	// The weights have to fit before anything else about the model does, so the
+	// file's size is measured against the free device memory — the one number this
+	// app can read without loading a model, and one that understates the footprint
+	// rather than overstating it, which is the cautious direction for a warning. It
+	// is measured whether or not a device reported memory: a 0 in either number
+	// means "unknown" to the panel, and a size that is only read when a GPU is
+	// present would be unknown exactly on the machines that have none.
+	for i := range status.Models {
+		status.Models[i].ModelBytes = modelFileSize(status.Models[i].ModelPath)
 	}
 
 	a.installMu.Lock()
@@ -355,11 +440,17 @@ func (a *App) existingServer(backendID string) *rt.Server {
 	return a.servers[backendID]
 }
 
-// InstallLlamaRuntime fetches llama-server. It returns as soon as the download is
-// under way — the archive is tens to hundreds of megabytes, and a bound method that
-// blocked for minutes would freeze the window that called it. GetRuntimeStatus
-// reports the progress and the outcome.
-func (a *App) InstallLlamaRuntime() error {
+// InstallLlamaRuntime fetches llama-server for one build family. It returns as
+// soon as the download is under way — the archive is tens to hundreds of megabytes,
+// and a bound method that blocked for minutes would freeze the window that called
+// it. GetRuntimeStatus reports the progress and the outcome.
+//
+// The family is a parameter rather than read from the stored settings because the
+// picker above the button edits a draft that has not been saved yet. Reading the
+// stored value here made "pick Vulkan, press Download" fetch the previous build,
+// which is exactly the bug where a user picks a GPU build and the model still runs
+// on the CPU.
+func (a *App) InstallLlamaRuntime(accelerator string) error {
 	if err := a.ensure(); err != nil {
 		return err
 	}
@@ -370,14 +461,24 @@ func (a *App) InstallLlamaRuntime() error {
 	}
 	a.installBusy, a.installPhase, a.installErr, a.installDone, a.installTotal = true, "lookup", "", 0, 0
 	a.installMu.Unlock()
-	go a.installRuntime()
+	go a.installRuntime(installAccelerator(accelerator, a.Settings().Runtime.Accelerator))
 	return nil
 }
 
+// installAccelerator picks the family to fetch: the one the caller asked for when
+// it names a family this app knows, otherwise what is stored. An empty or unknown
+// answer must not become a download URL of its own, so it falls back.
+func installAccelerator(picked, stored string) string {
+	picked = strings.TrimSpace(picked)
+	if config.IsAccelerator(picked) {
+		return picked
+	}
+	return stored
+}
+
 // installRuntime is the download itself, on its own goroutine.
-func (a *App) installRuntime() {
-	settings := a.Settings()
-	asset, err := a.installer.Latest(a.ctx, goruntime.GOOS, goruntime.GOARCH, settings.Runtime.Accelerator)
+func (a *App) installRuntime(accelerator string) {
+	asset, err := a.installer.Latest(a.ctx, goruntime.GOOS, goruntime.GOARCH, accelerator)
 	if err != nil {
 		a.finishInstall("", err)
 		return
@@ -390,9 +491,12 @@ func (a *App) installRuntime() {
 
 	// The build that was installed is written down, so the next start finds it
 	// through the settings rather than by picking whatever is newest. The folder
-	// name carries the family, since two families are two installations.
+	// name carries the family, since two families are two installations. The
+	// accelerator is written down with it: it now names the build that is really on
+	// disk, which is what the picker has to show.
 	a.settingsMu.Lock()
 	a.settings.Runtime.Tag = asset.Dir()
+	a.settings.Runtime.Accelerator = asset.Variant
 	updated := a.settings
 	a.settingsMu.Unlock()
 	if err := a.sanitize(updated).Save(a.store); err != nil {

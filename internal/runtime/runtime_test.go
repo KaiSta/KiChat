@@ -559,3 +559,68 @@ func TestRingKeepsTheTailAndNotTheWholeLog(t *testing.T) {
 		t.Errorf("tail = %q, want the last three lines", got)
 	}
 }
+
+// TestArgsCarryFlashAttentionAndCacheTypes pins the command line the new fields
+// produce. The defaults are the server's own, and passing them anyway would be a
+// flag llama.cpp reads differently from its default in some builds — so "auto"
+// and f16 must not appear, while an explicit choice must.
+func TestArgsCarryFlashAttentionAndCacheTypes(t *testing.T) {
+	base := Options{Model: "/m.gguf", Host: "127.0.0.1", Port: 8080}
+
+	// The defaults add nothing: an empty or "auto" flash attention and an f16
+	// cache are exactly what llama-server would pick on its own.
+	for _, o := range []Options{
+		base,
+		func() Options { o := base; o.FlashAttention = "auto"; return o }(),
+		func() Options { o := base; o.CacheTypeK, o.CacheTypeV = CacheTypeF16, CacheTypeF16; return o }(),
+	} {
+		line := strings.Join(o.args(), " ")
+		for _, flag := range []string{"--flash-attn", "--cache-type-k", "--cache-type-v"} {
+			if strings.Contains(line, flag) {
+				t.Errorf("args = %q, want no %s for the server's own default", line, flag)
+			}
+		}
+	}
+
+	full := base
+	full.FlashAttention = FlashAttentionOn
+	full.CacheTypeK, full.CacheTypeV = "q8_0", "q4_0"
+	want := "-m /m.gguf --host 127.0.0.1 --port 8080 --flash-attn on --cache-type-k q8_0 --cache-type-v q4_0"
+	if got := strings.Join(full.args(), " "); got != want {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+
+	// The user's own arguments stay last, so they can still override ours.
+	override := full
+	override.Extra = []string{"--flash-attn", "off"}
+	if got := override.args(); got[len(got)-2] != "--flash-attn" || got[len(got)-1] != "off" {
+		t.Errorf("the user's arguments are not last: %q", got)
+	}
+}
+
+// TestLauncherFindsANamedBuild: the app runs the build it recorded rather than
+// merely the newest one on disk, so the installer has to be able to hand back a
+// named build's launcher — and answer false for one that is not there, which is
+// what lets a deleted build fall back to Find.
+func TestLauncherFindsANamedBuild(t *testing.T) {
+	dir := t.TempDir()
+	inst := NewInstaller(dir)
+
+	if _, ok := inst.Launcher(""); ok {
+		t.Error("an empty name answered with a launcher")
+	}
+	if _, ok := inst.Launcher("b11528-cpu"); ok {
+		t.Error("a build that was never installed answered with a launcher")
+	}
+
+	if err := os.MkdirAll(filepath.Join(dir, "b11528-cpu"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inst.BinaryPath("b11528-cpu"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := inst.Launcher("b11528-cpu")
+	if !ok || got != inst.BinaryPath("b11528-cpu") {
+		t.Errorf("Launcher = %q, %v; want the launcher of the named build", got, ok)
+	}
+}
