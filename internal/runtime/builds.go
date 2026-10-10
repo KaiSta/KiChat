@@ -95,8 +95,18 @@ func (i *Installer) Builds() []Build {
 // isInstallLeftover reports whether a directory name is one this package writes while
 // an install runs and removes when it finishes. A crash in between leaves it, and
 // that is the case the cleanup list is for.
+//
+// The marker is searched for rather than anchored at the end, because an install
+// writes three names of this kind and only one of them ends in `.installing`: the
+// staging directory is `<build>.installing`, `flattenSingleRoot` renames the
+// archive's inner root to `<build>.installing.root`, and a companion runtime unpacks
+// into `<build>.installing.runtime`. A crash between those renames leaves a
+// directory holding the full, startable build under the `.root` name — Find would
+// pick it as the newest build and the cleanup list would present it as a complete
+// one, which is exactly what the suffix test did before. No real build directory
+// contains `.installing`, so a substring is safe here.
 func isInstallLeftover(name string) bool {
-	return strings.HasSuffix(name, ".installing")
+	return strings.Contains(name, ".installing")
 }
 
 // RemoveBuild deletes one installed build, named the way Builds reported it.

@@ -193,6 +193,50 @@ func TestAStagingDirectoryWithALauncherIsStillAnInterruptedInstall(t *testing.T)
 	}
 }
 
+// The two scratch names an install uses besides the staging directory itself. A crash
+// after flattenSingleRoot renamed the archive's inner root leaves a *complete* build
+// under `<build>.installing.root` — launcher and all. Recognising only a name ending
+// in `.installing` made Find pick exactly that as the newest build, so a start could
+// run an unrenamed staging directory, and the cleanup list called it finished.
+func TestTheRootAndRuntimeScratchDirectoriesAreLeftovers(t *testing.T) {
+	dir := t.TempDir()
+	writeBuild(t, dir, "b11541-cpu", 1000)
+	// A crash between flattenSingleRoot's rename and its final one: the full build,
+	// still under the `.root` name.
+	writeBuild(t, dir, "b11541-cuda-13.4.installing.root", 1000)
+	// A crash while a companion runtime unpacks: libraries, no launcher.
+	runtimeDir := filepath.Join(dir, "b11541-cuda-13.4.installing.runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "libcudart.so.13"), make([]byte, 10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	inst := &Installer{Dir: dir}
+	if tag, _ := inst.Find(LlamaCPP); tag != "b11541-cpu" {
+		t.Errorf("Find = %q, want the real build, never a scratch directory", tag)
+	}
+
+	incomplete := map[string]bool{}
+	for _, build := range inst.Builds() {
+		incomplete[build.Dir] = build.Incomplete
+	}
+	for _, name := range []string{"b11541-cuda-13.4.installing.root", "b11541-cuda-13.4.installing.runtime"} {
+		if !incomplete[name] {
+			t.Errorf("%s is not listed as an interrupted install: %v", name, incomplete)
+		}
+		// The cleanup is the only thing that ever removes these.
+		if err := inst.RemoveBuild(name); err != nil {
+			t.Errorf("RemoveBuild(%s): %v", name, err)
+		}
+	}
+	builds := inst.Builds()
+	if len(builds) != 1 || builds[0].Dir != "b11541-cpu" {
+		t.Errorf("after the cleanup the list is %+v, want only the real build", builds)
+	}
+}
+
 // writeBuild makes a directory that looks like an install: a launcher, and one more
 // file whose size makes the measured footprint predictable.
 func writeBuild(t *testing.T, root, name string, size int) {
