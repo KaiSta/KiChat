@@ -303,10 +303,36 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 }
 
 // resolveModel looks up model metadata, applying user overrides and falling back
-// to the model list when a backend cannot answer directly.
+// to the model list when a backend cannot answer directly. It refreshes the
+// catalogue, which makes it the right call for a turn — the capabilities it reports
+// decide whether native tool calling is used.
 func (e *Engine) resolveModel(ctx context.Context, backendID, modelID string, settings config.Settings) llm.ModelInfo {
-	models := llm.MergeOverrides(e.Registry.ListModels(ctx, false), settings.ModelOverrides)
-	for _, m := range models {
+	return resolveModelFrom(e.Registry.ListModels(ctx, false), backendID, modelID, settings)
+}
+
+// resolveModelCached resolves a model against the catalogue already in hand and
+// only reaches the network if there is no catalogue at all.
+//
+// It is what a budget preview uses: opening a chat and switching a model in a
+// picker are not worth a listing request, and asking for one unconditionally made
+// them wait on every configured backend (20 seconds each, and one /api/show per
+// Ollama model on top of that). The one exception is a process that has never
+// listed anything — a chat opened before the first refresh — where a single
+// tightly bounded listing is cheaper than reporting a window the app does not know.
+func (e *Engine) resolveModelCached(backendID, modelID string, settings config.Settings) llm.ModelInfo {
+	models := e.Registry.Snapshot()
+	if len(models) == 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		models = e.Registry.ListModels(ctx, false)
+	}
+	return resolveModelFrom(models, backendID, modelID, settings)
+}
+
+// resolveModelFrom is the lookup itself, shared by the fresh and the cached path so
+// the two cannot disagree about an override or a fallback.
+func resolveModelFrom(models []llm.ModelInfo, backendID, modelID string, settings config.Settings) llm.ModelInfo {
+	for _, m := range llm.MergeOverrides(models, settings.ModelOverrides) {
 		if m.ID == modelID && m.Backend == backendID {
 			return m
 		}

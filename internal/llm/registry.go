@@ -209,6 +209,11 @@ func (r *Registry) ListModels(ctx context.Context, forceRefresh bool) []ModelInf
 
 	type result struct {
 		models []ModelInfo
+		// ok marks a provider that answered. It is what lets a listing in which
+		// every backend failed avoid overwriting the catalogue that was working a
+		// moment ago: caching the empty merge made one network blip hide every
+		// model from the picker for the whole thirty-second window.
+		ok bool
 	}
 	results := make([]result, len(providers))
 	var wg sync.WaitGroup
@@ -222,21 +227,43 @@ func (r *Registry) ListModels(ctx context.Context, forceRefresh bool) []ModelInf
 			if err != nil {
 				return
 			}
-			results[i] = result{models: models}
+			results[i] = result{models: models, ok: true}
 		}(i, p)
 	}
 	wg.Wait()
 
 	merged := []ModelInfo{}
+	anyOK := false
 	for _, res := range results {
+		if !res.ok {
+			continue
+		}
+		anyOK = true
 		merged = append(merged, res.models...)
 	}
 
 	r.mu.Lock()
+	if !anyOK && len(r.catalog) > 0 {
+		// Nothing answered. The previous listing is still the best answer this
+		// process has, so it is kept and returned rather than replaced by "no
+		// models", which is what a down backend would otherwise look like.
+		merged = append([]ModelInfo(nil), r.catalog...)
+	}
 	r.catalog = merged
+	// The timestamp moves either way: a failed round must not make every caller
+	// pay for another twenty-second attempt.
 	r.catalogAt = time.Now()
 	r.mu.Unlock()
 	return append([]ModelInfo(nil), merged...)
+}
+
+// Snapshot returns the catalogue exactly as it was last read, without asking any
+// backend. A budget preview uses it, because it has to answer immediately and a
+// model listing is not worth a request there (see chat.Engine.resolveModelCached).
+func (r *Registry) Snapshot() []ModelInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]ModelInfo(nil), r.catalog...)
 }
 
 // Invalidate drops the cached catalogue so the next listing refetches, and
