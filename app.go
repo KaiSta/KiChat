@@ -248,35 +248,48 @@ func (a *App) startManagedModel(backendID string) error {
 }
 
 // llamaServerPath resolves the launcher: the user's own copy if they gave one,
-// otherwise the build the installer fetched for the selected release source.
+// otherwise the build the installer fetched for the selected release source. Which
+// build that is, is managedLauncher's question.
+func (a *App) llamaServerPath(settings config.Settings) (string, error) {
+	if p := strings.TrimSpace(settings.Runtime.BinaryPath); p != "" {
+		return p, nil
+	}
+	if _, binary := a.managedLauncher(settings); binary != "" {
+		return binary, nil
+	}
+	return "", errors.New("llama-server ist noch nicht installiert")
+}
+
+// managedLauncher resolves the build a managed start would run for the selected
+// source, and is the one place that answers "which build is installed".
 //
-// The tagged build is preferred over the newest one. Install writes the tag of
+// The recorded build is preferred over the newest one. Install writes the tag of
 // what it just fetched, and that is the build the picker shows; falling straight
 // through to Find's newest would run a different family than the panel names the
 // moment two families are installed. A tag whose directory is gone falls back, so
 // a deleted build is not a dead end.
 //
-// A recorded tag of the *other* source does not count, which is the second half of
-// the same rule: upstream's `b11541-cpu` is not a build the fork's selection can run,
-// and the two produce different GGUF support. Switching the source in the picker and
-// saving therefore does not keep running the launcher the switch moved away from —
-// it says no build is installed until one is, which is what the download button next
-// to the picker is for.
-func (a *App) llamaServerPath(settings config.Settings) (string, error) {
-	if p := strings.TrimSpace(settings.Runtime.BinaryPath); p != "" {
-		return p, nil
-	}
+// A recorded tag of the *other* source does not count: upstream's `b11541-cpu` is
+// not a build the fork's selection can run, and the two produce different GGUF
+// support. Switching the source in the picker and saving therefore does not keep
+// running the launcher the switch moved away from — it says no build is installed
+// until one is, which is what the download button next to the picker is for.
+//
+// The status the panel reads and the update comparison go through here too, so the
+// build the panel names, the build an update is weighed against, and the build a
+// start runs cannot be three different answers. Reading Find's newest for the panel
+// while a start ran the recorded tag was exactly that: when the two disagreed, the
+// header showed the build that was on disk while the start ran the older one the
+// settings still named — and an update the newer build already was could never be
+// offered.
+func (a *App) managedLauncher(settings config.Settings) (tag, binary string) {
 	dist := distributionFor(settings)
-	if tag := strings.TrimSpace(settings.Runtime.Tag); dist.TagOfDir(tag) != "" {
-		if binary, ok := a.installer.Launcher(tag); ok {
-			return binary, nil
+	if recorded := strings.TrimSpace(settings.Runtime.Tag); dist.TagOfDir(recorded) != "" {
+		if path, ok := a.installer.Launcher(recorded); ok {
+			return recorded, path
 		}
 	}
-	tag, binary := a.installer.Find(dist)
-	if tag == "" || binary == "" {
-		return "", errors.New("llama-server ist noch nicht installiert")
-	}
-	return binary, nil
+	return a.installer.Find(dist)
 }
 
 // serverFor returns the supervisor of one backend, creating it if needed.

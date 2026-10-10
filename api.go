@@ -412,9 +412,16 @@ func (a *App) CheckLlamaRuntimeUpdate() (RuntimeUpdate, error) {
 	// or unknown value.
 	dist := distributionFor(settings)
 	family := installAccelerator("", settings.Runtime.Accelerator)
-	installed := a.installedBuildTag(dist)
+	installed := a.installedBuildTag(settings)
 
-	ctx, cancel := context.WithTimeout(context.Background(), updateLookupTimeout)
+	// Bounded by the app's own context, not a fresh one: a lookup that is still in
+	// flight when the window closes is answered by the store's own shutdown rather
+	// than left to outlive it. Tests call this on an App whose ctx is nil.
+	parent := a.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, updateLookupTimeout)
 	defer cancel()
 	asset, err := a.installer.Latest(ctx, dist, goruntime.GOOS, goruntime.GOARCH, family)
 	if err != nil {
@@ -452,13 +459,17 @@ func updateReadingOf(dist rt.Distribution, asset rt.Asset, installed string) Run
 	}
 }
 
-// installedBuildTag is the build tag of the launcher on disk, which is the side of
-// the comparison the panel names as installed. It is the same directory
-// GetRuntimeStatus reports as the installed tag, read with the shape of the source it
-// was asked about — a directory of the other source reduces to no tag at all, which
-// is what keeps a fork build from being compared against upstream's releases.
-func (a *App) installedBuildTag(dist rt.Distribution) string {
-	tag, _ := a.installer.Find(dist)
+// installedBuildTag is the build tag of the launcher the app would start, which is the
+// side of the comparison the panel names as installed. It goes through managedLauncher
+// for the same reason GetRuntimeStatus does: the build an update is weighed against has
+// to be the build a start would run, not merely the newest directory of the source —
+// otherwise a recorded build behind a newer directory is offered no update, and the
+// comparison is about a llama.cpp the app does not use. The name is read with the shape
+// of the source it was asked about, so a directory of the other source reduces to no tag
+// at all and a fork build is never compared against upstream's releases.
+func (a *App) installedBuildTag(settings config.Settings) string {
+	dist := distributionFor(settings)
+	tag, _ := a.managedLauncher(settings)
 	return dist.TagOfDir(tag)
 }
 
@@ -734,11 +745,13 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 	}
 	settings := a.Settings()
 	status := runtimeStatusBase(settings, goruntime.GOOS, goruntime.GOARCH)
-	// Only a build of the selected source counts as installed. With a fork build
-	// beside an upstream one, reporting the other source's build here would name a
-	// launcher the app will refuse to start — the panel would say "available" next
-	// to a model that cannot run.
-	if tag, binary := a.installer.Find(distributionFor(settings)); tag != "" {
+	// Only a build of the selected source counts as installed, and the one named is
+	// the build a start would run rather than merely the newest on disk: with a fork
+	// build beside an upstream one, reporting the other source's build here would name
+	// a launcher the app refuses to start, and reporting a newer directory than the
+	// recorded build would name a llama.cpp the app does not use. managedLauncher is
+	// the single answer to that question; see it for why.
+	if tag, binary := a.managedLauncher(settings); tag != "" {
 		status.Installed, status.Tag, status.Binary = true, tag, binary
 	}
 	if status.CustomBinary != "" {
