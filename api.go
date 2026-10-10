@@ -896,12 +896,12 @@ func installDistribution(picked, stored string) string {
 func (a *App) installRuntime(dist rt.Distribution, accelerator string) {
 	asset, err := a.installer.Latest(a.ctx, dist, goruntime.GOOS, goruntime.GOARCH, accelerator)
 	if err != nil {
-		a.finishInstall("", err)
+		a.finishInstall(err)
 		return
 	}
 	binary, err := a.installer.Install(a.ctx, asset)
 	if err != nil {
-		a.finishInstall("", err)
+		a.finishInstall(err)
 		return
 	}
 
@@ -919,7 +919,7 @@ func (a *App) installRuntime(dist rt.Distribution, accelerator string) {
 	updated := a.settings
 	a.settingsMu.Unlock()
 	if err := a.sanitize(updated).Save(a.store); err != nil {
-		a.finishInstall(asset.Dir(), fmt.Errorf("Installation speichern: %w", err))
+		a.finishInstall(fmt.Errorf("Installation speichern: %w", err))
 		return
 	}
 	runtime.LogInfof(a.ctx, "%s llama-server %s (%s) installiert: %s", dist.ID, asset.Dir(), asset.Variant, binary)
@@ -928,7 +928,7 @@ func (a *App) installRuntime(dist rt.Distribution, accelerator string) {
 	// the build that is now on disk and starting.
 	a.setUpdate(updateReadingOf(dist, asset, dist.TagOfDir(asset.Dir())))
 	a.rebuildServices(updated)
-	a.finishInstall(asset.Dir(), nil)
+	a.finishInstall(nil)
 }
 
 // recordInstallProgress is the installer's progress callback.
@@ -939,7 +939,10 @@ func (a *App) recordInstallProgress(p rt.Progress) {
 	a.installMu.Unlock()
 }
 
-func (a *App) finishInstall(tag string, err error) {
+// finishInstall ends a download, successfully or not. The tag the caller knew is not
+// part of the record — the settings carry it, and this only closes the progress the UI
+// polls.
+func (a *App) finishInstall(err error) {
 	a.installMu.Lock()
 	a.installBusy = false
 	if err != nil {
