@@ -215,6 +215,13 @@ const de = {
   'settings.managed.downloading': 'Download',
   'settings.managed.extracting': 'wird entpackt …',
   'settings.managed.preparing': 'wird vorbereitet …',
+  'settings.managed.distribution': 'llama.cpp-Quelle',
+  'settings.managed.distLlamacpp': 'llama.cpp (offiziell)',
+  'settings.managed.distPrism': 'PrismML (ternär)',
+  'settings.managed.distLlamacppHint':
+    'Die offiziellen Releases — die Wahl für jedes Modell, das llama.cpp direkt lädt.',
+  'settings.managed.distPrismHint':
+    'PrismMLs Fork bringt die ternären Kernel mit: nur damit laufen ternäre Modelle wie Bonsai 2.',
   'settings.managed.accelerator': 'Build',
   'settings.managed.accelCpu': 'CPU (läuft überall)',
   'settings.managed.accelVulkan': 'Vulkan (GPU)',
@@ -262,6 +269,14 @@ const de = {
   'settings.managed.cacheF32': 'f32 (am größten)',
   'settings.managed.cacheHint':
     'Ein quantisierter KV-Cache spart Speicher, kostet aber Genauigkeit; quantisiertes V setzt Flash Attention voraus.',
+  'settings.managed.offload': 'GPU-Layer (--gpu-layers)',
+  'settings.managed.offloadAuto': 'Automatisch — so viele Layer wie hineinpassen',
+  'settings.managed.offloadAll': 'Alle Layer auf die GPU',
+  'settings.managed.offloadOff': 'Nur CPU — keine GPU-Layer',
+  'settings.managed.offloadHint':
+    'Automatisch ist llama.cpps eigener Standard: es legt so viele Layer in den Gerätespeicher, wie hineinpassen. „Alle\u201c erzwingt alle Layer, „Nur CPU\u201c rechnet alles auf der CPU. Der Start gilt ab dem nächsten Start.',
+  'settings.managed.offloadReport': 'Auf {{device}}: {{layers}} von {{total}} Layern auf der GPU',
+  'settings.managed.offloadCpu': '{{total}} Layer rechnen auf der CPU — kein Layer auf der GPU',
   'settings.managed.tooLarge':
     'Die Gewichte ({{model}}) sind größer als der freie Speicher der erkannten Geräte ({{free}}) — das Modell passt nicht vollständig auf die GPU und wird ganz oder teilweise auf der CPU gerechnet. Eine stärker quantisierte Datei passt eher.',
   'settings.managed.ctx': 'Kontextfenster (-c)',
@@ -577,6 +592,13 @@ const en: Record<keyof typeof de, string> = {
   'settings.managed.downloading': 'Download',
   'settings.managed.extracting': 'unpacking …',
   'settings.managed.preparing': 'preparing …',
+  'settings.managed.distribution': 'llama.cpp source',
+  'settings.managed.distLlamacpp': 'llama.cpp (official)',
+  'settings.managed.distPrism': 'PrismML (ternary)',
+  'settings.managed.distLlamacppHint':
+    'The official releases — the choice for every model llama.cpp loads by itself.',
+  'settings.managed.distPrismHint':
+    "PrismML's fork carries the ternary kernels: it is the only build that runs a ternary model such as Bonsai 2.",
   'settings.managed.accelerator': 'Build',
   'settings.managed.accelCpu': 'CPU (runs anywhere)',
   'settings.managed.accelVulkan': 'Vulkan (GPU)',
@@ -624,6 +646,14 @@ const en: Record<keyof typeof de, string> = {
   'settings.managed.cacheF32': 'f32 (largest)',
   'settings.managed.cacheHint':
     'A quantised KV cache saves memory at the cost of precision; quantised V also needs flash attention.',
+  'settings.managed.offload': 'GPU layers (--gpu-layers)',
+  'settings.managed.offloadAuto': 'Automatic — as many layers as fit',
+  'settings.managed.offloadAll': 'All layers on the GPU',
+  'settings.managed.offloadOff': 'CPU only — no GPU layers',
+  'settings.managed.offloadHint':
+    'Automatic is the server\u2019s own default: it places as many layers in the device memory as fit. \u201cAll\u201d forces every layer onto the GPU, \u201cCPU only\u201d computes everything on the CPU. A change applies from the next start.',
+  'settings.managed.offloadReport': 'On {{device}}: {{layers}} of {{total}} layers on the GPU',
+  'settings.managed.offloadCpu': '{{total}} layers are computed on the CPU — no layer on the GPU',
   'settings.managed.tooLarge':
     'The weights ({{model}}) are larger than the free memory the reported devices have ({{free}}) — the model does not fit on the GPU in full and will be computed on the CPU, wholly or partly. A more strongly quantised file is more likely to fit.',
   'settings.managed.ctx': 'Context window (-c)',
@@ -933,6 +963,11 @@ const zh: Record<keyof typeof de, string> = {
   'settings.managed.downloading': '下载',
   'settings.managed.extracting': '正在解压……',
   'settings.managed.preparing': '正在准备……',
+  'settings.managed.distribution': 'llama.cpp 来源',
+  'settings.managed.distLlamacpp': 'llama.cpp（官方）',
+  'settings.managed.distPrism': 'PrismML（三值）',
+  'settings.managed.distLlamacppHint': '官方发行版——llama.cpp 能直接加载的模型都选它。',
+  'settings.managed.distPrismHint': 'PrismML 的分支内置三值内核：只有它才能运行 Bonsai 2 这类三值模型。',
   'settings.managed.accelerator': '构建版本',
   'settings.managed.accelCpu': 'CPU（随处可用）',
   'settings.managed.accelVulkan': 'Vulkan（GPU）',
@@ -980,6 +1015,14 @@ const zh: Record<keyof typeof de, string> = {
   'settings.managed.cacheF32': 'f32（最大）',
   'settings.managed.cacheHint':
     '量化 KV 缓存可节省内存，但会损失精度；量化 V 还需要开启 Flash Attention。',
+  'settings.managed.offload': 'GPU 层（--gpu-layers）',
+  'settings.managed.offloadAuto': '自动——尽可能多地放入显存',
+  'settings.managed.offloadAll': '全部层放入 GPU',
+  'settings.managed.offloadOff': '仅 CPU——不使用 GPU',
+  'settings.managed.offloadHint':
+    '自动是 llama.cpp 自身的默认值：尽可能多地把层放入设备内存。“全部”强制所有层放入 GPU，“仅 CPU”则完全在 CPU 上计算。修改从下次启动起生效。',
+  'settings.managed.offloadReport': '在 {{device}} 上：{{layers}}/{{total}} 层运行于 GPU',
+  'settings.managed.offloadCpu': '{{total}} 层在 CPU 上计算——没有层运行于 GPU',
   'settings.managed.tooLarge':
     '权重（{{model}}）大于所识别设备的可用显存（{{free}}）——模型无法完整放入 GPU，将全部或部分在 CPU 上计算。量化程度更高的文件更有可能放得下。',
   'settings.managed.ctx': '上下文窗口（-c）',

@@ -34,7 +34,7 @@ func TestAssetNameCoversEveryPublishedFamily(t *testing.T) {
 		{"windows", "arm64", AcceleratorROCm, ""}, // no ROCm for arm64 Windows
 	}
 	for _, tc := range cases {
-		got, err := AssetName("b11535", tc.goos, tc.goarch, tc.accel)
+		got, err := LlamaCPP.AssetName("b11535", tc.goos, tc.goarch, tc.accel)
 		if tc.want == "" {
 			if err == nil {
 				t.Errorf("%s/%s/%s = %q, want a refusal", tc.goos, tc.goarch, tc.accel, got)
@@ -76,7 +76,7 @@ func TestLatestTakesTheNewestSuiteOfTheFamily(t *testing.T) {
 		SuiteCheck: func(string, string) (bool, string) { return true, "" },
 	}
 
-	cuda, err := inst.Latest(context.Background(), "linux", "amd64", AcceleratorCUDA)
+	cuda, err := inst.Latest(context.Background(), LlamaCPP, "linux", "amd64", AcceleratorCUDA)
 	if err != nil {
 		t.Fatalf("cuda: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestLatestTakesTheNewestSuiteOfTheFamily(t *testing.T) {
 		t.Errorf("cuda dir = %q", cuda.Dir())
 	}
 
-	rocm, err := inst.Latest(context.Background(), "linux", "amd64", AcceleratorROCm)
+	rocm, err := inst.Latest(context.Background(), LlamaCPP, "linux", "amd64", AcceleratorROCm)
 	if err != nil {
 		t.Fatalf("rocm: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestLatestTakesTheNewestSuiteOfTheFamily(t *testing.T) {
 
 	// The plain CPU build must not be picked up by a GPU family, and vice versa:
 	// the two names differ by one segment.
-	cpu, err := inst.Latest(context.Background(), "linux", "amd64", AcceleratorCPU)
+	cpu, err := inst.Latest(context.Background(), LlamaCPP, "linux", "amd64", AcceleratorCPU)
 	if err != nil {
 		t.Fatalf("cpu: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestLatestRefusesAFamilyThisPlatformDoesNotPublish(t *testing.T) {
 	}))
 	defer srv.Close()
 	inst := &Installer{Dir: t.TempDir(), APIBase: srv.URL, Client: srv.Client()}
-	if _, err := inst.Latest(context.Background(), "darwin", "arm64", AcceleratorROCm); err == nil {
+	if _, err := inst.Latest(context.Background(), LlamaCPP, "darwin", "arm64", AcceleratorROCm); err == nil {
 		t.Fatal("ROCm on macOS must be refused rather than answered with something else")
 	}
 }
@@ -140,12 +140,12 @@ func TestPublishedAcceleratorsPerPlatform(t *testing.T) {
 	}
 	for platform, want := range cases {
 		parts := strings.Split(platform, "/")
-		got := PublishedAccelerators(parts[0], parts[1])
+		got := LlamaCPP.PublishedAccelerators(parts[0], parts[1])
 		if strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Errorf("%s = %v, want %v", platform, got, want)
 		}
 	}
-	if got := PublishedAccelerators("freebsd", "amd64"); len(got) != 0 {
+	if got := LlamaCPP.PublishedAccelerators("freebsd", "amd64"); len(got) != 0 {
 		t.Errorf("freebsd = %v, want nothing offered", got)
 	}
 }

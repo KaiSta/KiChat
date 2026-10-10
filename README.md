@@ -129,7 +129,9 @@ instance caches its device probe per binary path — and start the model. The pa
 reads `ROCm0: AMD Radeon RX 7900 XT (20464 MiB, 20364 MiB free)` instead of a CPU
 fallback. Measured here: the same 9.8 GB Q8_0 model answered at **65 tok/s on the ROCm
 build against 4.8 tok/s on the CPU build**, with `offloaded 34/34 layers to GPU` in the
-log.
+log. Settings → Backends shows that same reading for a running managed model — `On
+ROCm0: 34 of 34 layers on the GPU` — beside a GPU-layers row that chooses between
+automatic placement, every layer, or CPU only.
 
 **Where KiChat looks for the libraries.** AMD's packages unpack into
 `/opt/rocm-<version>/lib` and register nothing with the loader — `ldconfig -p` has no
@@ -189,6 +191,29 @@ before the download starts, and told that the driver is what is missing.
 refresh arrow in Settings → Backends, then start the model: the panel reads
 `CUDA0: NVIDIA GeForce …`. A build that reports no device while its libraries do
 resolve is one whose driver is too old for it.
+
+## Ternary models (PrismML's fork)
+
+A ternary GGUF — `PQ2_0`, `PTQ1_0` — is a GGML type mainline llama.cpp refuses to load,
+so it needs [PrismML's fork](https://github.com/PrismML-Eng/llama.cpp), which KiChat
+offers as the `llama.cpp source` in Settings → Backends. Everything else works as with
+the official releases: pick a build family, download it, pick a GGUF.
+
+**The fork's kernels are compiled into its GPU backends**, so offloading a ternary model
+genuinely accelerates it rather than just moving the weights. Measured here on
+`Ternary-Bonsai-2-27B-PQ2_0.gguf` (6.71 GB) with everything offloaded, on an RX 7900 XT:
+
+| Launcher | Reading in the panel | Ready | Generation | Free memory while loaded |
+| --- | --- | --- | --- | --- |
+| fork, Vulkan | 65 of 65 layers on `Vulkan0` | 4 s | 53.3 tok/s | 11,087 MiB |
+| fork, ROCm 7.2 | 65 of 65 layers on `ROCm0` | 2 s | 57.0 tok/s | 12,580 MiB |
+| fork, Vulkan with `--gpu-layers 0` | no layer on the GPU | 3 s | 4.6 tok/s | 18,349 MiB |
+
+The GPU-layers row is what produces those readings: *Automatic* is llama.cpp's own
+placement, *All layers* forces every one onto the card, and *CPU only* is the last row of
+the table — useful as the control that shows what the offload is worth. The sentence next
+to the state is the server's own answer, read from its log, and it only claims a GPU when
+the server named a device.
 
 ## Where data lives
 

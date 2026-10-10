@@ -17,7 +17,9 @@ import (
 
 // The comparison an update marker rests on, at the cases a tag can take: a newer
 // build, the same one, an older one, and the digit boundary where a textual
-// comparison would offer an update to a user who is already past it.
+// comparison would offer an update to a user who is already past it. The shape of a
+// tag belongs to the source it comes from, which is why the comparison is asked of
+// one — see internal/runtime/distribution_test.go for the fork's own cases.
 func TestNewerBuildComparesTheNumberNotTheText(t *testing.T) {
 	cases := []struct {
 		latest, installed string
@@ -36,27 +38,119 @@ func TestNewerBuildComparesTheNumberNotTheText(t *testing.T) {
 		{"v0.6.0", "v0.6.0", false},
 	}
 	for _, tc := range cases {
-		if got := newerBuild(tc.latest, tc.installed); got != tc.want {
-			t.Errorf("newerBuild(%q, %q) = %v, want %v", tc.latest, tc.installed, got, tc.want)
+		if got := rt.LlamaCPP.NewerBuild(tc.latest, tc.installed); got != tc.want {
+			t.Errorf("NewerBuild(%q, %q) = %v, want %v", tc.latest, tc.installed, got, tc.want)
 		}
 	}
 }
 
 // An installed build is named by its directory, and the directory carries the
-// family and the suite as well as the tag (`b11535`, `b11535-vulkan`,
-// `b11535-vulkan-10.0`). The comparison is against the build, so the extras have to
-// come off — otherwise every update would look like a different build twice over.
+// family and the suite as well as the tag (`b11541`, `b11541-vulkan`,
+// `b11541-vulkan-10.0`, and for the fork `prism-b10770-6684606-cuda-13.3`). The
+// comparison is against the build, so the extras have to come off — otherwise every
+// update would look like a different build twice over.
 func TestBuildTagOfStripsTheFamilyAndSuite(t *testing.T) {
-	cases := map[string]string{
-		"b11535":             "b11535",
-		"b11535-vulkan":      "b11535",
-		"b11535-vulkan-10.0": "b11535",
-		"":                   "",
+	cases := []struct {
+		dist rt.Distribution
+		dir  string
+		want string
+	}{
+		{rt.LlamaCPP, "b11541", "b11541"},
+		{rt.LlamaCPP, "b11541-vulkan", "b11541"},
+		{rt.LlamaCPP, "b11541-vulkan-10.0", "b11541"},
+		{rt.LlamaCPP, "", ""},
+		// The fork's tag carries its own commit, and a directory of a source that
+		// was not asked about reads as no tag at all.
+		{rt.PrismML, "prism-b10770-6684606-cuda-13.3", "prism-b10770-6684606"},
+		{rt.LlamaCPP, "prism-b10770-6684606-cpu", ""},
+		{rt.PrismML, "b11541-cpu", ""},
 	}
-	for dir, want := range cases {
-		if got := buildTagOf(dir); got != want {
-			t.Errorf("buildTagOf(%q) = %q, want %q", dir, got, want)
+	for _, tc := range cases {
+		if got := tc.dist.TagOfDir(tc.dir); got != tc.want {
+			t.Errorf("%s.TagOfDir(%q) = %q, want %q", tc.dist.ID, tc.dir, got, tc.want)
 		}
+	}
+}
+
+// The whole path for the fork, through the real bound method: a fork build on disk,
+// a newer fork release published, and the two tags read with the fork's own shape.
+// This is the case that used to lie — with upstream's tag shape applied to a
+// `prism-b10770-6684606-cpu` directory the name reduced to `prism`, which compared as
+// "different" against every published tag, so the installed build was offered as an
+// update over itself on every poll.
+func TestCheckRuntimeUpdateReadsTheSelectedSource(t *testing.T) {
+	dir := t.TempDir()
+	installFakeBuild(t, dir, "prism-b10770-6684606-cpu")
+
+	srv := serveReleases(t, rt.PrismML, "prism-b10771-abcdef0", 17800388)
+	defer srv.Close()
+
+	a := newUpdateTestApp(t, dir, srv)
+	a.settings.Runtime.Distribution = config.DistPrism
+
+	reading, err := a.CheckLlamaRuntimeUpdate()
+	if err != nil {
+		t.Fatalf("CheckLlamaRuntimeUpdate: %v", err)
+	}
+	if reading.Distribution != config.DistPrism {
+		t.Errorf("reading is about %q, want the source the settings name", reading.Distribution)
+	}
+	if reading.Installed != "prism-b10770-6684606" || reading.Latest != "prism-b10771-abcdef0" {
+		t.Errorf("reading = %+v, want the installed fork build against the published one", reading)
+	}
+	if !reading.Available {
+		t.Error("a newer fork build was not offered to a fork installation")
+	}
+
+	// The same reading for the *installed* build has to be the quiet one: that is
+	// the assertion the old helper failed.
+	srv2 := serveReleases(t, rt.PrismML, "prism-b10770-6684606", 17800388)
+	defer srv2.Close()
+	a2 := newUpdateTestApp(t, dir, srv2)
+	a2.settings.Runtime.Distribution = config.DistPrism
+	same, err := a2.CheckLlamaRuntimeUpdate()
+	if err != nil {
+		t.Fatalf("CheckLlamaRuntimeUpdate: %v", err)
+	}
+	if same.Available {
+		t.Errorf("the installed fork build was offered as an update over itself: %+v", same)
+	}
+	if same.Installed != "prism-b10770-6684606" {
+		t.Errorf("installed = %q, want the tag the directory was made from", same.Installed)
+	}
+}
+
+// A fork build on disk is not something an upstream lookup may compare against: the
+// installed side of that comparison has to come out empty, so the marker is quiet
+// rather than offering upstream's newest over a build it would replace with a
+// different llama.cpp.
+func TestAForkBuildOnDiskIsNotAnUpstreamInstallation(t *testing.T) {
+	dir := t.TempDir()
+	installFakeBuild(t, dir, "prism-b10770-6684606-cpu")
+
+	srv := serveReleases(t, rt.LlamaCPP, "b11541", 17829692)
+	defer srv.Close()
+
+	a := newUpdateTestApp(t, dir, srv)
+	reading, err := a.CheckLlamaRuntimeUpdate()
+	if err != nil {
+		t.Fatalf("CheckLlamaRuntimeUpdate: %v", err)
+	}
+	if reading.Installed != "" {
+		t.Errorf("installed = %q, want nothing: the build on disk is not upstream's", reading.Installed)
+	}
+	if reading.Available {
+		t.Errorf("an update was offered over a build of the other source: %+v", reading)
+	}
+
+	// And the status the panel reads says the same: no upstream launcher is
+	// installed, so the card offers the download rather than a start button.
+	status, err := a.GetRuntimeStatus()
+	if err != nil {
+		t.Fatalf("GetRuntimeStatus: %v", err)
+	}
+	if status.Installed {
+		t.Errorf("status reports an installed launcher although only a fork build is on disk: %+v", status)
 	}
 }
 
@@ -67,7 +161,7 @@ func TestCheckRuntimeUpdateFindsANewerBuild(t *testing.T) {
 	dir := t.TempDir()
 	installFakeBuild(t, dir, "b11535-cpu")
 
-	srv := serveReleases(t, "b11541", 17829692)
+	srv := serveReleases(t, rt.LlamaCPP, "b11541", 17829692)
 	defer srv.Close()
 
 	a := newUpdateTestApp(t, dir, srv)
@@ -158,7 +252,7 @@ func TestCheckRuntimeUpdateSeparatesFailureFromBeingCurrent(t *testing.T) {
 // out of the way rather than offering to overwrite the user's own build.
 func TestCheckRuntimeUpdateIgnoresACustomBinary(t *testing.T) {
 	dir := t.TempDir()
-	srv := serveReleases(t, "b11541", 17829692)
+	srv := serveReleases(t, rt.LlamaCPP, "b11541", 17829692)
 	defer srv.Close()
 
 	a := newUpdateTestApp(t, dir, srv)
@@ -208,12 +302,12 @@ func installFakeBuild(t *testing.T, runtimeDir, buildDir string) {
 	}
 }
 
-// serveReleases answers like GitHub's release list: one release, carrying the CPU
-// build for whatever platform this test runs on, so the fixture does not assume
-// Linux.
-func serveReleases(t *testing.T, tag string, size int64) *httptest.Server {
+// serveReleases answers like GitHub's release list: one release of one source,
+// carrying the CPU build for whatever platform this test runs on, so the fixture does
+// not assume Linux.
+func serveReleases(t *testing.T, dist rt.Distribution, tag string, size int64) *httptest.Server {
 	t.Helper()
-	name, err := rt.AssetName(tag, goruntime.GOOS, goruntime.GOARCH, rt.AcceleratorCPU)
+	name, err := dist.AssetName(tag, goruntime.GOOS, goruntime.GOARCH, rt.AcceleratorCPU)
 	if err != nil {
 		t.Fatalf("AssetName: %v", err)
 	}

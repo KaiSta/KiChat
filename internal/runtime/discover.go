@@ -123,6 +123,27 @@ func lmStudioDownloadsFolder(home string) string {
 	return ""
 }
 
+// isProjector reports whether a GGUF is a model projector rather than a model.
+//
+// `mmproj` is looked for as a *token* and not as a prefix, because publishers spell it
+// two ways and only one of them starts the file name: LM Studio's own downloads are
+// `mmproj-<model>-F16.gguf`, while the same file on Hugging Face carries the model's
+// name first — the ternary model this app added a second llama.cpp for ships
+// `Ternary-Bonsai-2-27B-mmproj-BF16.gguf`, which a prefix test offered as a model that
+// llama.cpp then refuses to load ("the current context does not support logits
+// computation"). Measured on that folder, on the user's own download.
+func isProjector(name string) bool {
+	lower := strings.ToLower(name)
+	for _, token := range strings.FieldsFunc(lower, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	}) {
+		if token == "mmproj" {
+			return true
+		}
+	}
+	return false
+}
+
 // ScanModelFolder lists the GGUF files under dir.
 //
 // Model projectors are skipped: LM Studio keeps a vision model's `mmproj` file
@@ -180,7 +201,7 @@ func ScanModelFolder(dir string) (ModelFolderScan, error) {
 			if !strings.HasSuffix(strings.ToLower(name), ".gguf") {
 				continue
 			}
-			if strings.HasPrefix(strings.ToLower(name), "mmproj") {
+			if isProjector(name) {
 				continue
 			}
 			fileInfo, err := entry.Info()

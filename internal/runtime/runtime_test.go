@@ -39,7 +39,7 @@ func TestAssetNameMatchesThePublishedNames(t *testing.T) {
 		{"b11528", "windows", "amd64", AcceleratorVulkan, "llama-b11528-bin-win-vulkan-x64.zip"},
 	}
 	for _, tc := range cases {
-		got, err := AssetName(tc.tag, tc.goos, tc.goarch, tc.accel)
+		got, err := LlamaCPP.AssetName(tc.tag, tc.goos, tc.goarch, tc.accel)
 		if err != nil {
 			t.Errorf("%s/%s/%s: %v", tc.goos, tc.goarch, tc.accel, err)
 			continue
@@ -60,7 +60,7 @@ func TestAssetNameRefusesWhatIsNotPublished(t *testing.T) {
 		{"windows", "386", AcceleratorCPU},
 		{"freebsd", "amd64", AcceleratorCPU},
 	} {
-		if got, err := AssetName("b11528", tc.goos, tc.goarch, tc.accel); err == nil {
+		if got, err := LlamaCPP.AssetName("b11528", tc.goos, tc.goarch, tc.accel); err == nil {
 			t.Errorf("%s/%s/%s = %q, want a refusal", tc.goos, tc.goarch, tc.accel, got)
 		}
 	}
@@ -87,7 +87,7 @@ func TestLatestSkipsReleasesWithoutOurBuild(t *testing.T) {
 	defer srv.Close()
 
 	inst := &Installer{Dir: t.TempDir(), APIBase: srv.URL, Client: srv.Client()}
-	asset, err := inst.Latest(context.Background(), "linux", "amd64", AcceleratorCPU)
+	asset, err := inst.Latest(context.Background(), LlamaCPP, "linux", "amd64", AcceleratorCPU)
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestLatestReportsAMissingBuild(t *testing.T) {
 	defer srv.Close()
 
 	inst := &Installer{Dir: t.TempDir(), APIBase: srv.URL, Client: srv.Client()}
-	if _, err := inst.Latest(context.Background(), "linux", "riscv64", AcceleratorCPU); err == nil {
+	if _, err := inst.Latest(context.Background(), LlamaCPP, "linux", "riscv64", AcceleratorCPU); err == nil {
 		t.Error("want an error for a platform with no build")
 	}
 }
@@ -221,7 +221,7 @@ func TestInstallUnpacksTheWholeArchive(t *testing.T) {
 		t.Errorf("the downloaded archive was left behind: %v", err)
 	}
 	// Find reports the build that was just unpacked.
-	if tag, found := inst.Find(); tag != "b1" || found != binary {
+	if tag, found := inst.Find(LlamaCPP); tag != "b1" || found != binary {
 		t.Errorf("Find = %q, %q; want the installed build", tag, found)
 	}
 }
@@ -247,7 +247,7 @@ func TestInstallRefusesAWrongDigest(t *testing.T) {
 	if _, err := inst.Install(context.Background(), asset); err == nil {
 		t.Fatal("a wrong digest was accepted")
 	}
-	if tag, _ := inst.Find(); tag != "" {
+	if tag, _ := inst.Find(LlamaCPP); tag != "" {
 		t.Errorf("a failed install left build %q installed", tag)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "b1")); !os.IsNotExist(err) {

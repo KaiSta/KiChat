@@ -226,6 +226,21 @@ type ManagedStatus struct {
 	// model's memory use this app can know without loading it — the weights have to
 	// fit before the KV cache is even considered.
 	ModelBytes int64 `json:"modelBytes"`
+	// OffloadLayers and OffloadTotal are the numbers the running server printed
+	// about the model's layers, "34/34" — the answer to "is this model actually on
+	// the GPU?" as opposed to the guess the free-memory warning makes. Both are 0
+	// when the server said nothing, which is what a launcher started without the
+	// trace level does: an empty reading is "not reported", never "nothing
+	// offloaded".
+	//
+	// OffloadDevice is the card those layers are on, and it is empty whenever they
+	// are not on one — including the CPU-only build, which reports every layer as
+	// offloaded and names no device. So the panel's rule is this single field: a
+	// name means the GPU, no name means the CPU. The panel phrases the sentence —
+	// numbers and an id cross the bridge, never a translated string.
+	OffloadLayers int    `json:"offloadLayers"`
+	OffloadTotal  int    `json:"offloadTotal"`
+	OffloadDevice string `json:"offloadDevice,omitempty"`
 }
 
 // RuntimeStatus is everything the UI needs about the llama.cpp KiChat would run:
@@ -273,10 +288,17 @@ type RuntimeStatus struct {
 	Done  int64  `json:"done"`
 	Total int64  `json:"total"`
 	Error string `json:"error,omitempty"`
-	// Variants are the build families this platform actually publishes, in the
-	// order to offer them. The picker is filled from here rather than from a list
-	// of its own, so it cannot offer a build that does not exist — ROCm and SYCL
-	// are x64 only, and macOS publishes a single Metal-enabled build per arch.
+	// Distribution is the release source the app installs from, and Distributions
+	// the ones it can offer: upstream llama.cpp, and PrismML's fork, which is the
+	// build that loads a ternary model. Distributions is never empty — the picker
+	// would have nothing to offer.
+	Distribution  string   `json:"distribution"`
+	Distributions []string `json:"distributions"`
+	// Variants are the build families the selected source actually publishes for
+	// this platform, in the order to offer them. The picker is filled from here
+	// rather than from a list of its own, so it cannot offer a build that does not
+	// exist — ROCm and SYCL are x64 only, macOS publishes a single Metal-enabled
+	// build per arch, and the fork publishes neither an OpenVINO nor an Adreno one.
 	Variants []string `json:"variants"`
 	// FlashAttentionModes and CacheTypes are the values a managed model may carry
 	// for `--flash-attn` and `--cache-type-k/-v`. The pickers are filled from here
@@ -284,6 +306,11 @@ type RuntimeStatus struct {
 	// offered.
 	FlashAttentionModes []string `json:"flashAttentionModes"`
 	CacheTypes          []string `json:"cacheTypes"`
+	// OffloadModes are the values a managed model may carry for `--gpu-layers`,
+	// filled from here for the same reason: the picker offers what this app can
+	// pass. The words are the app's own — llama.cpp takes a count, `auto` or `all`,
+	// so "off" is how KiChat spells `--gpu-layers 0`.
+	OffloadModes []string `json:"offloadModes"`
 	// Update is the last look at llama.cpp's releases, if one has been made. It is
 	// reported rather than asked for here: see RuntimeUpdate.
 	Update RuntimeUpdate `json:"update"`
@@ -316,6 +343,10 @@ type RuntimeUpdate struct {
 	// Family is the build family the lookup was made for, so a cached reading is
 	// not shown as an answer about a family the user has since switched to.
 	Family string `json:"family,omitempty"`
+	// Distribution is the source the lookup was made for. A reading taken from
+	// upstream's releases says nothing about the newest fork build, so a switch of
+	// the source has to discard it the same way a family switch does.
+	Distribution string `json:"distribution,omitempty"`
 	// Installed and Latest are the build tags being compared (`b11535`, `b11541`) —
 	// the two halves of the "b11535 → b11541" the panel prints. Installed is empty
 	// when there is no managed build to compare against.
@@ -359,21 +390,22 @@ func (a *App) CheckLlamaRuntimeUpdate() (RuntimeUpdate, error) {
 		return RuntimeUpdate{}, nil
 	}
 
-	// The family the app installs for: a draft the picker has not saved is not a
-	// build that is on disk to compare against. installAccelerator falls back for an
-	// empty or unknown value.
+	// The source and family the app installs for: a draft the picker has not saved
+	// is not a build that is on disk to compare against. Both fall back for an empty
+	// or unknown value.
+	dist := distributionFor(settings)
 	family := installAccelerator("", settings.Runtime.Accelerator)
-	installed := a.installedBuildTag()
+	installed := a.installedBuildTag(dist)
 
 	ctx, cancel := context.WithTimeout(context.Background(), updateLookupTimeout)
 	defer cancel()
-	asset, err := a.installer.Latest(ctx, goruntime.GOOS, goruntime.GOARCH, family)
+	asset, err := a.installer.Latest(ctx, dist, goruntime.GOOS, goruntime.GOARCH, family)
 	if err != nil {
-		reading := RuntimeUpdate{Checked: true, Family: family, Installed: installed, Error: err.Error()}
+		reading := RuntimeUpdate{Checked: true, Family: family, Distribution: dist.ID, Installed: installed, Error: err.Error()}
 		a.setUpdate(reading)
 		return reading, nil
 	}
-	reading := updateReadingOf(asset, installed)
+	reading := updateReadingOf(dist, asset, installed)
 	a.setUpdate(reading)
 	return reading, nil
 }
@@ -382,73 +414,35 @@ func (a *App) CheckLlamaRuntimeUpdate() (RuntimeUpdate, error) {
 // download would cost, and whether the published build is newer than the one on disk.
 // The install path calls it too, where the two tags are equal by construction — which
 // is what makes an update marker disappear the moment the update is installed.
-func updateReadingOf(asset rt.Asset, installed string) RuntimeUpdate {
+//
+// The comparison belongs to the source: both sides are that source's tags, read with
+// its own tag shape. Reading a fork tag with upstream's shape made an installed fork
+// build look older than itself, because the name reduced to the prefix `prism` — an
+// update offered on every poll, for the build already on disk.
+func updateReadingOf(dist rt.Distribution, asset rt.Asset, installed string) RuntimeUpdate {
 	size := asset.Size
 	if asset.Companion != nil {
 		size += asset.Companion.Size
 	}
 	return RuntimeUpdate{
-		Checked:   true,
-		Family:    asset.Variant,
-		Installed: installed,
-		Latest:    asset.Tag,
-		Size:      size,
-		Available: newerBuild(asset.Tag, installed),
+		Checked:      true,
+		Family:       asset.Variant,
+		Distribution: dist.ID,
+		Installed:    installed,
+		Latest:       asset.Tag,
+		Size:         size,
+		Available:    dist.NewerBuild(asset.Tag, installed),
 	}
 }
 
 // installedBuildTag is the build tag of the launcher on disk, which is the side of
 // the comparison the panel names as installed. It is the same directory
-// GetRuntimeStatus reports as the installed tag.
-func (a *App) installedBuildTag() string {
-	tag, _ := a.installer.Find()
-	return buildTagOf(tag)
-}
-
-// buildTagOf reduces an installation directory name to the build it belongs to.
-// rt.Asset.Dir names directories `b11535`, `b11535-vulkan` and
-// `b11535-vulkan-10.0`, and a build tag carries no `-` of its own.
-func buildTagOf(dir string) string {
-	if i := strings.IndexByte(dir, '-'); i >= 0 {
-		return dir[:i]
-	}
-	return dir
-}
-
-// newerBuild reports whether the published tag is newer than the installed one.
-//
-// The two are compared as numbers and not as text: llama.cpp's tags are `b11534`
-// today, and `b1000` sorts below `b999` as text the day the counter passes a digit
-// boundary — an update offered to a user who is already past it. A tag that carries
-// no number falls back to "different means newer": the panel prints both tags, so the
-// user sees what they would get, and refusing an update over an unusual tag would
-// hide the real ones.
-func newerBuild(latest, installed string) bool {
-	if installed == "" {
-		return false
-	}
-	l, lok := buildNumber(latest)
-	i, iok := buildNumber(installed)
-	if lok && iok {
-		return l > i
-	}
-	return latest != installed
-}
-
-// buildNumber reads the number a build tag carries (`b11541` becomes 11541).
-func buildNumber(tag string) (int, bool) {
-	digits := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(tag), "b"), "B")
-	if digits == "" {
-		return 0, false
-	}
-	n := 0
-	for _, r := range digits {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n, true
+// GetRuntimeStatus reports as the installed tag, read with the shape of the source it
+// was asked about — a directory of the other source reduces to no tag at all, which
+// is what keeps a fork build from being compared against upstream's releases.
+func (a *App) installedBuildTag(dist rt.Distribution) string {
+	tag, _ := a.installer.Find(dist)
+	return dist.TagOfDir(tag)
 }
 
 // InstalledBuild is one llama.cpp build on disk, as the panel reads it.
@@ -619,18 +613,25 @@ func buildDirOf(root, binary string) string {
 // error boundary with "Cannot read properties of null (reading 'find')". That is
 // the same trap `chat.UnresolvedVars` set. The slices here are never nil.
 func runtimeStatusBase(settings config.Settings, goos, goarch string) RuntimeStatus {
+	dist := distributionFor(settings)
 	status := RuntimeStatus{
 		Accelerator:         settings.Runtime.Accelerator,
+		Distribution:        dist.ID,
+		Distributions:       distributionIDs(),
 		ReadySeconds:        settings.Runtime.ReadySeconds,
 		CustomBinary:        settings.Runtime.BinaryPath,
 		Variants:            []string{},
 		FlashAttentionModes: config.FlashAttentionModes(),
 		CacheTypes:          config.CacheTypes(),
+		OffloadModes:        config.OffloadModes(),
 		Devices:             []string{},
 		DevicesMissingLibs:  []string{},
 		Models:              []ManagedStatus{},
 	}
-	if variants := rt.PublishedAccelerators(goos, goarch); len(variants) > 0 {
+	// The families of the selected source, not of both: the fork publishes five of
+	// upstream's six, and a picker offering OpenVINO under a PrismML label would be
+	// offering a download the source does not have.
+	if variants := dist.PublishedAccelerators(goos, goarch); len(variants) > 0 {
 		status.Variants = variants
 	}
 	for _, id := range sortedRuntimeIDs(settings) {
@@ -641,6 +642,33 @@ func runtimeStatusBase(settings config.Settings, goos, goarch string) RuntimeSta
 		})
 	}
 	return status
+}
+
+// distributionFor resolves the release source the settings name. An unrecognised
+// value is upstream, which is what config's own repair does with it; this is the
+// second line of defence for a blob that never went through that.
+func distributionFor(settings config.Settings) rt.Distribution {
+	return resolvedDistribution(settings.Runtime.Distribution)
+}
+
+// resolvedDistribution turns a stored or picked source id into a source, falling
+// back to upstream for anything this app does not know.
+func resolvedDistribution(id string) rt.Distribution {
+	if dist, ok := rt.DistributionFor(id); ok {
+		return dist
+	}
+	return rt.DefaultDistribution()
+}
+
+// distributionIDs is the sources the panel offers, never empty: a picker with no
+// options would leave the stored source unchangeable.
+func distributionIDs() []string {
+	dists := rt.Distributions()
+	ids := make([]string, 0, len(dists))
+	for _, d := range dists {
+		ids = append(ids, d.ID)
+	}
+	return ids
 }
 
 // deviceTexts is the device entries as the panel shows them: the line the server
@@ -689,7 +717,11 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 	}
 	settings := a.Settings()
 	status := runtimeStatusBase(settings, goruntime.GOOS, goruntime.GOARCH)
-	if tag, binary := a.installer.Find(); tag != "" {
+	// Only a build of the selected source counts as installed. With a fork build
+	// beside an upstream one, reporting the other source's build here would name a
+	// launcher the app will refuse to start — the panel would say "available" next
+	// to a model that cannot run.
+	if tag, binary := a.installer.Find(distributionFor(settings)); tag != "" {
 		status.Installed, status.Tag, status.Binary = true, tag, binary
 	}
 	if status.CustomBinary != "" {
@@ -756,6 +788,19 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 		status.Models[i].URL = st.URL
 		status.Models[i].Error = st.Error
 		status.Models[i].Log = st.Log
+		// Only a reading that exists is passed on, and the device only when layers
+		// really are on it — both decided by the runtime, not by the panel. A CPU-only
+		// build reports every layer offloaded while naming no device at all, and a
+		// `--gpu-layers 0` run names one while reporting none on it, so sending the id
+		// regardless would put the decision in the UI, one comparison away from
+		// claiming an accelerator that is not there.
+		if st.Offload.Reported() {
+			status.Models[i].OffloadLayers = st.Offload.Layers
+			status.Models[i].OffloadTotal = st.Offload.Total
+			if st.Offload.OnDevice() {
+				status.Models[i].OffloadDevice = st.Offload.Device
+			}
+		}
 	}
 	return status, nil
 }
@@ -768,17 +813,18 @@ func (a *App) existingServer(backendID string) *rt.Server {
 	return a.servers[backendID]
 }
 
-// InstallLlamaRuntime fetches llama-server for one build family. It returns as
-// soon as the download is under way — the archive is tens to hundreds of megabytes,
-// and a bound method that blocked for minutes would freeze the window that called
-// it. GetRuntimeStatus reports the progress and the outcome.
+// InstallLlamaRuntime fetches llama-server for one build family of one release
+// source. It returns as soon as the download is under way — the archive is tens to
+// hundreds of megabytes, and a bound method that blocked for minutes would freeze the
+// window that called it. GetRuntimeStatus reports the progress and the outcome.
 //
-// The family is a parameter rather than read from the stored settings because the
-// picker above the button edits a draft that has not been saved yet. Reading the
-// stored value here made "pick Vulkan, press Download" fetch the previous build,
-// which is exactly the bug where a user picks a GPU build and the model still runs
-// on the CPU.
-func (a *App) InstallLlamaRuntime(accelerator string) error {
+// Both are parameters rather than read from the stored settings because the pickers
+// above the button edit a draft that has not been saved yet. Reading the stored value
+// here made "pick Vulkan, press Download" fetch the previous build, which is exactly
+// the bug where a user picks a GPU build and the model still runs on the CPU; with a
+// source in the same draft it would be worse, because the wrong source's archive is a
+// different llama.cpp that cannot load the model the source was chosen for.
+func (a *App) InstallLlamaRuntime(accelerator, source string) error {
 	if err := a.ensure(); err != nil {
 		return err
 	}
@@ -789,7 +835,9 @@ func (a *App) InstallLlamaRuntime(accelerator string) error {
 	}
 	a.installBusy, a.installPhase, a.installErr, a.installDone, a.installTotal = true, "lookup", "", 0, 0
 	a.installMu.Unlock()
-	go a.installRuntime(installAccelerator(accelerator, a.Settings().Runtime.Accelerator))
+	stored := a.Settings()
+	dist := resolvedDistribution(installDistribution(source, stored.Runtime.Distribution))
+	go a.installRuntime(dist, installAccelerator(accelerator, stored.Runtime.Accelerator))
 	return nil
 }
 
@@ -804,9 +852,19 @@ func installAccelerator(picked, stored string) string {
 	return stored
 }
 
+// installDistribution picks the source to fetch from, by the same rule and for the
+// same reason as the family above.
+func installDistribution(picked, stored string) string {
+	picked = strings.TrimSpace(picked)
+	if config.IsDistribution(picked) {
+		return picked
+	}
+	return stored
+}
+
 // installRuntime is the download itself, on its own goroutine.
-func (a *App) installRuntime(accelerator string) {
-	asset, err := a.installer.Latest(a.ctx, goruntime.GOOS, goruntime.GOARCH, accelerator)
+func (a *App) installRuntime(dist rt.Distribution, accelerator string) {
+	asset, err := a.installer.Latest(a.ctx, dist, goruntime.GOOS, goruntime.GOARCH, accelerator)
 	if err != nil {
 		a.finishInstall("", err)
 		return
@@ -821,8 +879,11 @@ func (a *App) installRuntime(accelerator string) {
 	// through the settings rather than by picking whatever is newest. The folder
 	// name carries the family, since two families are two installations. The
 	// accelerator is written down with it: it now names the build that is really on
-	// disk, which is what the picker has to show.
+	// disk, which is what the picker has to show. So is the source, because the
+	// installed directory can only be found again by the source whose tag shape
+	// reads its name.
 	a.settingsMu.Lock()
+	a.settings.Runtime.Distribution = dist.ID
 	a.settings.Runtime.Tag = asset.Dir()
 	a.settings.Runtime.Accelerator = asset.Variant
 	updated := a.settings
@@ -831,11 +892,11 @@ func (a *App) installRuntime(accelerator string) {
 		a.finishInstall(asset.Dir(), fmt.Errorf("Installation speichern: %w", err))
 		return
 	}
-	runtime.LogInfof(a.ctx, "llama-server %s (%s) installiert: %s", asset.Dir(), asset.Variant, binary)
+	runtime.LogInfof(a.ctx, "%s llama-server %s (%s) installiert: %s", dist.ID, asset.Dir(), asset.Variant, binary)
 	// What was just fetched is the newest published build by definition, so the
 	// cached reading is replaced rather than left saying "update available" about
 	// the build that is now on disk and starting.
-	a.setUpdate(updateReadingOf(asset, buildTagOf(asset.Dir())))
+	a.setUpdate(updateReadingOf(dist, asset, dist.TagOfDir(asset.Dir())))
 	a.rebuildServices(updated)
 	a.finishInstall(asset.Dir(), nil)
 }

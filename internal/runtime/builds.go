@@ -58,13 +58,23 @@ func (i *Installer) Builds() []Build {
 		build := Build{Dir: name}
 		binary, info := i.launcherUnder(filepath.Join(i.Dir, name))
 		switch {
-		case binary != "":
-			build.InstalledAt = info.ModTime()
+		// The leftover is asked about first, because it is the leftover whatever is
+		// in it: a crash after the archive was flattened leaves a launcher in the
+		// staging directory, and reporting that as an ordinary build would hide the
+		// one directory nothing else will ever clean up. It also must not be offered
+		// to a start — Find skips it for the same reason.
 		case isInstallLeftover(name):
 			build.Incomplete = true
-			if info, err := entry.Info(); err == nil {
+			switch {
+			case info != nil:
 				build.InstalledAt = info.ModTime()
+			default:
+				if entryInfo, err := entry.Info(); err == nil {
+					build.InstalledAt = entryInfo.ModTime()
+				}
 			}
+		case binary != "":
+			build.InstalledAt = info.ModTime()
 		default:
 			continue
 		}

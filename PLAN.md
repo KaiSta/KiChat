@@ -22,7 +22,7 @@ numbers about what is being sent to the model.
 | Area | Delivered |
 | --- | --- |
 | Backends | LM Studio (`:1234`) and Ollama (`:11434`), plus DeepSeek and llama.cpp (`:9931`) shipped prepared-but-off, plus a generic OpenAI-compatible endpoint |
-| Local models | The llama.cpp entry can also be provided by KiChat itself: it fetches `llama-server` from llama.cpp's own releases — CPU, Vulkan, ROCm, CUDA, SYCL, OpenVINO or the Adreno build, whichever the platform publishes — starts a GGUF of the user's choosing on a free port, and stops it with the app, started again on every launch while the switch is on. The GGUF does not have to be downloaded again: the picker lists what is already in the folder LM Studio uses |
+| Local models | The llama.cpp entry can also be provided by KiChat itself: it fetches `llama-server` from a build source — upstream llama.cpp, or PrismML's fork when a ternary model is wanted — from the family that platform publishes (CPU, Vulkan, ROCm, CUDA, SYCL, OpenVINO or the Adreno build), starts a GGUF of the user's choosing on a free port, and stops it with the app, started again on every launch while the switch is on. The GGUF does not have to be downloaded again: the picker lists what is already in the folder LM Studio uses |
 | Context | Automatic and manual compaction, live context-window fullness meter, per-segment inspector |
 | Research | Brave Search (API key) with DuckDuckGo fallback, page scraping with SSRF guard, optional search-before-answer |
 | Files | Attachments, PDF/office text extraction, chunked with BM25 retrieval over the chunks |
@@ -189,7 +189,53 @@ the binary itself and shows what it answers (measured on `b11535`: `0.6.0-dev (b
 11535, commit f39148a95)`), read once per path and again after a save, because a status call is polled
 while a model loads and spawning a process per poll would be its own bug. The download is checked against the sha256 GitHub reports for it,
 and extraction happens into `<tag>.installing` and is renamed into place only when it is
-complete, so an interrupted install leaves nothing that looks installed.
+complete, so an interrupted install leaves nothing that looks installed — nothing a start
+would run, either: the name is refused outright wherever a build is looked for, because a
+crash late in an install leaves a launcher in the staging directory, and the tag inside
+that name is real enough to pass any check on the text alone.
+
+*The build comes from one of two sources, and the choice is part of every answer about
+it.* Upstream's `ggml-org/llama.cpp` releases are the default. PrismML's fork of the same
+project is the other, and it is not a preference: it adds the GGUF types a ternary model
+is stored in (`PQ2_0`, `PTQ1_0`), which mainline llama.cpp refuses to load — so a ternary
+model such as Bonsai 2 runs on that build and on nothing else. The two differ in ways that
+cannot be smoothed over: different repositories, different tag schemes (`prism-b10770-6684606`
+against `b11541`), different archive names (`linux-cuda-*` against `ubuntu-cuda-*`,
+`win-hip-radeon-x64` for ROCm on Windows), a family list one shorter (no OpenVINO, no
+Adreno, no arm64 CUDA on Linux) and, on Linux CUDA, no runtime bundle at all to attach —
+the fork publishes the companion asset for Windows only, while its backend asks for
+`libcudart.so.13`/`libcublas.so.13` just as upstream's does. So the source is one setting for the whole runtime — one
+runtime directory, one installed launcher, one update lookup — and it is a value in
+`internal/runtime` (`Distribution`) rather than a flag threaded through the installer.
+What follows from it is one rule, and it is the one a user would notice being broken: a
+managed start runs a launcher of the *selected* source or none at all. It never runs the
+other llama.cpp, because a user who selects the fork to load a ternary model would
+get a build that cannot load it, silently. The installs coexist in the runtime folder,
+so switching back and forth does not re-download.
+
+*Which family decides whether there is a GPU, and the app owns the rest of it.*
+Offloading itself is llama.cpp's: `-ngl/--gpu-layers` documents "an exact number, 'auto',
+or 'all' (default: auto)" with `--fit on`, so a GPU build places as many layers as fit
+without the app passing anything. What KiChat adds is the half that was missing. A
+managed model carries a mode — `auto` (nothing passed), `all`, or the app's own word
+`off`, which becomes `-ngl 0` because llama.cpp has none — and the *answer* to "did it
+really happen?" comes from the server itself: `using device Vulkan0 …` and
+`load_tensors: offloaded 65/65 layers to GPU`, read out of its log as the lines arrive.
+The device line is the load-bearing one, because the layer line alone means nothing: a
+CPU-only build reports every layer offloaded and names no device, so the app says a model
+is on the GPU only when the server named the card it went to.
+Those lines exist only at llama.cpp's trace level, so a managed start asks for it — but
+only for a launcher this app installed, because `-lv` is a flag an older binary a user
+points at may not know and an unknown argument stops a server rather than a report. A
+layer count, `-dev`, `-ts` and `-sm` stay where a flag for one model belongs: in its
+further arguments, which are passed last and therefore win.
+
+What the fork adds is that offloading a ternary model is worth doing at all: its ternary
+kernels are compiled into the GPU backends, not only into the CPU ones — measured
+`dequant_pq2_0`/`matmul_pq2_0_f32_fp32_data`/`block_pq2_0_packed16` and
+`mul_mat_vec_id_ptq1_0_q8_1_f32_subgroup` in `libggml-vulkan.so`, and hundreds of
+`pq2_0`/`ptq1_0` kernel names in `libggml-cuda.so` and `libggml-hip.so`. A backend that
+lacked them would move the layers to the GPU and keep doing the maths on the CPU.
 
 *A managed server's address cannot live in settings in advance.* The port is chosen at
 start, so when a server reports ready the address it settled on is written into the
@@ -481,10 +527,44 @@ wails build                    # when webkit2gtk-4.0 is available
   dropped and the platform defaults are offered instead — but a user who moved their
   models with a future LM Studio would have to point the picker at the folder once by
   hand.
-- **A vision model is offered without its projector.** The scanner deliberately skips
-  `mmproj-*` files because `llama-server` cannot load one as a model, so a multimodal GGUF
-  selected from the list starts as a text-only server: pairing the projector through
-  `--mmproj` is something the user has to add under *Further arguments* for now.
+- **A vision model is offered without its projector.** The scanner skips a model
+  projector — any GGUF whose file name carries `mmproj` as a token, whether it is
+  `mmproj-<model>-F16.gguf` as LM Studio names it or `<model>-mmproj-BF16.gguf` as it
+  comes off Hugging Face — because `llama-server` cannot load one as a model (it comes
+  back with "the current context does not support logits computation"); the token rule
+  replaced a prefix test that offered the Hugging Face spelling, which is what the
+  PrismML ternary model's own folder holds. A multimodal GGUF selected from the list
+  therefore starts as a text-only server, and pairing the projector through `--mmproj`
+  is something the user has to add under *Further arguments* for now.
+- **The fork is a third party's build, and the app installs it whole.** Selecting PrismML
+  as the source downloads binaries published by that project rather than by llama.cpp's
+  own maintainers, from a fork that tracks upstream but can lag it, restructure its
+  releases or stop. Nothing here checks those binaries beyond the sha256 GitHub reports
+  for the asset, and the version and device probes only describe the launcher to itself.
+  A user who does not want that can name their own `llama-server` instead, which overrides
+  both sources.
+- **A ternary model was measured, on the GPU, against the CPU.** `Ternary-Bonsai-2-27B-PQ2_0.gguf`
+  (6.71 GB, from the LM Studio folder's `prism-ml/` directory, whose `mmproj-BF16` projector
+  the scanner skips) loaded through the app's own supervisor on the fork's
+  `prism-b10770-6684606` builds, with everything offloaded and the trace level the app asks
+  for: **Vulkan** reported 65/65 layers on `Vulkan0`, ready in 4 s, `/props` `n_ctx=4096`, a
+  real turn with a coherent answer and `system_fingerprint: b10770-6684606ac`, at **53.3
+  tok/s** (11,087 MiB of the card free while loaded); **ROCm 7.2** reported 65/65 on `ROCm0`,
+  ready in 2 s, **57.0 tok/s**, 12,580 MiB free. The same file on the same Vulkan launcher
+  with `--gpu-layers 0` — what the app's `off` mode sends — answered at **4.6 tok/s** and
+  reported `0/65 on Vulkan0`, so the offload is worth 11–12×, and a backend whose ternary
+  kernels were missing would have produced that CPU number with the layers merely moved.
+  What is still unmeasured is how a ternary model *should* be sampled: a managed model
+  carries a context size, flash attention, a KV cache type and free-form extra arguments,
+  but no per-model sampler, so the global settings apply.
+- **The placement reading names one card, and the split case is unresolved.** A machine
+  with several cards of one backend splits the layers across them, and llama.cpp prints a
+  `using device` line per card while the layer line remains a single summary — so the
+  panel's `On Vulkan1: 34 of 34 layers on the GPU` attributes a model-wide count to one
+  device of several. The half that matters is still right (a named device means the
+  layers are on GPUs, no name means they are on the CPU), and this machine has one card
+  per backend, so the reading was not measured on a split. Carrying the device list
+  across instead of one id is what would settle it.
 - **A managed llama-server can outlive a hard kill.** A clean quit stops every server it
   started, and each runs in its own process group so the shutdown reaches the whole tree.
   A `SIGKILL` to the app, though, leaves the server running with its model in memory and

@@ -51,6 +51,16 @@ type Options struct {
 	// the server's own default and are not passed.
 	CacheTypeK string
 	CacheTypeV string
+	// Offload is how much of the model goes on the GPU: OffloadAll or OffloadOff
+	// for the two explicit modes, empty for the server's own default — as many
+	// layers as fit in the device memory. See gpuLayers.
+	Offload string
+	// Trace asks for the server's log at llama.cpp's trace level, which is where it
+	// names the device it chose and how many layers it placed there; the reading
+	// this app reports comes from those two lines and nowhere else. See
+	// TraceVerbosity. It is placed before Extra, so a verbosity the user typed
+	// themselves still wins.
+	Trace bool
 	// Extra is the rest of the user's command line, already split.
 	Extra []string
 	// Host defaults to 127.0.0.1. A server is only ever started on the loopback
@@ -70,6 +80,11 @@ type Status struct {
 	URL   string   `json:"url"`
 	Error string   `json:"error,omitempty"`
 	Log   []string `json:"log,omitempty"`
+	// Offload is what the server has said about the model's layers so far. It is
+	// the only answer to "is this model actually running on the GPU?", and it is
+	// empty until the server says something — a launcher started at the default
+	// log level says nothing at all.
+	Offload Offload `json:"offload"`
 }
 
 // Server supervises one llama-server process.
@@ -104,7 +119,7 @@ type Server struct {
 // NewServer builds a supervisor for one backend entry. The name is only used in
 // messages, so a user with two managed servers can tell them apart.
 func NewServer(name string) *Server {
-	return &Server{
+	s := &Server{
 		name:         name,
 		log:          newRing(40),
 		probe:        probeHealth,
@@ -112,6 +127,10 @@ func NewServer(name string) *Server {
 		grace:        5 * time.Second,
 		status:       Status{State: StateStopped},
 	}
+	// Installed here rather than per start, so the first line of the very first
+	// model load is already seen. See Server.observeOffload.
+	s.log.watch = s.observeOffload
+	return s
 }
 
 // SetReadyTimeout overrides how long a start may take. Used by settings.
@@ -196,7 +215,22 @@ func (s *Server) Start(opts Options) error {
 	cmd.Stderr = s.log.writer()
 	startInOwnGroup(cmd)
 
+	// A fresh Status rather than an update: the placement reading belongs to the
+	// process that answered it, and a restart must not keep the previous build's
+	// numbers, or the previous model's. It is cleared *before* the process exists,
+	// because the watcher that fills the reading runs on the very first line the
+	// launcher writes — a fast one can have its placement already in the status by
+	// the time exec returns, and resetting afterwards would throw it away.
+	s.mu.Lock()
+	s.status = Status{State: StateStarting, Model: opts.Model, Port: port}
+	s.mu.Unlock()
+
 	if err := cmd.Start(); err != nil {
+		// The row was marked "starting" before the process existed, so the first line
+		// of output could not be lost. A start that never happened has to undo that:
+		// a status saying "starting" would have the panel poll for a model load that
+		// no process is performing, forever.
+		s.markStopped()
 		return fmt.Errorf("llama-server starten: %w", err)
 	}
 
@@ -206,7 +240,7 @@ func (s *Server) Start(opts Options) error {
 	s.binary = opts.Binary
 	s.waited = make(chan struct{})
 	s.stopRequested = false
-	s.status = Status{State: StateStarting, Model: opts.Model, Port: port, PID: cmd.Process.Pid, URL: url}
+	s.status.PID, s.status.URL = cmd.Process.Pid, url
 	waited := s.waited
 	s.mu.Unlock()
 	s.publish()
@@ -340,8 +374,34 @@ func (s *Server) markStopped() {
 	s.status.PID = 0
 	s.status.Port = 0
 	s.status.URL = ""
+	// The reading described a process that is gone. Leaving it on the row would
+	// report a model as placed on a device it is no longer loaded on.
+	s.status.Offload = Offload{}
 	s.mu.Unlock()
 	s.publish()
+}
+
+// observeOffload reads one line of the server's log for where the model's layers
+// went, and keeps the answer on the status.
+//
+// Captured as the lines arrive instead of read out of the ring afterwards: the
+// placement is printed while the weights are loaded, and everything a model says
+// after that — the context, the KV cache, the graph — pushes it out of the
+// window. Measured on a 9B model at trace level, the two lines sit about 80 lines
+// before the end of a 250-line log, while the ring the panel shows holds 40.
+// Nothing is published from here: this runs for every line a server writes, and
+// the panel is polling a status while a model loads anyway.
+func (s *Server) observeOffload(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Only the process that is starting or running can say where its layers went.
+	// Output from a process that has already stopped arrives late on occasion —
+	// the pipe is closed after exec has reaped it — and a reading written into a
+	// stopped row would be a claim about a model nothing is loading.
+	if s.status.State != StateStarting && s.status.State != StateRunning {
+		return
+	}
+	s.status.Offload = parseOffloadLine(line, s.status.Offload)
 }
 
 // Binary is the launcher the current or last process was started from, empty before
@@ -375,6 +435,10 @@ func (s *Server) fail(message string) {
 	s.status.State = StateFailed
 	s.status.Error = message
 	s.status.PID = 0
+	// The reading described the process that just died, whether it died while
+	// loading or hours later. A failed row that still says which device the layers
+	// went to is a claim about a model that is not running.
+	s.status.Offload = Offload{}
 	s.mu.Unlock()
 	s.publish()
 }
@@ -399,6 +463,17 @@ func (o Options) args() []string {
 	}
 	if o.Ctx > 0 {
 		args = append(args, "-c", strconv.Itoa(o.Ctx))
+	}
+	// How much of the model goes on the GPU. Only the two explicit modes are
+	// passed: an "auto" offload is llama.cpp's own default, and asking for it in
+	// words would be a flag on a build that may not read it the same way.
+	if n := gpuLayers(o.Offload); n != "" {
+		args = append(args, "--gpu-layers", n)
+	}
+	// The level whose output carries the placement reading. Before Extra, so a
+	// verbosity the user typed themselves is the one that counts.
+	if o.Trace {
+		args = append(args, "-lv", strconv.Itoa(TraceVerbosity))
 	}
 	// Only the explicit flash-attention modes are passed. The default is "auto",
 	// and asking for "auto" should not turn into a flag the server might read
@@ -513,6 +588,11 @@ type ring struct {
 	mu    sync.Mutex
 	lines []string
 	max   int
+	// watch, when set, is handed every line as it arrives, outside the lock. It is
+	// for the readings that have to survive the window being small — the placement
+	// of a model's layers is printed early and the log after it is long. It must
+	// not block and must not call back into the ring.
+	watch func(string)
 }
 
 func newRing(max int) *ring { return &ring{max: max} }
@@ -527,10 +607,17 @@ func (r *ring) add(line string) {
 		return
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.lines = append(r.lines, line)
 	if len(r.lines) > r.max {
 		r.lines = r.lines[len(r.lines)-r.max:]
+	}
+	watch := r.watch
+	r.mu.Unlock()
+	// Called with no lock held: a watcher reads the server's status, which is
+	// guarded by its own mutex, and taking the two in the other order elsewhere
+	// would be a deadlock waiting for a log line.
+	if watch != nil {
+		watch(line)
 	}
 }
 

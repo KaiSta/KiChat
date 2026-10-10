@@ -555,6 +555,7 @@ Verfügbare Tools: {{tool_list}}`,
       { id: 'llamacpp', name: 'llama.cpp', kind: 'llamacpp', baseUrl: 'http://127.0.0.1:9931', enabled: false },
     ],
     runtime: {
+      distribution: 'llamacpp',
       tag: '',
       binaryPath: '',
       accelerator: 'cpu',
@@ -805,6 +806,15 @@ Verfügbare Tools: {{tool_list}}`,
       '[harness] device injection active: the launcher reports no accelerator' +
         (missingLibs ? ', and names the libraries its backend cannot load' : ''),
     )
+  }
+
+  // ?offload=cpu is a `--gpu-layers 0` start: the server still names the device it
+  // would have used and reports `offloaded 0/34 layers to GPU`, which is the third
+  // shape the placement row has to render — a reading that is an answer, not a
+  // missing one. Without it the fixture only ever shows every layer on the card.
+  const offloadParam = new URLSearchParams(location.search).get('offload')
+  if (offloadParam === 'cpu') {
+    console.warn('[harness] offload injection active: no layer is placed on the device')
   }
 
   const searchStatus = {
@@ -1071,6 +1081,36 @@ Verfügbare Tools: {{tool_list}}`,
   }
 
   /*
+   * ?dist= is the llama.cpp the app installs from, which is what the two pickers
+   * above the download button are about. `prism` is PrismML's fork: a build whose
+   * directory is named `prism-b10770-6684606-cpu` — a tag shape of its own, which is
+   * why the installed tag and the publishable tag both change with the source — and
+   * a family list one shorter than upstream's, because the fork publishes no
+   * OpenVINO build. Without the flag the fixture is upstream, which is the default.
+   *
+   * It sits before the update injection because what a release is called depends on
+   * the source: upstream publishes `b11528`, the fork `prism-b10770-6684606`.
+   */
+  const distParam = new URLSearchParams(location.search).get('dist')
+  const source = distParam === 'prism' ? 'prism' : 'llamacpp'
+  // A release tag of each source, spelled the way that source spells it: upstream
+  // `b11528`, the fork `prism-b10770-6684606` — number and short commit, which is
+  // what the panel has to print as one piece.
+  const tagOf = (build, sha) => (source === 'prism' ? `prism-${build}-${sha}` : build)
+  const installedFork = () => `prism-b10770-6684606-${(settings.runtime || {}).accelerator || 'cpu'}`
+  const latestTag = () => (updateParam === 'available' ? tagOf('b11541', '9f0c1a2') : tagOf('b10770', '6684606'))
+  // The build an update is installed over: older than the published one whether the
+  // source is upstream (`b11528`) or the fork (`prism-b10754-6684606`).
+  const olderTag = () => (source === 'prism' ? tagOf('b10754', '2459f68') : 'b11528')
+  if (distParam === 'prism') {
+    settings.runtime.distribution = 'prism'
+    managed.installed = true
+    managed.tag = installedFork()
+    managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
+    console.warn('[harness] source injection active: the build on disk is the PrismML fork')
+  }
+
+  /*
    * ?update= is the state of the llama.cpp release lookup, which is a request the app
    * makes rather than polls. `available` is a newer build published than the one on
    * disk, `error` is a lookup that could not be made at all — a rate limit — and
@@ -1082,10 +1122,10 @@ Verfügbare Tools: {{tool_list}}`,
    * the one they left in the settings.
    */
   const updateParam = new URLSearchParams(location.search).get('update')
-  const publishedTag = updateParam === 'available' ? 'b11541' : 'b11528'
+  const publishedTag = latestTag()
   if (updateParam && !managed.installed) {
     managed.installed = true
-    managed.tag = `b11528-${(settings.runtime || {}).accelerator || 'cpu'}`
+    managed.tag = `${olderTag()}-${(settings.runtime || {}).accelerator || 'cpu'}`
     managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
     console.warn(`[harness] update injection active: the published build is ${publishedTag}`)
   }
@@ -1141,29 +1181,46 @@ Verfügbare Tools: {{tool_list}}`,
    */
   let update = { checked: false, available: false, size: 0 }
   const computeUpdate = () => {
-    const family = (settings.runtime || {}).accelerator || 'cpu'
-    const installed = `${managed.tag || ''}`.split('-')[0]
-    const buildNumber = (tag) => Number(`${tag}`.replace(/^b/, '')) || 0
+    const runtime = settings.runtime || {}
+    const family = runtime.accelerator || 'cpu'
+    const sourceOfReading = runtime.distribution || 'llamacpp'
+    // The installed side is the build tag of a directory, read the way the source
+    // reads it: `b11528-vulkan` is `b11528`, and `prism-b10770-6684606-cpu` is
+    // `prism-b10770-6684606` — not `prism`, which is what a split at the first dash
+    // produced and what made the installed build look older than itself.
+    const installed = /^(prism-b\d+-[0-9a-f]+)/.exec(managed.tag || '')?.[1] ?? `${managed.tag || ''}`.split('-')[0]
+    const buildNumber = (tag) => Number(`${tag}`.replace(/^.*\bb/, '').split('-')[0]) || 0
     if (updateParam === 'error') {
       return {
         checked: true,
         available: false,
         family,
+        distribution: sourceOfReading,
         installed,
         size: 0,
         error: 'llama.cpp-Releases abfragen: HTTP 403',
       }
     }
     if (updateParam === 'stale') {
-      return { checked: true, available: false, family: 'rocm', installed, latest: publishedTag, size: 0, error: '' }
+      return {
+        checked: true,
+        available: false,
+        family: 'rocm',
+        distribution: sourceOfReading,
+        installed,
+        latest: publishedTag,
+        size: 0,
+        error: '',
+      }
     }
     return {
       checked: true,
       available: buildNumber(publishedTag) > buildNumber(installed),
       family,
+      distribution: sourceOfReading,
       installed,
       latest: publishedTag,
-      size: publishedTag === 'b11541' ? 17829692 : 0,
+      size: updateParam === 'available' ? 17829692 : 0,
       error: '',
     }
   }
@@ -1180,14 +1237,27 @@ Verfügbare Tools: {{tool_list}}`,
       version: managed.installed ? '0.6.0-dev (build 11528, commit 50e3e3e48)' : '',
       customBinary: runtime.binaryPath || '',
       accelerator: runtime.accelerator || 'cpu',
-      // What this platform publishes. Linux/x64 is the widest of them, which is
-      // what the harness runs on, so the picker is exercised with every family.
-      variants: ['cpu', 'vulkan', 'rocm', 'cuda', 'sycl', 'openvino'],
+      // The llama.cpp the app installs from, and the ones it may offer. The second
+      // is what the source picker is filled from, so the fixture has to carry it or
+      // the picker renders with a single option and looks broken.
+      distribution: runtime.distribution || 'llamacpp',
+      distributions: ['llamacpp', 'prism'],
+      // What the selected source publishes for this platform. Linux/x64 is the
+      // widest of them, which is what the harness runs on, so the picker is
+      // exercised with every family — and one fewer under the fork, which publishes
+      // no OpenVINO build, so the family list visibly follows the source.
+      variants:
+        (runtime.distribution || 'llamacpp') === 'prism'
+          ? ['cpu', 'vulkan', 'rocm', 'cuda', 'sycl']
+          : ['cpu', 'vulkan', 'rocm', 'cuda', 'sycl', 'openvino'],
       // The flash-attention modes and KV cache types the pickers are filled from.
       // The harness has to carry them too, or the KV dropdowns render with a
       // single f16 option and look broken rather than unconfigured.
       flashAttentionModes: ['auto', 'on', 'off'],
       cacheTypes: ['f16', 'bf16', 'q8_0', 'q5_1', 'q5_0', 'q4_1', 'q4_0', 'iq4_nl', 'f32'],
+      // The GPU layers the picker offers. This app's own three words rather than
+      // llama.cpp's spellings: `off` is how KiChat names `--gpu-layers 0`.
+      offloadModes: ['auto', 'all', 'off'],
       // What the installed build can use. Measured shape of `--list-devices` on
       // the Vulkan build; `?devices=none` empties it for the CPU-only case the
       // panel has to render as a warning, and `?fit=large` nearly fills the card
@@ -1231,6 +1301,23 @@ Verfügbare Tools: {{tool_list}}`,
           url: managed.port ? `http://127.0.0.1:${managed.port}` : '',
           error: managed.error,
           log: managed.log,
+          // What a running server says about the placement, which is the panel's
+          // only answer to "is this model on the GPU?". Measured on a 9B model:
+          // `load_tensors: offloaded 34/34 layers to GPU` beside `using device
+          // Vulkan0 (…)`. Three shapes are modelled, because the second line is
+          // what makes the first meaning: a full placement, a `--gpu-layers 0` run
+          // (`?offload=cpu`: a device named, no layer on it), and — under
+          // `?devices=none` — the CPU-only build, which reports every layer
+          // offloaded and names no device at all. A stopped server reports nothing,
+          // the same way the real row clears its reading.
+          // A device is named only when layers really are on one, which is what the
+          // backend decides before the field crosses the bridge: a `--gpu-layers 0`
+          // run names no device here even though the server's log did, and a CPU-only
+          // build names none at all.
+          offloadLayers: managed.state === 'running' && offloadParam !== 'cpu' ? 34 : 0,
+          offloadTotal: managed.state === 'running' ? 34 : 0,
+          offloadDevice:
+            managed.state === 'running' && offloadParam !== 'cpu' && !noDevices ? 'Vulkan0' : '',
           // GetRuntimeStatus stats the file, so what the fixture's own tree says
           // about it is the measured size.
           modelBytes: sizeOfModel(mm.modelPath),
@@ -1387,18 +1474,23 @@ Verfügbare Tools: {{tool_list}}`,
       )
       return Promise.resolve(copy(update))
     },
-    // The family is a parameter, mirroring the real binding: the picker edits the
-    // draft, so the download has to be told what to fetch. Recording it in the
-    // settings is what lets the harness check that picking a build downloads it.
-    InstallLlamaRuntime: (accelerator) => {
+    // Both are parameters, mirroring the real binding: the pickers edit the draft,
+    // so the download has to be told what to fetch and from where. Recording them in
+    // the settings is what lets the harness check that picking a build and a source
+    // is what gets downloaded.
+    InstallLlamaRuntime: (accelerator, source) => {
       const runtime = settings.runtime || {}
       const family = accelerator || runtime.accelerator || 'cpu'
-      settings.runtime = { ...runtime, accelerator: family }
+      const from = source || runtime.distribution || 'llamacpp'
+      settings.runtime = { ...runtime, accelerator: family, distribution: from }
+      // The tag of the source that was installed from, which is what the directory
+      // and the panel's own tag column are named after.
+      const tag = `${from === 'prism' ? latestTag() : publishedTag}-${family}`
       // An install writes a new directory and leaves the old one where it was — that
       // is why the cleanup list exists — so the build being replaced becomes one of
       // the old ones rather than disappearing, which is what the real runtime
       // directory does.
-      if (managed.installed && managed.tag && managed.tag !== `${publishedTag}-${family}`) {
+      if (managed.installed && managed.tag && managed.tag !== tag) {
         extraBuilds.push({
           dir: managed.tag,
           size: managed.tag.includes('cuda') ? 612000000 : 17829692,
@@ -1407,7 +1499,7 @@ Verfügbare Tools: {{tool_list}}`,
         })
       }
       managed.installed = true
-      managed.tag = `${publishedTag}-${family}`
+      managed.tag = tag
       managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
       // The build just downloaded is the published one, so the cached reading stops
       // offering it — the same thing the backend records after an install.

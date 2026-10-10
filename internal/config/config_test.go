@@ -640,7 +640,9 @@ func TestRuntimeSettingsAreUsableAsStored(t *testing.T) {
 // model, so a settings blob written before they existed carries neither. An empty
 // field has to mean the server's own default rather than a flag, and a value this
 // build does not recognise must not reach `--flash-attn`/`--cache-type-k/-v`,
-// where llama-server would reject it at startup.
+// where llama-server would reject it at startup. The GPU offload of the same test
+// is the third of those fields and follows the same rule: the two explicit words
+// are passed on, everything else means "as many layers as fit".
 func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 	// Absent fields keep their meaning: "auto" and f16, the server's own defaults.
 	s := Default()
@@ -652,6 +654,9 @@ func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 	}
 	if mm.CacheTypeK != CacheTypeF16 || mm.CacheTypeV != CacheTypeF16 {
 		t.Errorf("cache types = %q/%q, want f16/f16 for absent fields", mm.CacheTypeK, mm.CacheTypeV)
+	}
+	if mm.Offload != OffloadAuto {
+		t.Errorf("offload = %q, want %q for an absent field", mm.Offload, OffloadAuto)
 	}
 
 	// Every value the picker can store survives normalise untouched — a choice
@@ -674,10 +679,19 @@ func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 		}
 	}
 
+	for _, off := range OffloadModes() {
+		s = Default()
+		s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {Offload: off}}}
+		s.normalise()
+		if got := s.Runtime.Models["llamacpp"].Offload; got != off {
+			t.Errorf("offload %q became %q", off, got)
+		}
+	}
+
 	// Junk falls back to the default rather than being passed on.
 	s = Default()
 	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
-		FlashAttention: "maybe", CacheTypeK: "q3_k", CacheTypeV: "  ",
+		FlashAttention: "maybe", CacheTypeK: "q3_k", CacheTypeV: "  ", Offload: "gpu",
 	}}}
 	s.normalise()
 	mm = s.Runtime.Models["llamacpp"]
@@ -686,5 +700,8 @@ func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 	}
 	if mm.CacheTypeK != CacheTypeF16 || mm.CacheTypeV != CacheTypeF16 {
 		t.Errorf("cache types = %q/%q, want unknown values replaced by f16", mm.CacheTypeK, mm.CacheTypeV)
+	}
+	if mm.Offload != OffloadAuto {
+		t.Errorf("offload = %q, want an unknown value replaced by %q", mm.Offload, OffloadAuto)
 	}
 }

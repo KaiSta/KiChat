@@ -199,6 +199,12 @@ func (a *App) startManagedModel(backendID string) error {
 	}
 
 	srv := a.serverFor(backendID, settings)
+	// Only the build this app installed is asked for its trace log. The placement
+	// reading — which device, how many layers — is printed at that level and nowhere
+	// else, but `-lv` is a flag an older binary a user points at may not know, and an
+	// unknown argument stops the server rather than a report. A downloaded build is
+	// days old and always has it; a path in BinaryPath is of unknown age.
+	trace := strings.TrimSpace(settings.Runtime.BinaryPath) == ""
 	err = srv.Start(rt.Options{
 		Binary:         binary,
 		Model:          mm.ModelPath,
@@ -206,6 +212,8 @@ func (a *App) startManagedModel(backendID string) error {
 		FlashAttention: mm.FlashAttention,
 		CacheTypeK:     mm.CacheTypeK,
 		CacheTypeV:     mm.CacheTypeV,
+		Offload:        mm.Offload,
+		Trace:          trace,
 		Extra:          rt.SplitArgs(mm.ExtraArgs),
 	})
 	if err == nil {
@@ -219,21 +227,31 @@ func (a *App) startManagedModel(backendID string) error {
 }
 
 // llamaServerPath resolves the launcher: the user's own copy if they gave one,
-// otherwise the build the installer fetched.
+// otherwise the build the installer fetched for the selected release source.
 //
 // The tagged build is preferred over the newest one. Install writes the tag of
 // what it just fetched, and that is the build the picker shows; falling straight
 // through to Find's newest would run a different family than the panel names the
 // moment two families are installed. A tag whose directory is gone falls back, so
 // a deleted build is not a dead end.
+//
+// A recorded tag of the *other* source does not count, which is the second half of
+// the same rule: upstream's `b11541-cpu` is not a build the fork's selection can run,
+// and the two produce different GGUF support. Switching the source in the picker and
+// saving therefore does not keep running the launcher the switch moved away from —
+// it says no build is installed until one is, which is what the download button next
+// to the picker is for.
 func (a *App) llamaServerPath(settings config.Settings) (string, error) {
 	if p := strings.TrimSpace(settings.Runtime.BinaryPath); p != "" {
 		return p, nil
 	}
-	if binary, ok := a.installer.Launcher(settings.Runtime.Tag); ok {
-		return binary, nil
+	dist := distributionFor(settings)
+	if tag := strings.TrimSpace(settings.Runtime.Tag); dist.TagOfDir(tag) != "" {
+		if binary, ok := a.installer.Launcher(tag); ok {
+			return binary, nil
+		}
 	}
-	tag, binary := a.installer.Find()
+	tag, binary := a.installer.Find(dist)
 	if tag == "" || binary == "" {
 		return "", errors.New("llama-server ist noch nicht installiert")
 	}

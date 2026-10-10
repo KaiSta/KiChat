@@ -61,7 +61,7 @@ func TestLatestPicksASuiteThisMachineCanRun(t *testing.T) {
 			"12.8": {true, ""},
 		}),
 	}
-	asset, err := inst.Latest(context.Background(), "linux", "amd64", AcceleratorCUDA)
+	asset, err := inst.Latest(context.Background(), LlamaCPP, "linux", "amd64", AcceleratorCUDA)
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestLatestRefusesAFamilyWithNoUsableSuite(t *testing.T) {
 			"12.8": {false, reason},
 		}),
 	}
-	_, err := inst.Latest(context.Background(), "linux", "amd64", AcceleratorCUDA)
+	_, err := inst.Latest(context.Background(), LlamaCPP, "linux", "amd64", AcceleratorCUDA)
 	if err == nil {
 		t.Fatal("a CUDA install was offered on a machine whose driver supports neither suite")
 	}
@@ -128,7 +128,7 @@ func TestLatestFindsTheRuntimeBundleUnlessTheMachineHasOne(t *testing.T) {
 			why    string
 		}{"13.4": {true, ""}}),
 	}
-	asset, err := inst.Latest(context.Background(), "linux", "amd64", AcceleratorCUDA)
+	asset, err := inst.Latest(context.Background(), LlamaCPP, "linux", "amd64", AcceleratorCUDA)
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestLatestLeavesFamiliesWithoutABundleAlone(t *testing.T) {
 		Dir: t.TempDir(), APIBase: srv.URL, Client: srv.Client(),
 		SuiteCheck: func(string, string) (bool, string) { return true, "" },
 	}
-	asset, err := inst.Latest(context.Background(), "linux", "amd64", AcceleratorROCm)
+	asset, err := inst.Latest(context.Background(), LlamaCPP, "linux", "amd64", AcceleratorROCm)
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}

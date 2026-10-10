@@ -3,7 +3,9 @@
 //
 // Two jobs live in one package because they share one directory layout:
 //
-//   - Installer fetches llama-server from llama.cpp's own releases. Those archives
+//   - Installer fetches llama-server from a distribution's own releases — upstream
+//     llama.cpp or PrismML's fork, which is what loads a ternary model (see
+//     distribution.go). Those archives
 //     are not a single file: `llama-server` is a thin launcher whose code sits in
 //     `libllama-server-impl.so`, and its siblings (`libllama.so.0.6.0`,
 //     `libggml*.so`, symlinks pointing at them) have to be next to it for it to
@@ -36,11 +38,6 @@ import (
 )
 
 const (
-	// ReleasesAPI lists llama.cpp's releases, newest first.
-	ReleasesAPI = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
-	// DownloadBase is the URL every published asset lives under.
-	DownloadBase = "https://github.com/ggml-org/llama.cpp/releases/download"
-
 	// maxExtractBytes bounds what one archive may unpack to, so a truncated or
 	// hostile archive cannot fill the disk. The measured Linux CPU archive is
 	// 17.8 MB compressed, and the largest desktop build is about 590 MB.
@@ -69,9 +66,13 @@ const (
 	userAgent = "kichat-llama-runtime"
 )
 
-// Accelerators lists the build families in the order a picker should offer them:
-// the one that needs nothing first, then the portable GPU one, then the
-// vendor-specific ones.
+// Accelerators lists every build family a setting may name — the value space, not
+// what one source offers. Which of them a given source publishes on a given platform
+// is Distribution.PublishedAccelerators' question, and there the answer is smaller:
+// PrismML's fork has no OpenVINO and no Adreno build at all.
+//
+// The order is the one a picker should offer them in: the family that needs nothing
+// first, then the portable GPU one, then the vendor-specific ones.
 func Accelerators() []string {
 	return []string{AcceleratorCPU, AcceleratorVulkan, AcceleratorROCm, AcceleratorCUDA, AcceleratorSYCL, AcceleratorOpenVINO, AcceleratorOpenCL}
 }
@@ -126,7 +127,9 @@ type Progress struct {
 type Installer struct {
 	Dir string
 	// APIBase and Client are fields so the release lookup can be tested without
-	// reaching GitHub.
+	// reaching GitHub. An empty APIBase means the endpoint of the distribution the
+	// caller asks about, which is how the two sources are addressed without a second
+	// installer.
 	APIBase string
 	Client  *http.Client
 
@@ -139,11 +142,15 @@ type Installer struct {
 }
 
 // NewInstaller builds an installer rooted at dir.
+//
+// APIBase is left empty, which means "the endpoint of the distribution being
+// asked": the sources live at different repositories, so the address is a property
+// of the question and not of the installer. A test that sets it anyway overrides the
+// endpoint it lists from without touching GitHub.
 func NewInstaller(dir string) *Installer {
 	return &Installer{
-		Dir:     dir,
-		APIBase: ReleasesAPI,
-		Client:  &http.Client{Timeout: 30 * time.Minute},
+		Dir:    dir,
+		Client: &http.Client{Timeout: 30 * time.Minute},
 	}
 }
 
@@ -172,12 +179,12 @@ type variant struct {
 	runtime string
 }
 
-// variantsFor is the measured table of what llama.cpp publishes, read off release
-// b11535 (36 assets). It is per platform and per architecture because the
+// upstreamVariants is the measured table of what upstream llama.cpp publishes, read
+// off release b11541 (36 assets). It is per platform and per architecture because the
 // releases are: ROCm, SYCL and OpenVINO are x64 only, the CUDA arm64 build exists
 // where Vulkan's ARM one does, and macOS publishes a single Metal-enabled build
 // per architecture with no accelerator to choose.
-func variantsFor(goos, goarch string) ([]variant, error) {
+func upstreamVariants(goos, goarch string) ([]variant, error) {
 	switch goos {
 	case "linux":
 		switch goarch {
@@ -230,50 +237,74 @@ func variantsFor(goos, goarch string) ([]variant, error) {
 	return nil, fmt.Errorf("für %s wird llama.cpp nicht veröffentlicht", goos)
 }
 
-// variantFor picks one family out of the table, refusing what this platform does
-// not publish rather than substituting a build the user did not ask for.
-func variantFor(goos, goarch, accel string) (variant, error) {
-	if accel == "" {
-		accel = AcceleratorCPU
-	}
-	variants, err := variantsFor(goos, goarch)
-	if err != nil {
-		return variant{}, err
-	}
-	for _, v := range variants {
-		if v.ID == accel {
-			return v, nil
-		}
-	}
-	return variant{}, fmt.Errorf("für %s/%s gibt es keinen %s-Build", goos, goarch, accel)
-}
-
-// PublishedAccelerators lists the families this platform can actually fetch, in
-// the order the picker offers them, so the panel cannot offer a build that does
-// not exist.
+// prismVariants is the measured table of what PrismML's fork publishes, read off
+// release prism-b10770-6684606 (26 assets, published 2026-10-09). It is a fork of
+// ggml-org/llama.cpp tracking it closely, so most of the table is upstream's — and
+// the differences are exactly the ones that make a second table necessary:
 //
-// A platform with none answers with an empty list rather than nil: this feeds a
-// JSON array, and a nil slice marshals to `null`.
-func PublishedAccelerators(goos, goarch string) []string {
-	variants, err := variantsFor(goos, goarch)
-	if err != nil {
-		return []string{}
+//   - Linux CUDA is `linux-cuda-*`, not `ubuntu-cuda-*` (311 MB for 12.4, 198 for 12.8,
+//     175 for 13.3), and **the fork publishes no Linux runtime bundle at all**: its
+//     only `cudart-llama-…` assets are the Windows zips, while its `libggml-cuda.so`
+//     links `libcudart.so.13` and `libcublas.so.13` exactly as upstream's does
+//     (measured with ldd on the extracted archive). So this row has no companion to
+//     attach and a Linux machine with the driver but no CUDA toolkit gets a backend
+//     that cannot load — which the panel names, because `MissingLibraries` reads the
+//     loader's answer for the build directory. Including upstream's bundle here would
+//     cross both sources and suites, so it is documented rather than done. Windows
+//     keeps a companion: that bundle is published, and the build zip is ~20–46 MB
+//     smaller than a build with the runtime folded in.
+//   - ROCm on Windows is `win-hip-radeon-x64`, with no suite segment to match.
+//   - There is no OpenVINO build and no Adreno arm64 build, no Linux CUDA for arm64,
+//     and no Vulkan or SYCL build for arm64 Windows; macOS has an extra
+//     `macos-arm64-kleidiai` archive, which the exact `macos-arm64` row deliberately
+//     does not pick up (the KleidiAI kernels are an ARM CPU optimisation, not the
+//     Metal build that is the default answer here).
+func prismVariants(goos, goarch string) ([]variant, error) {
+	switch goos {
+	case "linux":
+		switch goarch {
+		case "amd64":
+			return []variant{
+				{AcceleratorCPU, "ubuntu-x64", ".tar.gz", ""},
+				{AcceleratorVulkan, "ubuntu-vulkan-x64", ".tar.gz", ""},
+				{AcceleratorROCm, "ubuntu-rocm-*-x64", ".tar.gz", ""},
+				{AcceleratorCUDA, "linux-cuda-*-x64", ".tar.gz", ""},
+				{AcceleratorSYCL, "ubuntu-sycl-*-x64", ".tar.gz", ""},
+			}, nil
+		case "arm64":
+			return []variant{
+				{AcceleratorCPU, "ubuntu-arm64", ".tar.gz", ""},
+				{AcceleratorVulkan, "ubuntu-vulkan-arm64", ".tar.gz", ""},
+			}, nil
+		}
+		return nil, fmt.Errorf("für Linux auf %s wird der PrismML-Build nicht veröffentlicht", goarch)
+	case "darwin":
+		switch goarch {
+		case "arm64":
+			return []variant{{AcceleratorCPU, "macos-arm64", ".tar.gz", ""}}, nil
+		case "amd64":
+			return []variant{{AcceleratorCPU, "macos-x64", ".tar.gz", ""}}, nil
+		}
+		return nil, fmt.Errorf("macOS auf %s wird nicht veröffentlicht", goarch)
+	case "windows":
+		switch goarch {
+		case "amd64":
+			return []variant{
+				{AcceleratorCPU, "win-cpu-x64", ".zip", ""},
+				{AcceleratorVulkan, "win-vulkan-x64", ".zip", ""},
+				{AcceleratorROCm, "win-hip-radeon-x64", ".zip", ""},
+				{AcceleratorCUDA, "win-cuda-*-x64", ".zip", "cudart-llama-bin-{platform}"},
+				{AcceleratorSYCL, "win-sycl-x64", ".zip", ""},
+			}, nil
+		case "arm64":
+			return []variant{
+				{AcceleratorCPU, "win-cpu-arm64", ".zip", ""},
+				{AcceleratorCUDA, "win-cuda-*-arm64", ".zip", "cudart-llama-bin-{platform}"},
+			}, nil
+		}
+		return nil, fmt.Errorf("für Windows auf %s wird der PrismML-Build nicht veröffentlicht", goarch)
 	}
-	ids := make([]string, 0, len(variants))
-	for _, v := range variants {
-		ids = append(ids, v.ID)
-	}
-	return ids
-}
-
-// AssetName is the archive name the app asks for, or an error naming what is not
-// covered. A `*` stands for the suite version a release carries (see variant).
-func AssetName(tag, goos, goarch, accel string) (string, error) {
-	v, err := variantFor(goos, goarch, accel)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("llama-%s-bin-%s%s", tag, v.platform, v.ext), nil
+	return nil, fmt.Errorf("für %s wird der PrismML-Build nicht veröffentlicht", goos)
 }
 
 // matchAssetName reports whether a published name is this variant, and returns the
@@ -353,14 +384,23 @@ func launcherName() string {
 	return "llama-server"
 }
 
-// Find reports the newest build already unpacked in the runtime directory, and
-// its launcher. An empty tag means nothing is installed.
+// Find reports the newest build of one source already unpacked in the runtime
+// directory, and its launcher. An empty tag means nothing of that source is
+// installed.
 //
-// The newest is chosen by modification time rather than by comparing build
-// numbers: a build tag is opaque text (`b11528` today, something else tomorrow),
-// and the directory that was written most recently is the one that was installed
-// most recently.
-func (i *Installer) Find() (tag, binary string) {
+// The source is a parameter and not a property of the installer because a build of
+// one source is not a build of the other: with a PrismML build beside an upstream one,
+// a lookup that ignored which source the settings name would start the wrong launcher
+// — silently, since both are called `llama-server`.
+//
+// The newest is chosen by modification time rather than by comparing build numbers:
+// a build tag is opaque text (`b11541`, `prism-b10770-6684606`), and the directory that
+// was written most recently is the one that was installed most recently.
+//
+// An install unpacks into `<dir>.installing` and renames that into place only when it
+// is complete, so a directory carrying that suffix is never a build — see
+// isInstallLeftover.
+func (i *Installer) Find(dist Distribution) (tag, binary string) {
 	entries, err := os.ReadDir(i.Dir)
 	if err != nil {
 		return "", ""
@@ -368,6 +408,20 @@ func (i *Installer) Find() (tag, binary string) {
 	var newest time.Time
 	for _, e := range entries {
 		if !e.IsDir() {
+			continue
+		}
+		// The staging directory of an interrupted install is not a candidate, however
+		// recently it was written. It is named after the build it was going to be, so
+		// it passes the tag test below, and a crash late in an install — after the
+		// archive has been flattened, or while a CUDA bundle unpacks — can already
+		// have left a launcher in it. Taking it would start a model from a
+		// half-extracted build, and it would win by being the newest thing there.
+		if isInstallLeftover(e.Name()) {
+			continue
+		}
+		// A directory that is not a build of this source is not a candidate, however
+		// recently it was installed.
+		if dist.TagOfDir(e.Name()) == "" {
 			continue
 		}
 		bin, info := i.launcherUnder(filepath.Join(i.Dir, e.Name()))
@@ -438,16 +492,25 @@ type release struct {
 	Assets []releaseAsset `json:"assets"`
 }
 
-// Latest returns the newest release that publishes an archive for this platform.
+// Latest returns the newest release of one source that publishes an archive for this
+// platform and family, and whether it is newer than what is installed is a separate
+// question (see Distribution.NewerBuild).
 //
 // GitHub's "latest" release cannot be used for this. Since llama.cpp moved to
 // versioned tags, `latest` points at a semver release (v0.6.0 when this was
 // written) that carries no binaries at all — only a nightly-tag.txt naming a
-// build — while the archives live on the per-build releases (`b11528`). So the
+// build — while the archives live on the per-build releases (`b11541`). So the
 // list is scanned in the order GitHub returns it, newest first, for the first
 // release that actually has our asset.
-func (i *Installer) Latest(ctx context.Context, goos, goarch, accel string) (Asset, error) {
-	url := i.APIBase + "?per_page=10"
+func (i *Installer) Latest(ctx context.Context, dist Distribution, goos, goarch, accel string) (Asset, error) {
+	// An empty APIBase is the source's own endpoint. It is read here rather than in
+	// NewInstaller because the sources differ by repository, and a test that points
+	// the installer at its own server must keep working for either of them.
+	base := strings.TrimSpace(i.APIBase)
+	if base == "" {
+		base = dist.ReleasesAPI()
+	}
+	url := base + "?per_page=10"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return Asset{}, err
@@ -474,7 +537,7 @@ func (i *Installer) Latest(ctx context.Context, goos, goarch, accel string) (Ass
 	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
 		return Asset{}, fmt.Errorf("Release-Liste lesen: %w", err)
 	}
-	chosen, err := variantFor(goos, goarch, accel)
+	chosen, err := dist.variantFor(goos, goarch, accel)
 	if err != nil {
 		return Asset{}, err
 	}
@@ -510,11 +573,16 @@ func (i *Installer) Latest(ctx context.Context, goos, goarch, accel string) (Ass
 			Tag: r.Tag, Name: a.Name, URL: a.URL, Size: a.Size, Digest: a.Digest,
 			Variant: chosen.ID, Suite: suite,
 		}
+		if asset.URL == "" {
+			// A listing without the download link still names the archive, and where
+			// the source publishes its assets is a property of the source.
+			asset.URL = dist.DownloadURL(r.Tag, a.Name)
+		}
 		asset.Companion = i.companionFor(r, chosen, suite)
 		return asset, nil
 	}
-	return Asset{}, fmt.Errorf("kein llama.cpp-Build für %s/%s (%s) in den letzten %d Releases gefunden",
-		goos, goarch, accel, len(releases))
+	return Asset{}, fmt.Errorf("kein %s-Build für %s/%s (%s) in den letzten %d Releases gefunden",
+		dist.ID, goos, goarch, accel, len(releases))
 }
 
 // suiteCheck asks the real machine whether a family and suite can run here, unless
@@ -913,6 +981,12 @@ func extractTarGz(archive, dst string) error {
 		if err != nil {
 			return err
 		}
+		if err := rootEntryOnlyDirectory(hdr.Name, path, dst, hdr.Typeflag == tar.TypeDir); err != nil {
+			return err
+		}
+		if path == dst {
+			continue
+		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(path, 0o755); err != nil {
@@ -950,6 +1024,12 @@ func extractZip(archive, dst string) error {
 		path, err := entryPath(dst, f.Name)
 		if err != nil {
 			return err
+		}
+		if err := rootEntryOnlyDirectory(f.Name, path, dst, f.FileInfo().IsDir()); err != nil {
+			return err
+		}
+		if path == dst {
+			continue
 		}
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(path, 0o755); err != nil {
@@ -994,6 +1074,17 @@ func symlink(target, path, root string) error {
 }
 
 // writeFile streams one entry into place.
+// rootEntryOnlyDirectory refuses an entry that resolved to the extraction root
+// unless it is a directory. The root marker is a directory by definition, so a
+// regular file or a link claiming the same name is an entry that would be written
+// over the extraction directory itself, which is not something to be tolerant of.
+func rootEntryOnlyDirectory(name, path, root string, isDir bool) error {
+	if path != root || isDir {
+		return nil
+	}
+	return fmt.Errorf("Archiv-Eintrag ohne Namen: %s", name)
+}
+
 func writeFile(path string, r io.Reader, size int64, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -1021,11 +1112,18 @@ func fileMode(mode int64) os.FileMode {
 // entryPath resolves an archive entry inside root, refusing anything that would
 // land outside it. Every unpacker needs this: an entry named `../../.bashrc` or
 // an absolute path is otherwise written wherever it likes.
+//
+// An entry naming the extraction root itself — `.`, `./`, or an empty name, which all
+// clean to the same thing — answers with root, and the caller skips it. A tar writer
+// emitting the root directory is ordinary (measured: the PrismML fork's archive opens
+// with a `./` directory entry, an upstream archive does not), and refusing it aborted
+// the whole install with "Archiv-Eintrag ohne Namen". Skipping it is what the entry
+// asks for anyway: the directory the extraction writes into already exists.
 func entryPath(root, name string) (string, error) {
 	clean := filepath.Clean(filepath.FromSlash(name))
 	clean = strings.TrimPrefix(clean, string(filepath.Separator))
-	if clean == "." || clean == "" {
-		return "", fmt.Errorf("Archiv-Eintrag ohne Namen")
+	if clean == "." {
+		return root, nil
 	}
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("Archiv-Eintrag verlässt das Ziel: %s", name)

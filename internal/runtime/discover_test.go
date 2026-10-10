@@ -105,6 +105,13 @@ func TestScanModelFolderFindsTheGgufsAndSkipsTheProjectors(t *testing.T) {
 	write("lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF/mmproj-Ministral-3-3B-Instruct-2512-F16.gguf", 1024)
 	write("lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF/README.md", 10)
 	write("lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF/MMPROJ-upper.gguf", 512)
+	// The other way publishers spell it: the model's name first, `mmproj` in the
+	// middle. Measured on the PrismML ternary model's folder, where this shape — not
+	// the `mmproj-…` one above — is what the download produces, and where a
+	// prefix-only test offered a projector as a model.
+	write("prism-ml/Ternary-Bonsai-2-27B-gguf/Ternary-Bonsai-2-27B-mmproj-BF16.gguf", 889)
+	// A model whose name merely contains the letters is not a projector.
+	mmproject := write("vendor/mmproject-7B-GGUF/mmproject-7B-Q4_K_M.gguf", 256)
 	deep := write("empero-ai/Qwythos-9B-GGUF/Qwythos-9B-Q4_K_M.gguf", 4096)
 
 	scan, err := ScanModelFolder(root)
@@ -115,11 +122,16 @@ func TestScanModelFolderFindsTheGgufsAndSkipsTheProjectors(t *testing.T) {
 	for _, f := range scan.Files {
 		got[f.Path] = f.Size
 	}
-	if len(got) != 2 {
-		t.Fatalf("found %d files, want 2: %+v", len(got), scan.Files)
+	if len(got) != 3 {
+		t.Fatalf("found %d files, want 3: %+v", len(got), scan.Files)
 	}
-	if got[want] != 2048 || got[deep] != 4096 {
+	if got[want] != 2048 || got[deep] != 4096 || got[mmproject] != 256 {
 		t.Fatalf("sizes wrong: %+v", scan.Files)
+	}
+	for _, f := range scan.Files {
+		if isProjector(f.Name) {
+			t.Errorf("a projector was offered as a model: %+v", f)
+		}
 	}
 
 	byPath := map[string]ModelFile{}

@@ -67,6 +67,24 @@ func runFakeLlamaServer() {
 		}
 		return
 	}
+	// What a real server says about the placement, and only at the level it is asked
+	// for. Measured on b11541 and on the fork's prism-b10770: at the default level
+	// (3, info) a model load prints nothing about a device, while at `-lv 4` it
+	// prints both of these. A stand-in that printed them unconditionally would
+	// answer a question the real server only answers when it is asked, and the test
+	// that checks the app asks would then pass for the wrong reason.
+	if hasArgValue(args, "-lv", "4") {
+		// A `--gpu-layers 0` run, which is what the app's `off` mode sends, names the
+		// device it would have used and then reports no layer on it — measured on the
+		// fork's Vulkan build. That shape is what the app must not read as a GPU.
+		layers := "34"
+		if hasArgValue(args, "--gpu-layers", "0") {
+			layers = "0"
+		}
+		fmt.Println("0.00.479.028 I llama_prepare_model_devices: using device Test0 (A Card) (0000:0c:00.0) - 18418 MiB free")
+		fmt.Printf("0.00.878.017 I load_tensors: offloaded %s/34 layers to GPU\n", layers)
+	}
+
 	// A leak guard: the launcher is a child of the test process, so a test that dies
 	// without its deferred stop — a panic, a killed run — would otherwise leave this
 	// stand-in listening on a loopback port for as long as the machine is up. No test
@@ -89,6 +107,17 @@ func runFakeLlamaServer() {
 func hasArg(args []string, want string) bool {
 	for _, arg := range args {
 		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+// hasArgValue reports whether a flag was passed with exactly that value, which is how
+// a stand-in decides what the real server would have printed.
+func hasArgValue(args []string, flag, value string) bool {
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) && args[i+1] == value {
 			return true
 		}
 	}

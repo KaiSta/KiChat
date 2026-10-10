@@ -384,6 +384,7 @@ function LocalModelSection({
     flashAttention: saved?.flashAttention ?? 'auto',
     cacheTypeK: saved?.cacheTypeK ?? 'f16',
     cacheTypeV: saved?.cacheTypeV ?? 'f16',
+    offload: saved?.offload ?? 'auto',
     extraArgs: saved?.extraArgs ?? '',
   }))
 
@@ -450,15 +451,29 @@ function LocalModelSection({
   }, [working])
 
   // Ask once, when the card first sees an installed build — not on every poll. A
-  // reading is only shown for the family it was made for, so a save that switches
-  // the family is the other reason to ask again: without that, the row would keep
-  // a statement about a build the user no longer runs.
+  // reading is only shown for the build it was made for, so a save that switches the
+  // family or the source is the other reason to ask again: without that, the row would
+  // keep a statement about a build the user no longer runs, or about a different
+  // llama.cpp's releases entirely.
   useEffect(() => {
     if (!status?.installed || status?.customBinary) return
-    if (status.update?.checked && status.update.family === status.accelerator) return
+    if (
+      status.update?.checked &&
+      status.update.family === status.accelerator &&
+      status.update.distribution === status.distribution
+    )
+      return
     void checkUpdate()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.installed, status?.customBinary, status?.accelerator, status?.update?.checked, status?.update?.family])
+  }, [
+    status?.installed,
+    status?.customBinary,
+    status?.accelerator,
+    status?.distribution,
+    status?.update?.checked,
+    status?.update?.family,
+    status?.update?.distribution,
+  ])
 
   // A managed server changes the entry it belongs to: the address it landed on is
   // written into the backend row and the registry is rebuilt around it. The row
@@ -493,17 +508,19 @@ function LocalModelSection({
     await refresh()
   }
 
-  // accelerator is passed in rather than read from the draft: the store's button
-  // downloads the build the picker shows, while the update row downloads the family
-  // the installed build belongs to. An empty value asks the backend for the stored
-  // one, which is what the update row means.
-  const install = async (accelerator: string) => {
+  // Both values are passed in rather than read from the draft: the store's button
+  // downloads the build and the source the pickers show, while the update row
+  // downloads what the installed build belongs to. An empty value asks the backend
+  // for the stored one, which is what the update row means.
+  const install = async (accelerator: string, source: string) => {
     setError('')
     try {
-      // The selected build, not the saved one: the picker edits the draft, and
-      // downloading the stored family here is how "I picked ROCm" used to install
-      // the CPU build. The backend records the family it really fetched.
-      await App.InstallLlamaRuntime(accelerator)
+      // The selected build and source, not the saved ones: the pickers edit the
+      // draft, and downloading the stored family here is how "I picked ROCm" used
+      // to install the CPU build. With the source in the draft as well, reading the
+      // stored one would install the wrong llama.cpp entirely — the backend records
+      // both of what it really fetched.
+      await App.InstallLlamaRuntime(accelerator, source)
     } catch (e) {
       setError(String(e))
     }
@@ -591,6 +608,19 @@ function LocalModelSection({
   const accelLabel = (id: string) =>
     t(`settings.managed.accel${id.charAt(0).toUpperCase()}${id.slice(1)}`)
 
+  // The release sources the app can install from, straight from the backend for the
+  // same reason as the families: a source with no repository behind it must not be
+  // offered. The families above belong to the selected source — the fork publishes
+  // five of upstream's six — so the two pickers read from the same status.
+  const sources = status?.distributions?.length ? status.distributions : ['llamacpp']
+  const chosenSource = draft.runtime?.distribution ?? 'llamacpp'
+  const sourceOptions = sources.includes(chosenSource) ? sources : [...sources, chosenSource]
+  const sourceLabel = (id: string) =>
+    t(`settings.managed.dist${id.charAt(0).toUpperCase()}${id.slice(1)}`)
+  const sourceHint = chosenSource === 'prism'
+    ? t('settings.managed.distPrismHint')
+    : t('settings.managed.distLlamacppHint')
+
   // Filled from the backend, like the accelerator picker: a value the app cannot
   // pass to llama-server must not be offered here.
   const flashModes = status?.flashAttentionModes?.length ? status.flashAttentionModes : ['auto', 'on', 'off']
@@ -599,6 +629,12 @@ function LocalModelSection({
     t(`settings.managed.flash${id.charAt(0).toUpperCase()}${id.slice(1)}`)
   const cacheLabel = (id: string) =>
     t(`settings.managed.cache${id.charAt(0).toUpperCase()}${id.slice(1)}`)
+  // The offload modes have labels in the same shape, but only the words: the modes
+  // are this app's own vocabulary for `--gpu-layers` rather than a list llama.cpp
+  // reports, so the fallback below is what a status older than this field sends.
+  const offloadModes = status?.offloadModes?.length ? status.offloadModes : ['auto', 'all', 'off']
+  const offloadLabel = (id: string) =>
+    t(`settings.managed.offload${id.charAt(0).toUpperCase()}${id.slice(1)}`)
 
   const folderLabel = (kind: string) =>
     kind === 'lmstudio-configured'
@@ -676,12 +712,14 @@ function LocalModelSection({
   const tooLarge = chosenAccel !== 'cpu' && deviceFreeBytes > 0 && selectedBytes > deviceFreeBytes
 
   // What the backend knows about a newer llama.cpp build. The reading counts only
-  // when it is about the family the app installs for — the family the picker edits
-  // is still a draft, and a reading taken for another build says nothing about this
-  // one.
-  const updateIsAboutThisFamily =
-    !!status?.update?.checked && status.update.family === status.accelerator
-  const updateAvailable = updateIsAboutThisFamily && !!status?.update?.available && !status?.update?.error
+  // when it is about the build the app installs for — the family and the source the
+  // pickers edit are still a draft, and a reading taken for another build, or from
+  // another source's releases, says nothing about this one.
+  const updateIsAboutThisBuild =
+    !!status?.update?.checked &&
+    status.update.family === status.accelerator &&
+    status.update.distribution === status.distribution
+  const updateAvailable = updateIsAboutThisBuild && !!status?.update?.available && !status?.update?.error
   // A server that is already running keeps the build it was started from, so this is
   // the one place an update needs a sentence — both before it is installed (the
   // running model will not change) and after, because the line has to survive the
@@ -726,7 +764,7 @@ function LocalModelSection({
       {status?.installed && !status?.customBinary && (
         <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
           <span className="faint shrink-0">{t('settings.managed.update')}</span>
-          {!updateIsAboutThisFamily ? (
+          {!updateIsAboutThisBuild ? (
             <span className="faint min-w-0 flex-1">{t('settings.managed.updateNotChecked')}</span>
           ) : status.update?.error ? (
             // The reason and not a generic "could not check": a rate limit and an
@@ -764,7 +802,7 @@ function LocalModelSection({
               type="button"
               className="btn btn-sm shrink-0"
               disabled={!!status?.busy}
-              onClick={() => void install(status?.accelerator || '')}
+              onClick={() => void install(status?.accelerator || '', status?.distribution || '')}
             >
               {t('settings.managed.updateInstall')}
             </button>
@@ -874,7 +912,12 @@ function LocalModelSection({
 
       {!status?.customBinary && (
         <div className="mb-2 flex items-center gap-2">
-          <button type="button" className="btn btn-sm" disabled={!!status?.busy} onClick={() => void install(chosenAccel)}>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={!!status?.busy}
+            onClick={() => void install(chosenAccel, chosenSource)}
+          >
             {status?.busy ? t('settings.managed.installing') : t('settings.managed.install')}
           </button>
           {status?.busy && (
@@ -888,6 +931,28 @@ function LocalModelSection({
           )}
         </div>
       )}
+
+      {/* Which llama.cpp the app installs from. It is one setting for the whole
+          runtime because there is one runtime directory and one installed launcher:
+          the two sources publish different releases under different tag schemes, and
+          only the fork carries the ternary kernels a model like Bonsai 2 needs. */}
+      <div className="mb-2 grid grid-cols-2 gap-2">
+        <label className="text-[11px]">
+          {t('settings.managed.distribution')}
+          <select
+            className="input mono mt-1"
+            value={chosenSource}
+            onChange={(e) => patch({ runtime: { ...draft.runtime, distribution: e.target.value } })}
+          >
+            {sourceOptions.map((id) => (
+              <option key={id} value={id}>
+                {sourceLabel(id)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="self-end pb-1 text-[11px] faint">{sourceHint}</div>
+      </div>
 
       <div className="mb-2 grid grid-cols-2 gap-2">
         <label className="text-[11px]">
@@ -1058,9 +1123,12 @@ function LocalModelSection({
         </label>
         <label className="text-[11px]">
           {t('settings.managed.extra')}
+          {/* A layer count is the one flag this box no longer has to advertise: the
+              row below sets `--gpu-layers`, and a count typed here still wins over
+              it, because the user's own arguments go last on the command line. */}
           <input
             className="input mono mt-1"
-            placeholder="--n-gpu-layers 99"
+            placeholder="--lora /pfad/adapter.gguf"
             value={model.extraArgs}
             onChange={(e) => update({ extraArgs: e.target.value })}
           />
@@ -1131,6 +1199,29 @@ function LocalModelSection({
         </div>
       )}
 
+      {/* How much of the model goes on the GPU. It sits above the flash/cache row
+          because it is the setting the other two react to: a quantised KV cache is
+          what buys the room for more layers, and a model too large for the card is
+          the reason to leave them off. Changing it applies from the next start — a
+          running server is not reconfigured from here. */}
+      <div className="mb-2">
+        <label className="text-[11px]">
+          {t('settings.managed.offload')}
+          <select
+            className="input mono mt-1"
+            value={model.offload}
+            onChange={(e) => update({ offload: e.target.value })}
+          >
+            {offloadModes.map((id) => (
+              <option key={id} value={id}>
+                {offloadLabel(id)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="mt-1 text-[11px] faint">{t('settings.managed.offloadHint')}</div>
+      </div>
+
       <div className="flex items-center gap-2">
         <button type="button" className="btn btn-sm" disabled={!status?.installed || !model.modelPath} onClick={() => void start()}>
           {t('settings.managed.start')}
@@ -1144,6 +1235,29 @@ function LocalModelSection({
         {mine?.url && <span className="mono min-w-0 flex-1 truncate text-[11px] faint">{mine.url}</span>}
       </div>
 
+      {/* What the server itself said about the placement, which is the only answer
+          to "is this model actually running on the GPU?" — the free-memory warning
+          above is a prediction, this is the reading. The numbers come from
+          llama.cpp's own log at the trace level, so an empty one means "not
+          reported" rather than "nothing offloaded": a launcher the app did not
+          install is never asked for that level, and neither is one that failed
+          before it got to the layers. It appears while the model is still loading,
+          because that is when the server says it. */}
+      {(mine?.offloadTotal ?? 0) > 0 && (
+        <div className="mt-1 text-[11px] faint">
+          {/* The device is the whole test, and the backend decides it: it sends a
+              name only when layers really are on a card. A CPU-only build reports
+              every layer offloaded without naming one — llama.cpp's wording — so
+              the count alone would be claiming an accelerator that is not there. */}
+          {mine?.offloadDevice
+            ? t('settings.managed.offloadReport', {
+                device: mine.offloadDevice,
+                layers: formatNumber(mine.offloadLayers),
+                total: formatNumber(mine.offloadTotal),
+              })
+            : t('settings.managed.offloadCpu', { total: formatNumber(mine?.offloadTotal ?? 0) })}
+        </div>
+      )}
       {mine?.error && (
         <div className="mt-2 whitespace-pre-wrap text-[11px]" style={{ color: 'var(--danger)' }}>
           {mine.error}

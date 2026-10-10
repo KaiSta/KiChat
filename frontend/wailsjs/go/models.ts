@@ -170,6 +170,7 @@ export namespace config {
 	    flashAttention: string;
 	    cacheTypeK: string;
 	    cacheTypeV: string;
+	    offload: string;
 	    extraArgs: string;
 	
 	    static createFrom(source: any = {}) {
@@ -184,6 +185,7 @@ export namespace config {
 	        this.flashAttention = source["flashAttention"];
 	        this.cacheTypeK = source["cacheTypeK"];
 	        this.cacheTypeV = source["cacheTypeV"];
+	        this.offload = source["offload"];
 	        this.extraArgs = source["extraArgs"];
 	    }
 	}
@@ -206,6 +208,7 @@ export namespace config {
 	    }
 	}
 	export class RuntimeSettings {
+	    distribution: string;
 	    tag: string;
 	    binaryPath: string;
 	    accelerator: string;
@@ -219,6 +222,7 @@ export namespace config {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.distribution = source["distribution"];
 	        this.tag = source["tag"];
 	        this.binaryPath = source["binaryPath"];
 	        this.accelerator = source["accelerator"];
@@ -628,6 +632,9 @@ export namespace main {
 	    error?: string;
 	    log?: string[];
 	    modelBytes: number;
+	    offloadLayers: number;
+	    offloadTotal: number;
+	    offloadDevice?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ManagedStatus(source);
@@ -646,6 +653,9 @@ export namespace main {
 	        this.error = source["error"];
 	        this.log = source["log"];
 	        this.modelBytes = source["modelBytes"];
+	        this.offloadLayers = source["offloadLayers"];
+	        this.offloadTotal = source["offloadTotal"];
+	        this.offloadDevice = source["offloadDevice"];
 	    }
 	}
 	export class PromptVariable {
@@ -668,6 +678,7 @@ export namespace main {
 	    checked: boolean;
 	    available: boolean;
 	    family?: string;
+	    distribution?: string;
 	    installed?: string;
 	    latest?: string;
 	    size: number;
@@ -682,6 +693,7 @@ export namespace main {
 	        this.checked = source["checked"];
 	        this.available = source["available"];
 	        this.family = source["family"];
+	        this.distribution = source["distribution"];
 	        this.installed = source["installed"];
 	        this.latest = source["latest"];
 	        this.size = source["size"];
@@ -705,9 +717,12 @@ export namespace main {
 	    done: number;
 	    total: number;
 	    error?: string;
+	    distribution: string;
+	    distributions: string[];
 	    variants: string[];
 	    flashAttentionModes: string[];
 	    cacheTypes: string[];
+	    offloadModes: string[];
 	    update: RuntimeUpdate;
 	    restartPending: boolean;
 	    models: ManagedStatus[];
@@ -734,9 +749,12 @@ export namespace main {
 	        this.done = source["done"];
 	        this.total = source["total"];
 	        this.error = source["error"];
+	        this.distribution = source["distribution"];
+	        this.distributions = source["distributions"];
 	        this.variants = source["variants"];
 	        this.flashAttentionModes = source["flashAttentionModes"];
 	        this.cacheTypes = source["cacheTypes"];
+	        this.offloadModes = source["offloadModes"];
 	        this.update = this.convertValues(source["update"], RuntimeUpdate);
 	        this.restartPending = source["restartPending"];
 	        this.models = this.convertValues(source["models"], ManagedStatus);

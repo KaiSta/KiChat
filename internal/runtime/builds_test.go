@@ -144,6 +144,55 @@ func TestRemoveBuildDeletesOneBuildAndItsLeftovers(t *testing.T) {
 	}
 }
 
+// An interrupted install can be killed after its archive was flattened, or while a
+// several-hundred-megabyte CUDA bundle unpacks, and then its staging directory holds a
+// launcher. It is still not a build: it is the newest thing in the directory, so `Find`
+// would pick it and a start would run a half-extracted build — upstream's is 17 MB, so
+// the archive's own contents decide what is missing — and the cleanup list would stop
+// calling the one directory nothing else cleans up a leftover.
+func TestAStagingDirectoryWithALauncherIsStillAnInterruptedInstall(t *testing.T) {
+	dir := t.TempDir()
+	writeBuild(t, dir, "b11541-cpu", 1000)
+	// The shape a crash leaves once the wrapper has been flattened: the launcher sits
+	// in the staging directory itself, and it was written after the real build.
+	staging := filepath.Join(dir, "b11541-cuda-13.4.installing")
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(staging, launcherName())
+	if err := os.WriteFile(launcher, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(launcher, later, later); err != nil {
+		t.Fatal(err)
+	}
+
+	inst := &Installer{Dir: dir}
+	if tag, binary := inst.Find(LlamaCPP); tag != "b11541-cpu" || binary == "" {
+		t.Errorf("Find = %q, %q; want the installed build, never the staging directory", tag, binary)
+	}
+
+	var leftover *Build
+	for _, build := range inst.Builds() {
+		if build.Dir == "b11541-cuda-13.4.installing" {
+			found := build
+			leftover = &found
+		}
+	}
+	if leftover == nil {
+		t.Fatal("the staging directory is not listed at all, so it could never be cleaned up")
+	}
+	if !leftover.Incomplete {
+		t.Errorf("staging directory listed as %+v, want it marked incomplete", *leftover)
+	}
+	// It is still removable: RemoveBuild refuses a directory holding no launcher, and
+	// this one holds the interrupted install's own.
+	if err := inst.RemoveBuild("b11541-cuda-13.4.installing"); err != nil {
+		t.Errorf("RemoveBuild on the staging directory: %v", err)
+	}
+}
+
 // writeBuild makes a directory that looks like an install: a launcher, and one more
 // file whose size makes the measured footprint predictable.
 func writeBuild(t *testing.T, root, name string, size int) {

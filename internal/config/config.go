@@ -47,9 +47,19 @@ type Settings struct {
 // and the download are shared, while which model to run is per backend entry.
 // ManagedModels is keyed by backend id for that reason.
 type RuntimeSettings struct {
+	// Distribution names which llama.cpp the app installs and runs managed models
+	// with: upstream's releases, or PrismML's fork, which is the build that loads a
+	// ternary model such as Bonsai 2. It is one setting for the whole runtime
+	// rather than one per model because there is one runtime directory and one
+	// installed launcher: the two sources publish different releases under
+	// different tag schemes, so "which build is on disk" is a question about the
+	// source as much as about the family. Empty means upstream.
+	Distribution string `json:"distribution"`
 	// Tag is the llama.cpp build whose binaries were installed, empty when none
 	// is. It is the directory name in the runtime folder, so it is also how an
-	// install is found again after a restart.
+	// install is found again after a restart — and its name carries the source it
+	// came from, so a recorded build of the other source is recognised as one this
+	// app would not start for the selected distribution.
 	Tag string `json:"tag"`
 	// BinaryPath overrides the downloaded binary with one the user installed
 	// themselves — a distro package, a build with an accelerator this app does
@@ -90,9 +100,47 @@ type ManagedModel struct {
 	// llama.cpp's own default and is passed through as such.
 	CacheTypeK string `json:"cacheTypeK"`
 	CacheTypeV string `json:"cacheTypeV"`
+	// Offload selects how much of the model runs on the GPU, llama.cpp's
+	// `--gpu-layers`. "auto" is the server's own default and the right answer for
+	// everything that fits: llama.cpp places as many layers in the device memory
+	// as it can (`--fit on` with a 1024 MiB margin), so nothing has to be counted
+	// here. "all" forces every layer onto the device; "off" runs the model on the
+	// CPU, which is what a GPU busy with something else needs — and what a model
+	// whose KV cache does not fit beside its own weights needs as well.
+	// Empty is normalised to "auto".
+	Offload string `json:"offload"`
 	// ExtraArgs is the rest of the command line, for the flags this app has no
-	// field for (--n-gpu-layers, a chat template).
+	// field for (--n-gpu-layers 24, a chat template).
 	ExtraArgs string `json:"extraArgs"`
+}
+
+// The llama.cpp release sources the app can install from. Like the family names
+// below, they are spelled here rather than imported from internal/runtime so the
+// settings package stays free of it, and the two lists are pinned against each other
+// by a test.
+const (
+	// DistLlamaCPP is upstream ggml-org/llama.cpp, the default.
+	DistLlamaCPP = "llamacpp"
+	// DistPrism is PrismML's fork, the build that can load a ternary model.
+	DistPrism = "prism"
+)
+
+// Distributions is every source a settings blob may name, in the order a picker
+// offers them: the default first.
+func Distributions() []string {
+	return []string{DistLlamaCPP, DistPrism}
+}
+
+// IsDistribution reports whether a value names a source this app knows. An
+// unrecognised value is repaired to the default rather than passed on: a download
+// URL built from it would ask for an archive that does not exist.
+func IsDistribution(value string) bool {
+	for _, d := range Distributions() {
+		if d == value {
+			return true
+		}
+	}
+	return false
 }
 
 // The build families the installer can fetch. They are spelled here rather than
@@ -194,6 +242,47 @@ func normaliseCacheType(value string) string {
 	return value
 }
 
+// GPU offload modes. "auto" is llama.cpp's own default — as many layers as fit in
+// the device memory — and is what a missing or unrecognised field falls back to.
+// The words are this app's: llama.cpp itself takes a layer count, `auto` or `all`,
+// so `off` is the app's name for `--gpu-layers 0`.
+const (
+	OffloadAuto = "auto"
+	OffloadAll  = "all"
+	OffloadOff  = "off"
+)
+
+// OffloadModes is every value the offload field may hold, in the order a picker
+// should offer them: the server's own choice first, the two explicit ones after
+// it. An exact layer count is deliberately not among them — a number only one
+// model needs stays a further argument (`--n-gpu-layers 24`), which is where the
+// flags this app has no field for belong.
+func OffloadModes() []string {
+	return []string{OffloadAuto, OffloadAll, OffloadOff}
+}
+
+// IsOffload reports whether a value names an offload mode.
+func IsOffload(value string) bool {
+	for _, v := range OffloadModes() {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+
+// normaliseOffload maps an absent or unrecognised value onto the server's own
+// default, for the same reason as the cache types: a word nothing here knows would
+// otherwise reach `--gpu-layers` and be rejected at startup, which reads as a model
+// that suddenly stopped loading rather than as a setting.
+func normaliseOffload(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !IsOffload(value) {
+		return OffloadAuto
+	}
+	return value
+}
+
 // Defaults for the managed runtime.
 const (
 	DefaultReadySeconds = 180
@@ -281,6 +370,7 @@ func Default() Settings {
 		Backends:       llm.DefaultBackendConfigs(),
 		ModelOverrides: map[string]llm.ModelOverride{},
 		Runtime: RuntimeSettings{
+			Distribution: DistLlamaCPP,
 			Accelerator:  AccelCPU,
 			ReadySeconds: DefaultReadySeconds,
 			Models:       map[string]ManagedModel{},
@@ -436,6 +526,11 @@ func (s *Settings) normalise() {
 	if s.ModelOverrides == nil {
 		s.ModelOverrides = map[string]llm.ModelOverride{}
 	}
+	if !IsDistribution(s.Runtime.Distribution) {
+		// An empty field is what every installation that predates this setting
+		// carries, and it has to mean upstream rather than something else.
+		s.Runtime.Distribution = DistLlamaCPP
+	}
 	if !IsAccelerator(s.Runtime.Accelerator) {
 		// Anything unrecognised falls back to the build that needs no GPU
 		// toolkit: shipping a stored value straight into a download URL would
@@ -468,6 +563,7 @@ func (s *Settings) normalise() {
 		mm.FlashAttention = normaliseFlashAttention(mm.FlashAttention)
 		mm.CacheTypeK = normaliseCacheType(mm.CacheTypeK)
 		mm.CacheTypeV = normaliseCacheType(mm.CacheTypeV)
+		mm.Offload = normaliseOffload(mm.Offload)
 		s.Runtime.Models[id] = mm
 	}
 	if len(s.Search.ProviderOrder) == 0 {
