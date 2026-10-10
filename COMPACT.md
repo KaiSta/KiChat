@@ -47,15 +47,20 @@ Every other decision in this document follows from these six.
    summary is an added reading instruction. Undo is therefore complete, not best-effort.
 2. **One cumulative memory, merged — not re-summarised.** A fold always starts *after* the
    end of the newest existing compaction and is asked to merge the existing memory into
-   one document. The active memory is always exactly one system message, no matter how
+   one document. The active memory is always exactly one merged document, no matter how
    many times the chat has been compacted. This is what keeps compaction cost **linear**
    in the number of messages instead of quadratic (`context.go:117`, `compact.go:544`).
 3. **Cut only at user-turn boundaries.** A cut between a tool call and its result produces
    a request the backend rejects, and a prompt that begins with an assistant message is
    malformed. So the planner's cut points are user messages only (`compact.go:154`).
-4. **The memory is a system message, never a fake user turn.** It is injected as
-   `<conversation_memory>…</conversation_memory>` (`context.go:207`). Faking a turn would
-   put words in the user's mouth in the transcript they read back.
+4. **The memory is system content, never a fake user turn.** It is folded into the one
+   leading system message, delimited by `<conversation_memory>…</conversation_memory>`
+   (`context.go:217`). Faking a turn would put words in the user's mouth in the transcript
+   they read back. It shares the prompt's message rather than travelling beside it because a
+   strict template — the Qwen3 one the ternary models use — reads `messages[0]` as the
+   system prompt and raises *"System message must be at the beginning."* for any other
+   system message. A second leading one made every turn after a compact fail; joining them
+   keeps the memory a system message and the request renderable.
 5. **A request that does not fit the window is the one failure that must not happen.**
    This applies twice: to the chat request (that is what compaction is for) and to the
    summarisation request itself, which is priced so that prompt + transcript + worst-case
@@ -597,9 +602,12 @@ English and Chinese.
 - sorts compactions by `ToSeq` and takes the **newest** (`context.go:117`) — it already
   merges earlier ones;
 - sets `FirstVerbatimSeq = latest.ToSeq + 1`; messages before it are *not* sent verbatim;
-- injects the summary as a system message wrapped in
-  `<conversation_memory>…</conversation_memory>` (`context.go:207`);
-- adds it to `budget.Memory` (`context.go:197`) and to the Context Inspector as a segment
+- folds the summary into the **single leading system message**, wrapped in
+  `<conversation_memory>…</conversation_memory>` (`context.go:217`). The prompt, the
+  document-index notice and the memory share that one message because a strict chat
+  template accepts a system message only at position 0 (principle 4 above, and the
+  seeded-search note below);
+- adds it to `budget.Memory` (`context.go:207`) and to the Context Inspector as a segment
   labelled **"Gedächtnis (Kompaktierung)"** with the detail `Zusammenfassung der Nachrichten
   from–to` (`context.go:213`);
 - counts every attachment **once**. Inlined document text is charged to
@@ -612,6 +620,15 @@ English and Chinese.
 
 So the memory is visible in the context inspector, counted in the meter, and clearly
 attributed to a range of message numbers.
+
+**A seeded search travels as a user turn, not a second system message.** `searchfirst.go`
+stores the pre-flight research as a `system` row, and it belongs next to the question it
+was run for. A strict template allows a system message only at position 0, so `Assemble`
+changes that one role on the wire (`context.go:248`): the payload and its untrusted-data
+notice are rendered as a user turn that a template will accept, while the stored row and
+the source card the user reads back are untouched. Sending it as a second system message
+was the same failure as a second leading one — a 500 from the template, not from the
+window.
 
 ### 11.4 Undo
 

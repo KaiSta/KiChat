@@ -962,6 +962,52 @@ func TestAssembleCompactionReplacesOldHistory(t *testing.T) {
 	}
 }
 
+// TestAssembleSendsExactlyOneSystemMessage pins the one message shape a strict
+// chat template accepts. The ternary models run on a Qwen3 template that reads
+// messages[0] as the system prompt and raises "System message must be at the
+// beginning." for any other system message, so a compaction's memory used to
+// turn every turn after a compact into a 500. The same shape would have come
+// from the attachment notice and from a seeded search inside the history.
+func TestAssembleSendsExactlyOneSystemMessage(t *testing.T) {
+	messages := append(conversation(2), // seq 1..4
+		msg(5, "system", "Vorab-Recherche für diese Frage (Anbieter: brave): …"))
+	// An indexed file adds the document notice; it is never inlined.
+	messages[0].Attachments = []store.Attachment{{
+		ID: "a1", ChatID: "c1", MessageID: messages[0].ID,
+		Filename: "bericht.pdf", DocumentID: "d1", Placement: store.PlacementIndexed,
+	}}
+
+	assembly := Assemble(AssemblyInput{
+		Chat:        asmChat("System."),
+		Messages:    messages,
+		Compactions: []store.Compaction{{ID: "k1", FromSeq: 1, ToSeq: 2, Summary: "Gedächtnis"}},
+		Documents:   []store.Document{{ID: "d1", Title: "bericht.pdf", Text: "…", TokenCount: 10}},
+		Limit:       10000,
+	})
+
+	if len(assembly.Messages) == 0 || assembly.Messages[0].Role != llm.RoleSystem {
+		t.Fatalf("the request must begin with a system message: %+v", assembly.Messages)
+	}
+	for i, m := range assembly.Messages {
+		if m.Role == llm.RoleSystem && i != 0 {
+			t.Fatalf("system message at index %d would be rejected by a strict template: %q", i, m.Content)
+		}
+	}
+	// The prompt, the notice and the memory must all reach the model inside
+	// that one system message, and the memory must stay delimited.
+	head := assembly.Messages[0].Content
+	for _, want := range []string{"System.", "bericht.pdf", "Gedächtnis", "<conversation_memory>"} {
+		if !strings.Contains(head, want) {
+			t.Errorf("the single system message is missing %q:\n%s", want, head)
+		}
+	}
+	// The seeded search must still be in the request, in its place.
+	last := assembly.Messages[len(assembly.Messages)-1]
+	if last.Role != llm.RoleUser || !strings.Contains(last.Content, "Vorab-Recherche") {
+		t.Errorf("the seeded search should travel as a user turn: %+v", last)
+	}
+}
+
 func TestAssembleFlagsAnOverfullWindow(t *testing.T) {
 	assembly := Assemble(AssemblyInput{
 		Chat:     asmChat("System."),

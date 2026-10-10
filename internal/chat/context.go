@@ -166,7 +166,18 @@ func Assemble(in AssemblyInput) Assembly {
 		toolsAvailable = append(toolsAvailable, t.Name)
 	}
 
-	// The rendered system prompt is always the first message.
+	// The rendered system prompt is always the first message — and the only
+	// system message. Everything the app puts ahead of the history (the
+	// attachment notice, a compaction's memory) travels inside it rather than as
+	// a message of its own.
+	//
+	// A strict chat template accepts exactly one: the ternary models run on a
+	// Qwen3 template that reads messages[0] as the system prompt and raises
+	// "System message must be at the beginning." for any other system message.
+	// A second leading one therefore made every turn after a compact fail — the
+	// tokens fit, the shape did not. Joining the parts preserves their order and
+	// their delimiters, so the memory is still a system message rather than a
+	// fake user turn.
 	renderedSystem := RenderPrompt(in.Chat.SystemPrompt, TemplateVars{
 		Now:          time.Now(),
 		Location:     in.Location,
@@ -177,8 +188,7 @@ func Assemble(in AssemblyInput) Assembly {
 		Tools:        toolsAvailable,
 	})
 
-	msgs := make([]llm.Message, 0, len(in.Messages)+3)
-	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: renderedSystem})
+	systemParts := []string{renderedSystem}
 
 	budget.System = llm.EstimateTokens(renderedSystem)
 	budget.Segments = append(budget.Segments, ContextSegment{
@@ -192,7 +202,7 @@ func Assemble(in AssemblyInput) Assembly {
 	// paying for their full text up front.
 	notice := buildAttachmentNotice(in)
 	if notice != "" {
-		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: notice})
+		systemParts = append(systemParts, notice)
 		tokens := llm.EstimateTokens(notice)
 		budget.Memory += tokens
 		budget.Segments = append(budget.Segments, ContextSegment{
@@ -205,7 +215,7 @@ func Assemble(in AssemblyInput) Assembly {
 
 	if memorySummary != "" {
 		wrapped := "<conversation_memory>\n" + memorySummary + "\n</conversation_memory>"
-		msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: wrapped})
+		systemParts = append(systemParts, wrapped)
 		tokens := llm.EstimateTokens(wrapped)
 		budget.Memory += tokens
 		budget.Segments = append(budget.Segments, ContextSegment{
@@ -215,6 +225,9 @@ func Assemble(in AssemblyInput) Assembly {
 			Detail: fmt.Sprintf("Zusammenfassung der Nachrichten %d–%d", latest.FromSeq, latest.ToSeq),
 		})
 	}
+
+	msgs := make([]llm.Message, 0, len(in.Messages)+1)
+	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: strings.Join(systemParts, "\n\n")})
 
 	// Verbatim history, plus any inlined attachment text.
 	historyCount := 0
@@ -227,6 +240,14 @@ func Assemble(in AssemblyInput) Assembly {
 			maxIncluded = m.Seq
 		}
 		lm := toLLMMessage(m)
+		// A seeded search is stored as a system message and belongs next to the
+		// question it was run for, but the template allows a system message only
+		// at position 0. It therefore travels as a user turn carrying the search
+		// payload and its untrusted-data notice; the stored row, and the source
+		// card the user reads back, are unchanged.
+		if lm.Role == llm.RoleSystem {
+			lm.Role = llm.RoleUser
+		}
 		// Priced before the attachment text is appended: inlined document text
 		// belongs to Attachments below, and counting it here as well made the
 		// meter read half again as large as the request it describes.
