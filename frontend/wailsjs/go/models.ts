@@ -575,6 +575,47 @@ export namespace main {
 	        this.toSeq = source["toSeq"];
 	    }
 	}
+	export class InstalledBuild {
+	    dir: string;
+	    size: number;
+	    // Go type: time
+	    installedAt: any;
+	    inUse: boolean;
+	    running: boolean;
+	    incomplete: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new InstalledBuild(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.dir = source["dir"];
+	        this.size = source["size"];
+	        this.installedAt = this.convertValues(source["installedAt"], null);
+	        this.inUse = source["inUse"];
+	        this.running = source["running"];
+	        this.incomplete = source["incomplete"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class ManagedStatus {
 	    backendId: string;
 	    enabled: boolean;
@@ -623,6 +664,30 @@ export namespace main {
 	        this.description = source["description"];
 	    }
 	}
+	export class RuntimeUpdate {
+	    checked: boolean;
+	    available: boolean;
+	    family?: string;
+	    installed?: string;
+	    latest?: string;
+	    size: number;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RuntimeUpdate(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.checked = source["checked"];
+	        this.available = source["available"];
+	        this.family = source["family"];
+	        this.installed = source["installed"];
+	        this.latest = source["latest"];
+	        this.size = source["size"];
+	        this.error = source["error"];
+	    }
+	}
 	export class RuntimeStatus {
 	    installed: boolean;
 	    tag?: string;
@@ -643,6 +708,8 @@ export namespace main {
 	    variants: string[];
 	    flashAttentionModes: string[];
 	    cacheTypes: string[];
+	    update: RuntimeUpdate;
+	    restartPending: boolean;
 	    models: ManagedStatus[];
 	
 	    static createFrom(source: any = {}) {
@@ -670,6 +737,8 @@ export namespace main {
 	        this.variants = source["variants"];
 	        this.flashAttentionModes = source["flashAttentionModes"];
 	        this.cacheTypes = source["cacheTypes"];
+	        this.update = this.convertValues(source["update"], RuntimeUpdate);
+	        this.restartPending = source["restartPending"];
 	        this.models = this.convertValues(source["models"], ManagedStatus);
 	    }
 	
@@ -691,6 +760,7 @@ export namespace main {
 		    return a;
 		}
 	}
+	
 	export class SearchStatus {
 	    providers: Record<string, boolean>;
 	    order: string[];

@@ -70,6 +70,13 @@ type App struct {
 	deviceMu    sync.Mutex
 	deviceCache map[string]deviceReading
 
+	// update is the last look at llama.cpp's releases. It is cached because it is
+	// the one question in the runtime panel that costs a request to a rate-limited
+	// API: the panel would otherwise ask it again on every poll, and the answer
+	// changes once a day.
+	updateMu sync.Mutex
+	update   RuntimeUpdate
+
 	// install tracks a download in progress. It is read by the UI through a
 	// bound method rather than pushed, because a download outlives the call that
 	// asked for it and polling cannot miss the end of one.
@@ -79,6 +86,12 @@ type App struct {
 	installDone  int64
 	installTotal int64
 	installErr   string
+	// installCompleted records that a build was downloaded during this session.
+	// A server that was already running keeps the binary it was started from, so
+	// without it the panel's "restart the model" line would disappear exactly when
+	// the update landed — the moment the restart is owed. A managed start clears
+	// it, because that server is running the new build.
+	installCompleted bool
 }
 
 // NewApp creates the application.
@@ -186,7 +199,7 @@ func (a *App) startManagedModel(backendID string) error {
 	}
 
 	srv := a.serverFor(backendID, settings)
-	return srv.Start(rt.Options{
+	err = srv.Start(rt.Options{
 		Binary:         binary,
 		Model:          mm.ModelPath,
 		Ctx:            mm.CtxSize,
@@ -195,6 +208,14 @@ func (a *App) startManagedModel(backendID string) error {
 		CacheTypeV:     mm.CacheTypeV,
 		Extra:          rt.SplitArgs(mm.ExtraArgs),
 	})
+	if err == nil {
+		// The server that just came up runs the launcher that is on disk now, which
+		// is what the panel's "restart the model" reminder is waiting for. A start
+		// that failed leaves the reminder in place: that model is still on the old
+		// build.
+		a.clearInstallCompleted()
+	}
+	return err
 }
 
 // llamaServerPath resolves the launcher: the user's own copy if they gave one,
@@ -325,6 +346,22 @@ func (a *App) forgetVersions() {
 	a.deviceMu.Lock()
 	a.deviceCache = map[string]deviceReading{}
 	a.deviceMu.Unlock()
+}
+
+// cachedUpdate returns the last release lookup, and whether one was made at all.
+func (a *App) cachedUpdate() RuntimeUpdate {
+	a.updateMu.Lock()
+	defer a.updateMu.Unlock()
+	return a.update
+}
+
+// setUpdate records one release lookup. An empty reading means "not checked", which
+// is what a user-supplied launcher gets: there is nothing on disk this app installed
+// to compare a published build against.
+func (a *App) setUpdate(reading RuntimeUpdate) {
+	a.updateMu.Lock()
+	a.update = reading
+	a.updateMu.Unlock()
 }
 
 // deviceReading is one cached `--list-devices` answer: the devices, why they could

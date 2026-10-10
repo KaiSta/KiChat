@@ -973,6 +973,10 @@ Verfügbare Tools: {{tool_list}}`,
     port: 0,
     error: '',
     log: [],
+    // A build was downloaded while a model was running, so that model is still on
+    // the old binary until it is started again. The real backend keeps this for the
+    // session and clears it on a managed start.
+    restartPending: false,
   }
 
   /*
@@ -1066,6 +1070,58 @@ Verfügbare Tools: {{tool_list}}`,
     }
   }
 
+  /*
+   * ?update= is the state of the llama.cpp release lookup, which is a request the app
+   * makes rather than polls. `available` is a newer build published than the one on
+   * disk, `error` is a lookup that could not be made at all — a rate limit — and
+   * `stale` is a reading taken for another family. The three must not render as each
+   * other: only the first is an update to install, and only the last is a statement
+   * about a build this card is not about. None of them reaches the network.
+   *
+   * It sits after the two install injections above so that the family it reports is
+   * the one they left in the settings.
+   */
+  const updateParam = new URLSearchParams(location.search).get('update')
+  const publishedTag = updateParam === 'available' ? 'b11541' : 'b11528'
+  if (updateParam && !managed.installed) {
+    managed.installed = true
+    managed.tag = `b11528-${(settings.runtime || {}).accelerator || 'cpu'}`
+    managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
+    console.warn(`[harness] update injection active: the published build is ${publishedTag}`)
+  }
+
+  /*
+   * ?builds= is what the installer has on disk besides the build in use. `old` is an
+   * update's predecessor plus the staging directory of an interrupted download — the
+   * two reasons the cleanup list exists — with the sizes those really occupy (a
+   * Vulkan build is 31.8 MB, a CUDA download that never finished had already written
+   * hundreds). Without the flag the fixture has exactly one build, which is the state
+   * the row deliberately stays out of.
+   */
+  const buildsParam = new URLSearchParams(location.search).get('builds')
+  let extraBuilds =
+    buildsParam === 'old'
+      ? [
+          { dir: 'b11528-vulkan', size: 31800000, installedAt: new Date(Date.now() - 26 * 3600e3).toISOString(), incomplete: false },
+          { dir: 'b11541-cuda-13.4.installing', size: 612000000, installedAt: new Date(Date.now() - 3600e3).toISOString(), incomplete: true },
+        ]
+      : []
+  if (buildsParam === 'old') {
+    // A build in use has to exist for the list to be worth anything: the row that
+    // may not be deleted is the one the guard is about, and the harness has to show
+    // it beside the two that may.
+    if (!managed.installed) {
+      managed.installed = true
+      managed.tag = `b11541-${(settings.runtime || {}).accelerator || 'cpu'}`
+      managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
+    }
+    console.warn('[harness] build injection active: two builds nothing is using are on disk')
+  }
+
+  // When the build in use landed. It moves to "just now" when the Download or Update
+  // button runs, which is what the age column is for.
+  let installedAt = new Date(Date.now() - 5 * 60e3).toISOString()
+
   // What GetRuntimeStatus measures: it stats the configured model path. The tree
   // below is where the fixture's files live, so their sizes are the ones the panel
   // compares against the device memory.
@@ -1075,6 +1131,41 @@ Verfügbare Tools: {{tool_list}}`,
       if (hit) return hit.size
     }
     return 0
+  }
+
+  /*
+   * The release lookup, as a state rather than a call: the real binding answers one
+   * of the three shapes below, so the panel's row has a fixture for each. The
+   * comparison is the numeric one the backend makes, so a fixture that installed a
+   * build newer than the published tag reports a current build and not a downgrade.
+   */
+  let update = { checked: false, available: false, size: 0 }
+  const computeUpdate = () => {
+    const family = (settings.runtime || {}).accelerator || 'cpu'
+    const installed = `${managed.tag || ''}`.split('-')[0]
+    const buildNumber = (tag) => Number(`${tag}`.replace(/^b/, '')) || 0
+    if (updateParam === 'error') {
+      return {
+        checked: true,
+        available: false,
+        family,
+        installed,
+        size: 0,
+        error: 'llama.cpp-Releases abfragen: HTTP 403',
+      }
+    }
+    if (updateParam === 'stale') {
+      return { checked: true, available: false, family: 'rocm', installed, latest: publishedTag, size: 0, error: '' }
+    }
+    return {
+      checked: true,
+      available: buildNumber(publishedTag) > buildNumber(installed),
+      family,
+      installed,
+      latest: publishedTag,
+      size: publishedTag === 'b11541' ? 17829692 : 0,
+      error: '',
+    }
   }
 
   const runtimeStatus = () => {
@@ -1118,6 +1209,10 @@ Verfügbare Tools: {{tool_list}}`,
       // panel measures a model file against.
       deviceFreeBytes: noDevices ? 0 : (fitLarge ? 600 : 18400) * 1024 * 1024,
       readySeconds: runtime.readySeconds || 180,
+      // Reported rather than asked for, like the real status: the lookup is the one
+      // thing in this card that costs a request to a rate-limited API.
+      update: copy(update),
+      restartPending: managed.restartPending,
       busy: false,
       phase: '',
       done: 0,
@@ -1282,6 +1377,16 @@ Verfügbare Tools: {{tool_list}}`,
     // load reports for its first seconds, and it is the state the poll has to
     // pick up.
     GetRuntimeStatus: () => Promise.resolve(copy(runtimeStatus())),
+    // One release lookup, cached, exactly as the real binding behaves: the answer
+    // is what `?update=` decided, and the status reports it from then on.
+    CheckLlamaRuntimeUpdate: () => {
+      update = computeUpdate()
+      console.log(
+        '[harness] release lookup:',
+        update.error || (update.available ? `${update.installed} → ${update.latest}` : 'current'),
+      )
+      return Promise.resolve(copy(update))
+    },
     // The family is a parameter, mirroring the real binding: the picker edits the
     // draft, so the download has to be told what to fetch. Recording it in the
     // settings is what lets the harness check that picking a build downloads it.
@@ -1289,11 +1394,71 @@ Verfügbare Tools: {{tool_list}}`,
       const runtime = settings.runtime || {}
       const family = accelerator || runtime.accelerator || 'cpu'
       settings.runtime = { ...runtime, accelerator: family }
+      // An install writes a new directory and leaves the old one where it was — that
+      // is why the cleanup list exists — so the build being replaced becomes one of
+      // the old ones rather than disappearing, which is what the real runtime
+      // directory does.
+      if (managed.installed && managed.tag && managed.tag !== `${publishedTag}-${family}`) {
+        extraBuilds.push({
+          dir: managed.tag,
+          size: managed.tag.includes('cuda') ? 612000000 : 17829692,
+          installedAt,
+          incomplete: false,
+        })
+      }
       managed.installed = true
-      managed.tag = `b11528-${family}`
+      managed.tag = `${publishedTag}-${family}`
       managed.binary = `/home/mock/.config/kichat/runtime/${managed.tag}/llama-server`
+      // The build just downloaded is the published one, so the cached reading stops
+      // offering it — the same thing the backend records after an install.
+      update = computeUpdate()
+      // A server that was already up is still the old build, so the reminder that
+      // says to restart it has to outlive the update it is about.
+      if (managed.state === 'running') managed.restartPending = true
+      // The build that just landed is the one on disk now, and it is new.
+      installedAt = new Date().toISOString()
       console.log('[harness] llama-server installed', family)
       return Promise.resolve(null)
+    },
+    // What is on disk, as the real binding reports it: the build in use first, then
+    // whatever an update left behind. The sizes follow the family, because that is
+    // what makes the list worth reading — a CPU build is 17.8 MB, a CUDA install is
+    // 593 MB once its runtime bundle is beside the launcher.
+    ListLlamaBuilds: () => {
+      const builds = []
+      if (managed.installed) {
+        builds.push({
+          dir: managed.tag,
+          size: managed.tag.includes('cuda') ? 612000000 : 17829692,
+          installedAt,
+          inUse: true,
+          running: managed.state === 'running',
+          incomplete: false,
+        })
+      }
+      for (const build of extraBuilds) {
+        builds.push({ ...build, inUse: false, running: false })
+      }
+      return Promise.resolve(copy(builds))
+    },
+    // The build in use is rejected rather than deleted, exactly as the backend
+    // refuses it: a mock that happily deletes it would let a panel bug through.
+    RemoveLlamaBuild: (dir) => {
+      const index = extraBuilds.findIndex((b) => b.dir === dir)
+      if (index < 0) {
+        return Promise.reject(
+          new Error(`${dir} ist der Build, den KiChat startet — erst aktualisieren oder einen anderen Build wählen`),
+        )
+      }
+      extraBuilds.splice(index, 1)
+      console.log('[harness] build removed', dir)
+      return Promise.resolve(null)
+    },
+    RemoveOldLlamaBuilds: () => {
+      const removed = extraBuilds.length
+      extraBuilds = []
+      console.log('[harness] old builds removed', removed)
+      return Promise.resolve(removed)
     },
     PickManagedModelFile: () => Promise.resolve('/models/Qwen3-4B-Q4_K_M.gguf'),
     // Empty means "the folder the backend would use", which is what the panel
@@ -1345,6 +1510,8 @@ Verfügbare Tools: {{tool_list}}`,
       setTimeout(() => {
         managed.state = 'running'
         managed.port = 38121
+        // The server that comes up runs the launcher on disk now.
+        managed.restartPending = false
         managed.log = ['loading model …', 'Modell geladen, Server bereit']
         followManagedServer(`http://127.0.0.1:${managed.port}`)
       }, 800)

@@ -216,6 +216,28 @@ guess.** Read off `b11535` and confirmed on `b11537` two days later, which is th
   names, not the first candidate that exists; the helpers are in
   `internal/runtime/discover.go` and the whole thing is unit-tested against temporary
   homes.
+- **An update check is a request, and a release tag is per release, not per family.**
+  `CheckLlamaRuntimeUpdate` asks the release list for the newest build of the family the
+  app installs and caches the reading; `GetRuntimeStatus` only reports the cached copy,
+  because that status is polled every 1.2 s while a model loads and the API allows 60
+  unauthenticated requests an hour per address. The comparison is between **build tags**
+  (`b11535` against `b11541`), not between installation directories: every family of one
+  release shares its tag, so a tag comparison cannot mistake a family switch for an
+  update, while a directory comparison would flag `b11541-cpu` against `b11541-vulkan` on
+  every check. It is numeric, because `b1000` sorts below `b999` as text, and a lookup
+  that failed reports the API's reason rather than "current" — "up to date" is a claim
+  this app is not entitled to make when it could not ask.
+- **Nothing removes the build an update replaces, so the cleanup list has to.**
+  `Installer.Builds` walks the runtime directory, measures each build (a symlink is
+  counted as the link it is, or the versioned library beside it counts twice) and
+  reports what an interrupted install left behind — the `<dir>.installing` staging
+  directory, which no other code will ever clean up. `RemoveBuild` refuses a name that
+  is not a single directory name and a directory with no launcher in it, and the App
+  refuses the build in use and the build a *running* server was started from — the
+  latter is why `Server` records the launcher it started (`Binary()`), since the status
+  itself carries no path. A launcher the user supplied protects nothing: it lives
+  outside the runtime directory, and `buildDirOf` says so rather than matching on a
+  substring of the path.
 - **A managed chat was measured, not assumed.** `LFM2.5-1.2B-Instruct-Q8_0.gguf`
   (1.25 GB, from the folder above) started under `b11535`, `/health` went 200, the
   provider listed it as `loaded` with a 4,096-token window, and a real turn came back in
@@ -223,6 +245,17 @@ guess.** Read off `b11535` and confirmed on `b11537` two days later, which is th
   1366 ms, `source llamacpp`). Models llama.cpp cannot load at all are a different
   matter: the bundled `nomic-embed-text-v1.5` starts and answers `/health` but refuses
   `/v1/chat/completions` with "the current context does not support logits computation".
+- **A test can start a managed server without llama.cpp being installed.** The root
+  package's `TestMain` re-executes the test binary as a stand-in launcher when
+  `KICHAT_TEST_FAKE_LLAMA_SERVER=1` is in its environment: the script the tests write
+  exports that variable plus the build number, and the child then answers `/health` 200,
+  `--version` (`0.6.0-dev (build 11535, commit deadbeef0)`, the build its directory is
+  named after) and `--list-devices`, and exits by itself after a minute so a test that
+  dies without stopping it cannot leave a listener behind. That is what makes the guard
+  that refuses to delete the build a *running* server was started from testable: the
+  process and the readiness poll are real, and no python, netcat or downloaded archive
+  is needed. Nothing takes that path unless the variable is set, and a test that skips
+  on Windows (the launcher is a shell script) is the only user of it.
 
 ## Verifying the UI
 
@@ -252,6 +285,17 @@ a purple **MOCK BRIDGE** badge, so a harness page is never mistaken for the real
   `unmodelled binding called: X`, the mock needs X when you exercise that path.
 - `?crash=render` injects an unrenderable message to prove the error boundary still
   catches a render fault instead of leaving a blank window.
+- `?update=available` (a newer build published than the one on disk), `?update=error` (a
+  lookup that could not be made — a rate limit), `?update=stale` (a reading taken for
+  another family, which the panel must not show as an answer about the installed one) and
+  `?devices=`/`?fit=` with no flag (an installed build that is current) are what the
+  update row is exercised with. All of them install a launcher first, so the row the
+  update is about is actually there.
+- `?builds=old` is the cleanup list: a build an update replaced (31.8 MB) beside the
+  staging directory of an interrupted download (612 MB, marked incomplete) and the build
+  in use, which carries no remove button. Pressing `Update now` under `?update=available`
+  produces the same shape on its own, because the mock's install leaves the replaced
+  build in the list the way the real runtime directory does.
 - It is a mock: it proves rendering, state flow and event wiring, **not** backend
   behaviour. Backend truth lives in the Go tests and the live tests above. What it
   cannot see is the *shape of an idle answer*: its fixture always has a managed

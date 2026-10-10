@@ -284,9 +284,327 @@ type RuntimeStatus struct {
 	// offered.
 	FlashAttentionModes []string `json:"flashAttentionModes"`
 	CacheTypes          []string `json:"cacheTypes"`
+	// Update is the last look at llama.cpp's releases, if one has been made. It is
+	// reported rather than asked for here: see RuntimeUpdate.
+	Update RuntimeUpdate `json:"update"`
+	// RestartPending means a build was downloaded during this session and no managed
+	// model has been started since, so a server that is running now is still the old
+	// build. It is what makes the "restart the model" line survive the update it
+	// refers to; a managed start clears it.
+	RestartPending bool `json:"restartPending"`
 	// Models carries one entry per id in the settings, so a row with no model
 	// configured still appears with the state to explain it.
 	Models []ManagedStatus `json:"models"`
+}
+
+// RuntimeUpdate is the answer to "is there a newer llama.cpp build?", as the panel
+// reads it.
+//
+// It is a type of its own rather than more fields on RuntimeStatus because it is the
+// only question in that panel that costs a request to llama.cpp's release list — an
+// unauthenticated API that allows 60 requests an hour per address — while the status
+// is polled every 1.2 s while a download or a model load is under way. So the lookup
+// happens when it is asked for, its answer is cached on the App, and
+// GetRuntimeStatus only reports what that lookup found.
+type RuntimeUpdate struct {
+	// Checked is false until a lookup has finished. "up to date" and "not asked"
+	// are different statements, and only one of them is a claim about the build on
+	// disk.
+	Checked bool `json:"checked"`
+	// Available marks the newest published build as newer than the one on disk.
+	Available bool `json:"available"`
+	// Family is the build family the lookup was made for, so a cached reading is
+	// not shown as an answer about a family the user has since switched to.
+	Family string `json:"family,omitempty"`
+	// Installed and Latest are the build tags being compared (`b11535`, `b11541`) —
+	// the two halves of the "b11535 → b11541" the panel prints. Installed is empty
+	// when there is no managed build to compare against.
+	Installed string `json:"installed,omitempty"`
+	Latest    string `json:"latest,omitempty"`
+	// Size is what an update would download, both archives when the family
+	// publishes a companion runtime one. 0 when the release did not report it.
+	Size int64 `json:"size"`
+	// Error is why no newest build could be established — no network, a rate limit,
+	// no build for this machine. It is kept apart from Available=false because
+	// "current" is a claim this app must not make when it could not ask.
+	Error string `json:"error,omitempty"`
+}
+
+// updateLookupTimeout bounds a release lookup. The installer's own client allows 30
+// minutes because downloading hundreds of megabytes needs it; a JSON listing that
+// has not answered in ten seconds is not worth the wait, and the panel awaits this
+// call.
+const updateLookupTimeout = 10 * time.Second
+
+// CheckLlamaRuntimeUpdate asks llama.cpp's releases for the newest build of the
+// family this app installs, and reports whether it is newer than the one on disk.
+// The answer is cached and GetRuntimeStatus reports the cached copy: the panel polls
+// that status while a model loads, and spending a request out of a 60-an-hour budget
+// on every poll would be answering a question whose answer changes once a day.
+//
+// It blocks until the lookup is done — a few hundred milliseconds when GitHub
+// answers, bounded by updateLookupTimeout when it does not. A lookup that failed is
+// reported in the reading rather than as an error, because it is a row in the panel
+// ("could not ask") and not a failure of the call.
+func (a *App) CheckLlamaRuntimeUpdate() (RuntimeUpdate, error) {
+	if err := a.ensure(); err != nil {
+		return RuntimeUpdate{}, err
+	}
+	settings := a.Settings()
+	if strings.TrimSpace(settings.Runtime.BinaryPath) != "" {
+		// The launcher in use is the user's own build. llama.cpp's releases say
+		// nothing about it, and offering to replace a binary the user pointed at
+		// would be an offer to overwrite it.
+		a.setUpdate(RuntimeUpdate{})
+		return RuntimeUpdate{}, nil
+	}
+
+	// The family the app installs for: a draft the picker has not saved is not a
+	// build that is on disk to compare against. installAccelerator falls back for an
+	// empty or unknown value.
+	family := installAccelerator("", settings.Runtime.Accelerator)
+	installed := a.installedBuildTag()
+
+	ctx, cancel := context.WithTimeout(context.Background(), updateLookupTimeout)
+	defer cancel()
+	asset, err := a.installer.Latest(ctx, goruntime.GOOS, goruntime.GOARCH, family)
+	if err != nil {
+		reading := RuntimeUpdate{Checked: true, Family: family, Installed: installed, Error: err.Error()}
+		a.setUpdate(reading)
+		return reading, nil
+	}
+	reading := updateReadingOf(asset, installed)
+	a.setUpdate(reading)
+	return reading, nil
+}
+
+// updateReadingOf is one release lookup as the panel shows it: the two tags, what the
+// download would cost, and whether the published build is newer than the one on disk.
+// The install path calls it too, where the two tags are equal by construction — which
+// is what makes an update marker disappear the moment the update is installed.
+func updateReadingOf(asset rt.Asset, installed string) RuntimeUpdate {
+	size := asset.Size
+	if asset.Companion != nil {
+		size += asset.Companion.Size
+	}
+	return RuntimeUpdate{
+		Checked:   true,
+		Family:    asset.Variant,
+		Installed: installed,
+		Latest:    asset.Tag,
+		Size:      size,
+		Available: newerBuild(asset.Tag, installed),
+	}
+}
+
+// installedBuildTag is the build tag of the launcher on disk, which is the side of
+// the comparison the panel names as installed. It is the same directory
+// GetRuntimeStatus reports as the installed tag.
+func (a *App) installedBuildTag() string {
+	tag, _ := a.installer.Find()
+	return buildTagOf(tag)
+}
+
+// buildTagOf reduces an installation directory name to the build it belongs to.
+// rt.Asset.Dir names directories `b11535`, `b11535-vulkan` and
+// `b11535-vulkan-10.0`, and a build tag carries no `-` of its own.
+func buildTagOf(dir string) string {
+	if i := strings.IndexByte(dir, '-'); i >= 0 {
+		return dir[:i]
+	}
+	return dir
+}
+
+// newerBuild reports whether the published tag is newer than the installed one.
+//
+// The two are compared as numbers and not as text: llama.cpp's tags are `b11534`
+// today, and `b1000` sorts below `b999` as text the day the counter passes a digit
+// boundary — an update offered to a user who is already past it. A tag that carries
+// no number falls back to "different means newer": the panel prints both tags, so the
+// user sees what they would get, and refusing an update over an unusual tag would
+// hide the real ones.
+func newerBuild(latest, installed string) bool {
+	if installed == "" {
+		return false
+	}
+	l, lok := buildNumber(latest)
+	i, iok := buildNumber(installed)
+	if lok && iok {
+		return l > i
+	}
+	return latest != installed
+}
+
+// buildNumber reads the number a build tag carries (`b11541` becomes 11541).
+func buildNumber(tag string) (int, bool) {
+	digits := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(tag), "b"), "B")
+	if digits == "" {
+		return 0, false
+	}
+	n := 0
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, true
+}
+
+// InstalledBuild is one llama.cpp build on disk, as the panel reads it.
+//
+// It is listed rather than counted because a build is not small and an update leaves
+// the one it replaces: a CPU build is 17.8 MB, a CUDA one 593 MB with its runtime
+// bundle, and the sizes are what tell a user which line is worth a second look.
+type InstalledBuild struct {
+	// Dir is the directory name and the tag the settings would record for it
+	// (`b11541-vulkan-10.0`).
+	Dir string `json:"dir"`
+	// Size is what the directory occupies in bytes.
+	Size int64 `json:"size"`
+	// InstalledAt is when the build landed.
+	InstalledAt time.Time `json:"installedAt"`
+	// InUse marks the build this app would start a model with — the one the settings
+	// record, or the newest one when nothing is recorded. It is the line that must
+	// not be deleted.
+	InUse bool `json:"inUse"`
+	// Running marks a build a managed server was started from and has not stopped
+	// since. It is kept apart from InUse because it is the other way a deletion
+	// breaks something: the server holds those files open, so on Windows the delete
+	// would not even succeed.
+	Running bool `json:"running"`
+	// Incomplete marks what an interrupted install left behind — a staging directory
+	// that is always safe to remove and is otherwise invisible.
+	Incomplete bool `json:"incomplete"`
+}
+
+// ListLlamaBuilds lists the llama.cpp builds on disk with what each occupies, so an
+// old one can be seen before it is removed.
+func (a *App) ListLlamaBuilds() ([]InstalledBuild, error) {
+	if err := a.ensure(); err != nil {
+		return nil, err
+	}
+	inUse, running := a.buildDirsInUse(a.Settings())
+	builds := a.installer.Builds()
+	out := make([]InstalledBuild, 0, len(builds))
+	for _, build := range builds {
+		out = append(out, InstalledBuild{
+			Dir: build.Dir, Size: build.SizeBytes, InstalledAt: build.InstalledAt,
+			InUse: inUse[build.Dir], Running: running[build.Dir],
+			Incomplete: build.Incomplete,
+		})
+	}
+	return out, nil
+}
+
+// RemoveLlamaBuild deletes one installed build.
+//
+// The build in use and the build a running server was started from are refused, with
+// the reason: removing the first leaves a model that cannot start, and removing the
+// second takes the files out from under a server that is answering.
+func (a *App) RemoveLlamaBuild(dir string) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	name := strings.TrimSpace(dir)
+	inUse, running := a.buildDirsInUse(a.Settings())
+	if running[name] {
+		return fmt.Errorf("%s läuft gerade — Modell zuerst stoppen", name)
+	}
+	if inUse[name] {
+		return fmt.Errorf("%s ist der Build, den KiChat startet — erst aktualisieren oder einen anderen Build wählen", name)
+	}
+	if err := a.installer.RemoveBuild(name); err != nil {
+		return err
+	}
+	if a.ctx != nil {
+		runtime.LogInfof(a.ctx, "llama.cpp-Build %s entfernt", name)
+	}
+	return nil
+}
+
+// RemoveOldLlamaBuilds deletes every build except the one in use, and answers how
+// many it removed.
+//
+// It is the list's one-press version, and what it keeps is exactly what this app
+// would start — so "which of these do I still need" is never left to be guessed. A
+// running server does not make its build expendable: that one is refused by name and
+// the rest go.
+func (a *App) RemoveOldLlamaBuilds() (int, error) {
+	if err := a.ensure(); err != nil {
+		return 0, err
+	}
+	inUse, running := a.buildDirsInUse(a.Settings())
+	removed := 0
+	var failure error
+	for _, build := range a.installer.Builds() {
+		if inUse[build.Dir] || running[build.Dir] {
+			continue
+		}
+		if err := a.installer.RemoveBuild(build.Dir); err != nil {
+			if failure == nil {
+				failure = err
+			}
+			continue
+		}
+		removed++
+	}
+	if a.ctx != nil && removed > 0 {
+		runtime.LogInfof(a.ctx, "%d alte llama.cpp-Builds entfernt", removed)
+	}
+	if failure != nil {
+		// The count is lost with the error, and the panel re-reads the list anyway —
+		// so what matters is that the reason is not swallowed.
+		return removed, fmt.Errorf("%d entfernt, dann: %w", removed, failure)
+	}
+	return removed, nil
+}
+
+// buildDirsInUse names the build directories a removal has to leave alone: the one
+// this app would start, and any a managed server is running from.
+//
+// A launcher the user supplied protects nothing here. It lives outside the runtime
+// directory, and a path that is not a build says nothing about which builds exist.
+func (a *App) buildDirsInUse(settings config.Settings) (inUse, running map[string]bool) {
+	inUse, running = map[string]bool{}, map[string]bool{}
+	if binary, err := a.llamaServerPath(settings); err == nil {
+		if dir := buildDirOf(a.installer.Dir, binary); dir != "" {
+			inUse[dir] = true
+		}
+	}
+	a.serversMu.Lock()
+	defer a.serversMu.Unlock()
+	for _, srv := range a.servers {
+		state := srv.Status().State
+		// A stopped server says nothing: what it ran last is not a reason to keep
+		// hundreds of megabytes.
+		if state != rt.StateStarting && state != rt.StateRunning {
+			continue
+		}
+		if dir := buildDirOf(a.installer.Dir, srv.Binary()); dir != "" {
+			running[dir] = true
+		}
+	}
+	return inUse, running
+}
+
+// buildDirOf is the runtime build directory a launcher lives in, empty for a path
+// outside root. A build is a direct child of the runtime directory, so anything else
+// — the user's own launcher, the models folder — is not a build this list manages.
+func buildDirOf(root, binary string) string {
+	if strings.TrimSpace(binary) == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(root, filepath.Dir(binary))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	// An archive whose wrapper could not be unwrapped leaves the launcher one level
+	// deeper, and that build is the directory above it.
+	if i := strings.IndexRune(rel, filepath.Separator); i >= 0 {
+		rel = rel[:i]
+	}
+	return rel
 }
 
 // runtimeStatusBase is the part of the status that comes from the stored settings,
@@ -399,6 +717,13 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 		}
 	}
 
+	// The last release lookup, reported rather than asked for: see RuntimeUpdate.
+	// A user-supplied launcher is left out of it entirely — a build nobody here
+	// installed is not one this app can offer to update.
+	if status.CustomBinary == "" {
+		status.Update = a.cachedUpdate()
+	}
+
 	// The weights have to fit before anything else about the model does, so the
 	// file's size is measured against the free device memory — the one number this
 	// app can read without loading a model, and one that understates the footprint
@@ -413,6 +738,9 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 	a.installMu.Lock()
 	status.Busy, status.Phase, status.Done, status.Total, status.Error =
 		a.installBusy, a.installPhase, a.installDone, a.installTotal, a.installErr
+	// A launcher the user supplied is not the one an install replaced, so there is
+	// nothing to restart for in that case.
+	status.RestartPending = a.installCompleted && status.CustomBinary == ""
 	a.installMu.Unlock()
 
 	// The live state is filled into the rows the base already laid out, rather
@@ -504,6 +832,10 @@ func (a *App) installRuntime(accelerator string) {
 		return
 	}
 	runtime.LogInfof(a.ctx, "llama-server %s (%s) installiert: %s", asset.Dir(), asset.Variant, binary)
+	// What was just fetched is the newest published build by definition, so the
+	// cached reading is replaced rather than left saying "update available" about
+	// the build that is now on disk and starting.
+	a.setUpdate(updateReadingOf(asset, buildTagOf(asset.Dir())))
 	a.rebuildServices(updated)
 	a.finishInstall(asset.Dir(), nil)
 }
@@ -525,7 +857,24 @@ func (a *App) finishInstall(tag string, err error) {
 	} else {
 		a.installErr = ""
 		a.installPhase = "done"
+		a.installCompleted = true
 	}
+	a.installMu.Unlock()
+}
+
+// installCompletedDuringSession reports whether a build was downloaded in this
+// session, which is what a running server has to be restarted for.
+func (a *App) installCompletedDuringSession() bool {
+	a.installMu.Lock()
+	defer a.installMu.Unlock()
+	return a.installCompleted
+}
+
+// clearInstallCompleted is what a successful managed start calls: the server that
+// just came up runs the launcher that is on disk now.
+func (a *App) clearInstallCompleted() {
+	a.installMu.Lock()
+	a.installCompleted = false
 	a.installMu.Unlock()
 }
 

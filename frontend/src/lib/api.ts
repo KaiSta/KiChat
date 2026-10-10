@@ -86,6 +86,10 @@ export namespace main {
   export type AttachmentInput = Plain<Gen.main.AttachmentInput>
   export type RuntimeStatus = Plain<Gen.main.RuntimeStatus>
   export type ManagedStatus = Plain<Gen.main.ManagedStatus>
+  /** The last look at llama.cpp's releases, carried inside RuntimeStatus. */
+  export type RuntimeUpdate = Plain<Gen.main.RuntimeUpdate>
+  /** One llama.cpp build on disk, as the cleanup list reads it. */
+  export type InstalledBuild = Plain<Gen.main.InstalledBuild>
 }
 
 export namespace research {

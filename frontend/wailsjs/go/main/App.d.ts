@@ -12,6 +12,8 @@ export function ActiveGenerations():Promise<Array<string>>;
 
 export function AddAttachment(arg1:main.AttachmentInput):Promise<store.Attachment>;
 
+export function CheckLlamaRuntimeUpdate():Promise<main.RuntimeUpdate>;
+
 export function CompactNow(arg1:main.CompactRequest):Promise<chat.CompactResult>;
 
 export function CreateChat(arg1:string,arg2:string):Promise<store.Chat>;
@@ -50,6 +52,8 @@ export function ListChunks(arg1:string):Promise<Array<store.Chunk>>;
 
 export function ListCompactions(arg1:string):Promise<Array<store.Compaction>>;
 
+export function ListLlamaBuilds():Promise<Array<main.InstalledBuild>>;
+
 export function ListModels(arg1:boolean):Promise<Array<llm.ModelInfo>>;
 
 export function ModelFolders():Promise<Array<runtime.ModelFolder>>;
@@ -69,6 +73,10 @@ export function RedactSecrets(arg1:string):Promise<string>;
 export function Regenerate(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function RemoveAttachment(arg1:string):Promise<void>;
+
+export function RemoveLlamaBuild(arg1:string):Promise<void>;
+
+export function RemoveOldLlamaBuilds():Promise<number>;
 
 export function RenameChat(arg1:string,arg2:string):Promise<void>;
 

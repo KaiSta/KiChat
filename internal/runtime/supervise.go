@@ -79,6 +79,10 @@ type Server struct {
 	mu     sync.Mutex
 	cmd    *exec.Cmd
 	waited chan struct{}
+	// binary is the launcher the current — or last — process was started from. A
+	// running server keeps the build it started with, so this is what tells the
+	// cleanup list which build must not be deleted while it answers.
+	binary string
 	// stopRequested separates "the user stopped it" from "it died", which is the
 	// difference between a clean stop and a failure worth reporting.
 	stopRequested bool
@@ -199,6 +203,7 @@ func (s *Server) Start(opts Options) error {
 	url := fmt.Sprintf("http://%s:%d", host, port)
 	s.mu.Lock()
 	s.cmd = cmd
+	s.binary = opts.Binary
 	s.waited = make(chan struct{})
 	s.stopRequested = false
 	s.status = Status{State: StateStarting, Model: opts.Model, Port: port, PID: cmd.Process.Pid, URL: url}
@@ -337,6 +342,15 @@ func (s *Server) markStopped() {
 	s.status.URL = ""
 	s.mu.Unlock()
 	s.publish()
+}
+
+// Binary is the launcher the current or last process was started from, empty before
+// the first start. It is what a caller needs to answer "which build is this server
+// running", which the status itself does not carry.
+func (s *Server) Binary() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.binary
 }
 
 // Status returns a snapshot for the UI.

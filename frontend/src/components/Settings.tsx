@@ -4,6 +4,7 @@ import {
   formatBytes,
   formatNumber,
   modelLabel,
+  timeAgo,
   toDate,
   type config,
   type llm,
@@ -359,6 +360,19 @@ function LocalModelSection({
   const [scan, setScan] = useState<runtime.ModelFolderScan | null>(null)
   const [scanError, setScanError] = useState('')
   const [scanning, setScanning] = useState(false)
+  // Whether a look at llama.cpp's releases is in flight. The call is awaited —
+  // it blocks on one HTTP request, not on a download — so the control can say so.
+  const [checking, setChecking] = useState(false)
+  // What the installer has on disk. An update never removes the build it replaced —
+  // 17.8 MB for the CPU family, 593 MB for a CUDA install with its runtime bundle —
+  // so this list is where an old download becomes visible before it becomes a
+  // gigabyte. It is measured on every refresh: a directory listing is cheap next to
+  // the status call it arrives with, and a size that lags is worse than none.
+  const [builds, setBuilds] = useState<main.InstalledBuild[]>([])
+  // Which removal is running, by directory name or 'all', so the control that was
+  // pressed is the one that says it is working.
+  const [cleaning, setCleaning] = useState('')
+  const lang = useStore((s) => s.lang)
   // The state a managed server was last seen in, so a change can be told from a
   // poll that found the same thing again.
   const lastState = useRef<string | null>(null)
@@ -380,6 +394,36 @@ function LocalModelSection({
     } catch (e) {
       setError(String(e))
     }
+    try {
+      setBuilds((await App.ListLlamaBuilds()) ?? [])
+    } catch (e) {
+      setBuilds([])
+      setError(String(e))
+    }
+  }
+
+  const removeBuild = async (dir: string) => {
+    setCleaning(dir)
+    setError('')
+    try {
+      await App.RemoveLlamaBuild(dir)
+    } catch (e) {
+      setError(String(e))
+    }
+    setCleaning('')
+    await refresh()
+  }
+
+  const removeOldBuilds = async () => {
+    setCleaning('all')
+    setError('')
+    try {
+      await App.RemoveOldLlamaBuilds()
+    } catch (e) {
+      setError(String(e))
+    }
+    setCleaning('')
+    await refresh()
   }
 
   useEffect(() => {
@@ -404,6 +448,17 @@ function LocalModelSection({
     return () => window.clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [working])
+
+  // Ask once, when the card first sees an installed build — not on every poll. A
+  // reading is only shown for the family it was made for, so a save that switches
+  // the family is the other reason to ask again: without that, the row would keep
+  // a statement about a build the user no longer runs.
+  useEffect(() => {
+    if (!status?.installed || status?.customBinary) return
+    if (status.update?.checked && status.update.family === status.accelerator) return
+    void checkUpdate()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.installed, status?.customBinary, status?.accelerator, status?.update?.checked, status?.update?.family])
 
   // A managed server changes the entry it belongs to: the address it landed on is
   // written into the backend row and the registry is rebuilt around it. The row
@@ -438,16 +493,34 @@ function LocalModelSection({
     await refresh()
   }
 
-  const install = async () => {
+  // accelerator is passed in rather than read from the draft: the store's button
+  // downloads the build the picker shows, while the update row downloads the family
+  // the installed build belongs to. An empty value asks the backend for the stored
+  // one, which is what the update row means.
+  const install = async (accelerator: string) => {
     setError('')
     try {
       // The selected build, not the saved one: the picker edits the draft, and
       // downloading the stored family here is how "I picked ROCm" used to install
       // the CPU build. The backend records the family it really fetched.
-      await App.InstallLlamaRuntime(chosenAccel)
+      await App.InstallLlamaRuntime(accelerator)
     } catch (e) {
       setError(String(e))
     }
+    await refresh()
+  }
+
+  // The one question in this card that costs a request to GitHub's API, which
+  // allows 60 an hour per address unauthenticated. It is asked for rather than
+  // polled, and the backend caches the answer so the row keeps showing it.
+  const checkUpdate = async () => {
+    setChecking(true)
+    try {
+      await App.CheckLlamaRuntimeUpdate()
+    } catch (e) {
+      setError(String(e))
+    }
+    setChecking(false)
     await refresh()
   }
 
@@ -602,6 +675,25 @@ function LocalModelSection({
   // memory has nothing to compare against — that case already has its own row.
   const tooLarge = chosenAccel !== 'cpu' && deviceFreeBytes > 0 && selectedBytes > deviceFreeBytes
 
+  // What the backend knows about a newer llama.cpp build. The reading counts only
+  // when it is about the family the app installs for — the family the picker edits
+  // is still a draft, and a reading taken for another build says nothing about this
+  // one.
+  const updateIsAboutThisFamily =
+    !!status?.update?.checked && status.update.family === status.accelerator
+  const updateAvailable = updateIsAboutThisFamily && !!status?.update?.available && !status?.update?.error
+  // A server that is already running keeps the build it was started from, so this is
+  // the one place an update needs a sentence — both before it is installed (the
+  // running model will not change) and after, because the line has to survive the
+  // update it is about. A managed start clears the backend's flag.
+  const updateNeedsRestart = state === 'running' && (updateAvailable || !!status?.restartPending)
+
+  // The builds nothing is using. The backend refuses the other two by name — the one
+  // KiChat would start, and the one a server is running from — so this is the set the
+  // buttons may act on, and the sum is what one press would reclaim.
+  const removable = builds.filter((b) => !b.inUse && !b.running)
+  const reclaimBytes = removable.reduce((sum, b) => sum + b.size, 0)
+
   return (
     <div className="mt-3 rounded-md p-3" style={{ background: 'var(--surface)' }}>
       <div className="mb-2 text-[12px] font-semibold">{t('settings.managed.title')}</div>
@@ -627,6 +719,115 @@ function LocalModelSection({
           {status?.version || t('settings.managed.versionUnknown')}
         </span>
       </div>
+
+      {/* Is there a newer llama.cpp build than the one on disk? The tag above is
+          this app's name for the download; this row is about the build itself, and
+          it is what turns "reinstall and hope" into "b11535 → b11541". */}
+      {status?.installed && !status?.customBinary && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
+          <span className="faint shrink-0">{t('settings.managed.update')}</span>
+          {!updateIsAboutThisFamily ? (
+            <span className="faint min-w-0 flex-1">{t('settings.managed.updateNotChecked')}</span>
+          ) : status.update?.error ? (
+            // The reason and not a generic "could not check": a rate limit and an
+            // unreachable API are told apart by the API's own words.
+            <span
+              className="min-w-0 flex-1 truncate"
+              style={{ color: 'var(--danger)' }}
+              title={status.update.error}
+            >
+              {status.update.error}
+            </span>
+          ) : status.update?.available ? (
+            <>
+              <span className="badge badge-warn shrink-0">{t('settings.managed.updateAvailable')}</span>
+              <span className="mono min-w-0 truncate" title={`${status.update.installed} → ${status.update.latest}`}>
+                {status.update.installed} → {status.update.latest}
+              </span>
+              {!!status.update.size && (
+                <span className="mono faint shrink-0">{formatBytes(status.update.size)}</span>
+              )}
+            </>
+          ) : (
+            <span className="faint min-w-0 flex-1">{t('settings.managed.updateCurrent')}</span>
+          )}
+          <button
+            type="button"
+            className="btn btn-sm shrink-0"
+            disabled={checking || !!status?.busy}
+            onClick={() => void checkUpdate()}
+          >
+            {checking ? t('settings.managed.updateChecking') : t('settings.managed.updateCheck')}
+          </button>
+          {updateAvailable && (
+            <button
+              type="button"
+              className="btn btn-sm shrink-0"
+              disabled={!!status?.busy}
+              onClick={() => void install(status?.accelerator || '')}
+            >
+              {t('settings.managed.updateInstall')}
+            </button>
+          )}
+        </div>
+      )}
+
+      {updateNeedsRestart && (
+        <div className="mb-2 text-[11px] faint">{t('settings.managed.updateRestart')}</div>
+      )}
+
+      {/* What is on disk, and what can go. It stays out of the way while there is
+          nothing to remove, and appears with the sizes the moment an update has left
+          a build behind — that is the only moment this list is interesting. */}
+      {removable.length > 0 && (
+        <div className="mb-2 rounded-md p-2 text-[11px]" style={{ background: 'var(--surface-2)' }}>
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <span className="faint shrink-0">{t('settings.managed.builds')}</span>
+            <span className="mono faint">{formatBytes(reclaimBytes)}</span>
+            <button
+              type="button"
+              className="btn btn-sm ml-auto shrink-0"
+              disabled={!!cleaning || !!status?.busy}
+              onClick={() => void removeOldBuilds()}
+            >
+              {cleaning === 'all'
+                ? t('settings.managed.buildsRemoving')
+                : t('settings.managed.buildsRemoveOld', { count: String(removable.length) })}
+            </button>
+          </div>
+          <div className="space-y-0.5">
+            {builds.map((b) => (
+              <div key={b.dir} className="flex items-center gap-2">
+                <span className="mono min-w-0 truncate" title={b.dir}>
+                  {b.dir}
+                </span>
+                {/* Which line may not be deleted, and why. The two badges are kept
+                    apart on purpose: one is what KiChat would start, the other is
+                    what is answering right now. */}
+                {b.inUse && <span className="badge badge-ok shrink-0">{t('settings.managed.buildInUse')}</span>}
+                {b.running && <span className="badge badge-ok shrink-0">{t('settings.managed.buildRunning')}</span>}
+                {b.incomplete && (
+                  <span className="badge badge-warn shrink-0">{t('settings.managed.buildIncomplete')}</span>
+                )}
+                <span className="faint ml-auto shrink-0">{timeAgo(b.installedAt, lang)}</span>
+                <span className="mono faint shrink-0">{formatBytes(b.size)}</span>
+                {!b.inUse && !b.running && (
+                  <button
+                    type="button"
+                    className="btn btn-sm shrink-0"
+                    disabled={!!cleaning}
+                    aria-label={`${t('settings.managed.buildRemove')}: ${b.dir}`}
+                    title={t('settings.managed.buildRemove')}
+                    onClick={() => void removeBuild(b.dir)}
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Which compute devices the installed build can actually use. This is what
           makes a silent CPU fallback visible: a GPU build that finds no device,
@@ -673,7 +874,7 @@ function LocalModelSection({
 
       {!status?.customBinary && (
         <div className="mb-2 flex items-center gap-2">
-          <button type="button" className="btn btn-sm" disabled={!!status?.busy} onClick={() => void install()}>
+          <button type="button" className="btn btn-sm" disabled={!!status?.busy} onClick={() => void install(chosenAccel)}>
             {status?.busy ? t('settings.managed.installing') : t('settings.managed.install')}
           </button>
           {status?.busy && (

@@ -10,6 +10,10 @@ export function AddAttachment(arg1) {
   return window['go']['main']['App']['AddAttachment'](arg1);
 }
 
+export function CheckLlamaRuntimeUpdate() {
+  return window['go']['main']['App']['CheckLlamaRuntimeUpdate']();
+}
+
 export function CompactNow(arg1) {
   return window['go']['main']['App']['CompactNow'](arg1);
 }
@@ -86,6 +90,10 @@ export function ListCompactions(arg1) {
   return window['go']['main']['App']['ListCompactions'](arg1);
 }
 
+export function ListLlamaBuilds() {
+  return window['go']['main']['App']['ListLlamaBuilds']();
+}
+
 export function ListModels(arg1) {
   return window['go']['main']['App']['ListModels'](arg1);
 }
@@ -124,6 +132,14 @@ export function Regenerate(arg1, arg2, arg3) {
 
 export function RemoveAttachment(arg1) {
   return window['go']['main']['App']['RemoveAttachment'](arg1);
+}
+
+export function RemoveLlamaBuild(arg1) {
+  return window['go']['main']['App']['RemoveLlamaBuild'](arg1);
+}
+
+export function RemoveOldLlamaBuilds() {
+  return window['go']['main']['App']['RemoveOldLlamaBuilds']();
 }
 
 export function RenameChat(arg1, arg2) {
