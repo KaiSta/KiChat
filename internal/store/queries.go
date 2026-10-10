@@ -299,8 +299,20 @@ func (s *Store) ListMessages(chatID string) ([]Message, error) {
 }
 
 // DeleteMessagesFromSeq removes a chat's tail starting at seq (inclusive).
+//
+// Everything runs in one transaction. The tail is a message row plus its tool
+// calls, its attachments and those attachments' documents — and the caller is a
+// regenerate, which is a normal user action, so a failure part-way through used to
+// leave a chat whose tail had been half deleted: some messages gone, their
+// documents and index rows still there and unreachable.
 func (s *Store) DeleteMessagesFromSeq(chatID string, seq int) error {
-	rows, err := s.db.Query(`SELECT id FROM messages WHERE chat_id=? AND seq>=?`, chatID, seq)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`SELECT id FROM messages WHERE chat_id=? AND seq>=?`, chatID, seq)
 	if err != nil {
 		return err
 	}
@@ -314,20 +326,24 @@ func (s *Store) DeleteMessagesFromSeq(chatID string, seq int) error {
 		ids = append(ids, id)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
 	for _, id := range ids {
-		if _, err := s.db.Exec(`DELETE FROM tool_calls WHERE message_id=?`, id); err != nil {
+		if _, err := tx.Exec(`DELETE FROM tool_calls WHERE message_id=?`, id); err != nil {
 			return err
 		}
 		// Each attachment owns a document, which owns its chunks and index rows.
 		// The document has to go with the attachment: deleting only the row would
 		// leave the extracted text unreachable, the same leak DeleteChat fixed.
-		// The ids are collected before deleting because a query and a write share
-		// the single pooled connection.
-		var docIDs []string
-		docRows, err := s.db.Query(`SELECT document_id FROM attachments WHERE message_id=?`, id)
+		// The ids are collected before deleting because an open result set and a
+		// write cannot share the transaction's one connection.
+		docRows, err := tx.Query(`SELECT document_id FROM attachments WHERE message_id=?`, id)
 		if err != nil {
 			return err
 		}
+		var docIDs []string
 		for docRows.Next() {
 			var docID string
 			if err := docRows.Scan(&docID); err != nil {
@@ -339,19 +355,22 @@ func (s *Store) DeleteMessagesFromSeq(chatID string, seq int) error {
 			}
 		}
 		docRows.Close()
-		for _, docID := range docIDs {
-			if err := s.DeleteDocument(docID); err != nil {
-				return err
-			}
-		}
-		if _, err := s.db.Exec(`DELETE FROM attachments WHERE message_id=?`, id); err != nil {
+		if err := docRows.Err(); err != nil {
 			return err
 		}
-		if _, err := s.db.Exec(`DELETE FROM messages WHERE id=?`, id); err != nil {
+		for _, docID := range docIDs {
+			if err := deleteDocumentTx(tx, s.FTS, docID); err != nil {
+				return fmt.Errorf("Dokument %s entfernen: %w", docID, err)
+			}
+		}
+		if _, err := tx.Exec(`DELETE FROM attachments WHERE message_id=?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM messages WHERE id=?`, id); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // CountMessages returns how many messages a chat has.
@@ -395,19 +414,32 @@ UPDATE attachments SET message_id=?,pages=?,token_estimate=?,placement=?,
 // leak DeleteChat had. Deleting the document first also means a failure leaves
 // the attachment row in place, so the operation can simply be repeated. A row
 // that is already gone is not an error: deleting twice must not report one.
+//
+// The two deletions are one transaction, which is what makes that "repeated"
+// promise true: without it a failure between them leaves the attachment pointing
+// at a document that is already gone, and repeating the call would delete the row
+// while the chunks it owned stayed behind.
 func (s *Store) DeleteAttachment(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	var docID string
-	err := s.db.QueryRow(`SELECT document_id FROM attachments WHERE id=?`, id).Scan(&docID)
+	err = tx.QueryRow(`SELECT document_id FROM attachments WHERE id=?`, id).Scan(&docID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("Anhang %s lesen: %w", id, err)
 	}
 	if docID != "" {
-		if err := s.DeleteDocument(docID); err != nil {
+		if err := deleteDocumentTx(tx, s.FTS, docID); err != nil {
 			return fmt.Errorf("Dokument %s entfernen: %w", docID, err)
 		}
 	}
-	_, err = s.db.Exec(`DELETE FROM attachments WHERE id=?`, id)
-	return err
+	if _, err := tx.Exec(`DELETE FROM attachments WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // PruneExpiredCaches deletes expired rows from the two web caches and reports how
@@ -527,13 +559,33 @@ FROM documents WHERE chat_id=? ORDER BY created_at`, chatID)
 }
 
 // DeleteDocument removes a document and its chunks and index entries.
+//
+// The index rows and the document row go in one transaction: the chunks cascade
+// from the document, so a failure between the two would leave fts rows naming
+// chunks that no longer exist while the document — and the chunks it still owns —
+// stayed behind.
 func (s *Store) DeleteDocument(id string) error {
-	if s.FTS {
-		if _, err := s.db.Exec(`DELETE FROM chunks_fts WHERE doc_id=?`, id); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := deleteDocumentTx(tx, s.FTS, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// deleteDocumentTx is deleteDocument inside a caller's transaction, so a deletion
+// that is part of a bigger one — a message tail, an attachment — commits or rolls
+// back with it rather than on its own.
+func deleteDocumentTx(tx *sql.Tx, fts bool, id string) error {
+	if fts {
+		if _, err := tx.Exec(`DELETE FROM chunks_fts WHERE doc_id=?`, id); err != nil {
 			return err
 		}
 	}
-	_, err := s.db.Exec(`DELETE FROM documents WHERE id=?`, id)
+	_, err := tx.Exec(`DELETE FROM documents WHERE id=?`, id)
 	return err
 }
 
