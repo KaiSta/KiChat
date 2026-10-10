@@ -115,9 +115,15 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 
 		events, err := in.Provider.Chat(ctx, req)
 		if err != nil {
-			row.Status = store.StatusCancelled
+			// The request never produced a byte, so there is no partial answer to
+			// keep: the row is a failure. It used to be stored as "cancelled",
+			// which is the status of a tool call the *user* abandoned — a backend
+			// that refused the request (a connection error, a 400, a missing key)
+			// therefore read back as though the user had interrupted it.
+			row.Status = store.StatusFailed
+			row.StopReason = "request_error"
 			row.Content = ""
-			e.persist(in.Chat.ID, "Der Abbruch", e.Store.UpdateMessage(row))
+			e.persist(in.Chat.ID, "Die Antwort", e.Store.UpdateMessage(row))
 			result.Status = row.Status
 			return result, err
 		}
