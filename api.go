@@ -153,7 +153,15 @@ type SecretStatus struct {
 	Backend     string `json:"backend"`
 	Keyring     bool   `json:"keyring"`
 	BraveKeySet bool   `json:"braveKeySet"`
-	Warning     string `json:"warning,omitempty"`
+	// BackendKeys names the backends that have a key stored, one boolean per
+	// configured entry and never a value. The settings blob is sanitized, so this
+	// is the only way the panel can tell a configured entry from an untouched one.
+	// It needs that to explain the state this was added for: a key pasted into a
+	// shipped entry that is switched off is stored by the save, but no provider is
+	// built for it and no probe is ever sent, and the panel could otherwise only
+	// show a blank key field on a backend that is already configured.
+	BackendKeys map[string]bool `json:"backendKeys,omitempty"`
+	Warning     string          `json:"warning,omitempty"`
 }
 
 // GetSecretStatus reports where the Brave key is kept.
@@ -166,6 +174,12 @@ func (a *App) GetSecretStatus() (SecretStatus, error) {
 		Keyring: a.secrets.KeyringAvailable(),
 	}
 	_, status.BraveKeySet = a.secrets.Get("brave")
+	// Every configured entry, switched on or not: an entry that is off is exactly
+	// the one whose key has to stay visible.
+	status.BackendKeys = map[string]bool{}
+	for _, b := range a.Settings().Backends {
+		_, status.BackendKeys[b.ID] = a.secrets.Get(llm.BackendAPIKeyName(b.ID))
+	}
 	if !status.Keyring {
 		status.Warning = "Kein Schlüsselbund verfügbar (libsecret fehlt). " +
 			"Der Key wird lokal verschlüsselt gespeichert — das schützt vor versehentlicher " +

@@ -233,6 +233,33 @@
       capabilities: ['tool_use'],
       parameterCount: '8B',
     },
+    // The two models the real listing collapses its aliases down to. They are here
+    // for a backend that ships switched off, the same way the llama.cpp row above
+    // is: the row that was reported broken is the one whose box gets ticked, and the
+    // badge it then shows counts these. A row for a backend with no listing at all
+    // would have the panel claim reachable and zero models at once.
+    {
+      id: 'mistral-small-latest',
+      backend: 'mistral',
+      publisher: 'mistralai',
+      arch: 'mistral-small-2603',
+      state: 'loaded',
+      type: 'llm',
+      contextLimit: 262144,
+      maxContextLimit: 262144,
+      capabilities: ['tool_use', 'vision', 'reasoning'],
+    },
+    {
+      id: 'ministral-8b-latest',
+      backend: 'mistral',
+      publisher: 'mistralai',
+      arch: 'ministral-8b',
+      state: 'loaded',
+      type: 'vlm',
+      contextLimit: 262144,
+      maxContextLimit: 262144,
+      capabilities: ['tool_use', 'vision'],
+    },
     {
       id: PATH_MODEL_ID,
       backend: 'lmstudio',
@@ -265,46 +292,65 @@
     }
   }
 
-  const health = [
-    { id: 'lmstudio', name: 'LM Studio', kind: 'lmstudio', baseUrl: 'http://127.0.0.1:1234', ok: true, models: models.length },
-    { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', ok: false, error: 'connection refused', models: 0 },
-    // DeepSeek ships disabled and with no key, so its row has to be able to
-    // render a failure that is a missing credential rather than a dead port.
-    // The text mirrors what ErrMissingAPIKey wraps, so the harness shows the
-    // message the app would actually show.
-    {
-      id: 'deepseek',
-      name: 'DeepSeek',
-      kind: 'deepseek',
-      baseUrl: 'https://api.deepseek.com',
-      ok: false,
-      error: 'llm: backend unavailable: no API key configured',
-      models: 0,
-    },
-    // Mistral ships the same way and for the same reason, so its row shows the
-    // same missing-credential failure rather than a dead port.
-    {
-      id: 'mistral',
-      name: 'Mistral',
-      kind: 'mistral',
-      baseUrl: 'https://api.mistral.ai/v1',
-      ok: false,
-      error: 'llm: backend unavailable: no API key configured',
-      models: 0,
-    },
-    // llama.cpp is stopped until something starts it: a managed server, or a
-    // user running llama-server by hand. Refused is what the row shows in
-    // between, and it is the state the local-model section is there to end.
-    {
-      id: 'llamacpp',
-      name: 'llama.cpp',
-      kind: 'llamacpp',
-      baseUrl: 'http://127.0.0.1:9931',
-      ok: false,
-      error: 'llm: backend unavailable: connection refused',
-      models: 0,
-    },
+  /*
+   * probes is what a *probe* returned, one entry per backend that can be
+   * contacted. It deliberately does not carry `enabled`: whether a backend was
+   * probed at all comes from the settings, exactly as Registry.Health reads them,
+   * and hardcoding it here is how the fixture drifted out of step with the app.
+   *
+   * That drift hid a real bug. This fixture used to give every backend a result,
+   * including the switched-off ones, so the settings screen always had a row to
+   * render — while the app, which builds no provider for a backend that is off,
+   * reported no row at all and the panel fell back to "unreachable". A user who
+   * pasted an API key into a shipped-but-off entry and pressed refresh was told to
+   * fix an address that had never been asked, and the harness agreed with the app
+   * about a state neither had ever produced.
+   *
+   * The probe results below are what remain after that is fixed: an entry that is
+   * off contributes no result and renders as off, and the interesting failures
+   * belong to entries that really are on.
+   */
+  // Keyed by id, carrying no name, kind or address: those come from the settings,
+  // which is where the app reads them too. One copy is what keeps them from
+  // drifting apart — the address in particular, since a managed server moves it.
+  const probes = [
+    { id: 'lmstudio', ok: true, models: models.length },
+    // Ollama is switched on but not running, which is a dev machine and the only
+    // way the refused-but-enabled state gets rendered.
+    { id: 'ollama', ok: false, error: 'connection refused', models: 0 },
+    // Switched on without a key: the state a user reaches by ticking the box
+    // before pasting one. The text mirrors what ErrMissingAPIKey wraps, so the
+    // harness shows the message the app would actually show.
+    { id: 'deepseek', ok: false, error: 'llm: backend unavailable: no API key configured', models: 0 },
+    // Mistral ships off, and the fixture keeps a key stored for it — that is the
+    // state the reported bug was in, and the one the panel has to explain. The
+    // result below is therefore guarded by the box like every other: it is what the
+    // entry answers once it is switched on, including through the row's own
+    // "turn on and check" button.
+    { id: 'mistral', ok: true, models: 2 },
+    // llama.cpp has no result until a server is started, which the runtime flags do.
+    { id: 'llamacpp', ok: false, error: 'llm: backend unavailable: connection refused', models: 0 },
   ]
+
+  // One row per configured backend, switched on or not, with `enabled` following
+  // the current fixture state: the runtime flags flip a backend on to render its
+  // controls, and the row has to follow or it would read "off" on a backend the
+  // panel is showing as on. A backend with no probe entry gets its state and no
+  // result, rather than an invented one.
+  const healthRows = () =>
+    settings.backends.map((b) => {
+      const probe = probes.find((p) => p.id === b.id)
+      return {
+        id: b.id,
+        name: b.name || b.id,
+        kind: b.kind,
+        baseUrl: b.baseUrl,
+        enabled: Boolean(b.enabled),
+        ok: false,
+        models: 0,
+        ...(probe && b.enabled ? probe : {}),
+      }
+    })
 
   /*
    * The shipped system prompts, one body per UI language, mirrored from
@@ -557,8 +603,12 @@ Verfügbare Tools: {{tool_list}}`,
     theme: 'dark',
     backends: [
       { id: 'lmstudio', name: 'LM Studio', kind: 'lmstudio', baseUrl: 'http://127.0.0.1:1234', enabled: true },
-      { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', enabled: false },
-      { id: 'deepseek', name: 'DeepSeek', kind: 'deepseek', baseUrl: 'https://api.deepseek.com', enabled: false },
+      // Ollama and DeepSeek are switched on so the two failure rows the panel has
+      // to render — a refused server, and a missing credential — belong to
+      // backends that really were probed. Mistral and llama.cpp stay off, which is
+      // how they ship; see the `probes` fixture above.
+      { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', enabled: true },
+      { id: 'deepseek', name: 'DeepSeek', kind: 'deepseek', baseUrl: 'https://api.deepseek.com', enabled: true },
       { id: 'mistral', name: 'Mistral', kind: 'mistral', baseUrl: 'https://api.mistral.ai/v1', enabled: false },
       // llama.cpp ships disabled on the port its server now defaults to, and it
       // is the one kind KiChat can run itself — without this entry the whole
@@ -829,6 +879,15 @@ Verfügbare Tools: {{tool_list}}`,
     console.warn('[harness] offload injection active: no layer is placed on the device')
   }
 
+  // ?health=empty is the panel before the first probe has landed — and the state a
+  // backend added to the draft but not yet saved is in, since the report names
+  // only what is configured. Its row must read "not checked" rather than claiming
+  // a probe failed, so the empty case is renderable.
+  const healthEmpty = new URLSearchParams(location.search).get('health') === 'empty'
+  if (healthEmpty) {
+    console.warn('[harness] health injection active: no probe has reported yet')
+  }
+
   const searchStatus = {
     providers: { brave: false, duckduckgo: true },
     order: ['brave', 'duckduckgo'],
@@ -839,6 +898,20 @@ Verfügbare Tools: {{tool_list}}`,
   }
 
   let braveKeySet = false
+
+  /*
+   * Which backends have a key in the secret store, mirroring
+   * SecretStatus.backendKeys. The settings blob is sanitised, so a boolean is all
+   * the view is allowed to know — and it is the difference between an entry nobody
+   * has configured and one whose key was pasted and then never asked, because the
+   * entry was switched off.
+   *
+   * Mistral starts with one for that reason: it is the state the bug report came
+   * from. A save adds to it, so typing a key into any row here leaves the same
+   * trace the real one does, and the field comes back empty exactly as the
+   * sanitised settings would.
+   */
+  const backendKeys = { mistral: true }
 
   /* --------------------------------------------------------------- streaming */
 
@@ -1018,13 +1091,15 @@ Verfügbare Tools: {{tool_list}}`,
       entry.baseUrl = url
       entry.enabled = Boolean(url) || entry.enabled
     }
-    const row = health.find((h) => h.id === MANAGED_BACKEND)
-    if (row) {
-      row.baseUrl = url
-      row.ok = Boolean(url)
-      row.models = url ? 1 : 0
-      if (url) delete row.error
-      else row.error = 'llm: backend unavailable: connection refused'
+    // The probe result, not the row: rows are derived from the probes plus the
+    // settings, so a write to a row would be gone by the next read. The address is
+    // written to the settings entry above, which is where the row takes it from.
+    const probe = probes.find((p) => p.id === MANAGED_BACKEND)
+    if (probe) {
+      probe.ok = Boolean(url)
+      probe.models = url ? 1 : 0
+      if (url) delete probe.error
+      else probe.error = 'llm: backend unavailable: connection refused'
     }
     const listed = models.findIndex((m) => m.backend === MANAGED_BACKEND)
     if (listed >= 0) models.splice(listed, 1)
@@ -1384,6 +1459,17 @@ Verfügbare Tools: {{tool_list}}`,
       // Mirrors the backend, which localises the untouched built-in prompts on
       // save and hands the stored settings back so the view can adopt them.
       localisePrompts(settings)
+      // And the secret half of a save: each typed key goes to the store and the copy
+      // the view gets back is sanitised, so the field is empty afterwards and only
+      // the boolean says the key is there. Keeping the value instead would show a
+      // secret the real bridge never hands out, and would hide the very row state
+      // this fixture exists to render.
+      for (const b of settings.backends) {
+        if ((b.apiKey || '').trim()) {
+          backendKeys[b.id] = true
+          b.apiKey = ''
+        }
+      }
       // app.go restores a running managed server's address on save: the port is
       // chosen when it starts, and a panel opened before that still holds the one
       // before it. Without this the harness would show the stale field winning.
@@ -1402,7 +1488,7 @@ Verfügbare Tools: {{tool_list}}`,
     // back the live array makes zustand's set() see the same reference it already
     // holds, so the view would not re-render. The real bindings answer with freshly
     // decoded JSON, so a copy is also the faithful shape.
-    GetHealth: () => Promise.resolve(copy(health)),
+    GetHealth: () => Promise.resolve(copy(healthEmpty ? [] : healthRows())),
     // force is what the re-check button sends: re-read the backend rather than
     // answering from the listing taken earlier in the session.
     ListModels: (force) => {
@@ -1477,7 +1563,8 @@ Verfügbare Tools: {{tool_list}}`,
     },
 
     GetSearchStatus: () => Promise.resolve(searchStatus),
-    GetSecretStatus: () => Promise.resolve({ backend: 'file', keyring: false, braveKeySet }),
+    GetSecretStatus: () =>
+      Promise.resolve({ backend: 'file', keyring: false, braveKeySet, backendKeys: copy(backendKeys) }),
 
     // The managed llama.cpp runtime. Starting is staged over two states because
     // that is the part of the flow worth seeing: "starting" is what a real model

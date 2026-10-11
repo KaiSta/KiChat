@@ -397,6 +397,7 @@ export namespace llm {
 	    name: string;
 	    kind: string;
 	    baseUrl: string;
+	    enabled: boolean;
 	    ok: boolean;
 	    error?: string;
 	    models: number;
@@ -411,6 +412,7 @@ export namespace llm {
 	        this.name = source["name"];
 	        this.kind = source["kind"];
 	        this.baseUrl = source["baseUrl"];
+	        this.enabled = source["enabled"];
 	        this.ok = source["ok"];
 	        this.error = source["error"];
 	        this.models = source["models"];
@@ -805,6 +807,7 @@ export namespace main {
 	    backend: string;
 	    keyring: boolean;
 	    braveKeySet: boolean;
+	    backendKeys?: Record<string, boolean>;
 	    warning?: string;
 	
 	    static createFrom(source: any = {}) {
@@ -816,6 +819,7 @@ export namespace main {
 	        this.backend = source["backend"];
 	        this.keyring = source["keyring"];
 	        this.braveKeySet = source["braveKeySet"];
+	        this.backendKeys = source["backendKeys"];
 	        this.warning = source["warning"];
 	    }
 	}

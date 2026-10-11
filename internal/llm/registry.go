@@ -60,6 +60,11 @@ type HealthStatus struct {
 	Name    string `json:"name"`
 	Kind    string `json:"kind"`
 	BaseURL string `json:"baseUrl"`
+	// Enabled is false for a shipped backend the user has not switched on. It is
+	// carried because the two states need different words: a backend that was
+	// never contacted is not unreachable, and a panel that cannot tell them apart
+	// tells the user to repair an address that was never asked.
+	Enabled bool   `json:"enabled"`
 	OK      bool   `json:"ok"`
 	Error   string `json:"error,omitempty"`
 	Models  int    `json:"models"`
@@ -157,16 +162,49 @@ func (r *Registry) Providers() []Provider {
 }
 
 // Health probes every backend concurrently.
+// Health probes the enabled backends and reports one row per *configured* one,
+// switched on or not.
+//
+// A disabled backend builds no provider, and leaving it out entirely is what the
+// settings screen read as a failed probe: the row disappeared, the panel fell
+// back to "unreachable", and a user who pasted a key into a shipped-but-off
+// entry was told to repair an address that had never been contacted. The row is
+// therefore reported with Enabled unset and no Error — nothing failed, because
+// nothing was sent — the same way RuntimeStatus carries an entry for every id in
+// the settings so a row with no model configured still has its state explained.
 func (r *Registry) Health(ctx context.Context) []HealthStatus {
-	providers := r.Providers()
-	out := make([]HealthStatus, len(providers))
+	configs := r.Configs()
+	byID := map[string]Provider{}
+	for _, p := range r.Providers() {
+		byID[p.ID()] = p
+	}
+
+	out := make([]HealthStatus, len(configs))
 	var wg sync.WaitGroup
-	for i, p := range providers {
+	for i, cfg := range configs {
+		name := cfg.Name
+		if name == "" {
+			if p, ok := byID[cfg.ID]; ok {
+				name = p.Name()
+			}
+		}
+		st := HealthStatus{
+			ID:      cfg.ID,
+			Name:    name,
+			Kind:    cfg.Kind,
+			BaseURL: cfg.BaseURL,
+			Enabled: cfg.Enabled,
+		}
+		p, ok := byID[cfg.ID]
+		if !ok {
+			// Switched off, or a kind that builds no provider: there is no result
+			// to report, only the state to explain.
+			out[i] = st
+			continue
+		}
 		wg.Add(1)
-		go func(i int, p Provider) {
+		go func(i int, p Provider, st HealthStatus) {
 			defer wg.Done()
-			cfg := r.configFor(p.ID())
-			st := HealthStatus{ID: p.ID(), Name: p.Name(), Kind: cfg.Kind, BaseURL: cfg.BaseURL}
 			probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
 			if err := p.Health(probeCtx); err != nil {
@@ -178,21 +216,10 @@ func (r *Registry) Health(ctx context.Context) []HealthStatus {
 				}
 			}
 			out[i] = st
-		}(i, p)
+		}(i, p, st)
 	}
 	wg.Wait()
 	return out
-}
-
-func (r *Registry) configFor(id string) BackendConfig {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, c := range r.configs {
-		if c.ID == id {
-			return c
-		}
-	}
-	return BackendConfig{}
 }
 
 // ListModels returns the merged catalogue. A failing backend contributes nothing

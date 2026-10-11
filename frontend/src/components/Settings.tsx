@@ -42,13 +42,17 @@ export function Settings() {
 
   const patch = (changes: Partial<config.Settings>) => setDraft({ ...draft, ...changes })
 
-  const save = async () => {
+  // A row's own "turn on and check" button changes the draft and applies it in the
+  // same click, and setState has not landed by the time this runs, so the payload
+  // can be handed in rather than always read from state.
+  const save = async (next?: config.Settings) => {
+    const payload = next ?? draft
     setSaving(true)
     try {
       // Adopt what the backend stored rather than the draft: the untouched
       // built-in prompts are rewritten into the language being saved, so the
       // draft and the stored settings would otherwise disagree until a restart.
-      const stored = await App.SaveSettings(draft)
+      const stored = await App.SaveSettings(payload)
       setDraft(stored)
       useStore.setState({ settings: stored })
       useStore.getState().toast('info', t('settings.saved'))
@@ -1317,16 +1321,21 @@ function BackendsTab({
   patch: (c: Partial<config.Settings>) => void
   // Persisting is what applies a typed-in API key to the registry, so the
   // refresh control commits the draft first and then re-reads models/health.
-  onApply: () => void
+  // The payload is optional so a row can apply a change of its own in one click.
+  onApply: (next?: config.Settings) => void
 }) {
   const t = useStore((s) => s.t)
   const health = useStore((s) => s.health)
   const models = useStore((s) => s.models)
   const [secrets, setSecrets] = useState<main.SecretStatus | null>(null)
 
+  // Re-read with the health report: a save is what puts a key in the store, and
+  // the flag saying which entries have one would otherwise stay stale for the
+  // rest of the session — the panel would forget a key it had just stored, which
+  // is precisely the state this flag exists to explain.
   useEffect(() => {
     void App.GetSecretStatus().then(setSecrets).catch(() => undefined)
-  }, [])
+  }, [health])
 
   const updateBackend = (index: number, changes: Partial<llm.BackendConfig>) => {
     const backends = draft.backends.map((b, i) => (i === index ? { ...b, ...changes } : b))
@@ -1342,12 +1351,27 @@ function BackendsTab({
         {draft.backends.map((backend, index) => {
           const status = health.find((h) => h.id === backend.id)
           const modelCount = models.filter((m) => m.backend === backend.id).length
+          // The state the running app reported, not the checkbox: an entry that is
+          // off was never contacted, and that is what the hint below explains.
+          const offSaved = status ? !status.enabled : false
+          // A key counts as present whether it was just typed or is already in the
+          // secret store. The stored one cannot be read back — that is what being a
+          // secret means here — so the backend reports only which entries have one.
+          const keyPresent =
+            (backend.apiKey ?? '').trim() !== '' || (secrets?.backendKeys?.[backend.id] ?? false)
+          const enableAndApply = () => {
+            const backends = draft.backends.map((b, i) => (i === index ? { ...b, enabled: true } : b))
+            patch({ backends })
+            void onApply({ ...draft, backends })
+          }
           return (
             <div key={backend.id} className="mb-3 rounded-md p-3" style={{ background: 'var(--surface-2)' }}>
               <div className="mb-2 flex items-center gap-2">
                 <input
                   type="checkbox"
                   checked={backend.enabled}
+                  aria-label={t('settings.enabled')}
+                  title={t('settings.enabled')}
                   onChange={(e) => updateBackend(index, { enabled: e.target.checked })}
                 />
                 <input
@@ -1355,9 +1379,23 @@ function BackendsTab({
                   value={backend.name}
                   onChange={(e) => updateBackend(index, { name: e.target.value })}
                 />
-                <span className={`badge ${status?.ok ? 'badge-ok' : 'badge-danger'}`}>
-                  {status?.ok ? `${t('settings.ok')} · ${modelCount} ${t('settings.modelsFound')}` : t('settings.fail')}
-                </span>
+                {/* Three states, not two. A backend that is switched off was
+                    never contacted, so it is not "unreachable" — that label sent
+                    a user who had just pasted a key to fix an address nothing
+                    had asked. And a row the backend did not report at all is a
+                    draft that has not been saved, which is also not a failure.
+                    The badge follows the reported state rather than the
+                    checkbox, because it describes the connection the running
+                    app actually has; saving is what changes it. */}
+                {!status ? (
+                  <span className="badge">{t('settings.notChecked')}</span>
+                ) : !status.enabled ? (
+                  <span className="badge">{t('settings.disabled')}</span>
+                ) : (
+                  <span className={`badge ${status.ok ? 'badge-ok' : 'badge-danger'}`}>
+                    {status.ok ? `${t('settings.ok')} · ${modelCount} ${t('settings.modelsFound')}` : t('settings.fail')}
+                  </span>
+                )}
               </div>
               <input
                 className="input mono"
@@ -1384,9 +1422,25 @@ function BackendsTab({
                   }
                 />
               )}
-              {status && !status.ok && (
+              {status && status.enabled && !status.ok && (
                 <div className="mt-2 text-[11px]" style={{ color: 'var(--danger)' }}>
                   {status.error}
+                </div>
+              )}
+              {/* A key in an entry that is switched off is stored and then never
+                  used: no provider is built for an off entry, so no probe is sent
+                  and there is no connection to report. "off" on its own leaves the
+                  user who just pasted a key with nothing to do next, so the reason
+                  and the one click that settles it sit together here. */}
+              {offSaved && keyPresent && (
+                <div
+                  className="mt-2 flex items-center gap-2 text-[11px]"
+                  style={{ color: 'var(--text-dim)' }}
+                >
+                  <span className="min-w-0 flex-1">{t('settings.keyStoredWhileOff')}</span>
+                  <button type="button" className="btn btn-sm" onClick={enableAndApply}>
+                    {t('settings.enableAndCheck')}
+                  </button>
                 </div>
               )}
               {/* Only the kind that KiChat knows how to run itself gets the

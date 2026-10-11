@@ -369,6 +369,17 @@ const de = {
   'settings.health': 'Verbindung',
   'settings.ok': 'erreichbar',
   'settings.fail': 'nicht erreichbar',
+  // A backend that is switched off was never contacted, so it is neither
+  // reachable nor unreachable. Saying "nicht erreichbar" here sent users to fix
+  // an address that had never been asked.
+  'settings.enabled': 'aktiviert',
+  'settings.disabled': 'aus',
+  'settings.notChecked': 'nicht geprüft',
+  // A key pasted into a switched-off entry is stored and never used, because an
+  // off entry is never asked. The row says so and offers the click that fixes it.
+  'settings.keyStoredWhileOff':
+    'Schlüssel gespeichert. Der Eintrag ist aus, deshalb wird er nie geprüft.',
+  'settings.enableAndCheck': 'Einschalten und prüfen',
   'settings.modelsFound': 'Modelle',
   'settings.addCustom': 'OpenAI-kompatibel',
   'settings.keyringMissing': 'libsecret fehlt',
@@ -745,6 +756,15 @@ const en: Record<keyof typeof de, string> = {
   'settings.health': 'Connection',
   'settings.ok': 'reachable',
   'settings.fail': 'unreachable',
+  // See the German dictionary: "off" and "unreachable" are different states and
+  // telling them apart is the whole point of this row.
+  'settings.enabled': 'enabled',
+  'settings.disabled': 'off',
+  'settings.notChecked': 'not checked',
+  // See the German dictionary: the key is stored, the entry is off, and nothing
+  // has ever asked it.
+  'settings.keyStoredWhileOff': 'Key stored. The entry is off, so it is never checked.',
+  'settings.enableAndCheck': 'Turn on and check',
   'settings.modelsFound': 'models',
   'settings.addCustom': 'OpenAI-compatible',
   'settings.keyringMissing': 'libsecret missing',
@@ -1107,6 +1127,11 @@ const zh: Record<keyof typeof de, string> = {
   'settings.health': '连接',
   'settings.ok': '可达',
   'settings.fail': '不可达',
+  'settings.enabled': '已启用',
+  'settings.disabled': '已关闭',
+  'settings.notChecked': '未检查',
+  'settings.keyStoredWhileOff': '密钥已保存。该项已关闭，因此不会被检查。',
+  'settings.enableAndCheck': '启用并检查',
   'settings.modelsFound': '个模型',
   'settings.addCustom': 'OpenAI 兼容',
   'settings.keyringMissing': '缺少 libsecret',
