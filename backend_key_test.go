@@ -247,6 +247,65 @@ func TestSecretStatusNamesTheBackendsWithAStoredKey(t *testing.T) {
 	}
 }
 
+// TestAModelOverrideSaveDoesNotWriteTheKeyIntoTheBlob closes the last path that
+// put a secret into the settings row.
+//
+// Correcting a model's context window writes that row from the in-memory snapshot —
+// the copy that holds the real keys, because the registry authenticates from it —
+// and it wrote the snapshot as it stood. Every other save builds its blob from a
+// draft that never carried a key, which is why this one could not rely on that.
+//
+// Nothing visibly broke, and that is why it lasted: `config.Load` reads the keys
+// back out of the secret store and shadows whatever the row says, so the app kept
+// working while the row kept the secret. The test therefore checks both halves —
+// the row must be clean, and a restart must still find what it needs.
+func TestAModelOverrideSaveDoesNotWriteTheKeyIntoTheBlob(t *testing.T) {
+	var hits int32
+	srv := fakeMistral(t, "sk-typed", &hits)
+
+	settings := config.Default()
+	settings.Backends = mistralBackends(t, srv.URL)
+	a := newSettingsTestApp(t, settings, t.TempDir())
+
+	// The user's own path: paste the key and save, then correct the window of one
+	// of that backend's models.
+	if _, err := a.SaveSettings(draftPayloadWithKey(t, a, "mistral", "sk-typed")); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+	if err := a.SetModelOverride("mistral", "ministral-8b-latest", llm.ModelOverride{ContextLimit: 32768}); err != nil {
+		t.Fatalf("SetModelOverride: %v", err)
+	}
+
+	var blob config.Settings
+	found, err := a.store.GetSetting("settings", &blob)
+	if err != nil || !found {
+		t.Fatalf("read the settings row: found=%v err=%v", found, err)
+	}
+	for _, b := range blob.Backends {
+		if b.APIKey != "" {
+			t.Errorf("the settings row carries the key for %q: secrets live in the secret store, "+
+				"and this is the row the design says never carries one", b.ID)
+		}
+	}
+	if blob.Search.BraveAPIKey != "" {
+		t.Error("the settings row carries the Brave key")
+	}
+
+	// And the sanitising costs nothing: a restart reads that row, takes the key from
+	// the secret store and the override from the row itself.
+	loaded, err := config.Load(a.store, a.secrets)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	row := findBackend(t, loaded.Backends, "mistral")
+	if loaded.Backends[row].APIKey != "sk-typed" {
+		t.Errorf("the key after a restart = %q, want the one the save stored", loaded.Backends[row].APIKey)
+	}
+	if got := loaded.ModelOverrides["mistral/ministral-8b-latest"].ContextLimit; got != 32768 {
+		t.Errorf("the override after a restart = %d, want 32768: it has to survive one", got)
+	}
+}
+
 // readSettings is the bridge call the panel makes when it opens or re-reads its
 // draft: settings with every secret blanked.
 func readSettings(t *testing.T, a *App) config.Settings {

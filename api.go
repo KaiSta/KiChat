@@ -1221,7 +1221,13 @@ func (a *App) SetModelOverride(backend, model string, ov llm.ModelOverride) erro
 		return err
 	}
 	a.currentRegistry().Invalidate()
-	return settings.Save(a.store)
+	// Sanitised, because this is the one save that writes the *in-memory* snapshot
+	// rather than a draft: no control in the panel edits a model override through
+	// the settings form, so the snapshot is all this call has. SaveSettings can
+	// persist its draft as it stands precisely because a draft never carries a key;
+	// this one carries every key the app holds, and writing it as it stood put all
+	// of them into the settings row.
+	return a.sanitize(settings).Save(a.store)
 }
 
 // ModelCheckStatus is a model availability sweep as the picker reads it.
