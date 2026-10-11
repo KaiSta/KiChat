@@ -310,3 +310,62 @@ func offered(models []ModelInfo, id string) bool {
 	}
 	return false
 }
+
+// TestLiveMistralTemperatureAboveThePublishedMaximum settles a question the
+// offline tests cannot. Mistral's request schema bounds `temperature` to
+// `[0, 1.5]` while the app's own Settings screen offers up to `2`, and nothing
+// in between clamps the value, so a user who drags the slider to the top can
+// construct a body the vendor's schema forbids. Whether the deployed service
+// enforces that bound decides whether this is a reachable 422 or harmless schema
+// drift — and only a key can answer it.
+//
+// It reports the outcome rather than asserting one: either answer is a fact
+// worth having, and inventing a failure for the expected one would be guessing
+// in a test's clothing. One metered request, one token.
+//
+//	KICHAT_LIVE=1 KICHAT_MISTRAL_KEY=<key> go test ./internal/llm/ -run TestLiveMistralTemperature -v
+func TestLiveMistralTemperatureAboveThePublishedMaximum(t *testing.T) {
+	if os.Getenv("KICHAT_LIVE") != "1" {
+		t.Skip("set KICHAT_LIVE=1 to run against a live backend")
+	}
+	key := os.Getenv("KICHAT_MISTRAL_KEY")
+	if key == "" {
+		t.Skip("set KICHAT_MISTRAL_KEY to run against the live Mistral API")
+	}
+	p := newMistralProvider("mistral", "Mistral", os.Getenv("KICHAT_MISTRAL_BASE"), key)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	models, err := p.ListModels(ctx)
+	if err != nil {
+		t.Fatalf("list models: %v", err)
+	}
+	chosen := liveMistralChatModel(t, models)
+
+	stream, err := p.Chat(ctx, ChatRequest{
+		Model:       chosen.ID,
+		Messages:    []Message{{Role: RoleUser, Content: "Reply with exactly: OK"}},
+		MaxTokens:   1,
+		Temperature: 1.8,
+	})
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && (he.StatusCode == http.StatusTooManyRequests || he.StatusCode == http.StatusForbidden) {
+			t.Skipf("%s is refused for this account (HTTP %d: %s)", chosen.ID, he.StatusCode, he.Body)
+		}
+		if errors.As(err, &he) && (he.StatusCode == http.StatusBadRequest || he.StatusCode == http.StatusUnprocessableEntity) {
+			t.Logf("temperature 1.8 is REJECTED for %s (HTTP %d: %s): the published maximum is enforced, Settings offers 2 and nothing clamps it — a reachable 422, so the UI bound has to come down to 1.5",
+				chosen.ID, he.StatusCode, he.Body)
+			return
+		}
+		t.Fatalf("chat against %q: %v", chosen.ID, err)
+	}
+	for ev := range stream {
+		if ev.Type == EventError {
+			t.Fatalf("stream error: %s", ev.Error)
+		}
+	}
+	t.Logf("temperature 1.8 is ACCEPTED for %s: the published maximum of 1.5 is not enforced, so the Settings bound of 2 costs no rejected request (it may still be clamped silently)",
+		chosen.ID)
+}

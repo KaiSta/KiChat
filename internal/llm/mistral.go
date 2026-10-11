@@ -49,6 +49,12 @@ import (
 // `mistral-small-latest` is refused outright, and a Labs model answers HTTP 403
 // naming that gate instead.
 
+// Two names in the request body are this vendor's own, and they are set in the
+// provider rather than in the shared builder: the pinned seed is `random_seed`
+// (the published schema has no `seed` property at all), and "do not think" is
+// `reasoning_effort: "none"` rather than a toggle of the shape LM Studio or
+// llama.cpp takes.
+
 // MistralDefaultBaseURL is the address the vendor documents. The /v1 prefix is
 // part of it: every route of this API lives under it.
 const MistralDefaultBaseURL = "https://api.mistral.ai/v1"
@@ -86,6 +92,13 @@ func newMistralProvider(id, name, baseURL, apiKey string) *openAICompatProvider 
 		modelsPath:       baseURL + "/models",
 		openAIModelsPath: baseURL + "/models",
 		modelsFlavour:    flavourMistral,
+		// The two request-body names this vendor does not share with the
+		// OpenAI-compatible world. `seed` is `random_seed` here — the published
+		// request schema has no property of the former name — and "do not
+		// think" is a field of its own, `reasoning_effort: "none"`, rather than
+		// LM Studio's `enable_thinking` or llama.cpp's template kwargs.
+		seedField:          "random_seed",
+		reasoningEffortOff: true,
 	}
 }
 

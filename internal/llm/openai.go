@@ -62,6 +62,21 @@ type openAICompatProvider struct {
 	// only one of them accepts.
 	chatTemplateKwargs bool
 
+	// seedField is the request field this backend reads a pinned sampling seed
+	// from. The OpenAI-compatible servers — and DeepSeek, and llama.cpp — call
+	// it `seed`; Mistral's published request body has no such property at all
+	// and calls it `random_seed`, so the name travels with the flavour instead
+	// of living in the body builder. It matters because a field name the vendor
+	// does not know is at best a silent no-op: Mistral publishes the body with
+	// `additionalProperties: false`.
+	seedField string
+
+	// reasoningEffortOff marks a backend that documents a field of its own for
+	// "do not think": Mistral's `reasoning_effort: "none"`. LM Studio and
+	// llama.cpp express the same request in their own way (above); a server
+	// that documents neither is sent neither.
+	reasoningEffortOff bool
+
 	// nativeChatPath is LM Studio's v1 chat route, and v1ModelsPath is the
 	// listing that says which models expose a reasoning setting. Both are used
 	// only for a request that explicitly asks not to think: that route is the
@@ -86,6 +101,11 @@ type openAICompatProvider struct {
 	// not recorded, so the next summarisation retries instead of silently
 	// keeping the optimisation off for the rest of the session.
 	v1Unavailable bool
+	// reasoningEffortRejected records a request that lost the
+	// `reasoning_effort` field to a 400/422. The field is an optimisation for
+	// compaction, so it is retired for the session rather than sent again to
+	// the same answer.
+	reasoningEffortRejected bool
 
 	// props caches the reading of propsPath. `-c` is fixed when llama-server
 	// starts, so the number only changes when the server behind the URL is
@@ -106,12 +126,31 @@ const (
 	flavourMistral
 )
 
+// The field Mistral documents for "do not think". Its request schema spells the
+// reasoning control as `reasoning_effort: "high" | "none"`, where "none"
+// disables the reasoning effort, and deprecates `prompt_mode: "reasoning"` in
+// its favour. The value is a plain string rather than a nested object, so it
+// needs no builder of its own the way llama.cpp's template kwargs do.
+const (
+	reasoningEffortField = "reasoning_effort"
+	reasoningEffortNone  = "none"
+)
+
 // keyCheck reports a backend that needs a credential and has none.
 func (p *openAICompatProvider) keyCheck() error {
 	if p.requiresKey && strings.TrimSpace(p.apiKey) == "" {
 		return ErrMissingAPIKey
 	}
 	return nil
+}
+
+// seedKey is the request field this backend reads a pinned seed from, which is
+// `seed` everywhere but Mistral.
+func (p *openAICompatProvider) seedKey() string {
+	if p.seedField != "" {
+		return p.seedField
+	}
+	return "seed"
 }
 
 func newLMStudioProvider(baseURL, apiKey string) *openAICompatProvider {
@@ -569,6 +608,38 @@ func (p *openAICompatProvider) retireChatPath() {
 	}
 }
 
+// reasoningEffortRetired reports whether a previous request already lost the
+// `reasoning_effort` field to a rejection, so the field is not offered again in
+// this session.
+func (p *openAICompatProvider) reasoningEffortRetired() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.reasoningEffortRejected
+}
+
+// retireReasoningEffort reacts to a failed request that carried
+// `reasoning_effort`. A 400 or a 422 is the vendor refusing the field — a
+// schema violation is a 422 on Mistral — and the caller then retries without
+// it; the answer says whether the error was that rejection, so the caller knows
+// a retry is worth making.
+//
+// Only those two statuses retire the field. A timeout, a 429 or a 500 is a fact
+// about the moment, not about the field, and must not cost a working model its
+// optimisation for the rest of the session.
+func (p *openAICompatProvider) retireReasoningEffort(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	if he.StatusCode != http.StatusBadRequest && he.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reasoningEffortRejected = true
+	return true
+}
+
 // InvalidateCache forgets the learned reasoning settings, so a re-check reads
 // the v1 listing again instead of handing an existing installation the answer
 // that was cached before the user loaded a different model.
@@ -890,8 +961,14 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 		body["max_tokens"] = req.MaxTokens
 	}
 	if req.Seed != nil {
-		body["seed"] = *req.Seed
+		// The vendor's own name for it: Mistral calls a pinned seed
+		// `random_seed` and has no `seed` property at all.
+		body[p.seedKey()] = *req.Seed
 	}
+	// reasoningEffortSent records whether this request carried the
+	// `reasoning_effort` field, so a vendor that refuses it can be answered with
+	// one retry without the field instead of a failed turn.
+	reasoningEffortSent := false
 	if req.Think != nil && !*req.Think {
 		switch {
 		case p.chatTemplateKwargs && p.templateTogglesThinking(ctx):
@@ -908,6 +985,14 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 			// spends the whole output budget thinking and returns no summary at
 			// all.
 			body["enable_thinking"] = false
+		case p.reasoningEffortOff && !p.reasoningEffortRetired():
+			// Mistral documents a field of its own for exactly this request:
+			// `"none"` disables the reasoning effort. Only a model the caller
+			// asked to silence ever gets here, and the caller derives that from
+			// the model's own `capabilities.reasoning`, so the field cannot
+			// reach a model that has no reasoning to switch off.
+			body[reasoningEffortField] = reasoningEffortNone
+			reasoningEffortSent = true
 		}
 	}
 	if len(req.Tools) > 0 {
@@ -928,6 +1013,14 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 	if err != nil {
 		if he, ok := err.(*HTTPError); ok && he.StatusCode == 404 && len(p.chatPaths) > 1 {
 			p.retireChatPath()
+			rc, err = postStream(ctx, p.currentChatPath(), p.authHeaders(), body)
+		}
+		// An optimisation may never be the reason a turn fails: a vendor that
+		// refuses `reasoning_effort` loses that field and nothing else, and the
+		// request goes out again without it. Nothing has been streamed yet, so
+		// the answer is unaffected and the price is one round trip, once.
+		if err != nil && reasoningEffortSent && p.retireReasoningEffort(err) {
+			delete(body, reasoningEffortField)
 			rc, err = postStream(ctx, p.currentChatPath(), p.authHeaders(), body)
 		}
 		if err != nil {

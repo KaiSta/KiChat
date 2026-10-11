@@ -106,7 +106,7 @@ The separating flag is `completion_chat`, **not** `function_calling`:
 `mistral-ocr-*` is the whole argument in one row: it advertises function calling while
 being unable to hold a conversation. Filtering on the tool flag would have put OCR models
 in the model picker, where they fail on send. `fromMistralEntry`
-([internal/llm/mistral.go:176](internal/llm/mistral.go#L176)) returns `(ModelInfo, false)`
+([internal/llm/mistral.go:189](internal/llm/mistral.go#L189)) returns `(ModelInfo, false)`
 for those, and the caller leaves them out of the catalogue entirely rather than offering
 a row that cannot work.
 
@@ -131,9 +131,9 @@ model's identity rather than the id. A per-entry mapper would have put 27 rows i
 picker for 8 models.
 
 So `mapMistralEntries`
-([internal/llm/mistral.go:104](internal/llm/mistral.go#L104)) reads the listing as a
+([internal/llm/mistral.go:117](internal/llm/mistral.go#L117)) reads the listing as a
 whole, groups by `name`, and `preferredMistralID`
-([internal/llm/mistral.go:140](internal/llm/mistral.go#L140)) picks the survivor: the
+([internal/llm/mistral.go:153](internal/llm/mistral.go#L153)) picks the survivor: the
 rolling `-latest` alias, shortest when a family has several, else the first id the
 listing named. A picker row should follow the vendor's release rather than pin a dated
 snapshot, and the alias reaches the same model either way.
@@ -190,7 +190,7 @@ Mistral-only one.
 
 ### What the code does now
 
-`deltaContent` ([internal/llm/openai.go:328](internal/llm/openai.go#L328)) accepts:
+`deltaContent` ([internal/llm/openai.go:355](internal/llm/openai.go#L355)) accepts:
 
 | input | result |
 | --- | --- |
@@ -222,17 +222,49 @@ rule so the shared parser cannot regress for LM Studio, Ollama or llama.cpp.
 
 `model`, `messages`, `stream: true`, `temperature`, `stream_options:
 {"include_usage": true}`, and then `top_p` (when > 0 — **the shipped default is 0.9**),
-`max_tokens` (when > 0), `tools` (when any), `seed` (when set).
+`max_tokens` (when > 0), `tools` (when any), and `random_seed` (when set).
 
 **Measured:** `top_p: 0.9` + `temperature: 0.7` + `stream_options` all answer HTTP 200, so
 nothing the app sends by default is rejected.
 
-**Never sent:** `seed` (nothing in `internal/chat` sets `ChatRequest.Seed`, so the field
-is inert), `enable_thinking` (`thinkingToggle` is false — that is LM Studio's), and
-`chat_template_kwargs` (`chatTemplateKwargs` is false — that is llama.cpp's). The switch
-in `Chat` that sends those is therefore a no-op here, which matters for compaction: it
-asks a reasoning model not to think, gets neither backend control, and falls back to the
-in-prompt soft switch that `Summarize` always sends.
+Two of those names are this vendor's own rather than the OpenAI-compatible world's, and
+both are set in `newMistralProvider` instead of in the shared body builder — the same
+separation that already kept LM Studio's `enable_thinking` and llama.cpp's
+`chat_template_kwargs` apart:
+
+| the app's own model | what Mistral reads | why it cannot be shared |
+| --- | --- | --- |
+| `seed` | **`random_seed`** | the published body has **no `seed` property at all**, and it is declared `additionalProperties: false` |
+| `Think: false` on LM Studio → `enable_thinking`, on llama.cpp → `chat_template_kwargs` | **`reasoning_effort: "none"`** | the schema's own spelling for it: `"none"` disables the reasoning effort (it deprecates `prompt_mode: "reasoning"` in favour of it) |
+
+`random_seed` is inert today — nothing in `internal/chat` sets `ChatRequest.Seed` — but it
+is wired to the name the API knows, so the day something does set a seed, the field is not
+a stranger's. `TestMistralCallsTheSeedFieldItsVendorNames` pins both sides of it: Mistral
+gets `random_seed`, and an OpenAI-compatible server still gets `seed`.
+
+`reasoning_effort` is **live**, and it is how compaction's "do not think" reaches this
+vendor at all. It is only ever sent for a model the caller asked to silence, and the
+caller derives that from the model's own `capabilities.reasoning` (`chat/maintenance.go`
+asks the question as `CapThink`), so a model with nothing to switch off never sees the
+field. What cannot be measured from here is whether the deployed service honours it or
+refuses it: every reasoning model this account can name sits behind the 429/403 gate of §6
+(measured: `mistral-medium-latest` → 429), so the field is made *safe* rather than
+*assumed right* — the first `400`/`422` retires it for the session and the request is sent
+again without it (`retireReasoningEffort`, `TestMistralAsksAReasoningModelNotToThinkWithReasoningEffort`).
+A refusal therefore costs one round trip, once, and never a turn.
+
+**The published bounds are not the app's.** The schema bounds `temperature` to
+**`[0, 1.5]`**, while Settings offers up to `2` (`<input type="number" max="2">`) and
+nothing between the two clamps the value — `config.normalise` only replaces a
+non-positive number with the 0.7 default. A user can therefore build a body the vendor's
+own schema forbids. Whether the service enforces that bound is **not measured**; §10.4 has
+the probe that answers it, and the value to act on.
+
+**Never sent:** `enable_thinking` (`thinkingToggle` is false — that is LM Studio's) and
+`chat_template_kwargs` (`chatTemplateKwargs` is false — that is llama.cpp's). Those two
+branches of the switch in `Chat` stay unreachable here, which is what kept the "do not
+think" request falling through to the in-prompt soft switch that `Summarize` always sends
+until `reasoning_effort` was wired up.
 
 ### The stream
 
@@ -322,36 +354,41 @@ if the server is reached at all.
 
 | file | symbol | what it does |
 | --- | --- | --- |
-| [internal/llm/mistral.go:54](internal/llm/mistral.go#L54) | `MistralDefaultBaseURL` | `https://api.mistral.ai/v1` — the `/v1` is part of the address |
-| [internal/llm/mistral.go:58](internal/llm/mistral.go#L58) | `newMistralProvider` | the provider: one chat path, `/models`, `flavourMistral`, `requiresKey` |
-| [internal/llm/mistral.go:93](internal/llm/mistral.go#L93) | `isBareHost` | decides whether the base URL may be completed with `/v1` |
-| [internal/llm/mistral.go:104](internal/llm/mistral.go#L104) | `mapMistralEntries` | whole-listing map: drop non-chat, collapse aliases |
-| [internal/llm/mistral.go:140](internal/llm/mistral.go#L140) | `preferredMistralID` | which alias of one model survives |
-| [internal/llm/mistral.go:176](internal/llm/mistral.go#L176) | `fromMistralEntry` | one entry → `ModelInfo`, or `false` if it cannot chat |
-| [internal/llm/openai.go:328](internal/llm/openai.go#L328) | `deltaContent` | `content` as string **or** typed-chunk list; the shared fix |
-| [internal/llm/openai.go:397](internal/llm/openai.go#L397) | `openAIDelta.Content` | now `deltaContent` instead of `string` |
-| [internal/llm/openai.go:1055](internal/llm/openai.go#L1055) | `consume` | emits `delta.Content.Text`; reasoning first via `reasoningText()` |
-| [internal/llm/openai.go:1324](internal/llm/openai.go#L1324) | `mergeDeltas` | merges both halves of `deltaContent` (the empty-string guards became no-ops) |
-| [internal/llm/registry.go:108](internal/llm/registry.go#L108) | `Reconfigure` | `case "mistral"` builds the provider |
-| [internal/llm/registry.go:382](internal/llm/registry.go#L382) | `DefaultBackendConfigs` | the shipped row: `mistral`, disabled |
+| [internal/llm/mistral.go:60](internal/llm/mistral.go#L60) | `MistralDefaultBaseURL` | `https://api.mistral.ai/v1` — the `/v1` is part of the address |
+| [internal/llm/mistral.go:64](internal/llm/mistral.go#L64) | `newMistralProvider` | the provider: one chat path, `/models`, `flavourMistral`, `requiresKey`, and the two vendor-specific names (`seedField: "random_seed"`, `reasoningEffortOff`) |
+| [internal/llm/mistral.go:106](internal/llm/mistral.go#L106) | `isBareHost` | decides whether the base URL may be completed with `/v1` |
+| [internal/llm/mistral.go:117](internal/llm/mistral.go#L117) | `mapMistralEntries` | whole-listing map: drop non-chat, collapse aliases |
+| [internal/llm/mistral.go:153](internal/llm/mistral.go#L153) | `preferredMistralID` | which alias of one model survives |
+| [internal/llm/mistral.go:189](internal/llm/mistral.go#L189) | `fromMistralEntry` | one entry → `ModelInfo`, or `false` if it cannot chat |
+| [internal/llm/openai.go:149](internal/llm/openai.go#L149) | `seedKey` | the shared builder's one flavour-dependent field name: `seed`, or `random_seed` |
+| [internal/llm/openai.go:629](internal/llm/openai.go#L629) | `retireReasoningEffort` | a 400/422 to `reasoning_effort` retires the field and the request is sent again without it |
+| [internal/llm/openai.go:355](internal/llm/openai.go#L355) | `deltaContent` | `content` as string **or** typed-chunk list; the shared fix |
+| [internal/llm/openai.go:436](internal/llm/openai.go#L436) | `openAIDelta.Content` | now `deltaContent` instead of `string` |
+| [internal/llm/openai.go:1037](internal/llm/openai.go#L1037) | `consume` | emits `delta.Content.Text`; reasoning first via `reasoningText()` |
+| [internal/llm/openai.go:1417](internal/llm/openai.go#L1417) | `mergeDeltas` | merges both halves of `deltaContent` (the empty-string guards became no-ops) |
+| [internal/llm/registry.go:113](internal/llm/registry.go#L113) | `Reconfigure` | `case "mistral"` builds the provider |
+| [internal/llm/registry.go:406](internal/llm/registry.go#L406) | `DefaultBackendConfigs` | the shipped row: `mistral`, disabled |
 | [internal/config/config.go:516](internal/config/config.go#L516) | `normalise` | repairs an empty address for an existing install |
 | [frontend/src/components/Settings.tsx:1373](frontend/src/components/Settings.tsx#L1373) | backend row | shows the key field and requires it |
 | [frontend/src/lib/i18n.ts:182](frontend/src/lib/i18n.ts#L182) | `settings.backendsHint` | the hint, all three languages (182/559/932) |
 | [tools/uiharness/mock-wails.js:287](tools/uiharness/mock-wails.js#L287) | harness fixture | the row the UI is verified against |
 
 `openAICompatProvider.modelsFlavour` gained `flavourMistral`
-([internal/llm/openai.go:106](internal/llm/openai.go#L106)), and `mapModelEntries`
+([internal/llm/openai.go:126](internal/llm/openai.go#L126)), and `mapModelEntries`
 dispatches the whole list to `mapMistralEntries` for that flavour rather than mapping
 entry by entry.
 
 ---
 
-## 8. The four bugs review found
+## 8. The bugs review found
 
-All four were in the first cut of this change. They are recorded because each one was
+§8.1–§8.4 were all in the first cut of this change. They are recorded because each one was
 invisible in the same way: a wrong shape does not raise, it just produces a worse answer.
 §8.1 and §8.3 were introduced by me and caught in review; §8.2 is a defect I had noticed
-and then failed to act on; §8.4 was in the test rather than in the product.
+and then failed to act on; §8.4 was in the test rather than in the product. §8.5 came out
+of a later pass that read the whole provider against the vendor's published schema instead
+of against the endpoints it happens to call, and it is the same species of fault: a name
+nothing on the other side was reading.
 
 ### 8.1 The frame-killing decode, one level in
 
@@ -399,6 +436,32 @@ four bullets; `mistralModelEntry` decoded `type` and `aliases` without ever read
 (and `aliases` could imply it drove the collapsing, which it does not — `name` does); and
 one earlier edit had collapsed a comment onto a code line.
 
+### 8.5 Two field names the vendor does not use
+
+Reading the published request schema whole — 662 kB of it — rather than the endpoints the
+provider happens to call turned up two properties that are not Mistral's:
+
+- **`seed`.** The shared body builder sent `seed`, the name every other backend in this
+  codebase reads. Mistral's chat body has no such property: it calls it **`random_seed`**
+  (the only seed-shaped property anywhere in the specification), and the body is declared
+  `additionalProperties: false`. Nothing in `internal/chat` sets `ChatRequest.Seed` today,
+  so the fault was latent rather than live — a defect with a trigger attached, waiting for
+  the first feature that pins a seed. The name now travels with the flavour
+  (`seedField`/`seedKey`) instead of living in the builder.
+- **"do not think".** The switch in `Chat` offered `enable_thinking` (LM Studio) and
+  `chat_template_kwargs` (llama.cpp) and then nothing at all, so a compaction on this
+  backend asked a reasoning model to skip its thinking and sent no field to say so, falling
+  back to the in-prompt soft switch. The schema documents the vendor's own spelling —
+  `reasoning_effort`, whose `"none"` disables the reasoning effort, with `prompt_mode`
+  deprecated in its favour — and that is now sent, for a reasoning model only, because only
+  a model the listing reports `reasoning: true` for can be asked.
+
+The two got different treatments on purpose. The seed was a **name** to correct. The
+reasoning field is a **claim** about the deployed service that this account cannot measure
+(§10.4), so it is sent optimistically and retired on the first `400`/`422`
+(`retireReasoningEffort`): the worst case is one wasted round trip, not a failed
+summarisation. A wrong name is invisible; a refused field is a failed turn.
+
 ---
 
 ## 9. How this is verified
@@ -415,6 +478,8 @@ one earlier edit had collapsed a comment onto a code line.
 | `TestMistralStreamsAFragmentedToolCall` | fragmented `tool_calls` reassemble into one executable call |
 | `TestRegistryBuildsMistralFromConfig` | the kind selects the provider, the default address, `requiresKey`, the flavour, and that a disabled entry builds nothing |
 | `TestShippedMistralBackendIsOffByDefault` | the shipped row is off and carries the vendor address |
+| `TestMistralCallsTheSeedFieldItsVendorNames` | `random_seed` for Mistral and `seed` for an OpenAI-compatible server, each asserted absent from the other's body |
+| `TestMistralAsksAReasoningModelNotToThinkWithReasoningEffort` | `reasoning_effort: "none"` on a `Think: false` request, the 422 it may draw, the retry that succeeds without it, and the field staying retired for the next call |
 
 The fake servers serve `/v1/models` and `/v1/chat/completions` — the real paths — so a
 provider that failed to complete the base URL would ask for `/models` and get a 404.
@@ -448,6 +513,21 @@ publishes are absent from what the provider offers.
 The fourth claim — the thinking-chunk decode — **could not be checked on this account**,
 and the test says so out loud rather than passing quietly. See §4 and §10.
 
+### The one metered probe
+
+The temperature bound of §5 has a probe of its own in the same file, kept separate because
+it is one request and needs no model that can reason:
+
+```
+KICHAT_LIVE=1 KICHAT_MISTRAL_KEY=<key> go test ./internal/llm/ -run TestLiveMistralTemperature -v
+```
+
+It sends `temperature: 1.8` — above the schema's `[0, 1.5]`, inside what Settings offers —
+with `max_tokens: 1` on the cheapest model the listing has, and **reports** which way the
+service went instead of asserting one. Either answer is a fact worth having, and a test
+that failed on the expected one would be guessing in a test's clothing. §10.4 says what to
+do with each result.
+
 ### The gate
 
 `make check` (gofmt, `go vet ./...`, every package's tests, `tsc --noEmit`) and
@@ -456,6 +536,11 @@ and the test says so out loud rather than passing quietly. See §4 and §10.
 was altered. The UI was driven in the mock-bridge harness in **English and German** — the
 row, the `/v1` address, the required-key field, and the
 `llm: backend unavailable: no API key configured` badge — with no console errors.
+
+Re-run after the §8.5 fix: `make check` and `make build` both exit 0 (34 s for the build),
+and no generated file moved — `frontend/wailsjs/go/models.ts` is identical, because nothing
+that crosses the bridge was touched. That harness walk above belongs to the original
+change; this pass changed no UI code.
 
 ---
 
@@ -472,6 +557,18 @@ row, the `/v1` address, the required-key field, and the
 3. **A pure-API-key rotation is untested.** The 401 body shape is recorded, but the
    in-app flow (paste → save → probe) was verified only through the harness, not against
    the live API from inside a running app.
+4. **Whether the service enforces `reasoning_effort` and the `[0, 1.5]` temperature bound
+   is unmeasured.** Both are read off the published schema, and both need a model this
+   account may call — the reasoning models sit behind the 429/403 gate of §6. The two are
+   handled differently because their failure modes are not alike: `reasoning_effort`
+   retires itself on a `400`/`422`, so a wrong guess costs one round trip once, while the
+   temperature bound is a **user-reachable 422** that nothing in the app prevents
+   (`<input type="number" max="2">`, no clamp in `config.normalise`).
+   `TestLiveMistralTemperatureAboveThePublishedMaximum` settles it with one metered token:
+   - **rejected** → Settings' maximum has to come down to `1.5`, and the bound belongs next
+     to the field rather than in a table here;
+   - **accepted** → the mismatch is schema drift and stays a sentence, since a value the
+     service silently clamps is not a value the app should be inventing a limit for.
 
 ---
 
@@ -479,7 +576,7 @@ row, the `/v1` address, the required-key field, and the
 
 **The duplicate listing-path fallback.** For Mistral, DeepSeek *and* llama.cpp the rich
 listing path and the plain-OpenAI fallback path are the **same URL**
-([internal/llm/mistral.go:86](internal/llm/mistral.go#L86),
+([internal/llm/mistral.go:92](internal/llm/mistral.go#L92),
 [internal/llm/deepseek.go:53](internal/llm/deepseek.go#L53),
 [internal/llm/llamacpp.go:109](internal/llm/llamacpp.go#L109)). So a 404 makes
 `ListModels` retry the identical address, and — if that retry ever answered — it would go

@@ -2,11 +2,14 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -450,5 +453,185 @@ func TestShippedMistralBackendIsOffByDefault(t *testing.T) {
 	}
 	if mistral == nil {
 		t.Fatal("Mistral is not among the shipped backends")
+	}
+}
+
+// mistralRecorder keeps every request body a fake server was sent, in order,
+// guarded so a test can read them once the streams have finished. The order
+// matters: the retirement test needs to see the refused request and the retry
+// that followed it as two separate bodies.
+type mistralRecorder struct {
+	mu     sync.Mutex
+	bodies []map[string]any
+}
+
+// add decodes and stores one request.
+func (r *mistralRecorder) add(t *testing.T, req *http.Request) {
+	t.Helper()
+	raw, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Errorf("reading the request body: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Errorf("the request body is not JSON: %v", err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bodies = append(r.bodies, body)
+}
+
+// Bodies returns the recorded requests in the order the server saw them.
+func (r *mistralRecorder) Bodies() []map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]map[string]any(nil), r.bodies...)
+}
+
+// mistralSSE answers one streaming chat completion with the given delta frames.
+func mistralSSE(w http.ResponseWriter, frames ...string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	for _, f := range frames {
+		fmt.Fprintf(w, "data: %s\n\n", f)
+	}
+	fmt.Fprint(w, "data: [DONE]\n\n")
+}
+
+// TestMistralCallsTheSeedFieldItsVendorNames pins the one request field whose
+// name this vendor does not share with the OpenAI-compatible world. Mistral's
+// published chat body has `random_seed` and no `seed` property at all, and the
+// body is declared with `additionalProperties: false`, so the shared name would
+// be an unknown field. Nothing in the app sets a seed today, which is exactly
+// why the wrong name could have sat there unnoticed until something did.
+func TestMistralCallsTheSeedFieldItsVendorNames(t *testing.T) {
+	rec := &mistralRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.add(t, r)
+		mistralSSE(w, `{"choices":[{"delta":{"content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	seed := 42
+	cases := []struct {
+		name    string
+		build   func() *openAICompatProvider
+		present string
+		absent  string
+	}{
+		{
+			name:    "Mistral reads random_seed",
+			build:   func() *openAICompatProvider { return newMistralProvider("mistral", "Mistral", srv.URL, "test-key") },
+			present: "random_seed",
+			absent:  "seed",
+		},
+		{
+			name:    "an OpenAI-compatible server still reads seed",
+			build:   func() *openAICompatProvider { return newLMStudioProvider(srv.URL, "") },
+			present: "seed",
+			absent:  "random_seed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			events, err := tc.build().Chat(context.Background(), ChatRequest{
+				Model:    "ministral-3b-latest",
+				Messages: []Message{{Role: RoleUser, Content: "Hallo"}},
+				Seed:     &seed,
+			})
+			if err != nil {
+				t.Fatalf("Chat: %v", err)
+			}
+			for range events {
+			}
+
+			bodies := rec.Bodies()
+			body := bodies[len(bodies)-1]
+			if got := body[tc.present]; got != float64(seed) {
+				t.Errorf("%s = %v, want the seed %d", tc.present, got, seed)
+			}
+			if _, ok := body[tc.absent]; ok {
+				t.Errorf("the body carries %q, a name this vendor does not know: %v", tc.absent, body)
+			}
+		})
+	}
+}
+
+// TestMistralAsksAReasoningModelNotToThinkWithReasoningEffort pins the field
+// that makes compaction's "do not think" reach this vendor at all, and the
+// safety net around it. Mistral documents `reasoning_effort: "none"` for
+// exactly that request — a field of its own rather than LM Studio's
+// `enable_thinking` — but a deployed service may still refuse it, and an
+// optimisation must never be the reason a turn fails. So the first 400/422
+// retires the field and the request goes out again without it: the answer
+// arrives, the vendor is asked exactly once for something it does not accept,
+// and nothing later in the session pays for it again.
+func TestMistralAsksAReasoningModelNotToThinkWithReasoningEffort(t *testing.T) {
+	rec := &mistralRecorder{}
+	rejected := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.add(t, r)
+		// Only the first request is refused; the retry has to get through.
+		if !rejected {
+			rejected = true
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			fmt.Fprint(w, `{"object":"error","message":"Extra inputs are not permitted","type":"invalid_request_error","code":"3000"}`)
+			return
+		}
+		mistralSSE(w, `{"choices":[{"delta":{"content":"Zusammenfassung"}}]}`)
+	}))
+	defer srv.Close()
+
+	p := newMistralProvider("mistral", "Mistral", srv.URL, "test-key")
+	off := false
+	events, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "mistral-small-latest",
+		Messages: []Message{{Role: RoleUser, Content: "Fasse den Verlauf zusammen."}},
+		Think:    &off,
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	var content strings.Builder
+	for ev := range events {
+		switch ev.Type {
+		case EventDelta:
+			content.WriteString(ev.Text)
+		case EventError:
+			t.Fatalf("stream error: %s", ev.Error)
+		}
+	}
+	if got, want := content.String(), "Zusammenfassung"; got != want {
+		t.Errorf("content = %q, want %q from the retried request", got, want)
+	}
+
+	bodies := rec.Bodies()
+	if len(bodies) != 2 {
+		t.Fatalf("the vendor saw %d requests, want the refused one and its retry", len(bodies))
+	}
+	if got := bodies[0][reasoningEffortField]; got != reasoningEffortNone {
+		t.Errorf("first request carried %s = %v, want %q", reasoningEffortField, got, reasoningEffortNone)
+	}
+	if _, ok := bodies[1][reasoningEffortField]; ok {
+		t.Errorf("the retry still carried %s: %v", reasoningEffortField, bodies[1])
+	}
+
+	// Retired, not retried: the next summary is not made to pay for the same
+	// rejection a second time.
+	again, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "mistral-small-latest",
+		Messages: []Message{{Role: RoleUser, Content: "Und noch eine."}},
+		Think:    &off,
+	})
+	if err != nil {
+		t.Fatalf("second Chat: %v", err)
+	}
+	for range again {
+	}
+	bodies = rec.Bodies()
+	if len(bodies) != 3 {
+		t.Fatalf("the vendor saw %d requests, want three", len(bodies))
+	}
+	if _, ok := bodies[2][reasoningEffortField]; ok {
+		t.Errorf("the field was offered again after being refused: %v", bodies[2])
 	}
 }

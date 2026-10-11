@@ -459,12 +459,16 @@ work was built for.
 fans that out:
 
 1. **The backend's own control.** True when the model advertises `CapThink`, or when the
-   provider implements `llm.ThinkingToggle` and reports `CanToggleThinking()`. On Ollama
-   that is `think: false`; on LM Studio `enable_thinking: false`.
+   provider implements `llm.ThinkingToggle` and reports `CanToggleThinking()`. The field
+   that carries it is the backend's own: on Ollama that is `think: false`, on LM Studio
+   `enable_thinking: false`, on llama.cpp a `chat_template_kwargs` entry, and on Mistral
+   `reasoning_effort: "none"` (MISTRAL.md §5 — sent only for a model the listing reports
+   `reasoning: true` for, and retired on a `400`/`422` rather than risked twice).
    Pinned by `TestOllamaHonoursDisableThinking`,
    `TestLMStudioSendsEnableThinkingFalse`,
    `TestCompactDisablesThinkingForAThinkingModel`,
-   `TestCompactAsksAToggleBackendNotToThink`.
+   `TestCompactAsksAToggleBackendNotToThink`,
+   `TestMistralAsksAReasoningModelNotToThinkWithReasoningEffort`.
 2. **LM Studio's native `/api/v1/chat` route.** With `Think=false` the request may travel
    on the native route with a **`reasoning`** field instead. The value is *the least
    reasoning the model permits*: `"off"` when that option exists, otherwise `"low"` — the

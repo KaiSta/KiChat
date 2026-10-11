@@ -128,6 +128,8 @@ KICHAT_LIVE=1 KICHAT_MISTRAL_KEY=<key> go test ./internal/llm/ -run TestLiveMist
 #   optional: KICHAT_MISTRAL_BASE, KICHAT_MISTRAL_MODEL,
 #   KICHAT_MISTRAL_REASONING_MODEL (the thinking-chunk shape needs one the
 #   account may call; a tier refusal is reported, not failed)
+#   the unanchored pattern also picks up the one-request temperature probe,
+#   TestLiveMistralTemperatureAboveThePublishedMaximum
 
 # PrismML's fork: one release lookup, a 17 MB download and a real model load
 KICHAT_LIVE=1 go test ./internal/runtime/ -run TestLivePrism -v
@@ -152,6 +154,10 @@ short version:
   published, 27 chat-capable, 8 models after the alias collapse), the window and the
   per-model capabilities come from the listing, `include_usage` is honoured, and a
   fragmented `tool_calls` stream reassembles.
+- `TestLiveMistralTemperatureAboveThePublishedMaximum` — MISTRAL.md §5 and §10.4: one
+  request at `temperature: 1.8`, above the schema's published `[0, 1.5]` and inside what
+  Settings offers, reporting whether the service enforces the bound. It asserts nothing:
+  either answer is a fact, and one of them means the UI maximum has to come down.
 - `TestLivePrismForkRunsAModel` — LLAMACPP.md §6: the fork as a runtime, not a table of
   names — its release list, its tag scheme, its archive, its ternary kernels, and a real
   GGUF loaded on its `llama-server`.
