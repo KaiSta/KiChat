@@ -124,6 +124,7 @@ const (
 	flavourDeepSeek
 	flavourLlamaCpp
 	flavourMistral
+	flavourNvidia
 )
 
 // The field Mistral documents for "do not think". Its request schema spells the
@@ -266,6 +267,12 @@ func (p *openAICompatProvider) mapModelEntries(raw []json.RawMessage) []ModelInf
 	// under several aliases.
 	if p.modelsFlavour == flavourMistral {
 		return p.mapMistralEntries(raw)
+	}
+	// NVIDIA's is read as a whole as well, for the opposite reason to Mistral's:
+	// nothing is grouped or dropped there, but an entry with no id has to be
+	// skipped rather than offered as a nameless row.
+	if p.modelsFlavour == flavourNvidia {
+		return p.mapNvidiaEntries(raw)
 	}
 	out := make([]ModelInfo, 0, len(raw))
 	for _, entry := range raw {

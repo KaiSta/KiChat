@@ -40,7 +40,7 @@ func newCustomProvider(id, name, baseURL, apiKey string) *openAICompatProvider {
 type BackendConfig struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
-	Kind    string `json:"kind"` // lmstudio | ollama | custom | deepseek | mistral | llamacpp
+	Kind    string `json:"kind"` // lmstudio | ollama | custom | deepseek | mistral | nvidia | llamacpp
 	BaseURL string `json:"baseUrl"`
 	APIKey  string `json:"apiKey"`
 	Enabled bool   `json:"enabled"`
@@ -112,6 +112,8 @@ func (r *Registry) Reconfigure(configs []BackendConfig) {
 			providers = append(providers, newDeepSeekProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		case "mistral":
 			providers = append(providers, newMistralProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
+		case "nvidia":
+			providers = append(providers, newNvidiaProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		case "llamacpp":
 			providers = append(providers, newLlamaCppProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		}
@@ -350,19 +352,22 @@ func MergeOverrides(models []ModelInfo, overrides map[string]ModelOverride) []Mo
 }
 
 // DefaultBackendConfigs returns the backends KiChat ships with: the two local
-// ones, pointing at their standard ports, plus DeepSeek, Mistral and llama.cpp.
+// ones, pointing at their standard ports, plus DeepSeek, Mistral, NVIDIA and
+// llama.cpp.
 //
-// The two hosted services ship **disabled**, unlike the local pair, and for the
-// same reason in both cases: they are metered and need a key, so enabling one by
+// The hosted services ship **disabled**, unlike the local pair, and for the same
+// reason in every case: they are metered and need a key, so enabling one by
 // default would probe a paid API on every health refresh without being asked,
 // and — because a hosted model is ready the moment a key is accepted — its
 // models would win the loaded-model race and quietly become the default for new
 // chats. A user who wants one turns it on and pastes a key in Settings.
 //
-// Both are offered rather than hidden because the entry is the only place the key
+// They are offered rather than hidden because the entry is the only place the key
 // can be pasted, and an entry that does not exist cannot be found. They differ in
 // what they are for: DeepSeek for its reasoning models, Mistral for a European
-// host whose smallest models are cheap enough to leave switched on.
+// host whose smallest models are cheap enough to leave switched on, and NVIDIA
+// for a catalogue that spans several vendors at once and whose keys are free to
+// create.
 //
 // llama.cpp ships disabled as well, and for a different reason: 127.0.0.1:9931 is
 // its documented default today, but it is a default rather than a port the server
@@ -407,6 +412,13 @@ func DefaultBackendConfigs() []BackendConfig {
 			Name:    "Mistral",
 			Kind:    "mistral",
 			BaseURL: MistralDefaultBaseURL,
+			Enabled: false,
+		},
+		{
+			ID:      "nvidia",
+			Name:    "NVIDIA",
+			Kind:    "nvidia",
+			BaseURL: NvidiaDefaultBaseURL,
 			Enabled: false,
 		},
 	}

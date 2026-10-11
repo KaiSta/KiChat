@@ -1409,6 +1409,7 @@ function BackendsTab({
               {(backend.kind === 'custom' ||
                 backend.kind === 'deepseek' ||
                 backend.kind === 'mistral' ||
+                backend.kind === 'nvidia' ||
                 backend.kind === 'llamacpp') && (
                 <input
                   className="input mono mt-2"
@@ -1416,7 +1417,9 @@ function BackendsTab({
                   value={backend.apiKey ?? ''}
                   onChange={(e) => updateBackend(index, { apiKey: e.target.value })}
                   placeholder={
-                    backend.kind === 'deepseek' || backend.kind === 'mistral'
+                    backend.kind === 'deepseek' ||
+                    backend.kind === 'mistral' ||
+                    backend.kind === 'nvidia'
                       ? t('settings.apiKeyRequired')
                       : t('settings.apiKeyOptional')
                   }

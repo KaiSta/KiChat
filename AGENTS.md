@@ -14,6 +14,7 @@ points at one document per subsystem for the measured detail behind it:
 | `COMPACT.md` | context compaction: strategy, arithmetic, failure modes, where the code is |
 | `MISTRAL.md` | the Mistral backend: the measured listing and stream shapes, the alias collapse, the typed content chunks, the bugs review found |
 | `DEEPSEEK.md` | the DeepSeek backend: the listing that reports a window, `reasoning_content`, the `/v1` alias, refusals |
+| `NVIDIA.md` | the build.nvidia.com backend: the four-field listing, the catalogue that lists models the account may not call (and why nothing is filtered out), the reasoning field that arrives twice, refusals |
 | `LLAMACPP.md` | llama.cpp on both sides: the provider's `/props`-driven metadata (and why a missing claim is not `false`), and the managed runtime that installs and runs `llama-server` — two release sources including PrismML's fork, the update check, GPU offload, the ternary models |
 | `RESEARCH.md` | web search and scraping: the Brave and DuckDuckGo providers, the metered LLM-context route that search-first uses, what classifies a refusal, the scraper's SSRF and robots guards, the token budgets, and the search-first seeded turn |
 
@@ -131,6 +132,12 @@ KICHAT_LIVE=1 KICHAT_MISTRAL_KEY=<key> go test ./internal/llm/ -run TestLiveMist
 #   the unanchored pattern also picks up the one-request temperature probe,
 #   TestLiveMistralTemperatureAboveThePublishedMaximum
 
+# NVIDIA: metered, needs a key; skips without KICHAT_NVIDIA_KEY
+KICHAT_LIVE=1 KICHAT_NVIDIA_KEY=<key> go test ./internal/llm/ -run TestLiveNvidia -v
+#   optional: KICHAT_NVIDIA_BASE, KICHAT_NVIDIA_MODEL. The catalogue lists
+#   models most keys cannot call, so this drives one model rather than walking
+#   the listing; TestLiveNvidia is the one that asserts a window of 0.
+
 # PrismML's fork: one release lookup, a 17 MB download and a real model load
 KICHAT_LIVE=1 go test ./internal/runtime/ -run TestLivePrism -v
 #   optional: KICHAT_PRISM_MODEL=<path.gguf>, otherwise the smallest model in
@@ -154,6 +161,10 @@ short version:
   published, 27 chat-capable, 8 models after the alias collapse), the window and the
   per-model capabilities come from the listing, `include_usage` is honoured, and a
   fragmented `tool_calls` stream reassembles.
+- `TestLiveNvidia` — NVIDIA.md §3 and §7: the catalogue is 80 four-field entries, the
+  chosen model is offered `loaded` with tools and a window of **0** (no route of this API
+  publishes one, so a value there would be invented), `include_usage` is honoured, and a real
+  tool call streams.
 - `TestLiveMistralTemperatureAboveThePublishedMaximum` — MISTRAL.md §5 and §10.4: one
   request at `temperature: 1.8`, above the schema's published `[0, 1.5]` and inside what
   Settings offers, reporting whether the service enforces the bound. It asserts nothing:

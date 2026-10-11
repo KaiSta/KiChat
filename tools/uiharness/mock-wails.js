@@ -260,6 +260,29 @@
       maxContextLimit: 262144,
       capabilities: ['tool_use', 'vision'],
     },
+    // NVIDIA's listing is the one that reports no window and claims tools only, so
+    // the fixture carries it that way rather than dressing it up: `contextLimit: 0`
+    // is the state a user of this backend actually sees, and it is what the
+    // per-model override in Settings exists to fill in. Two entries for the two the
+    // probe below counts.
+    {
+      id: 'openai/gpt-oss-20b',
+      backend: 'nvidia',
+      publisher: 'openai',
+      state: 'loaded',
+      type: 'llm',
+      contextLimit: 0,
+      capabilities: ['tool_use'],
+    },
+    {
+      id: 'z-ai/glm-5.3-flash',
+      backend: 'nvidia',
+      publisher: 'z-ai',
+      state: 'loaded',
+      type: 'llm',
+      contextLimit: 0,
+      capabilities: ['tool_use'],
+    },
     {
       id: PATH_MODEL_ID,
       backend: 'lmstudio',
@@ -328,6 +351,9 @@
     // entry answers once it is switched on, including through the row's own
     // "turn on and check" button.
     { id: 'mistral', ok: true, models: 2 },
+    // NVIDIA ships off too, and its probe is the one that says the listing answers
+    // while most of what it lists does not: see the note on its models above.
+    { id: 'nvidia', ok: true, models: 2 },
     // llama.cpp has no result until a server is started, which the runtime flags do.
     { id: 'llamacpp', ok: false, error: 'llm: backend unavailable: connection refused', models: 0 },
   ]
@@ -610,6 +636,10 @@ Verfügbare Tools: {{tool_list}}`,
       { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', enabled: true },
       { id: 'deepseek', name: 'DeepSeek', kind: 'deepseek', baseUrl: 'https://api.deepseek.com', enabled: true },
       { id: 'mistral', name: 'Mistral', kind: 'mistral', baseUrl: 'https://api.mistral.ai/v1', enabled: false },
+      // NVIDIA ships disabled as well, on the address the vendor documents. Its
+      // key field is the other thing this row proves: the kind is what decides
+      // whether the field is marked required (NVIDIA.md §2).
+      { id: 'nvidia', name: 'NVIDIA', kind: 'nvidia', baseUrl: 'https://integrate.api.nvidia.com/v1', enabled: false },
       // llama.cpp ships disabled on the port its server now defaults to, and it
       // is the one kind KiChat can run itself — without this entry the whole
       // local-model section has nothing to render, which is how a fixture that

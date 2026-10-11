@@ -477,9 +477,32 @@ export function ModelSwitcher() {
         <span className="faint">▾</span>
       </button>
 
+      {/* The panel hangs from the button's LEFT edge, and that direction is not a
+          matter of taste.
+
+          This is the first control in the composer row, so a right-anchored panel
+          grows leftwards from the button's right edge and crosses the window's left
+          edge as soon as the button is narrow enough — and because the button is
+          left-anchored in the row, widening the window never moved it. Measured
+          with an NVIDIA model selected, whose button loses the window number (this
+          backend reports no context window, so `contextLimit > 0` is false) and
+          whose label is short: the button fell from 263px to 124px, the panel's
+          left edge went to −68px, and it stayed at −68px from a 1440px viewport to
+          a 2200px one.
+
+          Left-anchored, the panel starts at the button's left edge and runs 30rem
+          from there. That edge is fixed by the layout — a 17rem sidebar (`App.tsx`)
+          plus the row's padding — so the panel spans roughly 288px to 768px and
+          cannot follow the button's width into the window edge. It also clears the
+          app's minimum window width of 900px (`main.go`), which is what makes the
+          one-directional fix safe rather than a trade.
+
+          The context inspector below stays anchored the other way on purpose: its
+          trigger sits on the right of the row, where a left-anchored panel is what
+          would leave the window. */}
       {open && (
         <div
-          className="card absolute bottom-full right-0 z-30 mb-2 flex max-h-[28rem] w-[30rem] flex-col p-2 shadow-lg"
+          className="card absolute bottom-full left-0 z-30 mb-2 flex max-h-[28rem] w-[30rem] flex-col p-2 shadow-lg"
           style={{ boxShadow: 'var(--shadow)' }}
         >
           <div className="mb-2 flex gap-2">

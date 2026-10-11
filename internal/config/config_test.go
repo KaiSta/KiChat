@@ -397,6 +397,19 @@ func TestNormaliseAddsMissingBackendsWithoutClobberingEdits(t *testing.T) {
 		t.Error("the repaired Mistral entry is enabled")
 	}
 
+	// NVIDIA arrives the same way — the third hosted backend shipped after this
+	// test was written — and is off for the same reason.
+	nvidia, ok := byID["nvidia"]
+	if !ok {
+		t.Fatalf("NVIDIA did not reach existing settings: %+v", s.Backends)
+	}
+	if nvidia.Kind != "nvidia" || nvidia.BaseURL != llm.NvidiaDefaultBaseURL {
+		t.Errorf("added entry = %+v, want the shipped NVIDIA config", nvidia)
+	}
+	if nvidia.Enabled {
+		t.Error("the repaired NVIDIA entry is enabled")
+	}
+
 	// And an entry the user has already configured is left exactly as it is.
 	s2 := Default()
 	s2.Backends = []llm.BackendConfig{
@@ -438,8 +451,8 @@ func TestNormaliseAddsMissingBackendsWithoutClobberingEdits(t *testing.T) {
 
 // TestNormaliseRestoresAShippedBackendsAddress covers a settings blob that names
 // a shipped backend but carries no address for it — which is what an entry added
-// by hand, or a partly written blob, looks like. Both shipped kinds with a
-// documented address are repaired, and a kind without one is left alone so no
+// by hand, or a partly written blob, looks like. Every shipped kind with a
+// documented address is repaired, and a kind without one is left alone so no
 // address is invented for it.
 func TestNormaliseRestoresAShippedBackendsAddress(t *testing.T) {
 	s := Default()
@@ -447,6 +460,7 @@ func TestNormaliseRestoresAShippedBackendsAddress(t *testing.T) {
 		{ID: "llamacpp", Name: "llama.cpp", Kind: "llamacpp", Enabled: true},
 		{ID: "deepseek", Name: "DeepSeek", Kind: "deepseek", Enabled: true},
 		{ID: "mistral", Name: "Mistral", Kind: "mistral", Enabled: true},
+		{ID: "nvidia", Name: "NVIDIA", Kind: "nvidia", Enabled: true},
 		{ID: "my-server", Name: "Eigenbau", Kind: "custom", Enabled: true},
 	}
 	s.normalise()
@@ -466,6 +480,11 @@ func TestNormaliseRestoresAShippedBackendsAddress(t *testing.T) {
 	// no route of that API answers on.
 	if got["mistral"] != llm.MistralDefaultBaseURL {
 		t.Errorf("mistral address = %q, want %q", got["mistral"], llm.MistralDefaultBaseURL)
+	}
+	// Same reason as Mistral's: /v1 is part of the address, and repairing an
+	// empty field to the bare host would name one no route of that API answers on.
+	if got["nvidia"] != llm.NvidiaDefaultBaseURL {
+		t.Errorf("nvidia address = %q, want %q", got["nvidia"], llm.NvidiaDefaultBaseURL)
 	}
 	if got["my-server"] != "" {
 		t.Errorf("a custom endpoint was given an invented address: %q", got["my-server"])

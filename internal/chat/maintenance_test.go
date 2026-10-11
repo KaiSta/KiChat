@@ -8,9 +8,87 @@ import (
 	"time"
 
 	"kichat/internal/config"
+	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/store"
 )
+
+// TestAutoCompactStaysQuietWhenTheWindowIsUnknown pins the difference between a
+// model the backend cannot describe and an incident.
+//
+// The automatic run happens before every send, so anything it forwards is a
+// warning the user meets once per message. That was the default state of the
+// NVIDIA backend: no route of that API reports a context window, so every model
+// arrives with none, the threshold — a ratio of that window — cannot be
+// evaluated, and the refusal put the same toast in front of the user on every
+// turn of the chat. The backend was working; the panel said otherwise, repeatedly.
+//
+// The refusal itself is real and is not what changed. What this pins is that the
+// *automatic* path does not carry it, because an automatic run has nobody to
+// report back to and the condition is already visible where it belongs: the
+// context meter reads "unknown" and the inspector names the source of the number.
+func TestAutoCompactStaysQuietWhenTheWindowIsUnknown(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	chat.AutoCompact = true
+	if err := st.UpdateChat(chat); err != nil {
+		t.Fatalf("enable auto-compaction: %v", err)
+	}
+
+	provider := &fakeProvider{
+		// No window at all, which is what every model of a backend whose listing
+		// reports none looks like.
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{{
+			{Type: llm.EventDelta, Text: "Antwort"},
+			{Type: llm.EventDone},
+		}},
+	}
+	engine, captured := newTestEngine(t, st, provider)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Frage"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("turn did not finish")
+	}
+
+	for _, ev := range captured.snapshot() {
+		if ev.name == events.Warning {
+			t.Errorf("a warning was emitted on a turn whose model is merely undescribed: %v", ev.payload["warning"])
+		}
+	}
+	// And nothing was spent trying: the only generation is the answer itself.
+	if n := provider.requestCount(); n != 1 {
+		t.Errorf("backend calls = %d, want 1 — only the turn, with no summariser run", n)
+	}
+}
+
+// TestManualCompactStillRefusesAnUnknownWindow is the other half, and the reason
+// the guard above is in the automatic path rather than in compactWith: the
+// refusal is a real answer to a real request. A user who presses Compact on a
+// model nobody describes asked a question, so they get the reason — and no
+// summariser call is spent finding it out.
+func TestManualCompactStillRefusesAnUnknownWindow(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", State: llm.StateLoaded},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	_, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
+	if err == nil {
+		t.Fatal("a manual compaction ran against a model whose window nobody reports")
+	}
+	if !strings.Contains(err.Error(), "unbekannt") {
+		t.Errorf("error = %v, want it to name the unknown window", err)
+	}
+	if n := provider.requestCount(); n != 0 {
+		t.Errorf("the summariser was called %d times, want 0", n)
+	}
+}
 
 // TestManualCompactWithoutHistoryIsNotAFailure is the regression test for the
 // error the UI reported when pressing Compact: a manual run over a conversation

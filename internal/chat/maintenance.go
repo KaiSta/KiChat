@@ -102,6 +102,28 @@ func (e *Engine) maybeAutoCompact(ctx context.Context, chat *store.Chat, provide
 		return nil
 	}
 	modelInfo := e.resolveModel(ctx, chat.Backend, modelID, settings)
+	// A model whose window nobody reports cannot be compacted *against*: the
+	// threshold is a ratio of that window, so it cannot be evaluated at all —
+	// compactWith refuses it. That refusal is not forwarded here, and the reason is
+	// this function's own contract: it runs before *every* send and an automatic run
+	// has nobody to report back to, so forwarding it put the same warning in front
+	// of the user once per message for as long as the model stayed undescribed.
+	// Measured: that is the default state of the NVIDIA backend, whose listing
+	// reports no context window for any of its models, so a backend that was
+	// working looked broken on every turn.
+	//
+	// The condition is a standing fact about the model, not an incident, and it is
+	// already visible where it belongs: the context meter reads "unknown" and the
+	// inspector names the source of the number. The manual path keeps the refusal
+	// with its reason, because there the user asked and there is somebody to
+	// answer — pinned by TestManualCompactStillRefusesAnUnknownWindow.
+	//
+	// limitFor is used rather than modelInfo.ContextLimit directly so the guard
+	// cannot drift from the number compactWith will see: a per-chat NumCtx makes an
+	// otherwise unknown window usable, and compacting against it must still work.
+	if limit, _ := limitFor(*chat, modelInfo); limit <= 0 {
+		return nil
+	}
 	// The created compaction is irrelevant here: an automatic run has nobody to
 	// report back to, and "nothing to fold" is already the silent outcome.
 	_, err := e.compactWith(ctx, chat, provider, chat.Backend, modelID, modelInfo, settings, CompactOptions{})

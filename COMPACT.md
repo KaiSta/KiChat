@@ -118,6 +118,17 @@ an empty `CompactOptions`, so `Force` is false — the planner's threshold decid
 `Target` is 0. The created compaction is discarded: an automatic run has nobody to report back to,
 and "nothing to fold" is already its silent outcome.
 
+**Silence extends to the window nobody reports.** A model whose context window is unknown cannot be
+compacted against at all — the threshold is a ratio of that window — but that is a standing fact
+about the model rather than an incident, and this function runs before *every* send. So it returns
+before calling `compactWith` when the limit resolves to zero, rather than forwarding the refusal:
+forwarding it put the same warning in front of the user once per message for as long as the model
+stayed undescribed. Measured on the NVIDIA backend, whose listing reports no window for any model,
+and therefore on every turn of every one of its chats. The condition stays visible where it belongs
+— the context meter reads `unbekannt` and the inspector names the source (`limitSource: "unknown"`)
+— and the manual path keeps the refusal with its reason, since there the user asked. Pinned by
+`TestAutoCompactStaysQuietWhenTheWindowIsUnknown` and `TestManualCompactStillRefusesAnUnknownWindow`.
+
 ### Manual
 
 `App.CompactNow` (`api.go:335`) is the bound RPC behind the UI buttons. It passes
@@ -140,7 +151,7 @@ It emits `events.ChatsChanged` only when `Created` is true.
 | a turn is running for this chat | refused: *"für diesen Chat läuft noch eine Generierung — kompaktieren ist möglich, sobald sie fertig ist"*. The turn owns the newest messages and writes into them as tokens arrive, so compacting now would freeze half an answer into the memory. The automatic run is exempt because it is triggered by that turn |
 | no model selected | `kein Modell ausgewählt` |
 | the chat's backend is not in the registry | `Backend %q ist nicht konfiguriert` |
-| the window is unknown | `Kontextfenster des Modells ist unbekannt` |
+| the window is unknown | `Kontextfenster des Modells ist unbekannt` — **manual only**; the automatic run returns silently before reaching this, because it fires on every send and has nobody to report to (§4) |
 | nothing foldable | `Created: false`, **no summariser call at all** |
 | a configured summary model is on a missing backend | error naming model and backend (§6) |
 
@@ -676,7 +687,8 @@ populated default, so no migration is needed for these.
 | a turn is running | button disabled + `compact.busy` (`ModelSwitcher.tsx:216`, `:223`); the engine refuses too | `maintenance.go:55` |
 | nothing to fold (manual) | `Created: false`, toast `compact.noNeed` (`ModelSwitcher.tsx:141`), **no model call** | `maintenance.go:134` |
 | nothing to fold (auto) | silent, the turn proceeds | `maybeAutoCompact` |
-| no model / backend unconfigured / unknown window | explicit error before any tokens are spent | `maintenance.go:54–72`, `:110` |
+| no model / backend unconfigured / unknown window, **manual** | explicit error before any tokens are spent | `maintenance.go:54–72`, `:110` |
+| unknown window, **automatic** | silent, the turn proceeds; the meter already says the limit is unknown | `maybeAutoCompact` |
 | summary model on a missing backend | error naming model *and* backend | `maintenance.go:310` |
 | summary model's window unknown | `events.Warning`, chat window used, memory still written | `maintenance.go:186` |
 | reasoning model eats the budget | up to 3 attempts with a growing budget, then the "spent its budget on reasoning" error naming `MaxSummaryTokens` | `compact.go:520` |
