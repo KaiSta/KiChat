@@ -492,7 +492,7 @@ func (s *Settings) normalise() {
 	}
 	// Ensure the shipped backends always exist, even if the user removed them
 	// from an older settings blob. This is also how a backend shipped in a later
-	// release — DeepSeek — reaches an installation that predates it.
+	// release — DeepSeek, then Mistral — reaches an installation that predates it.
 	seen := map[string]bool{}
 	for _, b := range s.Backends {
 		seen[b.ID] = true
@@ -513,6 +513,10 @@ func (s *Settings) normalise() {
 				// Restored here as well as in the provider, so the settings field
 				// shows the address the app would actually use.
 				s.Backends[i].BaseURL = llm.DeepSeekDefaultBaseURL
+			case "mistral":
+				// Same reason. The /v1 prefix is part of the address, and the
+				// provider completes it for a base URL saved without it.
+				s.Backends[i].BaseURL = llm.MistralDefaultBaseURL
 			case "llamacpp":
 				// Same reason as DeepSeek: 9931 is llama-server's documented
 				// default, and an empty field would otherwise hide it.

@@ -5,7 +5,9 @@ top of Go packages in `internal/`, and a React 19 / TypeScript UI in `frontend/`
 It is a **Wails v2** application (Go binary + webkit2gtk webview), talking to LM Studio
 (`:1234`) and Ollama (`:11434`), with Brave/DuckDuckGo web search and SQLite storage.
 `PLAN.md` describes the architecture and the reasoning behind it; `COMPACT.md` is the deep
-dive on context compaction (strategy, arithmetic, failure modes, where the code is).
+dive on context compaction (strategy, arithmetic, failure modes, where the code is);
+`MISTRAL.md` is the same for the Mistral backend (the measured listing and stream shapes,
+the alias collapse, the typed content chunks, and the bugs review found).
 
 ## Environment (verified, not assumed)
 
@@ -109,6 +111,12 @@ KICHAT_LIVE=1 go test ./internal/chat/ -run TestLiveEngineTurn -v   # needs KICH
 KICHAT_LIVE=1 KICHAT_DEEPSEEK_KEY=<key> go test ./internal/llm/ -run TestLiveDeepSeek -v
 #   optional: KICHAT_DEEPSEEK_BASE, KICHAT_DEEPSEEK_MODEL
 
+# Mistral: metered, needs a key; skips without KICHAT_MISTRAL_KEY
+KICHAT_LIVE=1 KICHAT_MISTRAL_KEY=<key> go test ./internal/llm/ -run TestLiveMistral -v
+#   optional: KICHAT_MISTRAL_BASE, KICHAT_MISTRAL_MODEL,
+#   KICHAT_MISTRAL_REASONING_MODEL (the thinking-chunk shape needs one the
+#   account may call; a tier refusal is reported, not failed)
+
 # PrismML's fork: one release lookup, a 17 MB download and a real model load
 KICHAT_LIVE=1 go test ./internal/runtime/ -run TestLivePrism -v
 #   optional: KICHAT_PRISM_MODEL=<path.gguf>, otherwise the smallest model in
@@ -132,6 +140,32 @@ What each live test buys:
   as expected. DeepSeek reasons by default and spends budget on `reasoning_content`
   first, so a small `max_tokens` returns `finish_reason: "length"` with empty
   `content` — the test asks for 2048/4096 for that reason.
+- `TestLiveMistral` — the four claims this provider makes that only the real service
+  can settle: the listing is **not** a chat catalogue (46 published, 27 of them chat —
+  embeddings, moderation, OCR, speech and transcription share the array, and
+  `mistral-ocr-*` even reports `function_calling: true`, so `completion_chat` and not
+  the tool flag is what separates a model that can answer from one that cannot), the
+  window and the per-model capabilities come from the listing, `include_usage` is
+  honoured so the context meter gets a measured `prompt_tokens`, and a fragmented
+  `tool_calls` stream reassembles. The filter is asserted from both sides: every
+  listed model carries a window, and the embedding ids the API really publishes are
+  absent from what the provider offers. Measured on the free tier: `ministral-3b`
+  answers in 2.2 s with `prompt=8 completion=2`, while `mistral-small-latest` is
+  refused with **HTTP 429 `type: "rate_limited", code: "1300"`** and a Labs model with
+  **HTTP 403** naming that gate — a per-model gate, not a general throttle, which is
+  why a refusal is reported rather than failed. The one claim that could not be checked
+  on this account is the thinking-chunk shape below.
+- **Those 27 chat ids are 8 models, and the ids are what the listing hands you.**
+  `mistral-medium-latest` alone is published under nine ids (`mistral-medium`,
+  `mistral-medium-3-5`, `mistral-medium-3.5`, `mistral-medium-3`, `mistral-medium-2604`,
+  `mistral-vibe-cli-latest`, `mistral-vibe-cli-with-tools`, `magistral-medium-latest`),
+  and `magistral-small-latest` is the same model as `mistral-small-latest`. Each group
+  agreed on its context window and on every capability flag, which is what makes the
+  shared `name` field usable as the model's identity. So the listing is read as a whole
+  and collapsed to one row per model — a per-entry mapper would put 27 rows in the
+  picker for 8 models. The surviving id is the rolling `-latest` alias, shortest when
+  a family has several, because a picker row should follow the vendor's release rather
+  than pin a dated snapshot.
 - `TestLivePrismForkRunsAModel` — PrismML's fork as a runtime rather than a table of
   names: its release list, its tag scheme (`TagOfDir` round-trip, and that the tag is not
   offered as an update over itself), its archive — whose `./` root entry aborted the
@@ -141,6 +175,21 @@ What each live test buys:
   on this machine, `/props` `n_ctx=4096`. The same model that answers in 24 tokens of
   `reasoning_content` with an empty `content` is why the turn accepts either field — the
   same trap the DeepSeek test documents.
+
+**A hosted reasoning model can stream its thinking inside `content`, which is a shape
+that silently kills a naive reader.** Measured from the vendor's documentation and from
+a recorded live response, not from this account (see the live test above): Mistral's
+reasoning models do not put thinking in a field of the delta the way DeepSeek's
+`reasoning_content` does. `choices[].delta.content` becomes a **list of typed chunks**
+and the thinking rides in it —
+`[{"type":"thinking","thinking":[{"type":"text","text":"…"}]}]` beside
+`[{"type":"text","text":"…"}]`. A struct field of type `string` makes `json.Unmarshal`
+fail on the whole chunk, and the stream loop tolerates a malformed frame by skipping
+it, so every frame of such an answer is dropped and the reply arrives **empty with no
+error at all** — which is why `deltaContent` in `internal/llm/openai.go` accepts a
+string, that list, or null, and why the live test names this as the claim it could not
+reach. Plain-string content is what every other backend sends, and the ordering rule
+for a frame carrying both is pinned: the thinking is emitted before the text.
 
 **Never put an API key in a tracked file.** Pass it in the environment; the app itself
 stores it through `internal/secret` (`~/.config/kichat/`). Measured facts worth keeping:

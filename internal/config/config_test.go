@@ -383,6 +383,20 @@ func TestNormaliseAddsMissingBackendsWithoutClobberingEdits(t *testing.T) {
 		t.Error("the repaired llama.cpp entry is enabled")
 	}
 
+	// Mistral arrives the same way — the second hosted backend shipped after this
+	// test was written, which is exactly the case it exists to cover — and is
+	// also off, because it is metered and needs a key.
+	mistral, ok := byID["mistral"]
+	if !ok {
+		t.Fatalf("Mistral did not reach existing settings: %+v", s.Backends)
+	}
+	if mistral.Kind != "mistral" || mistral.BaseURL != llm.MistralDefaultBaseURL {
+		t.Errorf("added entry = %+v, want the shipped Mistral config", mistral)
+	}
+	if mistral.Enabled {
+		t.Error("the repaired Mistral entry is enabled")
+	}
+
 	// And an entry the user has already configured is left exactly as it is.
 	s2 := Default()
 	s2.Backends = []llm.BackendConfig{
@@ -405,13 +419,20 @@ func TestNormaliseAddsMissingBackendsWithoutClobberingEdits(t *testing.T) {
 		t.Errorf("the user's backend was overwritten: %+v", *kept)
 	}
 	// Exactly once, in both cases: a duplicated entry would show twice in Settings
-	// and be probed twice by the registry.
+	// and be probed twice by the registry. Every shipped id is checked, so a new
+	// backend that is appended unconditionally — rather than only when it is
+	// missing — fails here instead of showing up twice in the settings panel.
 	seen := map[string]int{}
 	for _, b := range s2.Backends {
 		seen[b.ID]++
 	}
 	if seen["deepseek"] != 1 {
 		t.Errorf("deepseek appears %d times, want once", seen["deepseek"])
+	}
+	for _, b := range s2.Backends {
+		if seen[b.ID] != 1 {
+			t.Errorf("%s appears %d times, want once", b.ID, seen[b.ID])
+		}
 	}
 }
 
@@ -425,6 +446,7 @@ func TestNormaliseRestoresAShippedBackendsAddress(t *testing.T) {
 	s.Backends = []llm.BackendConfig{
 		{ID: "llamacpp", Name: "llama.cpp", Kind: "llamacpp", Enabled: true},
 		{ID: "deepseek", Name: "DeepSeek", Kind: "deepseek", Enabled: true},
+		{ID: "mistral", Name: "Mistral", Kind: "mistral", Enabled: true},
 		{ID: "my-server", Name: "Eigenbau", Kind: "custom", Enabled: true},
 	}
 	s.normalise()
@@ -438,6 +460,12 @@ func TestNormaliseRestoresAShippedBackendsAddress(t *testing.T) {
 	}
 	if got["deepseek"] != llm.DeepSeekDefaultBaseURL {
 		t.Errorf("deepseek address = %q, want %q", got["deepseek"], llm.DeepSeekDefaultBaseURL)
+	}
+	// The field shows the address the app would really use, and the /v1 prefix is
+	// part of it: an empty field repaired to the bare host would name an address
+	// no route of that API answers on.
+	if got["mistral"] != llm.MistralDefaultBaseURL {
+		t.Errorf("mistral address = %q, want %q", got["mistral"], llm.MistralDefaultBaseURL)
 	}
 	if got["my-server"] != "" {
 		t.Errorf("a custom endpoint was given an invented address: %q", got["my-server"])

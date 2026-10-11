@@ -1370,6 +1370,7 @@ function BackendsTab({
                   a keyed server would otherwise be unreachable from the UI. */}
               {(backend.kind === 'custom' ||
                 backend.kind === 'deepseek' ||
+                backend.kind === 'mistral' ||
                 backend.kind === 'llamacpp') && (
                 <input
                   className="input mono mt-2"
@@ -1377,7 +1378,9 @@ function BackendsTab({
                   value={backend.apiKey ?? ''}
                   onChange={(e) => updateBackend(index, { apiKey: e.target.value })}
                   placeholder={
-                    backend.kind === 'deepseek' ? t('settings.apiKeyRequired') : t('settings.apiKeyOptional')
+                    backend.kind === 'deepseek' || backend.kind === 'mistral'
+                      ? t('settings.apiKeyRequired')
+                      : t('settings.apiKeyOptional')
                   }
                 />
               )}

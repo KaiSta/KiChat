@@ -21,7 +21,7 @@ numbers about what is being sent to the model.
 
 | Area | Delivered |
 | --- | --- |
-| Backends | LM Studio (`:1234`) and Ollama (`:11434`), plus DeepSeek and llama.cpp (`:9931`) shipped prepared-but-off, plus a generic OpenAI-compatible endpoint |
+| Backends | LM Studio (`:1234`) and Ollama (`:11434`), plus DeepSeek, Mistral and llama.cpp (`:9931`) shipped prepared-but-off, plus a generic OpenAI-compatible endpoint |
 | Local models | The llama.cpp entry can also be provided by KiChat itself: it fetches `llama-server` from a build source — upstream llama.cpp, or PrismML's fork when a ternary model is wanted — from the family that platform publishes (CPU, Vulkan, ROCm, CUDA, SYCL, OpenVINO or the Adreno build), starts a GGUF of the user's choosing on a free port, and stops it with the app, started again on every launch while the switch is on. The GGUF does not have to be downloaded again: the picker lists what is already in the folder LM Studio uses |
 | Context | Automatic and manual compaction, live context-window fullness meter, per-segment inspector |
 | Research | Brave Search (API key) with DuckDuckGo fallback, page scraping with SSRF guard, optional search-before-answer |
@@ -51,6 +51,10 @@ internal/
     openai.go        LM Studio / OpenAI-compatible SSE streaming
     ollama.go        Ollama NDJSON streaming
     deepseek.go      DeepSeek over the OpenAI wire format, with its own error envelope
+    mistral.go       Mistral: its own listing (chat-capable models only, the aliases
+                     collapsed to one row per model, per-model capabilities) and the
+                     typed content chunks its reasoning models stream, which
+                     openai.go's deltaContent decodes
     llamacpp.go      llama.cpp /props: the loaded window, template caps, timings
     registry.go      BackendConfig, provider construction, model catalogue cache
   store/           SQLite persistence (modernc.org/sqlite, pure Go)

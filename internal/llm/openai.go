@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -102,6 +103,7 @@ const (
 	flavourLMStudio modelListFlavour = iota
 	flavourDeepSeek
 	flavourLlamaCpp
+	flavourMistral
 )
 
 // keyCheck reports a backend that needs a credential and has none.
@@ -220,6 +222,12 @@ func (p *openAICompatProvider) ListModels(ctx context.Context) ([]ModelInfo, err
 // unexpected model must not hide the others, the same way a dead backend does
 // not hide a live one.
 func (p *openAICompatProvider) mapModelEntries(raw []json.RawMessage) []ModelInfo {
+	// Mistral's listing is read as a whole rather than entry by entry, because
+	// which ids belong together is a fact about the list: one model is published
+	// under several aliases.
+	if p.modelsFlavour == flavourMistral {
+		return p.mapMistralEntries(raw)
+	}
 	out := make([]ModelInfo, 0, len(raw))
 	for _, entry := range raw {
 		if p.modelsFlavour == flavourDeepSeek {
@@ -305,9 +313,88 @@ type openAIToolCallDelta struct {
 	} `json:"function"`
 }
 
+// deltaContent is a `content` value. Every backend this app talked to before
+// Mistral sent a plain string, and that is still what the field means here.
+// Mistral's reasoning models send a list of typed chunks instead, with the
+// model's thinking inside it:
+//
+//	"content": [{"type":"thinking","thinking":[{"type":"text","text":"…"}]}]
+//	"content": [{"type":"text","text":"…"}]
+//
+// Decoding both is not a nicety. A plain string field makes json.Unmarshal fail
+// on the whole chunk, and the stream loop tolerates a malformed frame by
+// skipping it — so every frame of such an answer would be dropped and the reply
+// would arrive empty, with no error to explain it.
+type deltaContent struct {
+	Text      string
+	Reasoning string
+}
+
+// UnmarshalJSON accepts a string, a list of typed chunks, or null. Anything
+// else — an object, a number — is left empty rather than failing the chunk, so
+// a shape this app does not know cannot take a generation down with it. Unknown
+// part types inside the list are ignored the same way, with the known ones
+// around them kept.
+func (c *deltaContent) UnmarshalJSON(raw []byte) error {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	if raw[0] == '"' {
+		return json.Unmarshal(raw, &c.Text)
+	}
+	if raw[0] != '[' {
+		return nil
+	}
+	// The parts are decoded one by one rather than as one typed slice, and a part
+	// that cannot be read is skipped on its own. Decoding the whole list at once
+	// would mean one chunk type this app has never seen — a citation whose
+	// `content` is a list, say — failing the array it sits in and taking the text
+	// next to it down as well, which is the same fault at a smaller scale as the
+	// string field this type replaced.
+	var parts []json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return nil
+	}
+	for _, part := range parts {
+		var p struct {
+			Type string `json:"type"`
+			// A text chunk carries its words in `text`…
+			Text string `json:"text"`
+			// …and a thinking chunk carries them in `thinking`, which is itself
+			// a list of text chunks. `content` is read as well because the two
+			// field names appear for one and the same thing across the vendor's
+			// chunk types, and a part that uses the other one would otherwise be
+			// silently empty.
+			Thinking []struct {
+				Text string `json:"text"`
+			} `json:"thinking"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(part, &p); err != nil {
+			continue
+		}
+		switch p.Type {
+		case "thinking":
+			for _, t := range p.Thinking {
+				c.Reasoning += t.Text
+			}
+			if len(p.Thinking) == 0 {
+				c.Reasoning += p.Content
+			}
+		case "text":
+			c.Text += p.Text
+			if p.Text == "" {
+				c.Text += p.Content
+			}
+		}
+	}
+	return nil
+}
+
 type openAIDelta struct {
 	Role             string                `json:"role"`
-	Content          string                `json:"content"`
+	Content          deltaContent          `json:"content"`
 	Reasoning        string                `json:"reasoning"`
 	ReasoningContent string                `json:"reasoning_content"`
 	Thinking         string                `json:"thinking"`
@@ -320,8 +407,12 @@ func (d openAIDelta) reasoningText() string {
 		return d.Reasoning
 	case d.ReasoningContent != "":
 		return d.ReasoningContent
-	default:
+	case d.Thinking != "":
 		return d.Thinking
+	default:
+		// Mistral's thinking arrives as a chunk type inside `content` rather
+		// than in a field of the delta.
+		return d.Content.Reasoning
 	}
 }
 
@@ -944,7 +1035,8 @@ func (p *openAICompatProvider) consume(ctx context.Context, rc io.ReadCloser, ev
 
 		for _, choice := range chunk.Choices {
 			delta := choice.Delta
-			if choice.Message.Content != "" || choice.Message.Reasoning != "" ||
+			if choice.Message.Content.Text != "" || choice.Message.Content.Reasoning != "" ||
+				choice.Message.Reasoning != "" ||
 				choice.Message.ReasoningContent != "" || choice.Message.Thinking != "" ||
 				len(choice.Message.ToolCalls) > 0 {
 				// Non-streaming server: treat the full message as one delta.
@@ -960,13 +1052,13 @@ func (p *openAICompatProvider) consume(ctx context.Context, rc io.ReadCloser, ev
 					return
 				}
 			}
-			if delta.Content != "" {
+			if delta.Content.Text != "" {
 				if !sawFirstToken {
 					ttft = time.Since(start)
 					sawFirstToken = true
 				}
-				textLen += len(delta.Content)
-				if !send(StreamEvent{Type: EventDelta, Text: delta.Content}) {
+				textLen += len(delta.Content.Text)
+				if !send(StreamEvent{Type: EventDelta, Text: delta.Content.Text}) {
 					return
 				}
 			}
@@ -1230,9 +1322,9 @@ func (p *openAICompatProvider) consumeNative(ctx context.Context, rc io.ReadClos
 }
 
 func mergeDeltas(a, b openAIDelta) openAIDelta {
-	if b.Content != "" {
-		a.Content += b.Content
-	}
+	// Adding an empty string is a no-op, so neither needs a guard.
+	a.Content.Text += b.Content.Text
+	a.Content.Reasoning += b.Content.Reasoning
 	switch {
 	case b.Reasoning != "":
 		a.Reasoning += b.Reasoning

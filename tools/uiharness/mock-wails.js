@@ -281,6 +281,17 @@
       error: 'llm: backend unavailable: no API key configured',
       models: 0,
     },
+    // Mistral ships the same way and for the same reason, so its row shows the
+    // same missing-credential failure rather than a dead port.
+    {
+      id: 'mistral',
+      name: 'Mistral',
+      kind: 'mistral',
+      baseUrl: 'https://api.mistral.ai/v1',
+      ok: false,
+      error: 'llm: backend unavailable: no API key configured',
+      models: 0,
+    },
     // llama.cpp is stopped until something starts it: a managed server, or a
     // user running llama-server by hand. Refused is what the row shows in
     // between, and it is the state the local-model section is there to end.
@@ -548,6 +559,7 @@ Verfügbare Tools: {{tool_list}}`,
       { id: 'lmstudio', name: 'LM Studio', kind: 'lmstudio', baseUrl: 'http://127.0.0.1:1234', enabled: true },
       { id: 'ollama', name: 'Ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', enabled: false },
       { id: 'deepseek', name: 'DeepSeek', kind: 'deepseek', baseUrl: 'https://api.deepseek.com', enabled: false },
+      { id: 'mistral', name: 'Mistral', kind: 'mistral', baseUrl: 'https://api.mistral.ai/v1', enabled: false },
       // llama.cpp ships disabled on the port its server now defaults to, and it
       // is the one kind KiChat can run itself — without this entry the whole
       // local-model section has nothing to render, which is how a fixture that
