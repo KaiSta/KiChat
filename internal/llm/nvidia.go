@@ -45,6 +45,11 @@ import (
 // the list of models that will answer; the alternative is a picker that is
 // silently wrong for someone else.
 //
+// That is a statement about this provider only. The app offers a way out of the
+// cost that does not guess: App.StartModelCheck asks every model once (probe.go)
+// and keeps the ones this account cannot call out of the picker, so that filter
+// is evidence from this key rather than a claim about anyone else's.
+//
 // Measured on the live API: chat completions stream OpenAI-style SSE,
 // `stream_options.include_usage` is honoured (a final frame with `choices: []`
 // carrying prompt_tokens/completion_tokens), reasoning arrives in **both**

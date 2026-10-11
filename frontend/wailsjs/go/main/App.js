@@ -14,6 +14,10 @@ export function CheckLlamaRuntimeUpdate() {
   return window['go']['main']['App']['CheckLlamaRuntimeUpdate']();
 }
 
+export function ClearHiddenModels(arg1) {
+  return window['go']['main']['App']['ClearHiddenModels'](arg1);
+}
+
 export function CompactNow(arg1) {
   return window['go']['main']['App']['CompactNow'](arg1);
 }
@@ -52,6 +56,10 @@ export function GetDocument(arg1) {
 
 export function GetHealth() {
   return window['go']['main']['App']['GetHealth']();
+}
+
+export function GetModelCheckStatus() {
+  return window['go']['main']['App']['GetModelCheckStatus']();
 }
 
 export function GetPromptVariables() {
@@ -196,6 +204,10 @@ export function Settings() {
 
 export function StartManagedModel(arg1) {
   return window['go']['main']['App']['StartManagedModel'](arg1);
+}
+
+export function StartModelCheck(arg1) {
+  return window['go']['main']['App']['StartModelCheck'](arg1);
 }
 
 export function StopGeneration(arg1) {

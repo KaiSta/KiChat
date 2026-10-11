@@ -54,7 +54,7 @@ chats.
 
 There is also no migration to run. The settings blob is decoded over a fully populated
 default and `normalise()` appends any shipped backend that is missing
-([internal/config/config.go:516](internal/config/config.go#L516)), so a Mistral row
+([internal/config/config.go:491](internal/config/config.go#L491)), so a Mistral row
 appears in an installation that predates it, switched off, with its address filled in.
 That mechanism already existed for DeepSeek; this is its second user, and
 `TestNormaliseAddsMissingBackendsWithoutClobberingEdits` now asserts all five shipped
@@ -368,7 +368,7 @@ if the server is reached at all.
 | [internal/llm/openai.go:1417](internal/llm/openai.go#L1417) | `mergeDeltas` | merges both halves of `deltaContent` (the empty-string guards became no-ops) |
 | [internal/llm/registry.go:113](internal/llm/registry.go#L113) | `Reconfigure` | `case "mistral"` builds the provider |
 | [internal/llm/registry.go:406](internal/llm/registry.go#L406) | `DefaultBackendConfigs` | the shipped row: `mistral`, disabled |
-| [internal/config/config.go:516](internal/config/config.go#L516) | `normalise` | repairs an empty address for an existing install |
+| [internal/config/config.go:491](internal/config/config.go#L491) | `normalise` | repairs an empty address for an existing install |
 | [frontend/src/components/Settings.tsx:1373](frontend/src/components/Settings.tsx#L1373) | backend row | shows the key field and requires it |
 | [frontend/src/lib/i18n.ts:182](frontend/src/lib/i18n.ts#L182) | `settings.backendsHint` | the hint, all three languages (182/559/932) |
 | [tools/uiharness/mock-wails.js:287](tools/uiharness/mock-wails.js#L287) | harness fixture | the row the UI is verified against |

@@ -323,6 +323,7 @@ export namespace config {
 	    toolTokenBudget: number;
 	    nativeTools: boolean;
 	    runtime: RuntimeSettings;
+	    hiddenModels?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -345,6 +346,7 @@ export namespace config {
 	        this.toolTokenBudget = source["toolTokenBudget"];
 	        this.nativeTools = source["nativeTools"];
 	        this.runtime = this.convertValues(source["runtime"], RuntimeSettings);
+	        this.hiddenModels = source["hiddenModels"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -658,6 +660,32 @@ export namespace main {
 	        this.offloadLayers = source["offloadLayers"];
 	        this.offloadTotal = source["offloadTotal"];
 	        this.offloadDevice = source["offloadDevice"];
+	    }
+	}
+	export class ModelCheckStatus {
+	    backend?: string;
+	    busy: boolean;
+	    done: number;
+	    total: number;
+	    hidden: number;
+	    hiddenTotal: number;
+	    error?: string;
+	    reason?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelCheckStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.backend = source["backend"];
+	        this.busy = source["busy"];
+	        this.done = source["done"];
+	        this.total = source["total"];
+	        this.hidden = source["hidden"];
+	        this.hiddenTotal = source["hiddenTotal"];
+	        this.error = source["error"];
+	        this.reason = source["reason"];
 	    }
 	}
 	export class PromptVariable {

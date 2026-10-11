@@ -8,6 +8,7 @@ import {
   usageTone,
   type chat,
   type llm,
+  type main,
 } from '../lib/api'
 import { useStore } from '../store'
 
@@ -320,6 +321,11 @@ export function ModelSwitcher() {
   const [nextOnly, setNextOnly] = useState(false)
   const [preview, setPreview] = useState<chat.ContextBudget | null>(null)
   const [candidate, setCandidate] = useState<llm.ModelInfo | null>(null)
+  // The availability sweep: which backend is being asked, how far it has got, and
+  // how many models the last one hid. Read through a bound method rather than
+  // pushed, because a sweep of eighty models outlives any call it could be
+  // attached to — the same reason the runtime panel polls a download.
+  const [check, setCheck] = useState<main.ModelCheckStatus | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
 
   const current = useMemo(
@@ -343,6 +349,75 @@ export function ModelSwitcher() {
   useEffect(() => {
     if (open) void refreshModels(false)
   }, [open, refreshModels])
+
+  // Read the sweep state when the panel opens, so one that was started before it
+  // was closed — or that finished while it was — is still shown on the way back in.
+  useEffect(() => {
+    if (!open) return
+    let live = true
+    App.GetModelCheckStatus()
+      .then((st) => {
+        if (live) setCheck(st)
+      })
+      .catch((err) => {
+        if (live) setCheck({ busy: false, done: 0, total: 0, hidden: 0, hiddenTotal: 0, error: String(err) })
+      })
+    return () => {
+      live = false
+    }
+  }, [open])
+
+  // Poll only while a sweep is running. An idle picker asking for the status twice
+  // a second for the rest of the session would be a request per second to learn
+  // something that changed once.
+  useEffect(() => {
+    if (!open || !check?.busy) return
+    const id = window.setInterval(() => {
+      void App.GetModelCheckStatus()
+        .then(async (st) => {
+          setCheck(st)
+          if (!st.busy) {
+            // The verdict changed the list the backend builds, so re-read it
+            // instead of leaving the hidden rows on screen.
+            await refreshModels(false)
+          }
+        })
+        .catch((err) => {
+          // A failed poll is not worth a toast while the row can say it, but it
+          // has to stop the interval rather than spin against a broken bridge.
+          setCheck((prev) => (prev ? { ...prev, busy: false, error: String(err) } : prev))
+        })
+    }, 900)
+    return () => window.clearInterval(id)
+  }, [open, check?.busy, refreshModels])
+
+  /**
+   * Asks one backend's models whether this account may actually call them.
+   *
+   * It is what makes a vendor catalogue honest. build.nvidia.com lists eighty
+   * models and answers 404 for the ones a given key is not entitled to — a fact
+   * no metadata route reports, which is why the check costs one real request per
+   * model and is a button rather than something the app does on its own.
+   */
+  const runCheck = async (backend: string) => {
+    try {
+      setCheck(await App.StartModelCheck(backend))
+    } catch (err) {
+      // A sweep that could not even start — an unknown backend, an unreachable
+      // one, a listing that came back empty — has to be said out loud, because
+      // nothing else in the panel would show it.
+      useStore.getState().toast('error', String(err))
+    }
+  }
+
+  const unhide = async () => {
+    try {
+      setCheck(await App.ClearHiddenModels(''))
+      await refreshModels(false)
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    }
+  }
 
   const filtered = useMemo(() => {
     const needle = filter.trim().toLowerCase()
@@ -534,7 +609,23 @@ export function ModelSwitcher() {
             {grouped.length === 0 && <div className="p-3 text-center faint">{t('model.noModels')}</div>}
             {grouped.map(([backend, list]) => (
               <div key={backend} className="mb-2">
-                <div className="faint mono px-1 py-1 text-[11px] uppercase tracking-wide">{backend}</div>
+                <div className="flex items-center gap-2 px-1 py-1">
+                  <span className="faint mono text-[11px] uppercase tracking-wide">{backend}</span>
+                  {/* Per backend, because the answer is per backend: one
+                      vendor's catalogue needs this and a local server's does
+                      not, and a sweep costs one request per model. */}
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost ml-auto text-[11px]"
+                    disabled={!!check?.busy}
+                    title={t('model.checkTitle')}
+                    onClick={() => void runCheck(backend)}
+                  >
+                    {check?.busy && check.backend === backend
+                      ? t('model.checkProgress', { done: check.done, total: check.total })
+                      : t('model.check')}
+                  </button>
+                </div>
                 {list.map((m) => (
                   <ModelRow
                     key={`${m.backend}/${m.id}`}
@@ -548,6 +639,31 @@ export function ModelSwitcher() {
               </div>
             ))}
           </div>
+
+          {check?.error && (
+            <div
+              className="mt-2 rounded p-2 text-[11px]"
+              style={{ background: 'var(--surface-2)', color: 'var(--warn)' }}
+            >
+              {/* The sweep's own verdict has a sentence per language; every other
+                  failure is the backend's, and passing its text through is what
+                  the rest of the app does with a Go error. The two are not
+                  interchangeable: this row stays on screen, and a German
+                  sentence in a Chinese window is a bug the user cannot dismiss. */}
+              {check.reason === 'all-refused' ? t('model.checkRefusedAll') : check.error}
+            </div>
+          )}
+
+          {(check?.hiddenTotal ?? 0) > 0 && (
+            <div className="mt-2 flex items-center gap-2 text-[11px]" style={{ color: 'var(--text-dim)' }}>
+              <span title={t('model.hiddenTitle')}>
+                {t('model.hidden', { count: check?.hiddenTotal ?? 0 })}
+              </span>
+              <button type="button" className="btn btn-sm btn-ghost ml-auto" onClick={() => void unhide()}>
+                {t('model.unhide')}
+              </button>
+            </div>
+          )}
 
           {candidate && (
             <div className="mt-2 rounded p-2 text-[12px]" style={{ background: 'var(--surface-2)' }}>

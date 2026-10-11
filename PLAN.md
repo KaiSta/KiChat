@@ -57,7 +57,9 @@ internal/
                      openai.go's deltaContent decodes
     nvidia.go        build.nvidia.com: the four-field listing, which carries no
                      capability or window and lists models the account may not
-                     call — so nothing is filtered out and the window stays 0
+                     call — so the provider filters nothing and the window stays 0
+    probe.go         One token per model, to learn what no listing can say; the
+                     verdicts become the picker's blacklist (see NVIDIA.md)
     llamacpp.go      llama.cpp /props: the loaded window, template caps, timings
     registry.go      BackendConfig, provider construction, model catalogue cache
   store/           SQLite persistence (modernc.org/sqlite, pure Go)

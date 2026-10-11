@@ -14,6 +14,8 @@ export function AddAttachment(arg1:main.AttachmentInput):Promise<store.Attachmen
 
 export function CheckLlamaRuntimeUpdate():Promise<main.RuntimeUpdate>;
 
+export function ClearHiddenModels(arg1:string):Promise<main.ModelCheckStatus>;
+
 export function CompactNow(arg1:main.CompactRequest):Promise<chat.CompactResult>;
 
 export function CreateChat(arg1:string,arg2:string):Promise<store.Chat>;
@@ -33,6 +35,8 @@ export function GetChatState(arg1:string):Promise<main.ChatState>;
 export function GetDocument(arg1:string):Promise<store.Document>;
 
 export function GetHealth():Promise<Array<llm.HealthStatus>>;
+
+export function GetModelCheckStatus():Promise<main.ModelCheckStatus>;
 
 export function GetPromptVariables():Promise<Array<main.PromptVariable>>;
 
@@ -105,6 +109,8 @@ export function SetModelOverride(arg1:string,arg2:string,arg3:llm.ModelOverride)
 export function Settings():Promise<config.Settings>;
 
 export function StartManagedModel(arg1:string):Promise<void>;
+
+export function StartModelCheck(arg1:string):Promise<main.ModelCheckStatus>;
 
 export function StopGeneration(arg1:string):Promise<boolean>;
 

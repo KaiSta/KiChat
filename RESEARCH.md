@@ -409,8 +409,8 @@ context switched off, `renderResultListing` keeps the original headline-only for
 | [internal/chat/searchfirst.go:93](internal/chat/searchfirst.go#L93) | `searchTokenBudget` | the quarter-of-window cap |
 | [internal/tools/tools.go:155](internal/tools/tools.go#L155) | `searchWeb` | the model's `search_web` |
 | [internal/tools/tools.go:206](internal/tools/tools.go#L206) | `scrapeURL` | the model's `scrape_url` |
-| [api.go:1133](api.go#L1133) | `TestBraveKey` | one live query validates a pasted key |
-| [api.go:1655](api.go#L1655) | `GetSearchStatus` | availability, order, usage, quota estimate |
+| [api.go:1152](api.go#L1152) | `TestBraveKey` | one live query validates a pasted key |
+| [api.go:1935](api.go#L1935) | `GetSearchStatus` | availability, order, usage, quota estimate |
 
 ---
 

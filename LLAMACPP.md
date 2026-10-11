@@ -314,9 +314,9 @@ fork build out of an upstream comparison and the reverse. Pinned by
 `TestCheckRuntimeUpdateReadsTheSelectedSource`.
 
 **An update check is a request, and a release tag is per release, not per family.**
-`CheckLlamaRuntimeUpdate` ([api.go:397](api.go#L397)) asks the release list for the newest
+`CheckLlamaRuntimeUpdate` ([api.go:416](api.go#L416)) asks the release list for the newest
 build of the family the app installs and caches the reading; `GetRuntimeStatus`
-([api.go:742](api.go#L742)) only reports the cached copy, because that status is polled every
+([api.go:761](api.go#L761)) only reports the cached copy, because that status is polled every
 **1.2 s** while a model loads and the API allows 60 unauthenticated requests an hour per
 address.
 
@@ -536,8 +536,8 @@ reports it in the panel — `On Vulkan0: 65 of 65 layers on the GPU`.
 | [internal/runtime/discover.go:79](internal/runtime/discover.go#L79) | `LMStudioFolders` | which folder to offer first |
 | [internal/runtime/discover.go:154](internal/runtime/discover.go#L154) | `ScanModelFolder` | the `.gguf` files in one |
 | [internal/runtime/version.go:26](internal/runtime/version.go#L26) | `BinaryVersion` | `--version`, with a deadline and `WaitDelay` |
-| [api.go:397](api.go#L397) | `CheckLlamaRuntimeUpdate` | one request, cached |
-| [api.go:742](api.go#L742) | `GetRuntimeStatus` | reports the cached copy; clears before start |
+| [api.go:416](api.go#L416) | `CheckLlamaRuntimeUpdate` | one request, cached |
+| [api.go:761](api.go#L761) | `GetRuntimeStatus` | reports the cached copy; clears before start |
 
 ---
 

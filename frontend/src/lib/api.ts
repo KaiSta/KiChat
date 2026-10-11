@@ -90,6 +90,8 @@ export namespace main {
   export type RuntimeUpdate = Plain<Gen.main.RuntimeUpdate>
   /** One llama.cpp build on disk, as the cleanup list reads it. */
   export type InstalledBuild = Plain<Gen.main.InstalledBuild>
+  /** A model availability sweep, as the picker follows it. */
+  export type ModelCheckStatus = Plain<Gen.main.ModelCheckStatus>
 }
 
 export namespace research {

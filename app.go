@@ -100,6 +100,19 @@ type App struct {
 	installDone  int64
 	installTotal int64
 	installErr   string
+	// check tracks a model availability sweep. Like a download it is read by the
+	// UI through a bound method rather than pushed: it outlives the call that asked
+	// for it, and polling cannot miss the end of one. checkHidden is how many
+	// models the sweep that just finished put on the blacklist.
+	checkMu      sync.Mutex
+	checkBackend string
+	checkBusy    bool
+	checkDone    int
+	checkTotal   int
+	checkErr     string
+	checkReason  string
+	checkHidden  int
+
 	// installCompleted records that a build was downloaded during this session.
 	// A server that was already running keeps the binary it was started from, so
 	// without it the panel's "restart the model" line would disappear exactly when
@@ -737,12 +750,27 @@ func (a *App) firstAvailableModel() (string, string) {
 
 // visibleModels is the merged catalogue with user overrides applied and
 // embedding-only models filtered out of the picker.
+//
+// It also drops the blacklist the availability check wrote. That filtering
+// happens here rather than in the provider on purpose: every listing path — the
+// picker, the budget preview, the default model of a new chat — comes through
+// this function, so one filter covers all of them, and a backend keeps reporting
+// the models it really publishes. A chat that is already pinned to a hidden model
+// still resolves it, because resolving goes to the registry; hiding is a
+// statement about the picker, not a revocation.
 func (a *App) visibleModels(ctx context.Context) []llm.ModelInfo {
 	settings := a.Settings()
+	hidden := make(map[string]bool, len(settings.HiddenModels))
+	for _, key := range settings.HiddenModels {
+		hidden[key] = true
+	}
 	models := llm.MergeOverrides(a.currentRegistry().ListModels(ctx, false), settings.ModelOverrides)
 	out := make([]llm.ModelInfo, 0, len(models))
 	for _, m := range models {
 		if m.Type == "embeddings" {
+			continue
+		}
+		if hidden[m.Backend+"/"+m.ID] {
 			continue
 		}
 		// Fill in capability hints when a backend reports none, so the UI can

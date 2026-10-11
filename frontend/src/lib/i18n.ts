@@ -109,6 +109,16 @@ const de = {
   'model.switchAndCompact': 'Wechseln und komprimieren',
   'model.overrides': 'Kontextfenster überschreiben',
   'model.overrideHint': 'Nur nötig, wenn das Backend das Fenster nicht meldet.',
+  'model.check': 'prüfen',
+  'model.checkTitle':
+    'Fragt jedes Modell dieses Backends einmal an, um zu sehen, welche dieses Konto wirklich aufrufen darf. Was mit 404 antwortet, wird danach ausgeblendet.',
+  'model.checkProgress': '{{done}}/{{total}}',
+  'model.checkRefusedAll':
+    'Jedes geprüfte Modell wurde abgelehnt. Das deutet auf eine falsche Adresse oder einen Schlüssel ohne Zugriff hin, nicht auf die Liste — es wurde deshalb nichts ausgeblendet.',
+  'model.hidden': '{{count}} ausgeblendet',
+  'model.hiddenTitle':
+    'Modelle, die die Verfügbarkeitsprüfung als nicht erreichbar gemeldet hat. Sie bleiben aus der Liste, bis du sie wieder einblendest; ein Chat mit einem davon läuft weiter.',
+  'model.unhide': 'wieder einblenden',
 
   'compact.title': 'Kompaktierung',
   'compact.auto': 'automatisch',
@@ -497,6 +507,16 @@ const en: Record<keyof typeof de, string> = {
   'model.switchAndCompact': 'Switch and compact',
   'model.overrides': 'Override context window',
   'model.overrideHint': 'Only needed when the backend does not report the window.',
+  'model.check': 'check',
+  'model.checkTitle':
+    'Asks every model of this backend once, to see which ones this account may really call. Whatever answers 404 is hidden afterwards.',
+  'model.checkProgress': '{{done}}/{{total}}',
+  'model.checkRefusedAll':
+    'Every model that was checked was refused. That points at a wrong address or a key without access rather than at the list, so nothing was hidden.',
+  'model.hidden': '{{count}} hidden',
+  'model.hiddenTitle':
+    'Models the availability check reported as unreachable. They stay out of the list until you show them again; a chat already using one keeps working.',
+  'model.unhide': 'show again',
 
   'compact.title': 'Compaction',
   'compact.auto': 'automatic',
@@ -880,6 +900,16 @@ const zh: Record<keyof typeof de, string> = {
   'model.switchAndCompact': '切换并压缩',
   'model.overrides': '覆盖上下文窗口',
   'model.overrideHint': '仅当后端未报告窗口大小时才需要。',
+  'model.check': '检查',
+  'model.checkTitle':
+    '对本后端的每个模型各请求一次，以确认当前账号真正可以调用哪些。返回 404 的模型随后会被隐藏。',
+  'model.checkProgress': '{{done}}/{{total}}',
+  'model.checkRefusedAll':
+    '所有被检查的模型都遭到拒绝。这更像是地址错误或密钥没有权限，而不是模型列表的问题，因此没有隐藏任何内容。',
+  'model.hidden': '已隐藏 {{count}} 个',
+  'model.hiddenTitle':
+    '可用性检查报告为无法访问的模型。在你重新显示之前它们不会出现在列表中；已使用其中某个模型的对话仍然可用。',
+  'model.unhide': '重新显示',
 
   'compact.title': '压缩',
   'compact.auto': '自动',

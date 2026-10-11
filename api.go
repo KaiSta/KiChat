@@ -77,6 +77,11 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 		s.Runtime.Accelerator = recorded.Runtime.Accelerator
 	}
 	s.Runtime.Tag = recorded.Runtime.Tag
+	// The availability blacklist is written by the model check, not by any control
+	// in the panel, so no draft ever carries it. A draft the view read before the
+	// last sweep would otherwise put every hidden model back into the picker on the
+	// next unrelated save.
+	s.HiddenModels = recorded.HiddenModels
 	// Moving the untouched prompts to the new language, and repairing an empty
 	// default prompt, happen here as well as on load: clearing the textarea and
 	// switching the language in the same save must not leave either undone.
@@ -1217,6 +1222,261 @@ func (a *App) SetModelOverride(backend, model string, ov llm.ModelOverride) erro
 	}
 	a.currentRegistry().Invalidate()
 	return settings.Save(a.store)
+}
+
+// ModelCheckStatus is a model availability sweep as the picker reads it.
+type ModelCheckStatus struct {
+	Backend string `json:"backend,omitempty"`
+	Busy    bool   `json:"busy"`
+	Done    int    `json:"done"`
+	Total   int    `json:"total"`
+	// Hidden is how many models the sweep that just finished put on the
+	// blacklist, and HiddenTotal is the whole blacklist across every backend. The
+	// picker shows the second: a user who switched to another backend would
+	// otherwise see no sign that a list is shorter than the catalogue says.
+	Hidden      int `json:"hidden"`
+	HiddenTotal int `json:"hiddenTotal"`
+	// Error is why a sweep could not run, or why it declined to act. It is a
+	// reading rather than a failed call, because it is a row in the picker.
+	Error string `json:"error,omitempty"`
+	// Reason names the failure when the UI has its own sentence for it. Error is
+	// the backend's own text and is passed through untranslated — that is what
+	// every other Go error in this app does — but the one verdict the sweep itself
+	// reaches has to be translatable, or a Chinese or English window would show a
+	// German sentence in a row that stays on screen.
+	Reason string `json:"reason,omitempty"`
+}
+
+// ReasonAllRefused is the sweep's own verdict that it declined to act: every
+// model it reached was refused, which is what a wrong address or a key without
+// entitlement looks like from here. The UI has a sentence of its own for it.
+const ReasonAllRefused = "all-refused"
+
+// modelCheckTimeout bounds a whole sweep. It is generous because it is the outer
+// bound only: the per-model timeout is what a single hanging model costs, and six
+// of NVIDIA's 80 models hang rather than answer, so a tight total would cut the
+// sweep short and leave the models after it unasked.
+const modelCheckTimeout = 10 * time.Minute
+
+// StartModelCheck asks every model of one backend to answer one token, so the
+// ones this account cannot call can be kept out of the picker.
+//
+// It returns as soon as the sweep is running rather than when it finishes. The
+// sweep for build.nvidia.com's 80 models takes about a minute, and a bound call
+// that blocked for it would look like a hang with nothing to show; the UI follows
+// it by polling GetModelCheckStatus, the same way it follows a runtime download.
+func (a *App) StartModelCheck(backend string) (ModelCheckStatus, error) {
+	if err := a.ensure(); err != nil {
+		return ModelCheckStatus{}, err
+	}
+	a.checkMu.Lock()
+	if a.checkBusy {
+		// A second click while one is running is the same request, not a new one:
+		// two sweeps at once would double the requests and race on the result.
+		status := a.checkStatusLocked()
+		a.checkMu.Unlock()
+		return status, nil
+	}
+	a.checkMu.Unlock()
+
+	provider, ok := a.currentRegistry().Provider(backend)
+	if !ok {
+		return ModelCheckStatus{}, fmt.Errorf("Backend %q ist nicht konfiguriert oder ausgeschaltet", backend)
+	}
+
+	// The sweep outlives the call that started it, so it cannot borrow the call's
+	// context: Wails cancels that the moment this returns. The app's own context
+	// bounds it instead, which is what makes a sweep stop when the window closes.
+	base := a.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(base, modelCheckTimeout)
+
+	// Reachability is settled before the sweep rather than during it. A backend
+	// that answers nothing at all refuses every model it is asked about, and that
+	// reading is indistinguishable from a catalogue this account may not call — so
+	// it would blacklist the whole list because a server was down.
+	if err := provider.Health(ctx); err != nil {
+		cancel()
+		return ModelCheckStatus{}, fmt.Errorf("Backend %q ist nicht erreichbar: %w", backend, err)
+	}
+
+	// The listing is asked of the provider directly rather than read from the
+	// visible catalogue: a re-check has to see the models the last sweep hid, or a
+	// model wrongly kept out could never come back.
+	models, err := provider.ListModels(ctx)
+	if err != nil {
+		cancel()
+		return ModelCheckStatus{}, fmt.Errorf("Modellliste von %q: %w", backend, err)
+	}
+	if len(models) == 0 {
+		cancel()
+		return ModelCheckStatus{}, fmt.Errorf("Backend %q meldet keine Modelle", backend)
+	}
+
+	a.checkMu.Lock()
+	a.checkBackend, a.checkBusy, a.checkErr, a.checkReason = backend, true, "", ""
+	a.checkDone, a.checkTotal, a.checkHidden = 0, len(models), 0
+	status := a.checkStatusLocked()
+	a.checkMu.Unlock()
+
+	go func() {
+		defer cancel()
+		probes := llm.ProbeModels(ctx, provider, models, llm.ProbeOptions{}, func(llm.ModelProbe) {
+			a.checkMu.Lock()
+			a.checkDone++
+			a.checkMu.Unlock()
+		})
+		hidden, reason, err := a.applyModelProbes(backend, probes)
+		a.checkMu.Lock()
+		a.checkBusy = false
+		a.checkReason = reason
+		if err != nil {
+			a.checkErr = err.Error()
+		} else {
+			a.checkHidden = hidden
+		}
+		a.checkMu.Unlock()
+	}()
+	return status, nil
+}
+
+// GetModelCheckStatus reports the sweep in progress, or the last one's result.
+// The picker polls it while a sweep runs and once after.
+func (a *App) GetModelCheckStatus() ModelCheckStatus {
+	settings := a.Settings()
+	a.checkMu.Lock()
+	defer a.checkMu.Unlock()
+	status := a.checkStatusLocked()
+	status.HiddenTotal = len(settings.HiddenModels)
+	return status
+}
+
+// checkStatusLocked reads the sweep state; the caller holds checkMu.
+func (a *App) checkStatusLocked() ModelCheckStatus {
+	return ModelCheckStatus{
+		Backend: a.checkBackend,
+		Busy:    a.checkBusy,
+		Done:    a.checkDone,
+		Total:   a.checkTotal,
+		Hidden:  a.checkHidden,
+		Error:   a.checkErr,
+		Reason:  a.checkReason,
+	}
+}
+
+// applyModelProbes writes a sweep's verdicts into the blacklist and returns how
+// many models of that backend it hides.
+//
+// Two rules keep it from being destructive on weak evidence. A sweep in which
+// every model was refused is discarded rather than applied — that is what a wrong
+// address or a key without entitlement looks like from here, and committing it
+// would empty the picker. And a model the sweep could not judge (a timeout, a
+// throttle) keeps the verdict it already had, so only a sweep that really reached
+// a model can add it to the list or take it off.
+func (a *App) applyModelProbes(backend string, probes []llm.ModelProbe) (int, string, error) {
+	reached := map[string]bool{}
+	refused := map[string]bool{}
+	for _, p := range probes {
+		if p.Model == "" || p.Kind == "" {
+			continue // never asked: the sweep was stopped before it got here
+		}
+		reached[p.Model] = true
+		if p.Refused() {
+			refused[p.Model] = true
+		}
+	}
+	switch {
+	case len(reached) == 0:
+		return 0, "", errors.New("kein Modell konnte geprüft werden")
+	case len(refused) == len(reached):
+		return 0, ReasonAllRefused, fmt.Errorf("alle %d Modelle wurden abgelehnt — das deutet auf Adresse oder Schlüssel hin, nicht auf die Liste; es wurde nichts ausgeblendet", len(reached))
+	}
+
+	settings := a.Settings()
+	prefix := backend + "/"
+	out := make([]string, 0, len(settings.HiddenModels)+len(refused))
+	seen := map[string]bool{}
+	add := func(key string) {
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	for _, key := range settings.HiddenModels {
+		model, ok := strings.CutPrefix(key, prefix)
+		if !ok {
+			add(key) // another backend's entry, untouched
+			continue
+		}
+		if refused[model] || !reached[model] {
+			// Either still refused, or a model this sweep could not judge — in
+			// which case the earlier verdict stands rather than being dropped by a
+			// timeout that says nothing about the model.
+			add(key)
+		}
+	}
+	for _, p := range probes {
+		if p.Refused() {
+			add(prefix + p.Model)
+		}
+	}
+
+	a.settingsMu.Lock()
+	a.settings.HiddenModels = out
+	updated := a.settings
+	a.settingsMu.Unlock()
+	// Sanitised, the way SaveSettings persists: the in-memory snapshot keeps the
+	// real backend keys so the registry can authenticate, and the blob must not.
+	if err := a.sanitize(updated).Save(a.store); err != nil {
+		return 0, "", err
+	}
+
+	// Hiding is a statement about the picker, so a chat already pinned to one of
+	// these models keeps working and keeps its trigger label; only the listing
+	// changes.
+	hidden := 0
+	for _, key := range out {
+		if strings.HasPrefix(key, prefix) {
+			hidden++
+		}
+	}
+	return hidden, "", nil
+}
+
+// ClearHiddenModels forgets the blacklist, for one backend or — with an empty id
+// — for every backend.
+//
+// A sweep measures one moment: an account can be upgraded, and NVIDIA adds
+// capacity behind a model that 404s today. A verdict therefore has to be
+// reversible from the UI rather than by hand-editing the settings blob.
+func (a *App) ClearHiddenModels(backend string) (ModelCheckStatus, error) {
+	if err := a.ensure(); err != nil {
+		return ModelCheckStatus{}, err
+	}
+	settings := a.Settings()
+	kept := make([]string, 0, len(settings.HiddenModels))
+	for _, key := range settings.HiddenModels {
+		if backend == "" || !strings.HasPrefix(key, backend+"/") {
+			kept = append(kept, key)
+		}
+	}
+
+	a.settingsMu.Lock()
+	a.settings.HiddenModels = kept
+	a.settingsMu.Unlock()
+	a.checkMu.Lock()
+	a.checkBackend, a.checkHidden, a.checkErr, a.checkReason = "", 0, "", ""
+	a.checkMu.Unlock()
+
+	// Sanitised for the same reason as in applyModelProbes: the blob carries the
+	// blacklist, never a key.
+	if err := a.sanitize(a.Settings()).Save(a.store); err != nil {
+		return ModelCheckStatus{}, err
+	}
+	return a.GetModelCheckStatus(), nil
 }
 
 // --- prompt presets --------------------------------------------------------

@@ -38,6 +38,16 @@ type Settings struct {
 	// capability the app provides rather than a server it contacts, which is why
 	// none of it lives on BackendConfig.
 	Runtime RuntimeSettings `json:"runtime"`
+	// HiddenModels lists models an availability check found this account cannot
+	// call, keyed "backend/model" the way ModelOverrides is. It is stored rather
+	// than guessed because the check that produces it costs one request per model
+	// of a backend — eighty for build.nvidia.com — so re-deriving it on every
+	// start would spend those requests to learn what the last sweep already knew.
+	//
+	// It is separate from ModelOverrides because the two are opposites: an
+	// override corrects what a model *is*, and this records that the model could
+	// not be reached at all.
+	HiddenModels []string `json:"hiddenModels,omitempty"`
 }
 
 // RuntimeSettings configures the llama.cpp binaries KiChat installs and the
@@ -535,6 +545,24 @@ func (s *Settings) normalise() {
 	}
 	if s.ModelOverrides == nil {
 		s.ModelOverrides = map[string]llm.ModelOverride{}
+	}
+	// The blacklist is a set, and the picker counts it: a duplicate or a blank
+	// key would make that count disagree with what is actually hidden.
+	if len(s.HiddenModels) > 0 {
+		kept := make([]string, 0, len(s.HiddenModels))
+		seenHidden := map[string]bool{}
+		for _, key := range s.HiddenModels {
+			key = strings.TrimSpace(key)
+			if key == "" || seenHidden[key] {
+				continue
+			}
+			seenHidden[key] = true
+			kept = append(kept, key)
+		}
+		if len(kept) == 0 {
+			kept = nil
+		}
+		s.HiddenModels = kept
 	}
 	if !IsDistribution(s.Runtime.Distribution) {
 		// An empty field is what every installation that predates this setting

@@ -1087,6 +1087,52 @@ Verfügbare Tools: {{tool_list}}`,
   // depends on exactly that difference.
   const copy = (value) => JSON.parse(JSON.stringify(value))
 
+  /*
+   * The availability sweep the model picker runs. It starts as a *finished*
+   * reading with two models already hidden, so the footer row — the count and its
+   * one-click undo — is on screen as soon as the picker opens rather than only
+   * after a minute of requests. The button on a backend's heading drives the
+   * simulated sweep below, and the undo drives the count to zero, which is the
+   * other state that row has to render.
+   *
+   * ?check=clear is that empty reading without the click, and ?check=error is the
+   * refusal a sweep reports when it declined to act — the all-refused guard, whose
+   * message is the only thing that row ever says.
+   */
+  const checkParam = new URLSearchParams(location.search).get('check')
+  let modelCheck = {
+    backend: '',
+    busy: false,
+    done: 0,
+    total: 0,
+    hidden: 0,
+    hiddenTotal: checkParam === 'clear' ? 0 : 2,
+    // The two halves of a failure, exactly as the backend sends them: the raw text
+    // is passed through untranslated, and the reason is what a UI with its own
+    // sentence for it switches on.
+    error: checkParam === 'error' ? 'alle 80 Modelle wurden abgelehnt' : '',
+    reason: checkParam === 'error' ? 'all-refused' : '',
+  }
+  if (checkParam) {
+    console.warn(`[harness] check injection active: ${checkParam}`)
+  }
+
+  // A real sweep is one request per model, so this ticks rather than finishing at
+  // once: the progress label and the picker's polling loop are only exercised by a
+  // sweep that lasts longer than one poll interval.
+  let checkTimer = 0
+  function simulateModelCheck(backend) {
+    clearInterval(checkTimer)
+    modelCheck = { ...modelCheck, backend, busy: true, done: 0, total: 26, hidden: 0, error: '', reason: '' }
+    checkTimer = setInterval(() => {
+      modelCheck.done = Math.min(modelCheck.total, modelCheck.done + 3)
+      if (modelCheck.done >= modelCheck.total) {
+        clearInterval(checkTimer)
+        modelCheck = { ...modelCheck, busy: false, hidden: 2, hiddenTotal: 2 }
+      }
+    }, 250)
+  }
+
   // One managed llama.cpp model, so the local-model section has something to
   // render and to act on. It is assigned to rather than read, so a console can
   // drive a download or a start while the harness runs.
@@ -1867,6 +1913,18 @@ Verfügbare Tools: {{tool_list}}`,
     ListChunks: () => Promise.resolve([]),
 
     SetModelOverride: () => Promise.resolve(null),
+    // The sweep is polled rather than pushed, the same way a download is: it
+    // outlives the call that starts it, and polling cannot miss the end of one.
+    StartModelCheck: (backend) => {
+      simulateModelCheck(backend)
+      return Promise.resolve(copy(modelCheck))
+    },
+    GetModelCheckStatus: () => Promise.resolve(copy(modelCheck)),
+    ClearHiddenModels: (backend) => {
+      clearInterval(checkTimer)
+      modelCheck = { ...modelCheck, backend: backend || '', busy: false, hidden: 0, hiddenTotal: 0, error: '', reason: '' }
+      return Promise.resolve(copy(modelCheck))
+    },
     OpenExternal: (url) => {
       console.log('[harness] OpenExternal', url)
       return Promise.resolve(null)

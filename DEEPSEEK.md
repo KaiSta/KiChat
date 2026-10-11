@@ -56,7 +56,7 @@ asserted by `internal/config/config_test.go` (it sets the key in an isolated sec
 saves the settings, and reads the key back out).
 
 There is no migration. `normalise()`
-([internal/config/config.go:515](internal/config/config.go#L515)) appends any shipped
+([internal/config/config.go:491](internal/config/config.go#L491)) appends any shipped
 backend that is missing and repairs an empty address, which is how the entry reaches an
 installation that predates it.
 
@@ -173,7 +173,7 @@ test if the server is reached at all.
 | [internal/llm/openai.go:103](internal/llm/openai.go#L103) | `flavourDeepSeek` | selects the mapper in `mapModelEntries` |
 | [internal/llm/registry.go:106](internal/llm/registry.go#L106) | `Reconfigure` | `case "deepseek"` builds the provider |
 | [internal/llm/registry.go:375](internal/llm/registry.go#L375) | `DefaultBackendConfigs` | the shipped row: `deepseek`, disabled |
-| [internal/config/config.go:515](internal/config/config.go#L515) | `normalise` | repairs an empty address for an existing install |
+| [internal/config/config.go:491](internal/config/config.go#L491) | `normalise` | repairs an empty address for an existing install |
 
 The frontend needs nothing of its own: the API-key field and the "required" placeholder are
 driven by `backend.kind === 'deepseek'` in
