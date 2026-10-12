@@ -1928,6 +1928,39 @@ func (a *App) TestImageBackend() (string, error) {
 	return report, nil
 }
 
+// RegenerateImage draws a picture again from its own recorded recipe and returns the new
+// attachment. freshSeed asks for a variation — the same prompt with a seed the server
+// picks — rather than a repeat of the one on screen.
+//
+// This is the only path into image generation that does not go through a chat model: the
+// recipe is data, not a request in words, so nothing has to be asked of the model to use
+// it. The picture is filed onto the message it was redrawn from, which is what puts it
+// beside the original, and the attachments event is emitted because the view holds that
+// message's attachment list — without it the new picture would exist and stay invisible
+// until a manual reload.
+func (a *App) RegenerateImage(attachmentID string, freshSeed bool) (store.Attachment, error) {
+	if err := a.ensure(); err != nil {
+		return store.Attachment{}, err
+	}
+	service := a.currentToolService()
+	if service == nil {
+		return store.Attachment{}, images.ErrNotConfigured
+	}
+	if a.ctx == nil {
+		return store.Attachment{}, errors.New("App ist noch nicht bereit")
+	}
+	// Generous, because a local server drawing a large picture takes minutes on a CPU,
+	// and present at all so a wedged server cannot hold the click open indefinitely.
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Minute)
+	defer cancel()
+	attachment, err := service.Regenerate(ctx, attachmentID, freshSeed)
+	if err != nil {
+		return store.Attachment{}, err
+	}
+	a.emit(events.Attachments, map[string]any{"chatId": attachment.ChatID})
+	return attachment, nil
+}
+
 // GetAttachmentImage returns an attachment's payload as a data: URL the webview
 // can render.
 //

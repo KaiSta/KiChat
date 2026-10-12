@@ -697,3 +697,147 @@ func TestToolCallCancelledStateSurvives(t *testing.T) {
 		t.Error("the cancelled result was not stored")
 	}
 }
+
+// TestAnExistingInstallationGainsTheGenerationColumn is the upgrade path, and it is
+// asserted rather than assumed because getting it wrong is silent and total.
+//
+// Migrations resume at the version a database already reports, so a new entry only
+// reaches an existing installation if it is *appended*. One inserted earlier in the
+// slice is skipped forever on every database that predates it: the version advances past
+// it, no error is raised, and the first attachment read then fails on a column that was
+// never added. This test builds exactly that older database — the current schema with
+// the column dropped and the version rolled back — and reopens it.
+func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := st.DB().Exec(`ALTER TABLE attachments DROP COLUMN generation_json`); err != nil {
+		t.Fatalf("drop the column to build the older schema: %v", err)
+	}
+	if _, err := st.DB().Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatalf("roll the version back: %v", err)
+	}
+	// A row written before the column existed has to survive the upgrade too.
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(`INSERT INTO attachments
+  (id,chat_id,message_id,kind,filename,mime,size_bytes,sha256,pages,token_estimate,
+   placement,document_id,warning,created_at)
+  VALUES ('a1','c1','m1','file','alt.txt','text/plain',3,'',0,1,'inline','','',0)`); err != nil {
+		t.Fatalf("insert a pre-upgrade row: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen an older database: %v", err)
+	}
+	defer reopened.Close()
+
+	var version int
+	if err := reopened.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != len(migrations) {
+		t.Errorf("user_version = %d after the upgrade, want %d", version, len(migrations))
+	}
+	// The old row is readable, and having no recipe is what "an attached file" means.
+	old, err := reopened.GetAttachment("a1")
+	if err != nil {
+		t.Fatalf("the pre-upgrade row is unreadable after the upgrade: %v", err)
+	}
+	if old.Generation != nil {
+		t.Errorf("a file attached before the column existed reports a recipe: %+v", old.Generation)
+	}
+}
+
+// TestTheGenerationRecipeRoundTrips keeps the column that makes a picture repeatable from
+// quietly losing a field. The recipe is stored as JSON and decoded by name, so a field
+// added to GenerationRecipe with a missing or misspelled tag vanishes here rather than in
+// the UI, where it would look like a redraw that ignored one of its own settings.
+func TestTheGenerationRecipeRoundTrips(t *testing.T) {
+	st := newStore(t)
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatal(err)
+	}
+	recipe := &GenerationRecipe{
+		Prompt: "a red fox in deep snow", NegativePrompt: "blurry", Width: 768, Height: 512,
+		Steps: 25, Sampler: "Euler a", Seed: 4242, Model: "sdxl.safetensors",
+	}
+	if err := st.CreateAttachment(Attachment{
+		ID: "a1", ChatID: "c1", MessageID: "m1", Kind: "image",
+		Filename: "a-red-fox-1.png", Mime: "image/png", SizeBytes: 12,
+		TokenEstimate: 1024, Placement: PlacementInline, DocumentID: "d1",
+		CreatedAt: time.Now(), Generation: recipe,
+	}); err != nil {
+		t.Fatalf("CreateAttachment: %v", err)
+	}
+
+	got, err := st.GetAttachment("a1")
+	if err != nil {
+		t.Fatalf("GetAttachment: %v", err)
+	}
+	if got.Generation == nil {
+		t.Fatal("the recipe did not survive the write")
+	}
+	if *got.Generation != *recipe {
+		t.Errorf("recipe came back as %+v, want %+v", *got.Generation, *recipe)
+	}
+
+	// The chat view renders a message's attachments from ListAttachments, so the list has
+	// to carry the recipe as well as the single read does.
+	list, err := st.ListAttachments("c1")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ListAttachments = %+v, %v", list, err)
+	}
+	if list[0].Generation == nil || list[0].Generation.Seed != 4242 {
+		t.Errorf("the listed attachment lost its recipe: %+v", list[0].Generation)
+	}
+
+	// A file the user attached has no recipe at all, which is a different state from a
+	// picture whose recipe happens to be empty: the first must not offer a redraw.
+	if err := st.CreateAttachment(Attachment{
+		ID: "a2", ChatID: "c1", Kind: "file", Filename: "notes.txt",
+		TokenEstimate: 3, Placement: PlacementInline, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := st.GetAttachment("a2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Generation != nil {
+		t.Errorf("a text attachment reports a generation recipe: %+v", plain.Generation)
+	}
+}
+
+// TestACorruptRecipeFailsTheRead pins the choice made for a recipe that will not parse.
+//
+// It is JSON this app wrote, so a value that does not decode means something outside the
+// app edited the row. Reading it as "no recipe" would make the picture silently
+// un-repeatable with nothing to explain why, which is the one outcome the column exists to
+// prevent — so the read reports the problem instead, as config.Load does for its own
+// stored JSON.
+func TestACorruptRecipeFailsTheRead(t *testing.T) {
+	st := newStore(t)
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateAttachment(Attachment{
+		ID: "a1", ChatID: "c1", Kind: "image", Filename: "x.png",
+		TokenEstimate: 1, Placement: PlacementInline, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(`UPDATE attachments SET generation_json='{not json' WHERE id='a1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.GetAttachment("a1"); err == nil {
+		t.Error("an unparseable recipe was accepted as \"no recipe\"")
+	}
+}

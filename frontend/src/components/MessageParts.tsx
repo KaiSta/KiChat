@@ -427,6 +427,13 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   // the enlarged view is what makes "is this the one I want?" answerable before
   // the file is saved.
   const [expanded, setExpanded] = useState(false)
+  // Which redraw is in flight, if any. Two buttons that both spend GPU seconds are
+  // safe to press twice otherwise, and the second click would draw a second picture.
+  const [redrawing, setRedrawing] = useState<'same' | 'new' | null>(null)
+
+  // Only a picture KiChat drew carries a recipe. An uploaded photo has none, and
+  // offering to redraw one would offer to draw something unrelated to it.
+  const recipe = attachment.generation
 
   useEffect(() => {
     let cancelled = false
@@ -454,6 +461,23 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
       useStore.getState().toast('error', String(err))
     } finally {
       setSaving(false)
+    }
+  }
+
+  /* Draws again from the stored recipe. Nothing goes to the model: the recipe is the
+   * prompt, the settings and the seed, so the picture is redrawn from data rather
+   * than from a request in words. The new picture is filed onto this same message,
+   * which is what puts it beside the original — the backend's attachments event is
+   * what makes this component see it. */
+  const redraw = async (freshSeed: boolean) => {
+    setRedrawing(freshSeed ? 'new' : 'same')
+    try {
+      const drawn = await App.RegenerateImage(attachment.id, freshSeed)
+      useStore.getState().toast('info', `${t('images.redrawn')}: ${drawn.filename}`)
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    } finally {
+      setRedrawing(null)
     }
   }
 
@@ -499,13 +523,46 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
         title={t('images.zoom')}
         onClick={() => setExpanded((v) => !v)}
       />
-      <figcaption className="flex items-center gap-2 text-[11px]">
-        <span className="faint truncate" style={{ maxWidth: 200 }} title={attachment.filename}>
+      <figcaption className="flex flex-wrap items-center gap-2 text-[11px]">
+        <span
+          className="faint truncate"
+          style={{ maxWidth: 200 }}
+          title={recipe?.prompt || attachment.filename}
+        >
           {attachment.filename}
         </span>
+        {/* The seed is the number that reproduces a picture, and it is what tells two
+            redraws of one prompt apart once both are on screen. */}
+        {recipe?.seed ? (
+          <span className="faint" title={t('images.seed')}>
+            s{recipe.seed}
+          </span>
+        ) : null}
         <button type="button" className="btn btn-sm btn-ghost" disabled={saving} onClick={() => void save()}>
           {saving ? t('images.saving') : t('images.save')}
         </button>
+        {recipe && (
+          <>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              disabled={redrawing !== null}
+              title={t('images.redrawHint')}
+              onClick={() => void redraw(false)}
+            >
+              {redrawing === 'same' ? t('images.redrawing') : t('images.redraw')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              disabled={redrawing !== null}
+              title={t('images.variationHint')}
+              onClick={() => void redraw(true)}
+            >
+              {redrawing === 'new' ? t('images.redrawing') : t('images.variation')}
+            </button>
+          </>
+        )}
       </figcaption>
     </figure>
   )

@@ -629,6 +629,15 @@ func (a *App) currentImageProvider() images.Provider {
 	return a.imageProvider
 }
 
+// currentToolService is the tool service in use. A redraw goes through it rather than
+// through the provider directly, because filing a picture as an attachment is the
+// service's job and that is exactly what a redraw has to do with the result.
+func (a *App) currentToolService() *tools.Service {
+	a.servicesMu.RLock()
+	defer a.servicesMu.RUnlock()
+	return a.toolSvc
+}
+
 // currentChain is the search chain in use.
 func (a *App) currentChain() *research.Chain {
 	a.servicesMu.RLock()

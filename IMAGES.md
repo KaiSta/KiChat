@@ -67,6 +67,44 @@ assumption produces a *wrong picture* instead of an error:
 `internal/images/sdwebui_test.go` pins all four, plus basic-auth (`--api-auth`), the
 retry on a 503, the credential redaction, and the dimension rounding.
 
+### Getting a model to draw with
+
+**KiChat never downloads an image model, and has no control for one.** A checkpoint is a
+several-gigabyte file that belongs to the server the user already runs, and a second
+downloader inside this app would only disagree with the one they set up. What KiChat
+needs is a server that is up *with its API exposed* and a checkpoint installed, and both
+halves are the user's to arrange:
+
+| server | start it with | where the checkpoint goes | default port |
+| --- | --- | --- | --- |
+| AUTOMATIC1111 | `./webui.sh --api` (add `--listen` to answer on the network, `--ckpt-dir PATH` to keep checkpoints elsewhere) | `models/Stable-diffusion/` | 7860 |
+| Forge | `./webui.sh --api` | `models/Stable-diffusion/` | 7860 |
+| stable-diffusion.cpp | `sd-server -m /path/to/model.gguf --listen-port 1234` | anywhere — the path is on the command line | set by `--listen-port` |
+
+**`--api` is the step that is easy to miss, and the address field cannot explain it.** The
+WebUI serves its own interface perfectly well without the flag while the `/sdapi/v1/*`
+routes are not exposed at all, so the symptom is a Settings row that reports a failure
+about a server the user can plainly see running in a browser tab. Both forks document the
+flag as how you start *with* the API
+(<https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/API>,
+<https://github.com/lllyasviel/stable-diffusion-webui-forge/issues/2040>), which is why
+the Settings hint names it rather than leaving the user to find it.
+
+Two further differences matter for setup. A1111 and Forge both listen on **7860**, which
+is the address `DefaultImageBaseURL` offers, so the field is usually already right. A
+WebUI started with `--api-auth user:pass` additionally wants the credential in the
+`user:pass` field, which is stored in the secret store like every other credential.
+stable-diffusion.cpp's `sd-server` instead takes the model on its own command line with
+`-m`/`--model` and picks its port with `--listen-port`, so it is the one server whose
+address has to be edited — and its flags have moved between builds.
+
+**This subsection is the one part of this document that is *not* a measurement.** No
+image server runs on the machine this was written on, so the flags, folders and ports
+above are reproduced from the vendors' own documentation rather than observed here.
+`TestLiveSDWebUI` (documented in §8) is what would settle them; until it has run against
+a real server, treat the `--api` requirement as the vendors' claim rather than a measured
+fact.
+
 **ComfyUI is not covered, on purpose.** It takes a workflow graph rather than a flat
 prompt, and a picture comes back through a submit → poll `/history` → `GET /view`
 dance with the bytes written to *its* disk first. That is a second client with a
@@ -117,6 +155,44 @@ No schema change, and three properties fall out for free:
 3. **Deleting it works.** `DeleteMessagesFromSeq` and the chat cascade already clean
    up attachments and their documents.
 
+### The recipe: what makes a picture drawable again
+
+The picture is an attachment; the *recipe* is a column on it. `attachments.generation_json`
+holds the prompt, the negative prompt, the size, the steps, the sampler, the seed and the
+checkpoint, and it is what turns "draw that again" into a control instead of a
+conversation: the recipe is data, not a request in words, so no model has to be asked to
+use it.
+
+It records what the server **actually used**, not what was asked for, wherever the two
+differ. A request that leaves the seed open is given one by the server, and only that
+number reproduces the picture — the requested value was "none". The checkpoint follows the
+same rule, because the server knows which one it loaded. A size or a step count the server
+filled in from its own settings stays 0, exactly as it does on the way in, so a redraw
+leaves that choice open rather than freezing a number the user never made.
+
+Three consequences are deliberate:
+
+- **An uploaded picture has no recipe**, and that is a different state from a recipe that
+  happens to be empty. The column is `NULL`-like for an attached file, and the redraw
+  controls are not rendered at all (`MessageParts.tsx`) — redrawing a photograph would draw
+  something unrelated to it.
+- **A redraw carries its seed in the filename.** `a-red-fox-1-s4242.png` is distinguishable
+  from what it redrew and from another redraw, which matters because that name is what the
+  caption under the picture and the save dialog both show. When even that is not enough —
+  the same recipe drawn twice with the same seed — the name is bumped to `-2` rather than
+  repeated (`uniqueName`), because two pictures under one name are two pictures the user
+  cannot tell apart.
+- **A corrupt recipe fails the read.** The value is JSON this app wrote, so one that will
+  not decode means something outside the app edited the row; reading it as "no recipe"
+  would make the picture silently un-repeatable, which is the one outcome the column exists
+  to prevent. `config.Load` treats its own stored JSON the same way.
+
+The column is its own **appended** migration, and that is load-bearing rather than tidy: the
+runner resumes at the version a database already reports, so an entry inserted earlier in
+the slice is skipped forever on every installation that predates it — no error, no column,
+and every attachment read then failing. `store_test.go` builds exactly that older database
+and reopens it.
+
 The attachment is **linked to the assistant message that called the tool**, not to the
 chat. That is not incidental: the frontend renders a *message's* attachments, so an
 unlinked row would appear nowhere. The tool is only told its chat id, and the tool
@@ -133,10 +209,31 @@ afterwards, which is what makes the picture appear without a full reload.
   `Service.Definitions`.
 - **The text protocol**, for models that cannot call functions, via
   `tools.ImageProtocolHint`. That hint is appended *only when a server is configured*
-  (`generate.go`), and the tool is filtered out of `toolDefinitions` when
-  `e.Tools.Images` is nil (`engine.go`). A tool the model can see but never use costs
-  a wasted tool round every time it tries, which is why off means absent rather than
-  failing.
+  (`generate.go`).
+
+Absent means absent in **three** places, for one reason in each: a tool the model can see
+but never use costs a wasted tool round every time it tries, and the model's complaint
+about the failure reads as a broken feature rather than as a setting that is switched off.
+
+- The native `toolDefinitions` filter drops it when `e.Tools.Images` is nil (`engine.go`).
+- The `{{tool_list}}` line of the system prompt is rendered from that **same filtered
+  slice** (`context.go`), not from `Service.Definitions()`. This is the one a later edit
+  could leak by building the prompt's tool list separately, so it is asserted rather than
+  assumed.
+- `ImageProtocolHint` is a constant of its own that travels with the tool, instead of
+  being folded into the always-present `TextProtocolHint`.
+
+A third way exists that needs no model at all: the **redraw controls** under a picture
+(`MessageParts.tsx` → `api.go:RegenerateImage` → `tools.Service.Regenerate`). They read the
+recipe off the attachment (§4) and call the provider directly, so a repeat or a variation
+costs GPU seconds and no tokens. The result is filed onto the **message the original is
+on**, which is what puts it beside its source — an attachment on no message renders nowhere
+— and the backend emits `chat:attachments` afterwards, the same event the tool path uses,
+which is what makes the new picture appear without a reload.
+
+`internal/chat/image_tool_test.go` pins all three, on both the native and the
+text-protocol path, and from **both** sides: "absent when off" would also pass if the
+tool were never advertised at all, and that is the regression the test exists to catch.
 
 The tool result tells the model, in as many words, that **it cannot see the picture and
 must not describe its contents**. The chat model that called the tool has not seen it;
@@ -171,11 +268,13 @@ lasted one startup is not permanent.
 
 ```
 internal/images/        types + the /sdapi/v1 client (sdwebui.go, sdwebui_test.go)
-internal/tools/image.go the generate_image tool: arguments, storage, the model's reply
+internal/tools/image.go the generate_image tool: arguments, storage, the model's reply,
+                        the recipe, and Regenerate (repeat / variation)
 internal/config/        config.ImageSettings, DefaultImageBaseURL, NormaliseImageClamps
+internal/store/         GenerationRecipe on the attachment, migration 4, the queries
 app.go                  rebuildServices builds the provider, or nil when off
 api.go                  GetImageStatus, TestImageBackend, GetAttachmentImage,
-                        SaveAttachmentAs, PickSaveFolder
+                        SaveAttachmentAs, PickSaveFolder, RegenerateImage
 imgs  (frontend)        MessageParts.MessageImages / MessageImage, ChatView, Settings
 ```
 
@@ -183,11 +282,42 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage, ChatView, Set
 
 - `internal/images/sdwebui_test.go` — an `httptest` server for every shape above.
   No network, no keyring.
+- `internal/images/live_test.go` — `TestLiveSDWebUI`, the opt-in counterpart and the
+  **only** check that can turn §2's flags and shapes from the vendors' claims into
+  measurements. It is skipped by default, because drawing on a server the user happens to
+  be running for their own work is not something a test suite may do on its own:
+
+  ```bash
+  KICHAT_LIVE=1 go test ./internal/images/ -run TestLiveSDWebUI -v
+  #   KICHAT_SD_URL (default http://127.0.0.1:7860), KICHAT_SD_AUTH=user:pass
+  ```
+
+  It asserts the three things the offline tests can only fake: the server names its
+  checkpoints on `/sdapi/v1/sd-models`; the sampler this client sends is echoed back in
+  `info`, which is what proves a real server recognised it instead of ignoring it; and
+  the payload carries PNG magic, so a server answering with a URL or with a `data:`
+  prefix — bytes that are not a picture — is told apart from one that answered properly.
+  A closed port and a reachable-but-empty server are both reported as *skips* rather than
+  failures: the test describes a running server, it does not insist that one exists. It
+  draws one 64×64 picture at one step, because the wire shape is what is being verified
+  and not the art.
+- `internal/chat/image_tool_test.go` — the tool's visibility contract: with no server
+  configured, `generate_image` is absent from the native tool definitions, from the
+  rendered `{{tool_list}}` line and from the text-protocol hint, and present in each of
+  the three once a provider exists. It drives a real turn and reads the request the model
+  actually received, which is the only place all three are visible together.
 - `internal/tools/image_test.go` — the whole feature in one test: defaults from
   settings, the model's arguments winning, the attachment landing on the calling
   message, the document holding base64, the filename following the payload's real
   format, and the "do not describe it" instruction. It runs against a real SQLite
-  store in a temp directory.
+  store in a temp directory. The recipe is asserted against the seed and checkpoint the
+  *server* reported rather than the ones requested; a repeat pins the recorded seed while
+  a variation drops it; both land on the message the original is on, under names that do
+  not collide; and a picture with no recipe is refused before the provider is called.
+- `internal/store/store_test.go` — the recipe round-trips, a corrupt one fails the read
+  rather than degrading to "no recipe", and an **older database gains the column**: the
+  upgrade path is built by dropping the column and rolling `user_version` back, because a
+  migration placed at the wrong index is skipped silently and breaks every installation.
 - `internal/config/config_test.go` — the feature ships off, the fields stay empty, and
   the clamps hold.
 - `image_settings_test.go` (package `main`) — the rules the rest of this document
@@ -199,12 +329,15 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage, ChatView, Set
 - `config.ImageSettings` and `main.ImageStatus` are in the generated bindings, so
   `tsc` fails if the two sides drift.
 - The **mock-bridge harness** (`tools/uiharness`) carries a `Bildgenerierung` chat
-  whose reply has a generated picture attached, and models all five new bindings. It
+  whose reply has a generated picture attached, and models every new binding. It
   proves the rendering, the caption, the save button, the Settings section with its
-  populated checkpoint and sampler pickers, and the test-connection flow — **not**
-  backend behaviour, which lives in the Go tests. Its fixture picture is an SVG data
-  URL rather than a PNG because a fixture only has to be visible at size; the bytes the
-    real binding returns are asserted in Go.
+  populated checkpoint and sampler pickers, the test-connection flow, and both redraw
+  controls — including which of the two passes `freshSeed: true`, which is the one thing
+  a swap would hide. Its reply carries a **second, uploaded** picture beside the generated
+  one, because a fixture whose only picture has a recipe never renders the state where the
+  redraw controls are absent. It proves no backend behaviour, which lives in the Go tests.
+  Its fixture picture is an SVG data URL rather than a PNG because a fixture only has to be
+  visible at size; the bytes the real binding returns are asserted in Go.
 
 ## 9. What it does not do yet
 

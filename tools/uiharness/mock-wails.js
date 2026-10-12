@@ -881,6 +881,39 @@ Verfügbare Tools: {{tool_list}}`,
     placement: 'inline',
     documentId: 'doc-image-1',
     createdAt: now(),
+    // The recipe the picture was drawn with, which is what puts the redraw controls on
+    // it. A fixture without one is the uploaded-photo case, and those two states have to
+    // be reachable in the harness or the condition around the buttons is never seen to
+    // be false.
+    generation: {
+      prompt: 'a red fox in deep snow, golden hour, photorealistic',
+      negativePrompt: 'blurry, text',
+      width: 768,
+      height: 512,
+      steps: 25,
+      sampler: 'Euler a',
+      seed: 4242,
+      model: 'sdxl.safetensors [a1b2c3]',
+    },
+  }
+
+  // A picture the user *attached* rather than one KiChat drew: no recipe, so the redraw
+  // controls must not appear on it. Both states belong in the fixture — the condition
+  // around those buttons is only ever seen to be true if the only picture has a recipe.
+  const UPLOADED_ATTACHMENT = {
+    id: 'att-photo-1',
+    chatId: 'chat-image',
+    messageId: 'msg-image-1',
+    kind: 'image',
+    filename: 'urlaub-foto.png',
+    mime: 'image/png',
+    sizeBytes: 320_000,
+    sha256: '',
+    pages: 0,
+    tokenEstimate: 1024,
+    placement: 'inline',
+    documentId: 'doc-photo-1',
+    createdAt: now(),
   }
 
   const messages = new Map()
@@ -891,7 +924,7 @@ Verfügbare Tools: {{tool_list}}`,
     message('chat-image', 'assistant', 'Ich habe das Bild erzeugt. Du kannst es über die Schaltfläche unter dem Bild speichern.', {
       id: 'msg-image-1',
       seq: 1,
-      attachments: [IMAGE_ATTACHMENT],
+      attachments: [IMAGE_ATTACHMENT, UPLOADED_ATTACHMENT],
       promptTokens: 1860,
       completionTokens: 96,
       tokensPerSecond: 28.4,
@@ -2013,7 +2046,7 @@ Verfügbare Tools: {{tool_list}}`,
       }),
     TestImageBackend: () => Promise.resolve('1 Bild(er) erzeugt (Stable Diffusion WebUI)'),
     GetAttachmentImage: (id) => {
-      if (id !== IMAGE_ATTACHMENT.id) {
+      if (id !== IMAGE_ATTACHMENT.id && id !== UPLOADED_ATTACHMENT.id) {
         return Promise.reject(new Error('kein gespeichertes Bild'))
       }
       return Promise.resolve(IMAGE_DATA_URL)
@@ -2026,6 +2059,18 @@ Verfügbare Tools: {{tool_list}}`,
       return Promise.resolve('/home/user/Pictures/a-red-fox-in-deep-snow-1.png')
     },
     PickSaveFolder: () => Promise.resolve('/home/user/Pictures'),
+    // The redraw path. Recorded rather than dropped so the flag is observable: the point
+    // of the second argument is "another take on the same prompt", and a harness that
+    // could not show which one was asked for would not catch the two being wired
+    // backwards. It resolves a filename that differs by seed, which is what the toast
+    // prints and what has to be distinguishable from the original at a glance.
+    RegenerateImage: (id, freshSeed) => {
+      console.log('[harness] RegenerateImage', id, 'freshSeed=' + freshSeed)
+      const filename = freshSeed
+        ? 'a-red-fox-in-deep-snow-1-s9931.png'
+        : 'a-red-fox-in-deep-snow-1-s4242.png'
+      return Promise.resolve({ ...IMAGE_ATTACHMENT, id: nextId('att'), filename })
+    },
     AddAttachment: (input) => Promise.resolve({ id: nextId('att'), chatId: input.chatId, filename: 'harness.txt', kind: 'text', messageId: '', placement: 'inline', sizeBytes: 12, sha256: '', pages: 1, tokenEstimate: 12, documentId: '', createdAt: now() }),
     RemoveAttachment: () => Promise.resolve(null),
     SetAttachmentPlacement: () => Promise.resolve(null),

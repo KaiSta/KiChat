@@ -80,6 +80,40 @@ type Attachment struct {
 	DocumentID    string    `json:"documentId"`
 	Warning       string    `json:"warning,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
+
+	// Generation is the recipe a picture this app drew was made with, so it can be
+	// drawn again. It is nil for a file the user attached: a photograph has no
+	// prompt, and offering to redraw one would be offering to draw something
+	// unrelated to it.
+	Generation *GenerationRecipe `json:"generation,omitempty"`
+}
+
+// GenerationRecipe is what one text-to-image generation was made with, recorded so the
+// picture can be drawn again from its own fields rather than from a prose description
+// of them.
+//
+// It stores what the server *actually used*, not what was asked for, wherever the two
+// differ. A request that left the seed open was given one by the server, and only that
+// number reproduces the picture — the asked-for value was "none". A size or a step count
+// the server filled in from its own settings stays 0 here, exactly as it does on the way
+// in, so a redraw leaves that choice open again instead of freezing a number the user
+// never picked.
+//
+// Seed 0 means the server reported none. Zero is not a usable seed in practice, which is
+// why images.Result spells "not reported" the same way, and why a redraw of such a
+// picture lets the server choose again.
+type GenerationRecipe struct {
+	Prompt         string `json:"prompt"`
+	NegativePrompt string `json:"negativePrompt,omitempty"`
+	Width          int    `json:"width,omitempty"`
+	Height         int    `json:"height,omitempty"`
+	Steps          int    `json:"steps,omitempty"`
+	Sampler        string `json:"sampler,omitempty"`
+	Seed           int64  `json:"seed,omitempty"`
+	// Model is the checkpoint the server reported using, falling back to the one that
+	// was requested. Empty is "whatever is loaded", which is what a redraw asks for
+	// again rather than naming a checkpoint the server may no longer have.
+	Model string `json:"model,omitempty"`
 }
 
 // Attachment placement modes.

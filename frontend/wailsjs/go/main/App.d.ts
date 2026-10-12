@@ -82,6 +82,8 @@ export function RedactSecrets(arg1:string):Promise<string>;
 
 export function Regenerate(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function RegenerateImage(arg1:string,arg2:boolean):Promise<store.Attachment>;
+
 export function RemoveAttachment(arg1:string):Promise<void>;
 
 export function RemoveLlamaBuild(arg1:string):Promise<void>;

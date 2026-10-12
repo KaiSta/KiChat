@@ -14,7 +14,7 @@ import {
 import { useStore } from '../store'
 import { asLang, LANGS } from '../lib/i18n'
 
-type Tab = 'general' | 'backends' | 'prompt' | 'research' | 'context'
+type Tab = 'general' | 'backends' | 'images' | 'prompt' | 'research' | 'context'
 
 /**
  * Translate a key, falling back to text the backend supplied. translate() echoes
@@ -68,6 +68,9 @@ export function Settings() {
   const tabs: { id: Tab; label: string }[] = [
     { id: 'general', label: t('settings.general') },
     { id: 'backends', label: t('settings.backends') },
+    // Next to the chat backends, because it is the other server a user has to run
+    // themselves — but a tab of its own, because the setup does not fit beside one.
+    { id: 'images', label: t('settings.images') },
     { id: 'prompt', label: t('settings.prompt') },
     { id: 'research', label: t('settings.research') },
     { id: 'context', label: t('settings.compaction') },
@@ -98,6 +101,7 @@ export function Settings() {
         <div className="mx-auto max-w-3xl space-y-4">
           {tab === 'general' && <GeneralTab draft={draft} patch={patch} />}
           {tab === 'backends' && <BackendsTab draft={draft} patch={patch} onApply={save} />}
+          {tab === 'images' && <ImagesTab draft={draft} patch={patch} onApply={save} />}
           {tab === 'prompt' && <PromptTab draft={draft} patch={patch} />}
           {tab === 'research' && <ResearchTab draft={draft} patch={patch} />}
           {tab === 'context' && <ContextTab draft={draft} patch={patch} />}
@@ -1489,8 +1493,6 @@ function BackendsTab({
         </div>
       </Section>
 
-      <ImageSection draft={draft} patch={patch} onApply={onApply} />
-
       <Section title={t('settings.secrets')} hint={secrets?.warning}>
         <div className="text-[13px]">
           {t('settings.secrets')}: <strong>{secrets?.backend ?? '…'}</strong>
@@ -1506,17 +1508,20 @@ function BackendsTab({
 }
 
 /**
- * The picture server.
+ * The picture server, on a tab of its own.
  *
- * It sits beside the chat backends because that is where a user looks for a
- * server, but it is a section of its own because almost nothing about a chat
- * backend applies to it: no context window, no per-turn model to pick, and a
- * request that takes tens of seconds and answers with a picture instead of a
- * stream. The one hard rule, stated under the fields, is that an empty box leaves
- * the setting to the server — a WebUI user has already chosen a sampler, a step
- * count and a size, and filling those in with guesses would replace their setup.
+ * It began as a section of the backends tab and moved out once the setup outgrew a
+ * row beside a chat backend. Three things have no counterpart there: the server has
+ * to be started with its API exposed and a checkpoint installed, the generation
+ * fields each need a sentence about what leaving them empty means, and the
+ * connection test spends real GPU seconds drawing a picture. None of that applies to
+ * a chat backend — there is no context window to show, no per-turn model to pick,
+ * and a request answers with a picture instead of a stream. The one hard rule,
+ * stated under the fields, is that an empty box leaves the setting to the server: a
+ * WebUI user has already chosen a sampler, a step count and a size, and filling
+ * those in with guesses would replace their setup.
  */
-function ImageSection({
+function ImagesTab({
   draft,
   patch,
   onApply,

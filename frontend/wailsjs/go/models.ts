@@ -1104,6 +1104,32 @@ export namespace runtime {
 
 export namespace store {
 	
+	export class GenerationRecipe {
+	    prompt: string;
+	    negativePrompt?: string;
+	    width?: number;
+	    height?: number;
+	    steps?: number;
+	    sampler?: string;
+	    seed?: number;
+	    model?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GenerationRecipe(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.prompt = source["prompt"];
+	        this.negativePrompt = source["negativePrompt"];
+	        this.width = source["width"];
+	        this.height = source["height"];
+	        this.steps = source["steps"];
+	        this.sampler = source["sampler"];
+	        this.seed = source["seed"];
+	        this.model = source["model"];
+	    }
+	}
 	export class Attachment {
 	    id: string;
 	    chatId: string;
@@ -1120,6 +1146,7 @@ export namespace store {
 	    warning?: string;
 	    // Go type: time
 	    createdAt: any;
+	    generation?: GenerationRecipe;
 	
 	    static createFrom(source: any = {}) {
 	        return new Attachment(source);
@@ -1141,6 +1168,7 @@ export namespace store {
 	        this.documentId = source["documentId"];
 	        this.warning = source["warning"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
+	        this.generation = this.convertValues(source["generation"], GenerationRecipe);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1351,6 +1379,7 @@ export namespace store {
 		    return a;
 		}
 	}
+	
 	export class ToolCallRecord {
 	    id: string;
 	    messageId: string;

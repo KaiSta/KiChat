@@ -387,14 +387,33 @@ func (s *Store) CreateAttachment(a Attachment) error {
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = time.Now()
 	}
-	_, err := s.db.Exec(`
+	generation, err := marshalRecipe(a.Generation)
+	if err != nil {
+		return fmt.Errorf("Rezept von %s ablegen: %w", a.Filename, err)
+	}
+	_, err = s.db.Exec(`
 INSERT INTO attachments (id,chat_id,message_id,kind,filename,mime,size_bytes,
-  sha256,pages,token_estimate,placement,document_id,warning,created_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  sha256,pages,token_estimate,placement,document_id,warning,created_at,generation_json)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.ChatID, a.MessageID, a.Kind, a.Filename, a.Mime, a.SizeBytes,
 		a.SHA256, a.Pages, a.TokenEstimate, a.Placement, a.DocumentID,
-		a.Warning, millis(a.CreatedAt))
+		a.Warning, millis(a.CreatedAt), generation)
 	return err
+}
+
+// marshalRecipe encodes an optional generation recipe. An empty string is "there is
+// none", which is what a nil recipe means: an attached file has no prompt, and a row
+// that says nothing is better than one carrying an empty object the reader has to
+// interpret.
+func marshalRecipe(recipe *GenerationRecipe) (string, error) {
+	if recipe == nil {
+		return "", nil
+	}
+	raw, err := json.Marshal(recipe)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 // UpdateAttachment persists mutable attachment fields.
@@ -468,18 +487,31 @@ func (s *Store) PruneExpiredCaches() (int64, error) {
 }
 
 const attachmentColumns = `id,chat_id,message_id,kind,filename,mime,size_bytes,
-  sha256,pages,token_estimate,placement,document_id,warning,created_at`
+  sha256,pages,token_estimate,placement,document_id,warning,created_at,generation_json`
 
 func scanAttachment(row interface{ Scan(...any) error }) (Attachment, error) {
 	var a Attachment
 	var created int64
+	var generation string
 	err := row.Scan(&a.ID, &a.ChatID, &a.MessageID, &a.Kind, &a.Filename, &a.Mime,
 		&a.SizeBytes, &a.SHA256, &a.Pages, &a.TokenEstimate, &a.Placement,
-		&a.DocumentID, &a.Warning, &created)
+		&a.DocumentID, &a.Warning, &created, &generation)
 	if err != nil {
 		return Attachment{}, err
 	}
 	a.CreatedAt = fromMillis(created)
+	// A recipe that will not parse fails the read rather than being dropped. It is
+	// JSON this app wrote, so a value that does not decode means something else edited
+	// the row — and quietly treating that as "no recipe" would make the picture
+	// silently un-repeatable, which is the one thing this column exists to prevent.
+	// config.Load treats its own stored JSON the same way.
+	if strings.TrimSpace(generation) != "" {
+		var recipe GenerationRecipe
+		if err := json.Unmarshal([]byte(generation), &recipe); err != nil {
+			return Attachment{}, fmt.Errorf("Rezept von Anhang %s lesen: %w", a.ID, err)
+		}
+		a.Generation = &recipe
+	}
 	return a, nil
 }
 

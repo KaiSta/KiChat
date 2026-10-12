@@ -95,9 +95,12 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 		return "", err
 	}
 
+	// The recipe is recorded beside the picture, so "draw that again" needs no model turn
+	// and no parsing of the prose summary below.
+	recipe := recipeFrom(req, result)
 	messageID := callingMessage(ctx)
 	for i, img := range result.Images {
-		if _, err := s.storeGeneratedImage(chatID, messageID, imageFilename(prompt, i, img.Ext), img); err != nil {
+		if _, err := s.storeGeneratedImage(chatID, messageID, imageFilename(prompt, i, img.Ext), img, &recipe); err != nil {
 			// The picture is already drawn and paid for, so an error here loses it
 			// entirely. Reporting the failure is still right: silently returning a
 			// cheerful result would leave the user with a tool card claiming a
@@ -162,7 +165,7 @@ func (s *Service) imageSettings() config.ImageSettings {
 // image attachment back into an image part of the request, so a picture KiChat
 // generated can be handed to a vision model on a later turn without a single line
 // of new plumbing — and the frontend already renders a message's attachments.
-func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img images.Image) (store.Attachment, error) {
+func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img images.Image, recipe *store.GenerationRecipe) (store.Attachment, error) {
 	if s.Store == nil {
 		return store.Attachment{}, fmt.Errorf("kein Speicher verfügbar")
 	}
@@ -181,6 +184,9 @@ func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img im
 		TokenEstimate: tokens,
 		Placement:     store.PlacementInline,
 		CreatedAt:     now,
+		// Nil for a picture with no recorded recipe, which is what keeps an uploaded
+		// photo from offering to redraw itself.
+		Generation: recipe,
 	}
 	document := store.Document{
 		ID:           uuid.NewString(),
@@ -224,6 +230,148 @@ func seedFromValue(value any) *int64 {
 	return nil
 }
 
+// recipeFrom records what a generation was made with, so the picture can be drawn again
+// from its own fields rather than from the prose summary the model reads.
+//
+// The effective value wins wherever the request and the answer disagree. A request that
+// left the seed open was given one by the server, and only that number reproduces the
+// picture — the requested value was "none". The checkpoint follows the same rule, because
+// the server knows which one it really loaded, and a recipe that named the wrong one would
+// draw something else while claiming to repeat.
+func recipeFrom(req images.Request, result images.Result) store.GenerationRecipe {
+	recipe := store.GenerationRecipe{
+		Prompt:         req.Prompt,
+		NegativePrompt: req.NegativePrompt,
+		Width:          req.Width,
+		Height:         req.Height,
+		Steps:          req.Steps,
+		Sampler:        req.Sampler,
+		Model:          firstNonEmptyString(result.Model, req.Model),
+	}
+	switch {
+	case result.Seed != 0:
+		recipe.Seed = result.Seed
+	case req.Seed != nil:
+		recipe.Seed = *req.Seed
+	}
+	return recipe
+}
+
+// requestFromRecipe turns a stored recipe back into a request.
+//
+// freshSeed drops the seed so the server picks a new one, which is the difference between
+// reproducing a picture and asking for another take on the same prompt. A recipe that
+// never learned a seed (the server did not report one) behaves the same way, because there
+// is no number to pin it to.
+func requestFromRecipe(recipe store.GenerationRecipe, freshSeed bool) images.Request {
+	req := images.Request{
+		Prompt:         recipe.Prompt,
+		NegativePrompt: recipe.NegativePrompt,
+		Width:          recipe.Width,
+		Height:         recipe.Height,
+		Steps:          recipe.Steps,
+		Sampler:        recipe.Sampler,
+		Model:          recipe.Model,
+	}
+	if !freshSeed && recipe.Seed != 0 {
+		seed := recipe.Seed
+		req.Seed = &seed
+	}
+	return req
+}
+
+// Regenerate draws a picture again from its own stored recipe and files the result beside
+// the original — the same chat and the same message, so it appears next to the picture it
+// came from rather than somewhere the user has to go looking for it.
+//
+// This is the one path into image generation that does not go through a chat model. The
+// recipe is data rather than a request in words, so nothing has to be asked of the model
+// to use it, and the user gets the picture without paying for a turn. What it costs is
+// real GPU time, which is why it is a control the user presses and not something the app
+// does on its own.
+func (s *Service) Regenerate(ctx context.Context, attachmentID string, freshSeed bool) (store.Attachment, error) {
+	if s.Images == nil {
+		return store.Attachment{}, images.ErrNotConfigured
+	}
+	if s.Store == nil {
+		return store.Attachment{}, fmt.Errorf("kein Speicher verfügbar")
+	}
+	source, err := s.Store.GetAttachment(attachmentID)
+	if err != nil {
+		return store.Attachment{}, err
+	}
+	if source.Generation == nil {
+		// An uploaded file, a scraped page, or a picture drawn before the recipe was
+		// recorded. Naming the reason beats drawing something unrelated to it.
+		return store.Attachment{}, fmt.Errorf(
+			"%s hat kein Rezept: nur ein von KiChat erzeugtes Bild lässt sich erneut zeichnen",
+			source.Filename)
+	}
+	req := requestFromRecipe(*source.Generation, freshSeed)
+
+	result, err := s.Images.Generate(ctx, req)
+	if err != nil {
+		return store.Attachment{}, err
+	}
+	if len(result.Images) == 0 {
+		return store.Attachment{}, images.ErrNoModel
+	}
+
+	recipe := recipeFrom(req, result)
+	// The names this chat already shows, so a second redraw of the same seed does not land
+	// under the name the first one took.
+	used, err := s.usedFilenames(source.ChatID)
+	if err != nil {
+		return store.Attachment{}, err
+	}
+	var first store.Attachment
+	for i, img := range result.Images {
+		name := uniqueName(used, redrawFilename(req.Prompt, recipe.Seed, img.Ext, i))
+		attachment, err := s.storeGeneratedImage(source.ChatID, source.MessageID, name, img, &recipe)
+		if err != nil {
+			return store.Attachment{}, err
+		}
+		used[name] = true
+		if i == 0 {
+			first = attachment
+		}
+	}
+	return first, nil
+}
+
+// usedFilenames is the set of names a chat's pictures already carry.
+func (s *Service) usedFilenames(chatID string) (map[string]bool, error) {
+	attachments, err := s.Store.ListAttachments(chatID)
+	if err != nil {
+		return nil, err
+	}
+	used := make(map[string]bool, len(attachments))
+	for _, a := range attachments {
+		used[a.Filename] = true
+	}
+	return used, nil
+}
+
+// uniqueName returns name, or the first numbered variant of it the chat does not already
+// use. Two pictures under one name are two pictures a user cannot tell apart — in the
+// caption under each one and in the name the save dialog offers — and redrawing the same
+// recipe twice is an ordinary thing to do, not an edge case.
+func uniqueName(used map[string]bool, name string) string {
+	if !used[name] {
+		return name
+	}
+	base, ext := name, ""
+	if dot := strings.LastIndex(name, "."); dot >= 0 {
+		base, ext = name[:dot], name[dot:]
+	}
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s-%d%s", base, n, ext)
+		if !used[candidate] {
+			return candidate
+		}
+	}
+}
+
 // imageFilename builds a name that says what the picture is. A generated file is
 // saved by the user under this name, so "a-red-fox-in-snow-1.png" is worth ten
 // lines of slugging where "image-1.png" would leave them guessing which of six
@@ -247,6 +395,28 @@ func imageFilename(prompt string, index int, ext string) string {
 		slug = strings.Trim(string(runes[:48]), "-")
 	}
 	return fmt.Sprintf("%s-%d.%s", slug, index+1, ext)
+}
+
+// redrawFilename names a redrawn picture so it is distinguishable from the one it redrew
+// and from its own siblings.
+//
+// The plain name would repeat the first generation's exactly — same slug, same index — and
+// two files under one name make both the caption under the picture and the save dialog
+// ambiguous. The seed goes in because it is the number that reproduces a picture and the
+// one thing that differs between a redraw and what it redrew; the index keeps several
+// pictures from one redraw apart.
+func redrawFilename(prompt string, seed int64, ext string, index int) string {
+	name := imageFilename(prompt, index, ext)
+	if seed == 0 {
+		// No seed was reported, so there is no number to tell them apart by. It is still a
+		// separate attachment with its own id.
+		return name
+	}
+	dot := strings.LastIndex(name, ".")
+	if dot < 0 {
+		return name
+	}
+	return name[:dot] + fmt.Sprintf("-s%d", seed) + name[dot:]
 }
 
 // slugify keeps letters and digits and collapses everything else into single

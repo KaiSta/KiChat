@@ -342,3 +342,200 @@ func TestSeedFromValue(t *testing.T) {
 		t.Errorf("seedFromValue(1234) = %v, want 1234", got)
 	}
 }
+
+// firstAttachment returns the chat's only picture, failing the test if it is not alone.
+func firstAttachment(t *testing.T, st *store.Store, chatID string) store.Attachment {
+	t.Helper()
+	attachments, err := st.ListAttachments(chatID)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(attachments))
+	}
+	return attachments[0]
+}
+
+// TestGenerateImageRecordsWhatTheServerActuallyUsed is what makes a redraw possible at all,
+// and it is asserted against the values the *server* reported rather than the ones the
+// request carried.
+//
+// A request that leaves the seed open is given one by the server, and only that number
+// reproduces the picture — "no seed" is not a recipe. The checkpoint is the same story: the
+// server knows which one it loaded, and a recipe naming the requested one instead would
+// draw something else while claiming to repeat the picture.
+func TestGenerateImageRecordsWhatTheServerActuallyUsed(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{
+		Width: 768, Height: 512, Steps: 25, Sampler: "Euler a", Model: "requested.safetensors",
+	})
+
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage,
+		`{"prompt":"a red fox in deep snow","negative_prompt":"blurry"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	recipe := firstAttachment(t, st, chatID).Generation
+	if recipe == nil {
+		t.Fatal("the picture was stored without a recipe, so it can never be drawn again")
+	}
+	if recipe.Prompt != "a red fox in deep snow" || recipe.NegativePrompt != "blurry" {
+		t.Errorf("prompt fields = %q / %q, want what was drawn", recipe.Prompt, recipe.NegativePrompt)
+	}
+	if recipe.Width != 768 || recipe.Height != 512 || recipe.Steps != 25 || recipe.Sampler != "Euler a" {
+		t.Errorf("the configured settings are missing from the recipe: %+v", recipe)
+	}
+	// onePicture reports seed 4242 and the checkpoint sdxl.safetensors; the request carried
+	// no seed and named a different checkpoint.
+	if recipe.Seed != 4242 {
+		t.Errorf("seed = %d, want the one the server reported", recipe.Seed)
+	}
+	if recipe.Model != "sdxl.safetensors" {
+		t.Errorf("model = %q, want the checkpoint the server reported using", recipe.Model)
+	}
+}
+
+// TestRegenerateCoversBothHalvesOfTheControl pins the one flag that separates the two
+// buttons. They are the same call, so a swap would be invisible to any test that only
+// exercised one of them: a repeat has to pin the recorded seed, and a variation has to drop
+// it and let the server roll a new one while keeping the prompt.
+func TestRegenerateCoversBothHalvesOfTheControl(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage,
+		`{"prompt":"a red fox","width":640,"steps":20}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	original := firstAttachment(t, st, chatID)
+
+	// A repeat: the stored recipe, seed included.
+	if _, err := service.Regenerate(context.Background(), original.ID, false); err != nil {
+		t.Fatalf("Regenerate(repeat): %v", err)
+	}
+	if provider.got.Seed == nil || *provider.got.Seed != 4242 {
+		t.Errorf("a repeat must pin the recorded seed, got %v", provider.got.Seed)
+	}
+	if provider.got.Prompt != "a red fox" || provider.got.Width != 640 || provider.got.Steps != 20 {
+		t.Errorf("a repeat must reuse the recorded recipe, got %+v", provider.got)
+	}
+
+	// A variation: the same prompt and no seed, which is what lets the server pick a new
+	// one. This server reports 4242 again, so the two redraws collide on seed — which is
+	// exactly the collision the names have to survive.
+	if _, err := service.Regenerate(context.Background(), original.ID, true); err != nil {
+		t.Fatalf("Regenerate(variation): %v", err)
+	}
+	if provider.got.Seed != nil {
+		t.Errorf("a variation must let the server choose, got seed %d", *provider.got.Seed)
+	}
+	if provider.got.Prompt != "a red fox" {
+		t.Errorf("a variation must keep the prompt, got %q", provider.got.Prompt)
+	}
+
+	attachments, err := st.ListAttachments(chatID)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(attachments) != 3 {
+		t.Fatalf("attachments = %d, want the original plus two redraws", len(attachments))
+	}
+	names := map[string]bool{}
+	for _, a := range attachments {
+		// An attachment on no message renders nowhere, which would make the redraw cost GPU
+		// seconds and show the user nothing.
+		if a.MessageID != "msg-1" {
+			t.Errorf("%s is on message %q, want the message the original is on", a.Filename, a.MessageID)
+		}
+		// A redraw keeps its own recipe, so it can itself be redrawn.
+		if a.Generation == nil {
+			t.Errorf("%s was stored without a recipe", a.Filename)
+		}
+		if names[a.Filename] {
+			t.Errorf("two pictures share the name %q, so they cannot be told apart", a.Filename)
+		}
+		names[a.Filename] = true
+	}
+	if !names["a-red-fox-1-s4242.png"] {
+		t.Errorf("no redraw carries the seed in its name: %v", names)
+	}
+}
+
+// TestRegenerateRefusesAPictureWithoutARecipe covers the pictures the control must not touch.
+// An uploaded photo, a scraped page and a picture drawn before recipes were recorded all
+// have no prompt of their own, and redrawing one would draw something unrelated to it.
+func TestRegenerateRefusesAPictureWithoutARecipe(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+	if err := st.CreateAttachment(store.Attachment{
+		ID: "uploaded", ChatID: chatID, MessageID: "msg-1", Kind: "image",
+		Filename: "holiday.png", Mime: "image/png", TokenEstimate: 1024,
+		Placement: store.PlacementInline, DocumentID: "doc-1", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateAttachment: %v", err)
+	}
+
+	_, err := service.Regenerate(context.Background(), "uploaded", true)
+	if err == nil {
+		t.Fatal("an uploaded picture was redrawn")
+	}
+	if !strings.Contains(err.Error(), "holiday.png") {
+		t.Errorf("the refusal does not name the picture it is about: %v", err)
+	}
+	if provider.calls != 0 {
+		t.Errorf("a provider call was made for a picture with no recipe: %d", provider.calls)
+	}
+}
+
+// TestRegenerateNeedsAConfiguredServer keeps the off state honest on the new path too: the
+// feature being switched off has to refuse before it reads anything.
+func TestRegenerateNeedsAConfiguredServer(t *testing.T) {
+	service, _, _ := newImageService(t, nil, config.ImageSettings{})
+	if _, err := service.Regenerate(context.Background(), "any", true); !errors.Is(err, images.ErrNotConfigured) {
+		t.Fatalf("err = %v, want ErrNotConfigured", err)
+	}
+}
+
+// TestRedrawFilenameTellsTheRedrawsApart is the visible half of the collision: the name is
+// what the caption and the save dialog both show.
+func TestRedrawFilenameTellsTheRedrawsApart(t *testing.T) {
+	// The seed goes in, because it is the number that reproduces the picture and the one
+	// thing that differs from the original.
+	if got := redrawFilename("a red fox", 4242, "png", 0); got != "a-red-fox-1-s4242.png" {
+		t.Errorf("redrawFilename = %q", got)
+	}
+	// The index still separates several pictures from one call.
+	if got := redrawFilename("a red fox", 4242, "png", 1); got != "a-red-fox-2-s4242.png" {
+		t.Errorf("second picture of a redraw = %q", got)
+	}
+	// A server that reported no seed leaves no number to add, and the plain name stands.
+	if got := redrawFilename("a red fox", 0, "png", 0); got != "a-red-fox-1.png" {
+		t.Errorf("a seedless redraw = %q", got)
+	}
+	// The extension follows the payload here too, so a JPEG server does not produce a JPEG
+	// named .png.
+	if got := redrawFilename("a red fox", 7, "jpg", 0); got != "a-red-fox-1-s7.jpg" {
+		t.Errorf("a JPEG redraw = %q", got)
+	}
+}
+
+// TestUniqueNameBumpsACollision is the second line of defence, for the case the seed alone
+// cannot solve: the same recipe drawn twice with the same seed reports the same number.
+func TestUniqueNameBumpsACollision(t *testing.T) {
+	used := map[string]bool{"a-fox-1-s4242.png": true}
+	if got := uniqueName(used, "a-fox-1.png"); got != "a-fox-1.png" {
+		t.Errorf("a free name was changed: %q", got)
+	}
+	if got := uniqueName(used, "a-fox-1-s4242.png"); got != "a-fox-1-s4242-2.png" {
+		t.Errorf("a taken name = %q, want a numbered variant", got)
+	}
+	used["a-fox-1-s4242-2.png"] = true
+	if got := uniqueName(used, "a-fox-1-s4242.png"); got != "a-fox-1-s4242-3.png" {
+		t.Errorf("a name taken twice = %q", got)
+	}
+	// The extension stays where it belongs, including one the slug would not produce.
+	if got := uniqueName(map[string]bool{"x.webp": true}, "x.webp"); got != "x-2.webp" {
+		t.Errorf("a webp collision = %q", got)
+	}
+}

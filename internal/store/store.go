@@ -242,6 +242,14 @@ CREATE TABLE IF NOT EXISTS counters (
   period TEXT NOT NULL DEFAULT ''
 );
 `,
+	// 4: the recipe behind a generated picture, so it can be drawn again.
+	//
+	// It is its own migration and it is appended rather than folded into migration 2,
+	// because of how the runner works: it resumes at the version this database is
+	// already at, so an installation created before this feature runs this entry and
+	// nothing earlier. Adding the column to migration 2's CREATE TABLE would leave
+	// every existing database without it, and every attachment read would then fail.
+	`ALTER TABLE attachments ADD COLUMN generation_json TEXT NOT NULL DEFAULT ''`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

@@ -150,6 +150,10 @@ export function Regenerate(arg1, arg2, arg3) {
   return window['go']['main']['App']['Regenerate'](arg1, arg2, arg3);
 }
 
+export function RegenerateImage(arg1, arg2) {
+  return window['go']['main']['App']['RegenerateImage'](arg1, arg2);
+}
+
 export function RemoveAttachment(arg1) {
   return window['go']['main']['App']['RemoveAttachment'](arg1);
 }
