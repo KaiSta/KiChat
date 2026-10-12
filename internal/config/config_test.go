@@ -752,3 +752,69 @@ func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 		t.Errorf("offload = %q, want an unknown value replaced by %q", mm.Offload, OffloadAuto)
 	}
 }
+
+// TestDefaultLeavesImageGenerationOff pins the decision the whole feature rests
+// on: a fresh install contacts no image server. A WebUI is a several-gigabyte
+// install of its own, so probing an address for a feature nobody has asked for
+// would report a failure before the user has done anything — the same reason the
+// metered chat backends ship disabled.
+func TestDefaultLeavesImageGenerationOff(t *testing.T) {
+	s := Default()
+	if s.Images.Enabled {
+		t.Error("image generation is enabled on a fresh install")
+	}
+	if s.Images.BaseURL != DefaultImageBaseURL {
+		t.Errorf("baseUrl = %q, want the offered default %q", s.Images.BaseURL, DefaultImageBaseURL)
+	}
+	// Every generation field stays empty, and that is load-bearing rather than
+	// untidy: an empty value is omitted from the request, which is what leaves a
+	// sampler, a step count, a size and a negative prompt configured in the user's
+	// own WebUI in force instead of being replaced by this app's guesses.
+	if s.Images.Width != 0 || s.Images.Height != 0 || s.Images.Steps != 0 ||
+		s.Images.Sampler != "" || s.Images.Model != "" || s.Images.NegativePrompt != "" {
+		t.Errorf("a generation field carries a value the server should have chosen: %+v", s.Images)
+	}
+}
+
+// TestNormaliseClampsImageFields covers the bound a hand-edited blob — or a model
+// passing a number it invented — runs into. A WebUI does not refuse a
+// 20000-pixel request, it attempts it: minutes of work and tens of gigabytes.
+func TestNormaliseClampsImageFields(t *testing.T) {
+	cases := []struct {
+		name          string
+		width, height int
+		steps         int
+		wantW, wantH  int
+		wantSteps     int
+	}{
+		{"unset stays unset", 0, 0, 0, 0, 0, 0},
+		{"a real size survives", 768, 512, 25, 768, 512, 25},
+		{"below the minimum is raised", 16, 16, 0, MinImageDimension, MinImageDimension, 0},
+		{"above the maximum is capped", 99999, 4096, 9999, MaxImageDimension, MaxImageDimension, MaxImageSteps},
+		{"a negative size is 'server default', not 'invalid'", -10, -10, -5, 0, 0, 0},
+	}
+	for _, tc := range cases {
+		s := Default()
+		s.Images.Width, s.Images.Height, s.Images.Steps = tc.width, tc.height, tc.steps
+		s.normalise()
+		if s.Images.Width != tc.wantW || s.Images.Height != tc.wantH {
+			t.Errorf("%s: %dx%d normalised to %dx%d, want %dx%d",
+				tc.name, tc.width, tc.height, s.Images.Width, s.Images.Height, tc.wantW, tc.wantH)
+		}
+		if s.Images.Steps != tc.wantSteps {
+			t.Errorf("%s: steps %d normalised to %d, want %d",
+				tc.name, tc.steps, s.Images.Steps, tc.wantSteps)
+		}
+	}
+}
+
+// TestNormaliseRestoresTheImageAddress keeps an emptied field from hiding the
+// address the app would really use, exactly as the shipped backends do.
+func TestNormaliseRestoresTheImageAddress(t *testing.T) {
+	s := Default()
+	s.Images.BaseURL = "   "
+	s.normalise()
+	if s.Images.BaseURL != DefaultImageBaseURL {
+		t.Errorf("baseUrl = %q, want %q", s.Images.BaseURL, DefaultImageBaseURL)
+	}
+}

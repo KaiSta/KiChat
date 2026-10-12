@@ -38,6 +38,10 @@ export function GetAppInfo() {
   return window['go']['main']['App']['GetAppInfo']();
 }
 
+export function GetAttachmentImage(arg1) {
+  return window['go']['main']['App']['GetAttachmentImage'](arg1);
+}
+
 export function GetBudget(arg1, arg2, arg3) {
   return window['go']['main']['App']['GetBudget'](arg1, arg2, arg3);
 }
@@ -56,6 +60,10 @@ export function GetDocument(arg1) {
 
 export function GetHealth() {
   return window['go']['main']['App']['GetHealth']();
+}
+
+export function GetImageStatus() {
+  return window['go']['main']['App']['GetImageStatus']();
 }
 
 export function GetModelCheckStatus() {
@@ -126,6 +134,10 @@ export function PickModelFolder(arg1) {
   return window['go']['main']['App']['PickModelFolder'](arg1);
 }
 
+export function PickSaveFolder() {
+  return window['go']['main']['App']['PickSaveFolder']();
+}
+
 export function PreviewSystemPrompt(arg1) {
   return window['go']['main']['App']['PreviewSystemPrompt'](arg1);
 }
@@ -152,6 +164,10 @@ export function RemoveOldLlamaBuilds() {
 
 export function RenameChat(arg1, arg2) {
   return window['go']['main']['App']['RenameChat'](arg1, arg2);
+}
+
+export function SaveAttachmentAs(arg1) {
+  return window['go']['main']['App']['SaveAttachmentAs'](arg1);
 }
 
 export function SaveSettings(arg1) {
@@ -220,6 +236,10 @@ export function StopManagedModel(arg1) {
 
 export function TestBraveKey(arg1) {
   return window['go']['main']['App']['TestBraveKey'](arg1);
+}
+
+export function TestImageBackend() {
+  return window['go']['main']['App']['TestImageBackend']();
 }
 
 export function UnresolvedPromptVars(arg1) {

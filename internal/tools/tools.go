@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"kichat/internal/config"
+	"kichat/internal/images"
 	"kichat/internal/llm"
 	"kichat/internal/research"
 	"kichat/internal/store"
@@ -29,6 +31,16 @@ type Service struct {
 	Chain   *research.Chain
 	Scraper *research.Scraper
 	Store   *store.Store
+
+	// Images is the picture backend a generate_image call draws through. It is
+	// nil when the feature is switched off or no server is configured, which is
+	// what makes the tool disappear from the advertised list rather than fail: a
+	// tool the model can see but never use costs a round trip every time it tries.
+	Images images.Provider
+	// Settings reads the current configuration. It is a function rather than a
+	// copy so a settings save takes effect on the next tool call, the same way the
+	// engine's own Settings does — a Service outlives one settings blob.
+	Settings func() config.Settings
 
 	// ScrapeMaxTokens bounds a single scraped page.
 	ScrapeMaxTokens int
@@ -127,6 +139,51 @@ func (s *Service) Definitions() []llm.ToolDefinition {
 				"required": []string{"document"},
 			},
 		},
+		{
+			// The description carries the two things the model gets wrong most
+			// often: that the prompt should describe an image rather than ask for
+			// one, and that it cannot see what it drew.
+			Name: ToolGenerateImage,
+			Description: "Erzeugt ein Bild aus einer Beschreibung und zeigt es im Chat an. Nutze dieses " +
+				"Tool, wenn der Nutzer ein Bild, eine Illustration, eine Grafik oder ein Foto haben möchte. " +
+				"Der Prompt beschreibt das Motiv selbst, nicht die Handlung (\"a red fox in deep snow, " +
+				"golden hour, photorealistic\").",
+			Schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"prompt": map[string]any{
+						"type": "string",
+						"description": "Beschreibung des Motivs. Englisch liefert meist bessere Ergebnisse. " +
+							"Je genauer (Motiv, Stil, Licht, Perspektive), desto besser.",
+					},
+					"negative_prompt": map[string]any{
+						"type":        "string",
+						"description": "Was das Bild vermeiden soll, z. B. \"blurry, extra fingers, text\".",
+					},
+					"width": map[string]any{
+						"type":        "integer",
+						"description": "Breite in Pixeln, Vielfaches von 8 (64–2048).",
+					},
+					"height": map[string]any{
+						"type":        "integer",
+						"description": "Höhe in Pixeln, Vielfaches von 8 (64–2048).",
+					},
+					"steps": map[string]any{
+						"type":        "integer",
+						"description": "Anzahl der Sampling-Schritte (1–150). Mehr ist langsamer, nicht automatisch besser.",
+					},
+					"seed": map[string]any{
+						"type":        "integer",
+						"description": "Seed für ein reproduzierbares Bild. Weglassen für eine neue Zufallszahl.",
+					},
+					"sampler": map[string]any{
+						"type":        "string",
+						"description": "Name des Samplers, z. B. \"Euler a\". Weglassen für den Standard des Servers.",
+					},
+				},
+				"required": []string{"prompt"},
+			},
+		},
 	}
 }
 
@@ -141,6 +198,8 @@ func (s *Service) Execute(ctx context.Context, chatID, name, argsJSON string) (s
 		return s.searchDocs(chatID, argsJSON)
 	case ToolReadPages:
 		return s.readPages(chatID, argsJSON)
+	case ToolGenerateImage:
+		return s.generateImage(ctx, chatID, argsJSON)
 	default:
 		return "", fmt.Errorf("unbekanntes Tool %q", name)
 	}
@@ -460,6 +519,16 @@ const TextProtocolHint = `Wenn du ein Tool nutzen willst, gib AUSSCHLIESSLICH ei
 Verfügbare Tools: search_web ({"query": string, "freshness"?: "pd|pw|pm|py"}), ` +
 	`scrape_url ({"url": string}), search_documents ({"query": string}), ` +
 	`read_pages ({"document": string, "from": number, "to": number}).`
+
+// ImageProtocolHint describes generate_image to a model without native tool
+// calling. It is separate from TextProtocolHint rather than folded into it
+// because the tool is only offered when a picture server is configured, and a
+// hint that lists a tool the model cannot see would have it emit a text-protocol
+// call that is then answered with an error.
+const ImageProtocolHint = "Zusätzlich verfügbar: generate_image ({\"prompt\": string, " +
+	"\"negative_prompt\"?: string, \"width\"?: number, \"height\"?: number, \"steps\"?: number, " +
+	"\"seed\"?: number, \"sampler\"?: string}). Damit erzeugst du ein Bild; es erscheint direkt " +
+	"im Chat. Du siehst das Bild danach nicht — beschreibe seinen Inhalt nicht."
 
 func firstNonEmptyString(values ...string) string {
 	for _, v := range values {

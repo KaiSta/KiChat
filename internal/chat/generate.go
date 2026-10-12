@@ -78,6 +78,12 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		extraSystem := ""
 		if !in.UseNative {
 			extraSystem = tools.TextProtocolHint
+			// The image tool is only listed when a picture server is configured, so
+			// the hint that describes it travels with it rather than always being
+			// part of the text protocol.
+			if e.Tools != nil && e.Tools.Images != nil {
+				extraSystem += "\n\n" + tools.ImageProtocolHint
+			}
 		}
 		assembly, toolDefs, err := e.buildAssembly(ctx, &in.Chat,
 			in.BackendID, in.ModelID, in.Settings, in.Model, extraSystem)
@@ -247,8 +253,17 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 	e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 
 	start := time.Now()
-	output, execErr := e.executeTool(ctx, chatID, call)
+	output, execErr := e.executeTool(ctx, chatID, row.ID, call)
 	record.DurationMs = time.Since(start).Milliseconds()
+
+	// A tool that produced a picture filed it as an attachment of the message
+	// that asked for it, and the frontend renders a message's attachments — so it
+	// has to be told they changed. Emitting only on success is deliberate: a call
+	// that failed wrote nothing, and a refresh that finds nothing new is a repaint
+	// for no reason.
+	if execErr == nil && call.Name == tools.ToolGenerateImage {
+		e.emit(events.Attachments, map[string]any{"chatId": chatID})
+	}
 
 	if execErr != nil {
 		record.Status = store.ToolError
@@ -302,11 +317,16 @@ func (b *toolOutputBudget) take(output string) string {
 	return cut
 }
 
-func (e *Engine) executeTool(ctx context.Context, chatID string, call llm.ToolCall) (string, error) {
+// executeTool runs one tool call. The requesting message id travels with the
+// call in the context, because that is what lets a tool which creates an
+// attachment — generate_image is the only one — link it to the turn that asked
+// for it. A field on the shared Service would be wrong: two chats can run turns
+// at once, and the tool service is one value for the whole app.
+func (e *Engine) executeTool(ctx context.Context, chatID, messageID string, call llm.ToolCall) (string, error) {
 	if e.Tools == nil {
 		return "", fmt.Errorf("keine Tools verfügbar")
 	}
-	return e.Tools.Execute(ctx, chatID, call.Name, call.Arguments)
+	return e.Tools.Execute(tools.WithCallingMessage(ctx, messageID), chatID, call.Name, call.Arguments)
 }
 
 // cancelRemainingCalls writes a cancelled tool result for every call from index

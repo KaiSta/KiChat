@@ -1322,7 +1322,10 @@ function BackendsTab({
   // Persisting is what applies a typed-in API key to the registry, so the
   // refresh control commits the draft first and then re-reads models/health.
   // The payload is optional so a row can apply a change of its own in one click.
-  onApply: (next?: config.Settings) => void
+  // It returns the save's promise so a caller that has to *ask the running app*
+  // something afterwards — the image section's connection test — can wait for the
+  // rebuild instead of racing it.
+  onApply: (next?: config.Settings) => Promise<void>
 }) {
   const t = useStore((s) => s.t)
   const health = useStore((s) => s.health)
@@ -1486,6 +1489,8 @@ function BackendsTab({
         </div>
       </Section>
 
+      <ImageSection draft={draft} patch={patch} onApply={onApply} />
+
       <Section title={t('settings.secrets')} hint={secrets?.warning}>
         <div className="text-[13px]">
           {t('settings.secrets')}: <strong>{secrets?.backend ?? '…'}</strong>
@@ -1497,6 +1502,267 @@ function BackendsTab({
 
       <ModelOverridesTab />
     </>
+  )
+}
+
+/**
+ * The picture server.
+ *
+ * It sits beside the chat backends because that is where a user looks for a
+ * server, but it is a section of its own because almost nothing about a chat
+ * backend applies to it: no context window, no per-turn model to pick, and a
+ * request that takes tens of seconds and answers with a picture instead of a
+ * stream. The one hard rule, stated under the fields, is that an empty box leaves
+ * the setting to the server — a WebUI user has already chosen a sampler, a step
+ * count and a size, and filling those in with guesses would replace their setup.
+ */
+function ImageSection({
+  draft,
+  patch,
+  onApply,
+}: {
+  draft: config.Settings
+  patch: (c: Partial<config.Settings>) => void
+  onApply: (next?: config.Settings) => Promise<void>
+}) {
+  const t = useStore((s) => s.t)
+  const [status, setStatus] = useState<main.ImageStatus | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const images = draft.images ?? ({} as config.ImageSettings)
+
+  const update = (changes: Partial<config.ImageSettings>) =>
+    patch({ images: { ...images, ...changes } as config.ImageSettings })
+
+  // Read once on mount. The probe is a request to a server the user may not be
+  // running, so re-asking on every keystroke in the draft would hammer a port that
+  // is probably closed; the test button is what re-reads it deliberately. The
+  // effect is written out rather than shared with that button because it depends
+  // on nothing: a helper would either be a dependency that changes every render or
+  // a stale closure, and an empty dependency list is neither.
+  useEffect(() => {
+    let cancelled = false
+    setChecking(true)
+    App.GetImageStatus()
+      .then((next) => {
+        if (!cancelled) setStatus(next)
+      })
+      .catch((err) => {
+        if (!cancelled) useStore.getState().toast('error', String(err))
+      })
+      .finally(() => {
+        if (!cancelled) setChecking(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const test = async () => {
+    setTesting(true)
+    try {
+      // The app probes what was *saved*, so the draft has to be committed first:
+      // testing an address that was just typed would otherwise test the previous
+      // one and report a failure about a server the user already corrected.
+      await onApply({ ...draft, images })
+      // A listing cannot tell a server that is up from one that can draw: a WebUI
+      // with no checkpoint loaded answers `/sdapi/v1/sd-models` and then fails
+      // every generation. So the button draws one small picture and throws it
+      // away, which is the only check that exercises the route the tool uses.
+      const report = await App.TestImageBackend()
+      setStatus(await App.GetImageStatus())
+      useStore.getState().toast('info', report)
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+      // The row is re-read even so, because what a failed generation needs to be
+      // read against is whether the address answers at all: a WebUI that is
+      // running with nothing loaded is a different repair from one that is not up.
+      try {
+        setStatus(await App.GetImageStatus())
+      } catch (statusErr) {
+        useStore.getState().toast('error', String(statusErr))
+      }
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  return (
+    <Section title={t('settings.images')} hint={t('settings.imagesHint')}>
+      <div className="mb-2 flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={images.enabled ?? false}
+          aria-label={t('settings.images.enabled')}
+          title={t('settings.images.enabled')}
+          onChange={(e) => update({ enabled: e.target.checked })}
+        />
+        <span className="flex-1 text-[13px]">{t('settings.images.enabled')}</span>
+        {/* Four states, for the reasons the backend rows already learned. Switched
+            off is not "unreachable" — nothing was sent. And a server with no
+            checkpoint installed is reachable and still unable to draw, which is
+            its own sentence rather than a failure of the address. */}
+        {!images.enabled ? (
+          <span className="badge">{t('settings.images.off')}</span>
+        ) : status?.error ? (
+          <span className="badge badge-danger" title={status.error}>
+            {t('settings.fail')}
+          </span>
+        ) : status?.ok ? (
+          <span className={`badge ${status.models.length > 0 ? 'badge-ok' : 'badge-warn'}`}>
+            {t('settings.images.ok')} · {status.models.length} {t('settings.images.models')}
+          </span>
+        ) : (
+          <span className="badge">{checking ? '…' : t('settings.notChecked')}</span>
+        )}
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="text-[12px]">
+          {t('settings.images.baseUrl')}
+          <input
+            className="input mono mt-1"
+            value={images.baseUrl ?? ''}
+            onChange={(e) => update({ baseUrl: e.target.value })}
+            placeholder="http://127.0.0.1:7860"
+          />
+        </label>
+        <label className="text-[12px]" title={t('settings.images.keyHint')}>
+          {t('settings.images.key')}
+          <input
+            className="input mono mt-1"
+            type="password"
+            value={images.apiKey ?? ''}
+            onChange={(e) => update({ apiKey: e.target.value })}
+            placeholder={status?.keySet ? '••••••••' : 'user:pass'}
+          />
+        </label>
+        <label className="text-[12px]">
+          {t('settings.images.model')}
+          <select
+            className="input mt-1"
+            value={images.model ?? ''}
+            onChange={(e) => update({ model: e.target.value })}
+          >
+            <option value="">{t('settings.images.auto')}</option>
+            {(status?.models ?? []).map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[12px]">
+          {t('settings.images.sampler')}
+          <select
+            className="input mt-1"
+            value={images.sampler ?? ''}
+            onChange={(e) => update({ sampler: e.target.value })}
+          >
+            <option value="">{t('settings.images.auto')}</option>
+            {(status?.samplers ?? []).map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[12px]">
+          {t('settings.images.steps')}
+          <input
+            className="input mt-1"
+            type="number"
+            min={0}
+            max={150}
+            value={images.steps || ''}
+            onChange={(e) => update({ steps: Number(e.target.value) || 0 })}
+            placeholder={t('settings.images.auto')}
+          />
+        </label>
+        <label className="text-[12px]">
+          {t('settings.images.size')}
+          <div className="mt-1 flex items-center gap-2">
+            <input
+              className="input mono"
+              type="number"
+              min={0}
+              max={2048}
+              step={8}
+              value={images.width || ''}
+              onChange={(e) => update({ width: Number(e.target.value) || 0 })}
+              placeholder="512"
+            />
+            <span className="faint">×</span>
+            <input
+              className="input mono"
+              type="number"
+              min={0}
+              max={2048}
+              step={8}
+              value={images.height || ''}
+              onChange={(e) => update({ height: Number(e.target.value) || 0 })}
+              placeholder="512"
+            />
+          </div>
+        </label>
+        <label className="text-[12px] sm:col-span-2">
+          {t('settings.images.negative')}
+          <input
+            className="input mt-1"
+            value={images.negativePrompt ?? ''}
+            onChange={(e) => update({ negativePrompt: e.target.value })}
+            placeholder={t('settings.images.auto')}
+          />
+        </label>
+        <label className="text-[12px] sm:col-span-2">
+          {t('settings.images.saveFolder')}
+          <div className="mt-1 flex items-center gap-2">
+            <input
+              className="input mono flex-1"
+              value={images.saveFolder ?? ''}
+              onChange={(e) => update({ saveFolder: e.target.value })}
+            />
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={async () => {
+                try {
+                  const dir = await App.PickSaveFolder()
+                  if (dir) update({ saveFolder: dir })
+                } catch (err) {
+                  useStore.getState().toast('error', String(err))
+                }
+              }}
+            >
+              {t('settings.images.pickFolder')}
+            </button>
+          </div>
+        </label>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          className="btn btn-sm"
+          disabled={testing || !images.enabled}
+          onClick={() => void test()}
+        >
+          {testing ? t('settings.images.testing') : t('settings.images.test')}
+        </button>
+        <span className="faint text-[11px]">{t('settings.images.defaults')}</span>
+      </div>
+
+      {images.enabled && status?.error && (
+        <div className="mt-2 text-[11px]" style={{ color: 'var(--danger)' }}>
+          {status.error}
+        </div>
+      )}
+      {images.enabled && status?.ok && status.models.length === 0 && (
+        <div className="mt-2 text-[11px]" style={{ color: 'var(--warn)' }}>
+          {t('settings.images.noModels')}
+        </div>
+      )}
+    </Section>
   )
 }
 

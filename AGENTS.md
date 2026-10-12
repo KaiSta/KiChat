@@ -17,6 +17,7 @@ points at one document per subsystem for the measured detail behind it:
 | `NVIDIA.md` | the build.nvidia.com backend: the four-field listing, the catalogue that lists models the account may not call (why the provider filters nothing, and the one-token availability check that filters on evidence instead), the reasoning field that arrives twice, refusals |
 | `LLAMACPP.md` | llama.cpp on both sides: the provider's `/props`-driven metadata (and why a missing claim is not `false`), and the managed runtime that installs and runs `llama-server` — two release sources including PrismML's fork, the update check, GPU offload, the ternary models |
 | `RESEARCH.md` | web search and scraping: the Brave and DuckDuckGo providers, the metered LLM-context route that search-first uses, what classifies a refusal, the scraper's SSRF and robots guards, the token budgets, and the search-first seeded turn |
+| `IMAGES.md` | image generation: the one `/sdapi/v1/txt2img` route that covers AUTOMATIC1111, Forge and stable-diffusion.cpp, why an empty setting means "leave it to your server", the `generate_image` tool, and how a picture becomes an ordinary image attachment — which is what lets a vision model see it on the next turn |
 
 **A vendor fact belongs in one of those, not here.** If you measure something new about a
 backend, put it where a reader will look for it and leave this page a pointer — a fact that
@@ -142,6 +143,13 @@ KICHAT_LIVE=1 KICHAT_NVIDIA_KEY=<key> go test ./internal/llm/ -run TestLiveNvidi
 KICHAT_LIVE=1 go test ./internal/runtime/ -run TestLivePrism -v
 #   optional: KICHAT_PRISM_MODEL=<path.gguf>, otherwise the smallest model in
 #   the LM Studio folders; skips if there is none. Loads a real model: minutes.
+
+# Stable Diffusion WebUI: draws one 64x64 picture at one step. Local and
+# unauthenticated, so there is no key — but it needs a WebUI actually running,
+# and it skips when there is none (the normal state).
+KICHAT_LIVE=1 go test ./internal/images/ -run TestLiveSDWebUI -v
+#   optional: KICHAT_SD_URL (default 127.0.0.1:7860), KICHAT_SD_AUTH=user:pass
+#   for a WebUI started with --api-auth
 ```
 
 What each one buys — every subsystem is documented in full in its own file, so this is the
@@ -172,6 +180,10 @@ short version:
 - `TestLivePrismForkRunsAModel` — LLAMACPP.md §6: the fork as a runtime, not a table of
   names — its release list, its tag scheme, its archive, its ternary kernels, and a real
   GGUF loaded on its `llama-server`.
+- `TestLiveSDWebUI` — IMAGES.md §8: the WebUI route answers, the sampler this client
+  sends is one the server recognises (it comes back in `info`), and the picture decodes
+  to real PNG bytes — a server answering with a URL, or with a `data:` prefix, produces
+  bytes that are not a picture, and only a real round trip tells the two apart.
 
 **Never put an API key in a tracked file.** Pass it in the environment; the app itself
 stores it through `internal/secret` (`~/.config/kichat/`). What the two search providers

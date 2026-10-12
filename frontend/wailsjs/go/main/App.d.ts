@@ -26,6 +26,8 @@ export function DeleteCompaction(arg1:string,arg2:string):Promise<void>;
 
 export function GetAppInfo():Promise<main.AppInfo>;
 
+export function GetAttachmentImage(arg1:string):Promise<string>;
+
 export function GetBudget(arg1:string,arg2:string,arg3:string):Promise<chat.ContextBudget>;
 
 export function GetChat(arg1:string):Promise<store.Chat>;
@@ -35,6 +37,8 @@ export function GetChatState(arg1:string):Promise<main.ChatState>;
 export function GetDocument(arg1:string):Promise<store.Document>;
 
 export function GetHealth():Promise<Array<llm.HealthStatus>>;
+
+export function GetImageStatus():Promise<main.ImageStatus>;
 
 export function GetModelCheckStatus():Promise<main.ModelCheckStatus>;
 
@@ -70,6 +74,8 @@ export function PickManagedModelFile(arg1:string):Promise<string>;
 
 export function PickModelFolder(arg1:string):Promise<string>;
 
+export function PickSaveFolder():Promise<string>;
+
 export function PreviewSystemPrompt(arg1:string):Promise<string>;
 
 export function RedactSecrets(arg1:string):Promise<string>;
@@ -83,6 +89,8 @@ export function RemoveLlamaBuild(arg1:string):Promise<void>;
 export function RemoveOldLlamaBuilds():Promise<number>;
 
 export function RenameChat(arg1:string,arg2:string):Promise<void>;
+
+export function SaveAttachmentAs(arg1:string):Promise<string>;
 
 export function SaveSettings(arg1:config.Settings):Promise<config.Settings>;
 
@@ -117,6 +125,8 @@ export function StopGeneration(arg1:string):Promise<boolean>;
 export function StopManagedModel(arg1:string):Promise<void>;
 
 export function TestBraveKey(arg1:string):Promise<research.SearchOutcome>;
+
+export function TestImageBackend():Promise<string>;
 
 export function UnresolvedPromptVars(arg1:string):Promise<Array<string>>;
 

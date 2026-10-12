@@ -463,6 +463,13 @@ func (e *Engine) toolDefinitions(ctx context.Context, chat *store.Chat, model ll
 			if e.Tools.Scraper == nil {
 				continue
 			}
+		case tools.ToolGenerateImage:
+			// The tool is advertised only when a picture server is configured,
+			// which is what keeps a model from spending a tool round discovering
+			// that image generation is switched off.
+			if e.Tools.Images == nil {
+				continue
+			}
 		}
 		out = append(out, t)
 	}

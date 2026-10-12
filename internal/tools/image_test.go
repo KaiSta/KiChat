@@ -1,0 +1,344 @@
+package tools
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"kichat/internal/config"
+	"kichat/internal/images"
+	"kichat/internal/store"
+)
+
+// pictureBytes stands in for a PNG. It is not valid base64 itself, so a decode
+// that silently returned its input would fail the round-trip assertion rather
+// than pass it.
+var pictureBytes = []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x7f, 0x3c}
+
+type fakeImageProvider struct {
+	got    images.Request
+	result images.Result
+	err    error
+	calls  int
+}
+
+func (f *fakeImageProvider) ID() string                   { return "fake" }
+func (f *fakeImageProvider) Name() string                 { return "Fake SD" }
+func (f *fakeImageProvider) Health(context.Context) error { return nil }
+func (f *fakeImageProvider) Models(context.Context) ([]images.Model, error) {
+	return nil, nil
+}
+func (f *fakeImageProvider) Samplers(context.Context) ([]string, error) { return nil, nil }
+func (f *fakeImageProvider) Generate(_ context.Context, req images.Request) (images.Result, error) {
+	f.calls++
+	f.got = req
+	if f.err != nil {
+		return images.Result{}, f.err
+	}
+	return f.result, nil
+}
+
+// newImageService builds a tool service over a real store in a temp directory,
+// which is the only way to check what actually landed in the attachments table.
+func newImageService(t *testing.T, provider images.Provider, cfg config.ImageSettings) (*Service, *store.Store, string) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	chatID := "chat-1"
+	if err := st.CreateChat(store.Chat{ID: chatID, Title: "Bilder", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	settings := config.Settings{Images: cfg}
+	service := &Service{
+		Store:    st,
+		Images:   provider,
+		Settings: func() config.Settings { return settings },
+	}
+	return service, st, chatID
+}
+
+func onePicture() images.Result {
+	mime, ext := images.SniffImage(pictureBytes, images.MimePNG, "png")
+	return images.Result{
+		Images: []images.Image{{Data: pictureBytes, Mime: mime, Ext: ext}},
+		Seed:   4242,
+		Model:  "sdxl.safetensors",
+		Info:   `{"seed":4242}`,
+	}
+}
+
+// TestGenerateImageFilesThePictureOnTheCallingMessage is the whole feature in one
+// test: the picture has to end up as an inline image attachment of the assistant
+// message that asked for it, because that is what the frontend renders and what
+// the assembly turns back into an image part for a vision model.
+func TestGenerateImageFilesThePictureOnTheCallingMessage(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{
+		Width: 768, Height: 512, Steps: 25, Sampler: "Euler a",
+	})
+
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	out, err := service.Execute(ctx, chatID, ToolGenerateImage,
+		`{"prompt":"a red fox in deep snow"}`)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("provider calls = %d, want 1", provider.calls)
+	}
+	// The configured defaults fill in everything the model left out.
+	if provider.got.Width != 768 || provider.got.Height != 512 || provider.got.Steps != 25 {
+		t.Errorf("settings were not applied: %+v", provider.got)
+	}
+	if provider.got.Sampler != "Euler a" {
+		t.Errorf("sampler = %q, want the configured one", provider.got.Sampler)
+	}
+
+	attachments, err := st.ListAttachments(chatID)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(attachments))
+	}
+	got := attachments[0]
+	if got.MessageID != "msg-1" {
+		t.Errorf("messageId = %q, want msg-1: an unlinked attachment is rendered nowhere", got.MessageID)
+	}
+	if got.Kind != "image" {
+		t.Errorf("kind = %q, want image", got.Kind)
+	}
+	if got.Mime != "image/png" {
+		t.Errorf("mime = %q, want image/png", got.Mime)
+	}
+	if got.SizeBytes != int64(len(pictureBytes)) {
+		t.Errorf("sizeBytes = %d, want %d", got.SizeBytes, len(pictureBytes))
+	}
+	if got.Placement != store.PlacementInline {
+		t.Errorf("placement = %q, want inline — an image is passed to the model, not indexed", got.Placement)
+	}
+	if got.Filename != "a-red-fox-in-deep-snow-1.png" {
+		t.Errorf("filename = %q, want the prompt as a slug", got.Filename)
+	}
+
+	// The payload has to survive as base64 in the document, which is the shape
+	// the assembly reads back out as an image part.
+	document, err := st.GetDocument(got.DocumentID)
+	if err != nil {
+		t.Fatalf("GetDocument: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(document.Text)
+	if err != nil {
+		t.Fatalf("document text is not base64: %v", err)
+	}
+	if string(decoded) != string(pictureBytes) {
+		t.Errorf("stored payload = %v, want the generated bytes", decoded)
+	}
+
+	// The model that called this tool has not seen the picture. A result that
+	// invites it to describe what it drew produces an invented description, which
+	// reads as a broken feature rather than an absent one.
+	if !strings.Contains(out, "nicht beschreiben") {
+		t.Errorf("the tool result does not forbid describing the picture:\n%s", out)
+	}
+	if !strings.Contains(out, "Seed: 4242") {
+		t.Errorf("the seed is missing, so the picture cannot be reproduced:\n%s", out)
+	}
+}
+
+func TestGenerateImageArgumentBeatsTheSetting(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, _, chatID := newImageService(t, provider, config.ImageSettings{
+		Width: 768, Height: 512, Steps: 25, NegativePrompt: "blurry",
+	})
+
+	if _, err := service.Execute(context.Background(), chatID, ToolGenerateImage,
+		`{"prompt":"a fox","width":1024,"negative_prompt":"extra fingers"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if provider.got.Width != 1024 {
+		t.Errorf("width = %d, want the model's 1024", provider.got.Width)
+	}
+	if provider.got.NegativePrompt != "extra fingers" {
+		t.Errorf("negative = %q, want the model's", provider.got.NegativePrompt)
+	}
+	if provider.got.Height != 512 {
+		t.Errorf("height = %d, want the configured 512", provider.got.Height)
+	}
+}
+
+// A model that emits "512" where a number belongs must not cost a tool round:
+// small local models do it constantly, which is what decodeLoose is for.
+func TestGenerateImageToleratesNumbersAsStrings(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, _, chatID := newImageService(t, provider, config.ImageSettings{})
+
+	if _, err := service.Execute(context.Background(), chatID, ToolGenerateImage,
+		`{"prompt":"a fox","width":"640","steps":"30","seed":"7"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if provider.got.Width != 640 || provider.got.Steps != 30 {
+		t.Errorf("string numbers were dropped: %+v", provider.got)
+	}
+	if provider.got.Seed == nil || *provider.got.Seed != 7 {
+		t.Errorf("seed = %v, want 7", provider.got.Seed)
+	}
+}
+
+func TestGenerateImageRefusesAnEmptyPrompt(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+
+	if _, err := service.Execute(context.Background(), chatID, ToolGenerateImage,
+		`{"prompt":"   "}`); err == nil {
+		t.Fatal("an empty prompt was accepted; the server would draw something arbitrary")
+	}
+	if provider.calls != 0 {
+		t.Error("a generation was attempted with no prompt")
+	}
+	attachments, err := st.ListAttachments(chatID)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(attachments) != 0 {
+		t.Errorf("attachments = %d, want none", len(attachments))
+	}
+}
+
+func TestGenerateImageRequiresAConfiguredServer(t *testing.T) {
+	service, _, chatID := newImageService(t, nil, config.ImageSettings{})
+	_, err := service.Execute(context.Background(), chatID, ToolGenerateImage, `{"prompt":"x"}`)
+	if !errors.Is(err, images.ErrNotConfigured) {
+		t.Fatalf("err = %v, want ErrNotConfigured", err)
+	}
+}
+
+// A server failure must not leave a half-written attachment behind: the picture
+// was never produced, so a row claiming one would render a broken image.
+func TestGenerateImageReportsAServerFailureAndWritesNothing(t *testing.T) {
+	provider := &fakeImageProvider{err: errors.New("kein Modell geladen")}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+
+	if _, err := service.Execute(context.Background(), chatID, ToolGenerateImage,
+		`{"prompt":"a fox"}`); err == nil {
+		t.Fatal("a server failure was reported as success")
+	}
+	attachments, err := st.ListAttachments(chatID)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(attachments) != 0 {
+		t.Errorf("attachments = %d, want none after a failed generation", len(attachments))
+	}
+	documents, err := st.ListDocuments(chatID)
+	if err != nil {
+		t.Fatalf("ListDocuments: %v", err)
+	}
+	if len(documents) != 0 {
+		t.Errorf("documents = %d, want none: the payload was written for a picture that does not exist", len(documents))
+	}
+}
+
+func TestGenerateImageIsAdvertised(t *testing.T) {
+	service := &Service{}
+	found := false
+	for _, def := range service.Definitions() {
+		if def.Name == ToolGenerateImage {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("generate_image is not among the tool definitions")
+	}
+	// The unconfigured case has to be answerable without a server, because the
+	// engine filters on the provider being nil.
+	if _, err := service.Execute(context.Background(), "c", ToolGenerateImage, `{"prompt":"x"}`); err == nil {
+		t.Error("an unconfigured service answered a generation request")
+	}
+}
+
+func TestImageFilenameSlug(t *testing.T) {
+	cases := []struct {
+		prompt string
+		want   string
+		why    string
+	}{
+		{"a red fox in deep snow", "a-red-fox-in-deep-snow-1.png", "the words survive"},
+		{"  spaced   out  ", "spaced-out-1.png", "runs of punctuation collapse to one dash"},
+		{"Füchse im Schnee", "füchse-im-schnee-1.png", "umlauts are letters, not noise"},
+		{"一只红色的狐狸", "一只红色的狐狸-1.png", "a Chinese prompt is a normal prompt here"},
+		{"!!!", "bild-1.png", "a prompt with nothing usable still needs a name"},
+	}
+	for _, tc := range cases {
+		if got := imageFilename(tc.prompt, 0, "png"); got != tc.want {
+			t.Errorf("imageFilename(%q) = %q, want %q (%s)", tc.prompt, got, tc.want, tc.why)
+		}
+	}
+	// A 300-character prompt must not become a 300-character filename.
+	long := imageFilename(strings.Repeat("wort ", 80), 0, "png")
+	if len([]rune(long)) > 60 {
+		t.Errorf("filename is %d runes long, want it bounded", len([]rune(long)))
+	}
+	if !strings.HasSuffix(long, "-1.png") {
+		t.Errorf("truncation ate the index: %q", long)
+	}
+	// The index is what keeps several pictures from one prompt apart.
+	if got := imageFilename("a fox", 1, "png"); got != "a-fox-2.png" {
+		t.Errorf("second picture named %q", got)
+	}
+	// The extension follows the payload: a WebUI configured for JPEG must not
+	// produce a JPEG called .png, which is a file whose type and name disagree.
+	if got := imageFilename("a fox", 0, "jpg"); got != "a-fox-1.jpg" {
+		t.Errorf("jpeg picture named %q", got)
+	}
+	// An empty extension falls back to what the route returns by default.
+	if got := imageFilename("a fox", 0, ""); got != "a-fox-1.png" {
+		t.Errorf("extension-less picture named %q", got)
+	}
+}
+
+// TestSniffImage covers the format the server actually sent, which is not a
+// constant: the WebUI returns whatever its `samples_format` says.
+func TestSniffImage(t *testing.T) {
+	cases := []struct {
+		name     string
+		data     []byte
+		wantMime string
+		wantExt  string
+	}{
+		{"png", pictureBytes, "image/png", "png"},
+		{"jpeg", []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F'}, "image/jpeg", "jpg"},
+		{"gif", []byte("GIF89a\x01\x00"), "image/gif", "gif"},
+		// A payload nothing recognises keeps the fallback rather than being refused:
+		// the bytes are what the user asked for.
+		{"unknown", []byte{0x00, 0x01, 0x02, 0x03}, "image/png", "png"},
+		{"empty", nil, "image/png", "png"},
+	}
+	for _, tc := range cases {
+		mime, ext := images.SniffImage(tc.data, images.MimePNG, "png")
+		if mime != tc.wantMime || ext != tc.wantExt {
+			t.Errorf("%s: sniffed %q/%q, want %q/%q", tc.name, mime, ext, tc.wantMime, tc.wantExt)
+		}
+	}
+}
+
+func TestSeedFromValue(t *testing.T) {
+	// A missing seed, the WebUI's own -1 and a value that is not a number all
+	// mean the same thing: let the server choose. Zero would mean the opposite.
+	for _, value := range []any{nil, float64(-1), "abc", ""} {
+		if got := seedFromValue(value); got != nil {
+			t.Errorf("seedFromValue(%v) = %v, want nil", value, got)
+		}
+	}
+	got := seedFromValue(float64(1234))
+	if got == nil || *got != 1234 {
+		t.Errorf("seedFromValue(1234) = %v, want 1234", got)
+	}
+}

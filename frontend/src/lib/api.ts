@@ -37,6 +37,8 @@ export namespace config {
   /** The llama.cpp KiChat installs and runs itself. */
   export type RuntimeSettings = Plain<Gen.config.RuntimeSettings>
   export type ManagedModel = Plain<Gen.config.ManagedModel>
+  /** The picture server generate_image draws through. */
+  export type ImageSettings = Plain<Gen.config.ImageSettings>
 }
 
 export namespace llm {
@@ -92,6 +94,8 @@ export namespace main {
   export type InstalledBuild = Plain<Gen.main.InstalledBuild>
   /** A model availability sweep, as the picker follows it. */
   export type ModelCheckStatus = Plain<Gen.main.ModelCheckStatus>
+  /** The picture server's reachability and what it offers. */
+  export type ImageStatus = Plain<Gen.main.ImageStatus>
 }
 
 export namespace research {

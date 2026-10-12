@@ -48,6 +48,108 @@ type Settings struct {
 	// override corrects what a model *is*, and this records that the model could
 	// not be reached at all.
 	HiddenModels []string `json:"hiddenModels,omitempty"`
+	// Images configures the picture generation the model can ask for, which is a
+	// server the user runs rather than one of the chat backends above: an image
+	// server has no conversation, no context window and no token accounting, so
+	// almost nothing about a BackendConfig applies to it.
+	Images ImageSettings `json:"images"`
+}
+
+// ImageSettings configures text-to-image generation.
+//
+// Every generation field is deliberately omittable, and an empty value means
+// "leave it to the server". A user who runs AUTOMATIC1111 has already chosen a
+// checkpoint, a sampler, a step count and a picture size in its own settings, and
+// a request that filled those in with this app's guesses would quietly replace
+// their setup with something they never asked for. So an empty string or a zero
+// number is left out of the request entirely, and the server's own configured
+// default applies — which is also why the box in Settings is labelled as a hint
+// rather than as a value.
+type ImageSettings struct {
+	Enabled bool `json:"enabled"`
+	// BaseURL is the image server's address, e.g. http://127.0.0.1:7860 for
+	// AUTOMATIC1111. It is empty until the feature is switched on, so nothing is
+	// contacted on a machine that never asked for image generation.
+	BaseURL string `json:"baseUrl"`
+	// APIKey is the "user:pass" pair a WebUI started with `--api-auth` accepts as
+	// HTTP basic auth. Like every other credential it is not part of the settings
+	// blob: SaveSettings commits it to the secret store and the bridge only ever
+	// sees whether one is stored.
+	APIKey string `json:"apiKey"`
+	// Model names a checkpoint to switch to for a request. Empty uses whatever the
+	// server already has loaded.
+	Model string `json:"model"`
+	// Sampler is the sampler name to use, empty for the server's own.
+	Sampler string `json:"sampler"`
+	// Steps is the sampling step count, 0 for the server's own.
+	Steps int `json:"steps"`
+	// Width and Height are the picture size, 0 for the server's own.
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	// NegativePrompt is what the picture should avoid. Empty sends none, which
+	// matters: an empty string sent explicitly would replace a negative prompt the
+	// user configured in their WebUI, while omitting the field leaves it in force.
+	NegativePrompt string `json:"negativePrompt"`
+	// SaveFolder is where "Save as…" starts. It is remembered after a successful
+	// save because a user who exports pictures to a folder wants the next one to
+	// offer the same place, and re-picking it every time is the sort of friction
+	// that makes a feature unused.
+	SaveFolder string `json:"saveFolder"`
+}
+
+// DefaultImageBaseURL is AUTOMATIC1111's own default listen address, and is
+// also what Forge and stable-diffusion.cpp's sd-server use when left alone. It is
+// offered rather than probed: nothing is contacted until the feature is enabled.
+const DefaultImageBaseURL = "http://127.0.0.1:7860"
+
+// ImageAPIKeyName is the secret-store key the image server's credential lives
+// under. It is spelled like the backend keys so GetSecretStatus can report it in
+// the same table.
+const ImageAPIKeyName = "images"
+
+// Image bounds. They exist to stop a hand-edited settings blob — or a model that
+// passes a number it invented — from asking for a 20000-pixel picture, which a
+// local machine would spend minutes and tens of gigabytes on rather than refuse.
+const (
+	// MaxImageDimension is the largest side a request may ask for.
+	MaxImageDimension = 2048
+	// MinImageDimension is the smallest size worth drawing.
+	MinImageDimension = 64
+	// MaxImageSteps bounds the sampling step count.
+	MaxImageSteps = 150
+)
+
+// NormaliseImageClamps repairs the numeric image fields in place, reporting
+// whether anything changed. A value outside the bounds is clamped rather than
+// rejected: the settings blob is edited by hand often enough that throwing an
+// error would leave the field unopenable, and a clamped number is still a picture.
+func NormaliseImageClamps(s *ImageSettings) bool {
+	changed := false
+	clamp := func(value, min, max int) int {
+		if value <= 0 {
+			return 0 // 0 is "the server's own", not a number to raise.
+		}
+		if value < min {
+			return min
+		}
+		if value > max {
+			return max
+		}
+		return value
+	}
+	if next := clamp(s.Width, MinImageDimension, MaxImageDimension); next != s.Width {
+		s.Width = next
+		changed = true
+	}
+	if next := clamp(s.Height, MinImageDimension, MaxImageDimension); next != s.Height {
+		s.Height = next
+		changed = true
+	}
+	if next := clamp(s.Steps, 1, MaxImageSteps); next != s.Steps {
+		s.Steps = next
+		changed = true
+	}
+	return changed
 }
 
 // RuntimeSettings configures the llama.cpp binaries KiChat installs and the
@@ -419,6 +521,12 @@ func Default() Settings {
 		ToolIterations:      6,
 		ToolTokenBudget:     25000,
 		NativeTools:         true,
+		// Image generation ships switched off. It is a second server the user has
+		// to be running — a WebUI is a several-gigabyte install of its own — so
+		// offering an address and probing it would report a failure for a feature
+		// nobody asked for yet, which is the same reason the hosted chat backends
+		// ship disabled.
+		Images: ImageSettings{BaseURL: DefaultImageBaseURL},
 	}
 }
 
@@ -474,6 +582,11 @@ func Load(st *store.Store, ss *secret.Store) (Settings, error) {
 				s.Backends[i].APIKey = v
 			}
 		}
+		// The image server's credential is a secret like the others, so it is read
+		// back here rather than from the blob.
+		if v, ok := ss.Get(ImageAPIKeyName); ok {
+			s.Images.APIKey = v
+		}
 	}
 	s.normalise()
 	return s, nil
@@ -500,6 +613,13 @@ func (s *Settings) normalise() {
 	if len(s.Backends) == 0 {
 		s.Backends = llm.DefaultBackendConfigs()
 	}
+	if strings.TrimSpace(s.Images.BaseURL) == "" {
+		s.Images.BaseURL = DefaultImageBaseURL
+	}
+	// A crawled or hand-edited blob can carry a size or a step count no local
+	// machine should be asked for; clamping here means the request builder never
+	// has to trust the stored number.
+	NormaliseImageClamps(&s.Images)
 	// Ensure the shipped backends always exist, even if the user removed them
 	// from an older settings blob. This is also how a backend shipped in a later
 	// release — DeepSeek, then Mistral, then NVIDIA — reaches an installation

@@ -17,6 +17,7 @@ import (
 	"kichat/internal/chat"
 	"kichat/internal/config"
 	"kichat/internal/events"
+	"kichat/internal/images"
 	"kichat/internal/ingest"
 	"kichat/internal/llm"
 	"kichat/internal/research"
@@ -62,6 +63,20 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	recorded := a.Settings()
 	// An empty BraveAPIKey means "leave the stored key alone".
 	s.Search.BraveAPIKey = recorded.Search.BraveAPIKey
+	// The image server's credential follows the same rule as a backend key: a
+	// non-empty draft overwrites what is stored, and an empty one leaves it alone.
+	// "Empty" therefore cannot clear it, which is the right trade — a save that
+	// does not touch the field must not silently undo a configured credential.
+	if want := strings.TrimSpace(s.Images.APIKey); want != "" {
+		if err := a.secrets.Set(config.ImageAPIKeyName, want); err != nil {
+			return s, err
+		}
+		s.Images.APIKey = want
+	} else if stored, ok := a.secrets.Get(config.ImageAPIKeyName); ok {
+		s.Images.APIKey = stored
+	} else {
+		s.Images.APIKey = ""
+	}
 	// The installed build is the installer's record, and no control in the panel edits
 	// the tag. A download writes it from its own goroutine, after the bound call that
 	// started it returned, so a draft the view read before that still names the build
@@ -150,6 +165,9 @@ func (a *App) sanitize(s config.Settings) config.Settings {
 	}
 	s.Backends = backends
 	s.Search.BraveAPIKey = ""
+	// The image server's "user:pass" is a credential like the others, so it never
+	// reaches the settings blob or the bridge.
+	s.Images.APIKey = ""
 	return s
 }
 
@@ -166,7 +184,11 @@ type SecretStatus struct {
 	// built for it and no probe is ever sent, and the panel could otherwise only
 	// show a blank key field on a backend that is already configured.
 	BackendKeys map[string]bool `json:"backendKeys,omitempty"`
-	Warning     string          `json:"warning,omitempty"`
+	// ImageKeySet reports whether the image server has a credential stored. The
+	// panel needs it for the same reason it needs BackendKeys: the blob is
+	// sanitised, so a blank field cannot be told apart from a configured one.
+	ImageKeySet bool   `json:"imageKeySet"`
+	Warning     string `json:"warning,omitempty"`
 }
 
 // GetSecretStatus reports where the Brave key is kept.
@@ -179,6 +201,7 @@ func (a *App) GetSecretStatus() (SecretStatus, error) {
 		Keyring: a.secrets.KeyringAvailable(),
 	}
 	_, status.BraveKeySet = a.secrets.Get("brave")
+	_, status.ImageKeySet = a.secrets.Get(config.ImageAPIKeyName)
 	// Every configured entry, switched on or not: an entry that is off is exactly
 	// the one whose key has to stay visible.
 	status.BackendKeys = map[string]bool{}
@@ -1809,6 +1832,235 @@ func (a *App) SetAttachmentPlacement(attachmentID, placement string) (store.Atta
 	}
 	a.emit(events.Attachments, map[string]any{"chatId": attachment.ChatID})
 	return attachment, nil
+}
+
+// --- image generation -------------------------------------------------------
+
+// ImageStatus is the picture server as the Settings panel reads it.
+type ImageStatus struct {
+	Enabled bool   `json:"enabled"`
+	BaseURL string `json:"baseURL"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+	// Models and Samplers are never nil. A nil Go slice marshals to JSON null,
+	// and the panel iterates both — the empty case is exactly what a fresh
+	// WebUI with no checkpoint installed answers with, so it is the one that
+	// must not arrive as null.
+	Models   []string `json:"models"`
+	Samplers []string `json:"samplers"`
+	KeySet   bool     `json:"keySet"`
+}
+
+// GetImageStatus reports the image server's state: whether the feature is on,
+// whether the address answers, and what it offers.
+//
+// A switched-off feature reports no error at all. Nothing was contacted, so
+// nothing failed, and saying otherwise would put a red row in front of a user who
+// never asked for image generation — which is the mistake the backends panel
+// already made once with a disabled entry.
+func (a *App) GetImageStatus() (ImageStatus, error) {
+	if err := a.ensure(); err != nil {
+		return ImageStatus{}, err
+	}
+	settings := a.Settings()
+	status := ImageStatus{
+		Enabled:  settings.Images.Enabled,
+		BaseURL:  settings.Images.BaseURL,
+		Models:   []string{},
+		Samplers: []string{},
+	}
+	_, status.KeySet = a.secrets.Get(config.ImageAPIKeyName)
+
+	provider := a.currentImageProvider()
+	if provider == nil {
+		return status, nil
+	}
+	// The same bound as a backend health probe: a WebUI that is up answers in
+	// milliseconds, and one that is not must not hold the settings view open.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := provider.Health(ctx); err != nil {
+		status.Error = err.Error()
+		return status, nil
+	}
+	status.OK = true
+	if models, err := provider.Models(ctx); err == nil {
+		for _, m := range models {
+			status.Models = append(status.Models, m.ID)
+		}
+	}
+	if samplers, err := provider.Samplers(ctx); err == nil {
+		status.Samplers = append(status.Samplers, samplers...)
+	}
+	return status, nil
+}
+
+// TestImageBackend runs one generation and discards the result, so a user can
+// find out that their WebUI is reachable and has a model loaded without spending
+// a chat turn on it.
+func (a *App) TestImageBackend() (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	provider := a.currentImageProvider()
+	if provider == nil {
+		return "", images.ErrNotConfigured
+	}
+	settings := a.Settings()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	result, err := provider.Generate(ctx, images.Request{
+		Prompt:         "a simple color test pattern",
+		NegativePrompt: settings.Images.NegativePrompt,
+		Width:          512,
+		Height:         512,
+		Steps:          settings.Images.Steps,
+		Sampler:        settings.Images.Sampler,
+		Model:          settings.Images.Model,
+	})
+	if err != nil {
+		return "", err
+	}
+	report := fmt.Sprintf("%d Bild(er) erzeugt (%s)", len(result.Images), provider.Name())
+	if result.Model != "" {
+		report += ", Modell " + result.Model
+	}
+	return report, nil
+}
+
+// GetAttachmentImage returns an attachment's payload as a data: URL the webview
+// can render.
+//
+// The bytes are already stored base64-encoded — that is the shape an image
+// attachment's document has, and what the assembly turns back into an image part
+// — so this re-encodes nothing. The data: URL rather than a file:// path is
+// deliberate: the webview loads from an embedded assets handler, and a path would
+// be blocked by the same origin rule that stops any other local file from being
+// read.
+func (a *App) GetAttachmentImage(attachmentID string) (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	attachment, err := a.store.GetAttachment(attachmentID)
+	if err != nil {
+		return "", err
+	}
+	if attachment.DocumentID == "" {
+		return "", fmt.Errorf("Anhang %s hat kein gespeichertes Bild", attachment.Filename)
+	}
+	mime := strings.ToLower(attachment.Mime)
+	if attachment.Kind != string(ingest.KindImage) && !strings.HasPrefix(mime, "image/") {
+		return "", fmt.Errorf("%s ist kein Bild", attachment.Filename)
+	}
+	document, err := a.store.GetDocument(attachment.DocumentID)
+	if err != nil {
+		return "", err
+	}
+	payload := strings.TrimSpace(document.Text)
+	if payload == "" {
+		return "", fmt.Errorf("das Bild von %s ist leer", attachment.Filename)
+	}
+	if attachment.Mime == "" {
+		// The renderer needs the type to paint anything at all.
+		mime = "image/png"
+	} else {
+		mime = attachment.Mime
+	}
+	return "data:" + mime + ";base64," + payload, nil
+}
+
+// SaveAttachmentAs writes an attachment to a file the user picks, and returns the
+// path it was written to — empty when the user cancelled.
+//
+// This is the only place a generated picture leaves the app's own storage, and it
+// goes through the native save dialog rather than a folder setting so the choice
+// is made per picture. The folder it was saved into is remembered as the next
+// dialog's starting point, because re-navigating to the same place every time is
+// what makes an export button annoying enough not to use.
+func (a *App) SaveAttachmentAs(attachmentID string) (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	if a.ctx == nil {
+		return "", errors.New("App ist noch nicht bereit")
+	}
+	attachment, err := a.store.GetAttachment(attachmentID)
+	if err != nil {
+		return "", err
+	}
+	document, err := a.store.GetDocument(attachment.DocumentID)
+	if err != nil {
+		return "", err
+	}
+	// Only an image is stored as base64; a text attachment's document holds its
+	// extracted prose, and writing that out as if it were bytes would produce a
+	// file of literal characters rather than the original document.
+	if attachment.Kind != string(ingest.KindImage) {
+		return "", fmt.Errorf("%s ist kein gespeichertes Bild", attachment.Filename)
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(document.Text))
+	if err != nil {
+		return "", fmt.Errorf("das Bild konnte nicht dekodiert werden: %w", err)
+	}
+
+	filename := attachment.Filename
+	if strings.TrimSpace(filename) == "" {
+		filename = "bild.png"
+	}
+	// The filter follows the stored picture's own format, because that format is not
+	// always PNG: a WebUI can be configured to answer with JPEG, and offering only
+	// `*.png` for a JPEG makes the file look like it cannot be saved here.
+	pattern, filterName := "*.png", "PNG-Bild"
+	switch strings.ToLower(attachment.Mime) {
+	case "image/jpeg":
+		pattern, filterName = "*.jpg", "JPEG-Bild"
+	case "image/webp":
+		pattern, filterName = "*.webp", "WebP-Bild"
+	}
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:            "Bild speichern",
+		DefaultFilename:  filename,
+		DefaultDirectory: a.Settings().Images.SaveFolder,
+		Filters: []runtime.FileFilter{
+			{DisplayName: filterName, Pattern: pattern},
+			{DisplayName: "Alle Dateien", Pattern: "*.*"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", nil // The user closed the dialog; not an error.
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", fmt.Errorf("Bild konnte nicht gespeichert werden: %w", err)
+	}
+
+	if dir := filepath.Dir(path); dir != "" && dir != a.Settings().Images.SaveFolder {
+		a.settingsMu.Lock()
+		a.settings.Images.SaveFolder = dir
+		snapshot := a.settings
+		a.settingsMu.Unlock()
+		if err := a.sanitize(snapshot).Save(a.store); err != nil {
+			// Remembering the folder is a convenience, and the picture is already on
+			// disk: failing to write it must not read as a failed save.
+			a.emit(events.Warning, map[string]any{
+				"warning": "Der Zielordner konnte nicht gemerkt werden: " + err.Error(),
+			})
+		}
+	}
+	return path, nil
+}
+
+// PickSaveFolder opens a folder dialog, for the default export location.
+func (a *App) PickSaveFolder() (string, error) {
+	if a.ctx == nil {
+		return "", errors.New("App ist noch nicht bereit")
+	}
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:            "Ordner für gespeicherte Bilder",
+		DefaultDirectory: a.Settings().Images.SaveFolder,
+	})
 }
 
 // PickFiles opens a native file dialog and returns the chosen paths.

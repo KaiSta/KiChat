@@ -16,6 +16,7 @@ import (
 	"kichat/internal/chat"
 	"kichat/internal/config"
 	"kichat/internal/events"
+	"kichat/internal/images"
 	"kichat/internal/ingest"
 	"kichat/internal/llm"
 	"kichat/internal/research"
@@ -43,9 +44,14 @@ type App struct {
 	scraper   *research.Scraper
 	extractor *ingest.Extractor
 	secrets   *secret.Store
+	// imageProvider is the picture server generate_image draws through, nil when
+	// image generation is switched off. It is rebuilt with the other services and
+	// read under the same lock, for the same reason: a settings save replaces it
+	// while a bound call may be using it.
+	imageProvider images.Provider
 
-	// servicesMu guards the five services above that a settings save replaces
-	// wholesale: registry, chain, scraper, toolSvc and engine. A bound method can be
+	// servicesMu guards the six services above that a settings save replaces
+	// wholesale: registry, chain, scraper, toolSvc, engine and imageProvider. A bound method can be
 	// running on another goroutine while that replacement happens, so reading the
 	// field as it was being assigned was a data race; every read goes through one of
 	// the accessors below and every write happens inside rebuildServices.
@@ -570,13 +576,24 @@ func (a *App) rebuildServices(settings config.Settings) {
 		CacheHours:        settings.Search.ScrapeCacheHours,
 	}, a.extractor.PDFExtractorFunc())
 
+	// The image server is built from the same snapshot. Off means nil, and nil is
+	// what removes generate_image from the model's tool list rather than leaving a
+	// tool that can only ever fail.
+	var imageProvider images.Provider
+	if settings.Images.Enabled {
+		imageProvider = images.NewSDWebUI("images", "Stable Diffusion WebUI",
+			settings.Images.BaseURL, settings.Images.APIKey)
+	}
 	toolService := tools.New(a.store, chain, scraper)
+	toolService.Images = imageProvider
+	toolService.Settings = a.Settings
 	// A nil turns is only possible before init has run; NewEngineWithState makes its
 	// own in that case, so a half-initialised app cannot panic here.
 	engine := chat.NewEngineWithState(a.store, registry, toolService, a.Settings, a.emit, a.turns)
 
 	a.servicesMu.Lock()
 	a.registry, a.chain, a.scraper, a.toolSvc, a.engine = registry, chain, scraper, toolService, engine
+	a.imageProvider = imageProvider
 	a.servicesMu.Unlock()
 
 	// Servers survive a settings save: rebuilding services must not restart a
@@ -602,6 +619,14 @@ func (a *App) currentRegistry() *llm.Registry {
 	a.servicesMu.RLock()
 	defer a.servicesMu.RUnlock()
 	return a.registry
+}
+
+// currentImageProvider is the picture server in use, nil when image generation is
+// switched off.
+func (a *App) currentImageProvider() images.Provider {
+	a.servicesMu.RLock()
+	defer a.servicesMu.RUnlock()
+	return a.imageProvider
 }
 
 // currentChain is the search chain in use.

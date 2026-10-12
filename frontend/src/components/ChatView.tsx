@@ -5,7 +5,14 @@ import { OnFileDrop, OnFileDropOff } from '../../wailsjs/runtime/runtime'
 import { App, formatNumber, modelLabel, type store as storeTypes } from '../lib/api'
 import { messageText, pendingAttachments, useStore } from '../store'
 import { ContextInspector, ContextMeter, ContextRecheck, ModelSwitcher } from './ModelSwitcher'
-import { AttachmentChips, CompactionCard, MessageStats, ReasoningBlock, ToolCallCard } from './MessageParts'
+import {
+  AttachmentChips,
+  CompactionCard,
+  MessageImages,
+  MessageStats,
+  ReasoningBlock,
+  ToolCallCard,
+} from './MessageParts'
 import { Markdown } from './Markdown'
 
 type Item =
@@ -385,6 +392,7 @@ function MessageRow({
             : { background: 'var(--surface)', border: '1px solid var(--border)' }
         }
       >
+        <MessageImages attachments={message.attachments ?? []} />
         <AttachmentChips attachments={message.attachments ?? []} />
         {!isUser && <ReasoningBlock text={live.reasoning} streaming={live.streaming} />}
 

@@ -163,6 +163,36 @@ export namespace config {
 		    return a;
 		}
 	}
+	export class ImageSettings {
+	    enabled: boolean;
+	    baseUrl: string;
+	    apiKey: string;
+	    model: string;
+	    sampler: string;
+	    steps: number;
+	    width: number;
+	    height: number;
+	    negativePrompt: string;
+	    saveFolder: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImageSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.baseUrl = source["baseUrl"];
+	        this.apiKey = source["apiKey"];
+	        this.model = source["model"];
+	        this.sampler = source["sampler"];
+	        this.steps = source["steps"];
+	        this.width = source["width"];
+	        this.height = source["height"];
+	        this.negativePrompt = source["negativePrompt"];
+	        this.saveFolder = source["saveFolder"];
+	    }
+	}
 	export class ManagedModel {
 	    enabled: boolean;
 	    modelPath: string;
@@ -324,6 +354,7 @@ export namespace config {
 	    nativeTools: boolean;
 	    runtime: RuntimeSettings;
 	    hiddenModels?: string[];
+	    images: ImageSettings;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -347,6 +378,7 @@ export namespace config {
 	        this.nativeTools = source["nativeTools"];
 	        this.runtime = this.convertValues(source["runtime"], RuntimeSettings);
 	        this.hiddenModels = source["hiddenModels"];
+	        this.images = this.convertValues(source["images"], ImageSettings);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -581,6 +613,30 @@ export namespace main {
 	        this.target = source["target"];
 	        this.fromSeq = source["fromSeq"];
 	        this.toSeq = source["toSeq"];
+	    }
+	}
+	export class ImageStatus {
+	    enabled: boolean;
+	    baseURL: string;
+	    ok: boolean;
+	    error?: string;
+	    models: string[];
+	    samplers: string[];
+	    keySet: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImageStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.baseURL = source["baseURL"];
+	        this.ok = source["ok"];
+	        this.error = source["error"];
+	        this.models = source["models"];
+	        this.samplers = source["samplers"];
+	        this.keySet = source["keySet"];
 	    }
 	}
 	export class InstalledBuild {
@@ -836,6 +892,7 @@ export namespace main {
 	    keyring: boolean;
 	    braveKeySet: boolean;
 	    backendKeys?: Record<string, boolean>;
+	    imageKeySet: boolean;
 	    warning?: string;
 	
 	    static createFrom(source: any = {}) {
@@ -848,6 +905,7 @@ export namespace main {
 	        this.keyring = source["keyring"];
 	        this.braveKeySet = source["braveKeySet"];
 	        this.backendKeys = source["backendKeys"];
+	        this.imageKeySet = source["imageKeySet"];
 	        this.warning = source["warning"];
 	    }
 	}

@@ -654,6 +654,24 @@ Verfügbare Tools: {{tool_list}}`,
       readySeconds: 180,
       models: {},
     },
+    // The picture server is on with a reachable fixture address, so the section
+    // renders its populated state: the checkpoint and sampler pickers need a
+    // non-empty model and sampler list to be exercised at all, and the "empty box
+    // means the server's own setting" rule is only visible beside real choices.
+    // `width`, `steps` and `sampler` stay empty on purpose — that is the shape a
+    // user who configured their WebUI ends up with.
+    images: {
+      enabled: true,
+      baseUrl: 'http://127.0.0.1:7860',
+      apiKey: '',
+      model: '',
+      sampler: '',
+      steps: 0,
+      width: 0,
+      height: 0,
+      negativePrompt: '',
+      saveFolder: '/home/user/Pictures',
+    },
     modelOverrides: {},
     search: {
       providerOrder: ['brave', 'duckduckgo'],
@@ -789,6 +807,24 @@ Verfügbare Tools: {{tool_list}}`,
       searchFirst: true,
     },
     {
+      id: 'chat-image',
+      title: 'Bildgenerierung',
+      createdAt: now(),
+      updatedAt: now(),
+      backend: 'lmstudio',
+      model: models[0].id,
+      systemPrompt: settings.defaultSystemPrompt,
+      systemPromptPreset: 'research',
+      temperature: 0.7,
+      topP: 0.9,
+      numCtx: 0,
+      archived: false,
+      autoCompact: true,
+      compactThreshold: 0.8,
+      keepRecentTurns: 6,
+      searchFirst: false,
+    },
+    {
       id: 'chat-search',
       title: 'Recherche-Beispiel',
       createdAt: now(),
@@ -808,7 +844,63 @@ Verfügbare Tools: {{tool_list}}`,
     },
   ]
 
+  /*
+   * A picture the model generated, as a fixture.
+   *
+   * The real binding returns the stored PNG re-encoded as a data: URL. An SVG is
+   * used here because it is a few hundred bytes of text that renders visibly at
+   * any size, where a hand-written 1×1 PNG would paint a single pixel and prove
+   * nothing about the layout. What the harness checks — that a picture appears in
+   * the message, at a size that does not wreck the transcript, with a working save
+   * button — does not care about the format.
+   */
+  const IMAGE_DATA_URL =
+    'data:image/svg+xml;utf8,' +
+    encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">' +
+        '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">' +
+        '<stop offset="0" stop-color="#2b4a7a"/><stop offset="1" stop-color="#7ac0e8"/>' +
+        '</linearGradient></defs>' +
+        '<rect width="512" height="512" fill="url(#g)"/>' +
+        '<circle cx="256" cy="205" r="92" fill="#f5f7fa"/>' +
+        '<text x="256" y="400" font-family="sans-serif" font-size="30" fill="#eef2f7" text-anchor="middle">KiChat harness image</text>' +
+        '</svg>',
+    )
+
+  const IMAGE_ATTACHMENT = {
+    id: 'att-image-1',
+    chatId: 'chat-image',
+    messageId: 'msg-image-1',
+    kind: 'image',
+    filename: 'a-red-fox-in-deep-snow-1.png',
+    mime: 'image/png',
+    sizeBytes: 742_113,
+    sha256: '',
+    pages: 0,
+    tokenEstimate: 1024,
+    placement: 'inline',
+    documentId: 'doc-image-1',
+    createdAt: now(),
+  }
+
   const messages = new Map()
+  messages.set('chat-image', [
+    message('chat-image', 'user', 'Mal mir einen Fuchs im tiefen Schnee.', { seq: 0 }),
+    // The reply the tool produced: the model's text, and the picture filed as an
+    // attachment of this very message — which is what the renderer keys on.
+    message('chat-image', 'assistant', 'Ich habe das Bild erzeugt. Du kannst es über die Schaltfläche unter dem Bild speichern.', {
+      id: 'msg-image-1',
+      seq: 1,
+      attachments: [IMAGE_ATTACHMENT],
+      promptTokens: 1860,
+      completionTokens: 96,
+      tokensPerSecond: 28.4,
+      ttftMs: 1810,
+      generationMs: 3380,
+      stopReason: 'stop',
+      statsSource: 'estimated',
+    }),
+  ])
   messages.set('chat-markdown', [
     message('chat-markdown', 'user', 'Wie tief ist das Mittelmeer?'),
     message('chat-markdown', 'assistant', MARKDOWN_REPLY, {
@@ -1906,6 +1998,34 @@ Verfügbare Tools: {{tool_list}}`,
     },
 
     PickFiles: () => Promise.resolve([]),
+
+    // The picture server, as a worked example: reachable, two checkpoints, the
+    // three samplers a WebUI ships first. `keySet: false` is the default setup — a
+    // WebUI without --api-auth takes no credential at all.
+    GetImageStatus: () =>
+      Promise.resolve({
+        enabled: true,
+        baseURL: 'http://127.0.0.1:7860',
+        ok: true,
+        models: ['sdxl.safetensors [a1b2c3]', 'flux-dev.safetensors'],
+        samplers: ['Euler a', 'DPM++ 2M Karras', 'DDIM'],
+        keySet: false,
+      }),
+    TestImageBackend: () => Promise.resolve('1 Bild(er) erzeugt (Stable Diffusion WebUI)'),
+    GetAttachmentImage: (id) => {
+      if (id !== IMAGE_ATTACHMENT.id) {
+        return Promise.reject(new Error('kein gespeichertes Bild'))
+      }
+      return Promise.resolve(IMAGE_DATA_URL)
+    },
+    // Recorded rather than dropped, so the save path is observable: the chosen
+    // path is what the toast shows, and the case this has to keep honest is the
+    // empty one — a cancelled dialog must produce no toast at all.
+    SaveAttachmentAs: (id) => {
+      console.log('[harness] SaveAttachmentAs', id)
+      return Promise.resolve('/home/user/Pictures/a-red-fox-in-deep-snow-1.png')
+    },
+    PickSaveFolder: () => Promise.resolve('/home/user/Pictures'),
     AddAttachment: (input) => Promise.resolve({ id: nextId('att'), chatId: input.chatId, filename: 'harness.txt', kind: 'text', messageId: '', placement: 'inline', sizeBytes: 12, sha256: '', pages: 1, tokenEstimate: 12, documentId: '', createdAt: now() }),
     RemoveAttachment: () => Promise.resolve(null),
     SetAttachmentPlacement: () => Promise.resolve(null),

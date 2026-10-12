@@ -26,6 +26,7 @@ numbers about what is being sent to the model.
 | Context | Automatic and manual compaction, live context-window fullness meter, per-segment inspector |
 | Research | Brave Search (API key) with DuckDuckGo fallback, page scraping with SSRF guard, optional search-before-answer |
 | Files | Attachments, PDF/office text extraction, chunked with BM25 retrieval over the chunks |
+| Images | Text-to-image generation through a Stable Diffusion WebUI the user runs (AUTOMATIC1111, Forge or stable-diffusion.cpp — one `/sdapi/v1/txt2img` route covers all three), asked for by a `generate_image` tool the chat model calls. The picture is stored as an ordinary image attachment, so it renders in the chat, can be saved to a location of the user's choosing, and can be handed to a vision model on a later turn. See IMAGES.md |
 | Prompting | Editable system prompt (German research default), five shipped presets — including one tuned for small local models — template variables (`{{datetime}}`, `{{location}}`, `{{tool_list}}`, `{{context_used}}`, …) |
 | Tools | Native tool calling with an automatic text-protocol fallback |
 | Metrics | Per-message tokens/s, TTFT, generation duration, stop reason, token counts |
@@ -79,7 +80,10 @@ internal/
   research/        search.go, chain.go (Brave -> DuckDuckGo), brave.go, duckduckgo.go,
                    scrape.go (SSRF + robots guards), util.go
   ingest/          ingest.go, pdf.go (pdftotext), office.go (libreoffice), chunk.go
-  tools/           Tool definitions and dispatch
+  images/          sdwebui.go: the /sdapi/v1/txt2img client, one route for
+                   AUTOMATIC1111, Forge and stable-diffusion.cpp (see IMAGES.md)
+  tools/           Tool definitions and dispatch; image.go turns a generate_image
+                   call into rows in the attachments table
   runtime/         The llama.cpp KiChat installs and runs itself
     install.go       release lookup per build family, verified download, extraction
     supervise.go     one server per managed model: free port, /health, log tail, stop
@@ -635,8 +639,15 @@ event-name constants now live in `internal/events` so a mismatch fails the build
 10. **Automatic model fallback** when a backend is down or the context does not fit.
 11. **Cross-chat memory** backed by the same FTS index.
 12. **SourcesPanel UI** for the existing `scrapeIntoChat` binding.
-13. Vision support for the VLM models already listed by LM Studio.
-14. Remaining exploratory ideas: document generation, model benchmarking, branching
+13. Vision support for the VLM models already listed by LM Studio. The half that
+    accepts an image is already there — a picture is an image attachment, and the
+    assembly turns it into an image part (IMAGES.md §4); what is missing is the UI
+    that lets a user drop one in for a model that can read it.
+14. More image backends behind the same `images.Provider`: ComfyUI (a workflow graph,
+    then poll `/history` and fetch `/view`) and a hosted OpenAI-style
+    `/v1/images/generations`. The interface has no HTTP in it, which is what makes
+    this an addition rather than a rewrite.
+15. Remaining exploratory ideas: document generation, model benchmarking, branching
     conversations, and scheduled watch tasks.
 
 ---
