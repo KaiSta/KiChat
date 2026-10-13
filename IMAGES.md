@@ -249,6 +249,16 @@ the two things that step leaves undone.
   a folder holding no program is a reported failure rather than a quiet draw with the path
   from last year.
 
+The panel has to *say* that, because two fields that both look required are what a user
+reported back as "seems double": while `CLIFolder` is set, the Program field is drawn
+**disabled** with the reason under it instead of as an equal, and the program the folder
+resolved to is printed beneath it as `Gefunden: …/sd-cli`. That reading comes from
+`ImageStatus.Binary` and is printed only while `ImageStatus.Folder` still equals the folder in
+the draft — the status answers for the *saved* settings, so a path printed under a folder the
+user has just finished typing would be a fact about some other folder. A typed path is kept
+rather than cleared when a folder arrives: it is stored, it is what runs once the folder is
+empty, and a field that silently disappears takes its value with it.
+
 What is installed is a **reading, not a setting**. `AcceleratorOf` reads the backend library
 (`libggml-vulkan.so`, `ggml-cuda.dll`, `libggml-hip.so`, `libggml-metal.dylib`) and the panel
 prints it beside the archive its picker is pointing at. There is deliberately no stored "which
@@ -676,6 +686,13 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / RecipeEditor
   back.
   The checkbox is left **checked** in that fixture for the reason the second picture exists:
   a control that only ever renders one state cannot show whether its binding is wired at all.
+  Two more states of the same fixture are the ones a user actually hit. `?images=off` keeps
+  every field of the row filled in and switches the feature off, which is what an unticked box
+  means — no `generate_image` tool at all, however complete the row is (§5) — and the panel
+  says so under the checkbox instead of leaving it to a badge. `?typedbinary=1` adds a typed
+  program path pointing at a *different* folder, the pair that reads as double: it is the
+  state the disabled field, its note and the `Gefunden:` line exist for, and a fixture that
+  only ever held one of the two could not show that rule at all.
 
 ## 9. What it does not do yet
 

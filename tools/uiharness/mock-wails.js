@@ -655,7 +655,10 @@ Verfügbare Tools: {{tool_list}}`,
   }
 
   /**
-   * ?images=cli is the picture backend that is a local program instead of a server.
+   * ?images=cli is the picture backend that is a local program instead of a server, and
+   * ?images=off is that same row **switched off** — the state a user described as "I filled
+   * it all in and the model says it cannot draw", which is what an unticked box means: no
+   * tool at all. One parameter with two values rather than two flags, because it is one row.
    *
    * It is a query flag rather than a second fixture because the two kinds are one
    * settings section: the panel picks a form from `kind`, and the flag has to switch the
@@ -663,9 +666,23 @@ Verfügbare Tools: {{tool_list}}`,
    * status would render a form whose badge counts checkpoints it cannot list. The
    * declaration therefore sits above the fixture it changes.
    */
-  const imagesCLI = new URLSearchParams(location.search).get('images') === 'cli'
+  const imagesParam = new URLSearchParams(location.search).get('images')
+  const imagesOff = imagesParam === 'off'
+  const imagesCLI = imagesParam === 'cli' || imagesOff
+  // A typed program path *beside* a resolving folder: the state a user reaches by pointing at
+  // the file as well as the folder, and the one the panel has to show as unused rather than
+  // as an equal. A flag of its own so that ruling stays renderable.
+  const typedBinary =
+    imagesCLI && new URLSearchParams(location.search).get('typedbinary') === '1'
   if (imagesCLI) {
-    console.warn('[harness] images=cli active: the picture backend is a local binary')
+    console.warn(
+      imagesOff
+        ? '[harness] images=off active: the picture row is filled in and switched off'
+        : '[harness] images=cli active: the picture backend is a local binary',
+    )
+  }
+  if (typedBinary) {
+    console.warn('[harness] typedbinary=1 active: a typed program path beside a resolving folder')
   }
 
   /** The sampler names stable-diffusion.cpp's own option table lists, quoted from its
@@ -730,7 +747,9 @@ Verfügbare Tools: {{tool_list}}`,
     // `width`, `steps` and `sampler` stay empty on purpose — that is the shape a
     // user who configured their WebUI ends up with.
     images: {
-      enabled: true,
+      // Switched off only by ?images=off, which is the state a fully filled-in row can be
+      // in: the fields are all stored, and the model has no tool at all.
+      enabled: !imagesOff,
       baseUrl: 'http://127.0.0.1:7860',
       apiKey: '',
       model: '',
@@ -744,10 +763,12 @@ Verfügbare Tools: {{tool_list}}`,
       // backend; `?images=cli` fills them in and switches the kind, which is what
       // makes the other half of the form renderable.
       kind: imagesCLI ? 'cli' : '',
-      // The folder is the primary route and the fixture uses it, so the Program field
-      // is left empty — which is what it looks like when KiChat finds sd-cli for the
-      // user. The explicit path stays the fallback for a program the scan cannot reach.
-      cliBinary: '',
+      // The folder is the primary route and the fixture uses it, so the Program field is
+      // left empty — which is what it looks like when KiChat finds sd-cli for the user. The
+      // explicit path stays the fallback for a program the scan cannot reach, and
+      // `?typedbinary=1` fills it with a *different* folder: the state in which the panel
+      // has to mark the path as unused rather than present two fields as equals.
+      cliBinary: typedBinary ? '/home/user/Downloads/sd-old/sd-cli' : '',
       cliFolder: imagesCLI ? '/home/user/Downloads/sd' : '',
       cliModel: '',
       cliDiffusionModel: imagesCLI ? '/home/user/models/qwen-image-2.1-Q5_K_M.gguf' : '',
@@ -2194,16 +2215,21 @@ Verfügbare Tools: {{tool_list}}`,
       Promise.resolve(
         imagesCLI
           ? {
-              enabled: true,
+              enabled: !imagesOff,
               baseURL: '',
-              ok: true,
+              // Switched off contacts nothing, so nothing is reachable and nothing failed:
+              // the same early return the real GetImageStatus makes when the provider is nil.
+              ok: !imagesOff,
               models: [],
               samplers: cliSamplers,
               keySet: false,
               kind: 'cli',
               // The program was found in the folder rather than typed, and `build` is
               // what that folder turned out to be — a *reading*, which is why the
-              // fixture has the folder set and the Vulkan backend libraries in it.
+              // fixture has the folder set and the Vulkan backend libraries in it. It is
+              // also what the panel prints as the found program, so it must be the path
+              // the folder really holds; `?typedbinary=1` leaves this alone, which is the
+              // point: the typed path is a second, different folder that nothing reads.
               binary: '/home/user/Downloads/sd/sd-cli',
               folder: '/home/user/Downloads/sd',
               build: 'vulkan',

@@ -1571,6 +1571,12 @@ async function pickImageFolder(
  *
  * The eight of them are the same control with different text, and writing them out eight
  * times would mean eight chances to forget the button or the hint.
+ *
+ * `disabled` and `note` exist for the one field whose value can be beside the point: the
+ * explicit program path, which the backend ignores outright while a program folder is set.
+ * It is drawn dimmed rather than hidden, because a stored path that vanishes from the panel
+ * is a path its owner cannot clear — and the sentence that has to be read without hovering
+ * anything is the `note`, since `hint` is a tooltip.
  */
 function PathField({
   label,
@@ -1579,6 +1585,8 @@ function PathField({
   placeholder,
   onChange,
   onPick,
+  disabled,
+  note,
 }: {
   label: string
   hint: string
@@ -1586,6 +1594,8 @@ function PathField({
   placeholder?: string
   onChange: (value: string) => void
   onPick: () => void
+  disabled?: boolean
+  note?: string
 }) {
   const t = useStore((s) => s.t)
   return (
@@ -1596,12 +1606,14 @@ function PathField({
           className="input mono flex-1"
           value={value}
           placeholder={placeholder}
+          disabled={disabled}
           onChange={(e) => onChange(e.target.value)}
         />
-        <button type="button" className="btn btn-sm" onClick={onPick}>
+        <button type="button" className="btn btn-sm" disabled={disabled} onClick={onPick}>
           {t('settings.images.browse')}
         </button>
       </div>
+      {note ? <span className="faint mt-1 block text-[11px]">{note}</span> : null}
     </label>
   )
 }
@@ -1638,6 +1650,16 @@ function ImagesTab({
   // this string and the empty one. It is read once here rather than compared at every field:
   // which half of the form is on screen has to be one answer.
   const isCLI = images.kind === 'cli'
+  // A program folder is a statement about a *place*, and the backend lets it win outright
+  // (images.ResolveProgram): the typed program path is the fallback for an install that has
+  // no folder at all. Two fields that both look required are exactly what reads as "seems
+  // double", so the panel says which of the two is supplying the executable.
+  const folderSet = (images.cliFolder ?? '').trim() !== ''
+  // The program the folder resolved to, and only while it still describes the folder in the
+  // draft: `status` answers for the *saved* settings, so a path printed under a folder the
+  // user has just finished typing would be a reading of some other folder.
+  const foundProgram =
+    folderSet && status?.folder === images.cliFolder ? status.binary ?? '' : ''
   // What an empty field means, said in the selected backend's own words. It reads a little
   // differently for each kind — a server has its own default, a one-shot program has its
   // own too — and the shared fields below belong to both, so one of them would be wrong.
@@ -1752,6 +1774,12 @@ function ImagesTab({
           <span className="badge">{checking ? '…' : t('settings.notChecked')}</span>
         )}
       </div>
+      {!images.enabled ? (
+        /* The sentence the rest of this panel depends on: with the feature off there is no
+           tool for the model to call and every field below is inert, which a badge alone
+           does not say to somebody who has just finished filling them in. */
+        <p className="faint mb-2 text-[11px]">{t('settings.images.offHint')}</p>
+      ) : null}
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="text-[12px]">{t('settings.images.kind')}</span>
@@ -1836,14 +1864,27 @@ function ImagesTab({
                 {t('settings.images.cliBuildNone')}
               </span>
             )}
+            {/* The fallback, and drawn as one: while a folder is set this field is
+                disabled and says why. Not hidden, because the path is still stored and a
+                user who typed it has to be able to see it and clear it. */}
             <PathField
               label={t('settings.images.cliBinary')}
               hint={t('settings.images.cliBinaryHint')}
               value={images.cliBinary ?? ''}
               placeholder="sd-cli"
+              disabled={folderSet}
+              note={folderSet ? t('settings.images.cliBinaryIgnored') : undefined}
               onChange={(v) => update({ cliBinary: v })}
               onPick={() => pickFile(update, t('settings.images.cliBinary'), [], 'cliBinary')}
             />
+            {/* What the folder resolved to, so the answer to "isn't that path already
+                clear?" is on screen rather than in a hover. Empty while the draft's
+                folder differs from the one the status describes. */}
+            {foundProgram ? (
+              <span className="faint mono text-[11px] sm:col-span-2">
+                {t('settings.images.cliFound')}: {foundProgram}
+              </span>
+            ) : null}
             {/* Named one per flag, because the flags are the only documentation there is: a
                 user with a working command line can copy the paths across one for one, and
                 an empty one is simply not passed. */}

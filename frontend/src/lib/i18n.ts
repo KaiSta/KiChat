@@ -391,7 +391,7 @@ const de = {
 
   'settings.images': 'Bildgenerierung',
   'settings.imagesHint':
-    'KiChat zeichnet über Software, die du selbst betreibst: eine Stable-Diffusion-WebUI (AUTOMATIC1111, Forge oder stable-diffusion.cpp) an einer Adresse, oder ein lokales Programm wie sd-cli, das für jedes Bild einmal startet. Kontaktiert wird nichts, solange die Funktion aus ist, und das Modell sieht das Werkzeug nur, wenn ein Backend eingerichtet ist. Ein Server muss mit aktivierter API laufen — bei AUTOMATIC1111 und Forge der Startparameter --api — und ein Checkpoint installiert sein.',
+    'KiChat zeichnet über Software, die du selbst betreibst: eine Stable-Diffusion-WebUI (AUTOMATIC1111, Forge oder stable-diffusion.cpp) an einer Adresse, oder ein lokales Programm wie sd-cli, das für jedes Bild einmal startet. Kontaktiert wird nichts, solange die Funktion aus ist, und das Modell sieht das Werkzeug nur, wenn sie eingeschaltet und ein Backend eingerichtet ist. Ein Server muss mit aktivierter API laufen — bei AUTOMATIC1111 und Forge der Startparameter --api — und ein Checkpoint installiert sein.',
   'settings.images.enabled': 'Bildgenerierung aktivieren',
   'settings.images.baseUrl': 'Server-Adresse',
   'settings.images.key': 'Zugangsdaten (user:pass)',
@@ -413,6 +413,8 @@ const de = {
   'settings.images.testing': 'Wird getestet …',
   'settings.images.ok': 'erreichbar',
   'settings.images.off': 'Nicht aktiviert',
+  'settings.images.offHint':
+    'Aus heißt: das Modell hat das Werkzeug generate_image gar nicht. Es kann kein Bild anfordern, egal wie vollständig die Felder darunter sind.',
   'settings.images.noModels': 'Kein Checkpoint installiert',
   'settings.images.models': 'Checkpoints',
   'settings.images.defaults': 'Leere Felder überlassen die Einstellung deinem Server',
@@ -426,6 +428,8 @@ const de = {
   'settings.images.cliBinary': 'Programm',
   'settings.images.cliBinaryHint':
     'Der Pfad zu sd-cli, absolut. Nur nötig, wenn oben kein Programmordner steht — ein Ordner hat Vorrang. Ein Skript geht auch, wenn es die Umgebung setzt, bevor es das Programm startet.',
+  'settings.images.cliBinaryIgnored':
+    'Der Programmordner oben hat Vorrang: dieser Pfad wird erst gelesen, wenn der Ordner leer ist.',
   'settings.images.cliFolder': 'Programmordner',
   'settings.images.cliFolderHint':
     'Der Ordner, in den du das stable-diffusion.cpp-Archiv entpackt hast. KiChat sucht sd-cli darin selbst — die Datei musst du nicht auswählen.',
@@ -436,6 +440,7 @@ const de = {
     'Für diese Maschine veröffentlicht das Projekt kein Build. Du kannst selbst eines bauen und oben den Ordner angeben.',
   'settings.images.cliBuildNote.cuda': 'Braucht die CUDA-Laufzeit daneben (das cudart-Archiv).',
   'settings.images.cliDetected': 'Erkannt',
+  'settings.images.cliFound': 'Gefunden',
   'settings.images.cliModel': 'Einzeldatei-Checkpoint (-m)',
   'settings.images.cliModelHint':
     'Ein Modell in einer Datei, übergeben als -m. Eine Pipeline, die ihre Teile einzeln nennt, trägt sie stattdessen unten ein — ein einzelnes quantisiertes Diffusionsmodell kann aber trotzdem eine VAE und einen Textencoder brauchen.',
@@ -882,7 +887,7 @@ const en: Record<keyof typeof de, string> = {
 
   'settings.images': 'Image generation',
   'settings.imagesHint':
-    'KiChat draws through software you run yourself: a Stable Diffusion WebUI (AUTOMATIC1111, Forge or stable-diffusion.cpp) at an address, or a local program such as sd-cli that starts once per picture. Nothing is contacted while it is off, and the model only sees the tool once a backend is configured. A server has to be running with its API enabled — --api for AUTOMATIC1111 and Forge — and a checkpoint installed.',
+    'KiChat draws through software you run yourself: a Stable Diffusion WebUI (AUTOMATIC1111, Forge or stable-diffusion.cpp) at an address, or a local program such as sd-cli that starts once per picture. Nothing is contacted while it is off, and the model only sees the tool while it is switched on and a backend is configured. A server has to be running with its API enabled — --api for AUTOMATIC1111 and Forge — and a checkpoint installed.',
   'settings.images.enabled': 'Enable image generation',
   'settings.images.baseUrl': 'Server address',
   'settings.images.key': 'Credentials (user:pass)',
@@ -903,6 +908,8 @@ const en: Record<keyof typeof de, string> = {
   'settings.images.testing': 'Testing…',
   'settings.images.ok': 'reachable',
   'settings.images.off': 'Not enabled',
+  'settings.images.offHint':
+    'Off means the model has no generate_image tool at all. It cannot ask for a picture however completely the fields below are filled in.',
   'settings.images.noModels': 'No checkpoint installed',
   'settings.images.models': 'Checkpoints',
   'settings.images.defaults': 'Empty fields leave the setting to your server',
@@ -916,6 +923,8 @@ const en: Record<keyof typeof de, string> = {
   'settings.images.cliBinary': 'Program',
   'settings.images.cliBinaryHint':
     'The absolute path to sd-cli. Only needed when no program folder is set above — a folder wins. A wrapper script works too, if it sets up the environment before starting it.',
+  'settings.images.cliBinaryIgnored':
+    'The program folder above wins: this path is only read once that folder is empty.',
   'settings.images.cliFolder': 'Program folder',
   'settings.images.cliFolderHint':
     'The folder you unpacked the stable-diffusion.cpp archive into. KiChat finds sd-cli inside it itself — you do not have to pick the file.',
@@ -926,6 +935,7 @@ const en: Record<keyof typeof de, string> = {
     'The project publishes no build for this machine. You can compile one yourself and point at its folder above.',
   'settings.images.cliBuildNote.cuda': 'Needs the CUDA runtime beside it (the cudart archive).',
   'settings.images.cliDetected': 'Detected',
+  'settings.images.cliFound': 'Found',
   'settings.images.cliModel': 'Single-file checkpoint (-m)',
   'settings.images.cliModelHint':
     'A model that lives in one file, passed as -m. A pipeline that names its parts individually fills those in below instead — but a single quantized diffusion model can still need a VAE and a text encoder.',
@@ -1359,7 +1369,7 @@ const zh: Record<keyof typeof de, string> = {
 
   'settings.images': '图像生成',
   'settings.imagesHint':
-    'KiChat 通过你自己运行的软件绘图：某个地址上的 Stable Diffusion WebUI（AUTOMATIC1111、Forge 或 stable-diffusion.cpp），或像 sd-cli 这样每张图启动一次的本地程序。关闭时不会连接任何服务；只有配置了后端，模型才会看到该工具。服务器必须以启用 API 的方式运行（AUTOMATIC1111 和 Forge 需要 --api 参数），并且已安装检查点。',
+    'KiChat 通过你自己运行的软件绘图：某个地址上的 Stable Diffusion WebUI（AUTOMATIC1111、Forge 或 stable-diffusion.cpp），或像 sd-cli 这样每张图启动一次的本地程序。关闭时不会连接任何服务；只有开启并配置了后端，模型才会看到该工具。服务器必须以启用 API 的方式运行（AUTOMATIC1111 和 Forge 需要 --api 参数），并且已安装检查点。',
   'settings.images.enabled': '启用图像生成',
   'settings.images.baseUrl': '服务器地址',
   'settings.images.key': '凭据 (user:pass)',
@@ -1378,6 +1388,7 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.testing': '正在测试…',
   'settings.images.ok': '可访问',
   'settings.images.off': '未启用',
+  'settings.images.offHint': '关闭意味着模型完全没有 generate_image 工具。下面的字段填得再完整，它也无法请求绘图。',
   'settings.images.noModels': '未安装检查点',
   'settings.images.models': '检查点',
   'settings.images.defaults': '留空的字段由你的服务器决定',
@@ -1390,6 +1401,7 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.cliBinary': '程序',
   'settings.images.cliBinaryHint':
     'sd-cli 的绝对路径。仅在上方未设置程序文件夹时需要——文件夹优先。包装脚本也可以，只要它在启动前设置好环境。',
+  'settings.images.cliBinaryIgnored': '上方的程序文件夹优先：只有该文件夹为空时才会读取此路径。',
   'settings.images.cliFolder': '程序文件夹',
   'settings.images.cliFolderHint':
     '你解压 stable-diffusion.cpp 压缩包所在的文件夹。KiChat 会自行在其中找到 sd-cli，无需选择文件。',
@@ -1399,6 +1411,7 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.cliBuildNone': '项目未为此机器发布构建。你可以自行编译，并在上方指向其文件夹。',
   'settings.images.cliBuildNote.cuda': '旁边需要 CUDA 运行时（cudart 压缩包）。',
   'settings.images.cliDetected': '已检测到',
+  'settings.images.cliFound': '已找到',
   'settings.images.cliModel': '单文件检查点（-m）',
   'settings.images.cliModelHint': '单个文件的模型，作为 -m 传入。若流水线分别列出各个部分，请在下方填写；但单个量化扩散模型仍可能需要 VAE 和文本编码器。',
   'settings.images.cliPartsHint': '较新流水线（Qwen-Image、Flux、SD3）的各个部分。留空的字段不会被传递。',

@@ -173,6 +173,15 @@ body {
 .select:focus {
   border-color: var(--accent);
 }
+/* A field whose value is stored but not read right now — the explicit program path while a
+ * program folder is set. Dimmed the way a disabled button is, so it reads as switched off
+ * rather than as a value that is in effect. */
+.input:disabled,
+.textarea:disabled,
+.select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 /* The popup list is a native widget and does not inherit the select's colours, so
  * it has to be told explicitly or it renders its default text on our background. */
 .select option {
