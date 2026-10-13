@@ -873,13 +873,12 @@ func TestADrawIsWatchedAndStoppableUnderTheMessageThatAskedForIt(t *testing.T) {
 		return func() { released++ }
 	}
 	var progressIDs []string
+	var reports []images.Progress
 	service.Progress = func(id, chat string, p images.Progress) {
 		progressIDs = append(progressIDs, id)
+		reports = append(reports, p)
 		if chat != chatID {
 			t.Errorf("progress reported for chat %q, want %q", chat, chatID)
-		}
-		if len(p.Preview) == 0 || p.PreviewMime == "" {
-			t.Errorf("report %+v carries no usable preview", p)
 		}
 	}
 
@@ -897,8 +896,19 @@ func TestADrawIsWatchedAndStoppableUnderTheMessageThatAskedForIt(t *testing.T) {
 	if released != 1 {
 		t.Errorf("release called %d times, want exactly 1 — a registration that outlives its draw leaves a Stop button for nothing", released)
 	}
-	if len(progressIDs) != 2 {
-		t.Fatalf("progress reports = %d, want the 2 the provider sent", len(progressIDs))
+	if len(progressIDs) != 3 {
+		t.Fatalf("progress reports = %d, want the start report plus the 2 the provider sent", len(progressIDs))
+	}
+	// The first report announces the draw before the backend has anything to say. It is what
+	// makes the row — and the Stop button — exist on a backend that never reports on its
+	// own, so it is deliberately empty of pixels.
+	if len(reports[0].Preview) != 0 || reports[0].Step != 0 {
+		t.Errorf("the start report = %+v, want an empty one that only announces the draw", reports[0])
+	}
+	for _, p := range reports[1:] {
+		if len(p.Preview) == 0 || p.PreviewMime == "" {
+			t.Errorf("report %+v carries no usable preview", p)
+		}
 	}
 	for _, id := range progressIDs {
 		if id != "msg-42" {
@@ -918,14 +928,17 @@ func TestADrawWithNobodyWatchingStillDraws(t *testing.T) {
 		service, _, chatID := newImageService(t, provider, config.ImageSettings{})
 		// The draw is still *registered*, and that is not a contradiction: registering is
 		// about being stoppable, which this backend can be, and reporting is about being
-		// watchable, which it cannot. Only the reports have to be absent.
+		// watchable, which it cannot. What this backend cannot supply is any report of its
+		// own; the one report that does arrive is the service's own announcement of the
+		// draw, which is what gives the window a row to put a Stop on.
 		registered := 0
 		service.Draws = func(string, string, context.CancelFunc) func() {
 			registered++
 			return func() {}
 		}
-		service.Progress = func(string, string, images.Progress) {
-			t.Error("a report arrived from a backend that has none")
+		var reports []images.Progress
+		service.Progress = func(_, _ string, p images.Progress) {
+			reports = append(reports, p)
 		}
 		out, err := service.Execute(WithCallingMessage(context.Background(), "msg-1"), chatID, ToolGenerateImage,
 			`{"prompt":"a red fox"}`)
@@ -940,6 +953,11 @@ func TestADrawWithNobodyWatchingStillDraws(t *testing.T) {
 		}
 		if registered != 1 {
 			t.Errorf("draws registered = %d, want 1: a draw a Stop cannot reach is the failure this registration exists for", registered)
+		}
+		if len(reports) != 1 {
+			t.Errorf("reports = %d, want exactly the one start report: a backend that cannot report still has to announce its draw so the Stop is reachable", len(reports))
+		} else if reports[0].Step != 0 || len(reports[0].Preview) != 0 {
+			t.Errorf("start report = %+v, want a zero report with no preview", reports[0])
 		}
 	})
 

@@ -136,6 +136,13 @@ type App struct {
 	// the update landed — the moment the restart is owed. A managed start clears
 	// it, because that server is running the new build.
 	installCompleted bool
+
+	// emitFn, when set, replaces the Wails runtime call in emit. It exists for tests:
+	// EventsEmit given a context that is not the one from the lifecycle hooks calls
+	// log.Fatalf, which no test can recover from — and a draw now announces itself the
+	// moment it starts, so a test that sets a.ctx to run a bound call would otherwise
+	// die as soon as a picture began. A test helper installs a no-op.
+	emitFn func(name string, payload any)
 }
 
 // inflightDraw is one image draw this app is waiting for.
@@ -742,6 +749,10 @@ func (a *App) currentScraper() *research.Scraper {
 
 func (a *App) emit(name string, payload any) {
 	if a.ctx == nil {
+		return
+	}
+	if a.emitFn != nil {
+		a.emitFn(name, payload)
 		return
 	}
 	runtime.EventsEmit(a.ctx, name, payload)

@@ -148,6 +148,11 @@ func TestBuildDirOfIsTheBuildALauncherBelongsTo(t *testing.T) {
 func newCleanupTestApp(t *testing.T, settings config.Settings, runtimeDir string) *App {
 	t.Helper()
 	a := &App{settings: settings, installer: rt.NewInstaller(runtimeDir)}
+	// EventsEmit needs the Wails runtime's own context, which a test does not have, and it
+	// calls log.Fatalf rather than returning an error when given anything else. Silencing
+	// emit here is what lets a test set a.ctx — needed for a bound call — without the next
+	// event killing the test binary. A test that wants to observe events can replace this.
+	a.emitFn = func(string, any) {}
 	a.initOnce.Do(func() {})
 	return a
 }

@@ -403,10 +403,21 @@ func (s *Service) watchDraw(id, chatID string, cancel context.CancelFunc) func()
 	if s.Draws == nil || id == "" {
 		return func() {}
 	}
-	if release := s.Draws(id, chatID, cancel); release != nil {
-		return release
+	release := s.Draws(id, chatID, cancel)
+	if release == nil {
+		return func() {}
 	}
-	return func() {}
+	// Announce the draw at once, before the backend has anything of its own to say.
+	// The window keys the row — and with it the Stop button — off the draw id, and
+	// only a report creates that row; a backend that cannot report progress (an
+	// sd-cli build without `--preview`, a server without the progress route) would
+	// otherwise leave a model-started draw unstoppable for its whole length even
+	// though it is registered and cancellable. This zero report is that first
+	// report, and it is also what makes the release emit its `done`.
+	if s.Progress != nil {
+		s.Progress(id, chatID, images.Progress{})
+	}
+	return release
 }
 
 // draw runs one generation, reporting it while it runs when the backend can and somebody
