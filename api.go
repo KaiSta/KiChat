@@ -24,7 +24,6 @@ import (
 	rt "kichat/internal/runtime"
 	"kichat/internal/secret"
 	"kichat/internal/store"
-	"kichat/internal/tools"
 	"kichat/internal/version"
 )
 
@@ -2091,8 +2090,15 @@ func (a *App) RegenerateImage(attachmentID string, recipe store.GenerationRecipe
 	// bound, is the control for a draw that is merely slow.
 	ctx, cancel := context.WithTimeout(a.ctx, imageDrawTimeout(a.Settings()))
 	defer cancel()
-	token := a.beginDraw(attachmentID, cancel, service)
-	defer a.endDraw(attachmentID, token)
+	// The chat is read here rather than inside the service so the progress events can say
+	// which chat they belong to, the way every other event does; one indexed row read is a
+	// smaller price than a window that has to guess.
+	chatID := ""
+	if source, err := a.store.GetAttachment(attachmentID); err == nil {
+		chatID = source.ChatID
+	}
+	release := a.registerDraw(attachmentID, chatID, cancel)
+	defer release()
 
 	attachment, err := service.Regenerate(ctx, attachmentID, recipe)
 	if err != nil {
@@ -2127,6 +2133,57 @@ type StopDrawResult struct {
 	InterruptError string `json:"interruptError,omitempty"`
 }
 
+// reportDrawProgress turns one report from a running draw into an event the window can
+// paint.
+//
+// The preview travels as a data: URL for the same reason a stored picture does — the
+// webview loads from an embedded assets handler, and a path would be blocked by the same
+// origin rule — and because the bytes are already in hand: a second bridge round trip to
+// fetch what this call has just read would be a request per step.
+//
+// Called from the drawing goroutine, so it only touches the emitter, which is safe from
+// any goroutine.
+func (a *App) reportDrawProgress(id, chatID string, progress images.Progress) {
+	if id == "" {
+		return
+	}
+	// Noted so the release knows there is a row on screen to clear. A report for an id
+	// nothing is registered under is still emitted: the window keys its rows by draw id, so
+	// the worst it can do is update one nothing else will touch.
+	a.drawsMu.Lock()
+	if draw, ok := a.draws[id]; ok {
+		draw.reported = true
+		a.draws[id] = draw
+	}
+	a.drawsMu.Unlock()
+	a.emit(events.ImageProgress, drawProgressPayload(id, chatID, progress, false))
+}
+
+// drawProgressPayload decides the shape of one `image:progress` event, in one place because
+// two calls emit it — a report and the end of a draw.
+//
+// The keys are the interface the window reads, and a renamed key is not a compile error on
+// either side of the bridge: it is a progress row that silently stops appearing while the
+// draw itself keeps working. That is what the test in image_progress_test.go pins.
+//
+// `done` is part of every payload rather than a second event name, so a listener that misses
+// one cannot be left holding a progress row for a draw that is over — which is a Stop button
+// for something that is not running.
+func drawProgressPayload(id, chatID string, progress images.Progress, done bool) map[string]any {
+	payload := map[string]any{
+		"drawId": id,
+		"chatId": chatID,
+		"step":   progress.Step,
+		"steps":  progress.Steps,
+		"done":   done,
+	}
+	if len(progress.Preview) > 0 && progress.PreviewMime != "" {
+		payload["preview"] = "data:" + progress.PreviewMime + ";base64," +
+			base64.StdEncoding.EncodeToString(progress.Preview)
+	}
+	return payload
+}
+
 // StopImageDraw ends the wait on a picture being drawn and asks the server to abandon
 // the work behind it.
 //
@@ -2139,13 +2196,18 @@ type StopDrawResult struct {
 //
 // Nothing is stored either way: the picture only exists once the server answers with it,
 // so a stopped draw leaves the transcript exactly as it was.
-func (a *App) StopImageDraw(attachmentID string) StopDrawResult {
+//
+// drawID is whatever the view knows the draw by, and there are two of those: the attachment
+// a redraw works on, and the assistant message a model-started draw belongs to (its tool
+// call is rendered there). Passing an id nothing is registered under is not an error — it
+// is the "nothing was running" answer a second click produces.
+func (a *App) StopImageDraw(drawID string) StopDrawResult {
 	result := StopDrawResult{}
 	if a.ctx == nil {
 		return result
 	}
 	a.drawsMu.Lock()
-	draw, ok := a.draws[attachmentID]
+	draw, ok := a.draws[drawID]
 	a.drawsMu.Unlock()
 	if !ok {
 		return result
@@ -2164,34 +2226,57 @@ func (a *App) StopImageDraw(attachmentID string) StopDrawResult {
 	return result
 }
 
-// beginDraw registers a draw so Stop can find it, and returns the token that identifies
-// this registration.
-func (a *App) beginDraw(attachmentID string, cancel context.CancelFunc, service *tools.Service) uint64 {
+// registerDraw records a draw so Stop can find it, and returns the function that releases
+// the registration.
+//
+// It is called from two places, and that is the point of it: RegenerateImage registers the
+// attachment a redraw works on, and tools.Service registers the assistant message a
+// model-started draw belongs to. Both ids are uuids, so one map holds both kinds without
+// them colliding, and a single Stop path serves a picture that exists and one that does not
+// yet.
+//
+// The release is the same token dance as before: it removes the entry only if it is still
+// the one this call made, because a second draw of the same picture must keep its own entry
+// — deleting it would leave that draw uncancellable while Stop reported nothing to stop.
+// It also tells the window the draw is over, since there is no other event that means it: a
+// progress row that outlives its draw is a Stop button for something that is not running.
+//
+// That last part is why the event is *conditional* on the draw having been reported on. A
+// backend that cannot say anything while it works — or one whose only draw is a redraw the
+// user is watching under the picture — leaves no row behind, and an event that fires for
+// every silent draw is one the window has to handle for no reason at all.
+func (a *App) registerDraw(id, chatID string, cancel context.CancelFunc) func() {
+	if a.ctx == nil || id == "" {
+		return func() {}
+	}
+	service := a.currentToolService()
 	a.drawsMu.Lock()
-	defer a.drawsMu.Unlock()
 	if a.draws == nil {
 		a.draws = map[string]inflightDraw{}
 	}
-	// A draw already running for this picture is cancelled first. Nothing in the UI can
-	// start two (every control is disabled while one runs), so reaching this means a
-	// request arrived from somewhere else, and the newest recipe is then the one the user
-	// is waiting for.
-	if previous, ok := a.draws[attachmentID]; ok {
+	// A draw already running for this id is cancelled first. Nothing in the UI can start two
+	// (every control is disabled while one runs), so reaching this means a request arrived
+	// from somewhere else, and the newest recipe is then the one the user is waiting for.
+	if previous, ok := a.draws[id]; ok {
 		previous.cancel()
 	}
 	a.drawToken++
-	a.draws[attachmentID] = inflightDraw{token: a.drawToken, cancel: cancel, service: service}
-	return a.drawToken
-}
+	token := a.drawToken
+	a.draws[id] = inflightDraw{token: token, cancel: cancel, service: service}
+	a.drawsMu.Unlock()
 
-// endDraw removes a registration, but only if it is still the one this call made. A later
-// draw of the same picture must keep its own entry: deleting it here would leave that
-// draw uncancellable while Stop reported nothing to stop.
-func (a *App) endDraw(attachmentID string, token uint64) {
-	a.drawsMu.Lock()
-	defer a.drawsMu.Unlock()
-	if draw, ok := a.draws[attachmentID]; ok && draw.token == token {
-		delete(a.draws, attachmentID)
+	return func() {
+		a.drawsMu.Lock()
+		wasReported := false
+		if draw, ok := a.draws[id]; ok && draw.token == token {
+			wasReported = draw.reported
+			delete(a.draws, id)
+		}
+		a.drawsMu.Unlock()
+		if !wasReported {
+			return
+		}
+		a.emit(events.ImageProgress, drawProgressPayload(id, chatID, images.Progress{}, true))
 	}
 }
 

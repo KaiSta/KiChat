@@ -32,6 +32,11 @@ const (
 	Title      = "chat:title"
 	// Attachments reports that a chat's attachments changed.
 	Attachments = "chat:attachments"
+	// ImageProgress carries one report from a picture being drawn: a step counter and,
+	// usually, a small preview of the draw so far. It is its own event rather than a Status
+	// because it is high-frequency and structured — a draw reports once per step, and a
+	// phase string would mean re-sending the whole phase on every one of them.
+	ImageProgress = "image:progress"
 	// ChatsChanged reports that the chat list itself changed.
 	ChatsChanged = "chats:changed"
 )
@@ -42,5 +47,6 @@ func All() []string {
 	return []string{
 		Delta, Reasoning, Start, Done, Message, Tool, Status,
 		Error, Warning, Budget, Compaction, Title, Attachments, ChatsChanged,
+		ImageProgress,
 	}
 }

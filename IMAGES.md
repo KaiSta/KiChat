@@ -502,6 +502,95 @@ after Stop".
 text-protocol path, and from **both** sides: "absent when off" would also pass if the
 tool were never advertised at all, and that is the regression the test exists to catch.
 
+### Watching a draw
+
+A draw that takes minutes is the one case where "nothing to report" and "stuck" look
+identical in the window, so both backends report while they work. Neither source is invented
+here — each is the program's own, and each is read at the moment it is useful:
+
+- **The WebUI** polls `/sdapi/v1/progress`, which answers a step counter, a fraction and — on
+  most builds — a JPEG of the latent decoded so far. The step comes from `state`, **not** from
+  the flat `progress` fraction, which is measured rather than cautious:
+  stable-diffusion.cpp's `sd-server` streams `current_image` about once a second while
+  `progress` stays `0.0` for the whole draw. A1111 fills in both, so the step counter is the
+  one that works everywhere and the fraction is only the fallback for a server that reports
+  nothing else. The POST is a blocking call that answers when the picture is finished, so this
+  is a second route polled *beside* it — one request a second, not two, because the preview
+  comes from the same answer.
+- **The program** (`sd-cli`) writes a preview image to the path `--preview-path` names — the
+  file is rewritten on every denoiser step, so a poll of it is a live picture of the draw — and
+  prints the sampling step into its log as a bar (`  |=====>    | 3/12 - 2.20s/it`). The log is
+  now read **line by line** rather than collected and read at the end, because two of the three
+  things in it are only useful while the draw is running: the step, which is the progress, and
+  the seed, which makes a recipe record the number the program really used. The recent lines are
+  kept in a ring (`cliLogLines`), which is what a failure prints.
+
+Four decisions, each of which is the difference between a feature and a footgun:
+
+- **The flags are asked for, not assumed.** `sd-cli`'s preview options are newer than its first
+  builds, and an unknown option fails the **whole run** on that binary — so a build without them
+  would turn "no progress display" into "no picture". The client runs `-h` once
+  (`CLI.previewSupport`, memoised in `CLI.helpOnce`, which is also the probe `Health` needs),
+  appends the flags only when the build's own help lists them, and does nothing when the help
+  does not answer at all. A build whose help cannot be read is `previewSupport == false`, so
+  `previewSupport` must not be implemented as "assume yes on error".
+- **The user's own command line still wins.** `--preview` or `--preview-path` in
+  `CLIExtraArgs` means this app appends neither: there is no control for the method or the
+  interval, and appending ours would silently overrule a command line the user wrote. An
+  unwatched draw is a far smaller loss than a draw with the wrong method.
+- **A missing progress route is asked about once.** A 404 on `/sdapi/v1/progress` — a stop of
+  A1111 that predates it, or something else sharing the port — sets a flag on the client and is
+  never asked again: a request per second for the length of every draw is not a cost a missing
+  feature should carry. The draw is unaffected either way.
+- **The interface is optional**, like `Interrupter` and for the same reason: a backend that
+  cannot say anything halfway through is not a broken backend. `images.Progressive` is a
+  separate interface, `tools.Service.draw` falls back to a plain `Generate` when the provider
+  does not implement it, and nothing about the result depends on the reports having happened.
+
+How it reaches the window is one event and two kinds of id. `image:progress` carries
+`drawId`, `chatId`, `step`, `steps`, a `preview` as a **`data:` URL** (the webview loads from an
+embedded assets handler, so a path would be blocked by the same origin rule; the bytes are
+already in hand, so a second bridge round trip would be a request per step), and `done`. The
+`drawId` is the attachment of a redraw and the **assistant message** a model-started draw
+belongs to — the row each is rendered on, which is what makes a draw the *model* asked for
+stoppable at all: every Stop in the window lives under a picture, and there is no picture until
+the draw has finished. `image:progress` is in `events.All()`, so `internal/events`' test
+requires it in the frontend's `EV` map.
+
+- **The end of a draw is the same event with `done` set**, not a second name, and it is sent
+  **only for a draw that was reported on**. Its whole purpose is to clear a progress row off
+  the screen; a draw nobody reported on has no row, and the event exists so a Stop button
+  cannot outlive the thing it stops.
+- **Registration is not reporting.** `tools.Service.Draws` is called for every draw — that is
+  what makes a silent backend's draw stoppable — while `tools.Service.Progress` is only called
+  by a backend that implements `Progressive`.
+- **The release runs on the drawing goroutine**, so it only touches the emitter, which is safe
+  from any goroutine; the `reported` flag it reads lives under the app's `drawsMu`.
+
+**A measured trap, written down because the first version had it.** The drain of the program's
+output was placed *before* `cmd.Wait()` and bounded by a flat two seconds. That reads well —
+"the lines it wrote on its way out are in hand before Wait closes the pipe" — and it is wrong:
+the bound then applies to the whole *draw*, so the preview watcher was stopped two seconds in
+and every longer draw reported exactly one step and then went quiet. Measured while fixing it:
+a three-second fake draw reported `{Step:1 Steps:2}` and nothing else. What replaced it is an
+`os.Pipe()` this file owns (rather than `cmd.StdoutPipe()`, which the *command* closes) as the
+program's stdout, so EOF means "it and everything it started are done writing": `Wait`, then
+close the watcher, then a **bounded drain** of the tail. The bound now costs a truncated
+diagnosis in the pathological case and never a report.
+
+`internal/images/cli_test.go` drives a fake `sd-cli` that answers `-h`, rewrites a preview file
+and prints step bars: two reports arrive, the first carries the step and a real PNG preview,
+the last carries the second step, and the seed line is still read — the draw is unaffected by
+having been watched. Two more tests hold the negative side, which is the one that costs a user
+a picture: no `--preview` flags are passed to a build whose help does not list them, and none
+when the user's own arguments already decide the preview.
+`internal/images/sdwebui_test.go` does the same for the HTTP route, including that a 404 is
+asked about exactly once across two draws. `internal/tools/image_test.go` pins the ids: the
+draw is registered under the **calling message**, the reports are filed under it, and the
+release runs exactly once. `image_progress_test.go` pins the event's keys, because a renamed
+key is not a compile error on either side of the bridge — it is a progress row that silently
+stops appearing.
+
 The tool result tells the model, in as many words, that **it cannot see the picture and
 must not describe its contents**. The chat model that called the tool has not seen it;
 a reply that invents the contents of its own drawing reads as a broken feature rather

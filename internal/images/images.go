@@ -92,10 +92,48 @@ type Result struct {
 	// Model is the checkpoint the server reported using, empty when it did not
 	// name one.
 	Model string
-	// Info is the server's own report about the run, kept verbatim for the tool
-	// result: when a picture comes out wrong the sampler, the seed and the
-	// scheduler it actually used are what a bug report needs.
+	// Info is the backend's own report about the run, in its own words: a WebUI's
+	// `info` text, or — for the local program — the lines of its log that name what
+	// it loaded, which seed it drew with and how long the sampling took. Nothing in
+	// the app parses it: it is what a bug report prints, which is what the live tests
+	// do with it. For the CLI kind it used to be the entire log, progress bars and
+	// all, because a run's output was collected and read only at the end; now that the
+	// same stream feeds progress reporting it is trimmed to the lines worth keeping,
+	// so a field nobody reads is not also the largest thing in memory.
 	Info string
+}
+
+// Progress is one report from a draw that is still running.
+//
+// Both backends can say something while they work, and neither was asked before this:
+// a WebUI answers its progress route with a step counter and a JPEG of the latent decoded
+// so far, while stable-diffusion.cpp's `sd-cli` writes a preview image to a path it is
+// given and prints the sampling step into its own log. A draw that takes minutes is the
+// one case where "nothing to report" and "stuck" look identical in the window, which is
+// what makes this worth the wiring.
+type Progress struct {
+	// Step and Steps are the sampling pass's own numbering. Steps is the total, so a caller
+	// can say "step 3 of 12"; zero means the total is unknown and only Step is worth showing.
+	Step, Steps int
+	// Preview is the picture as it looks so far, nil when this report carries none. It is a
+	// real (small) image rather than a placeholder, which is why a caller may render it.
+	Preview []byte
+	// PreviewMime is the format Preview arrived in, empty when there is none. It is a value
+	// rather than a constant because the sources differ: the HTTP route answers with JPEG,
+	// and the file the binary writes is whatever its own encoder produced.
+	PreviewMime string
+}
+
+// Progressive is a provider that can report a draw's progress while it runs.
+//
+// It is a separate interface rather than a method on Provider for the same reason
+// Interrupter is: a backend that cannot say anything halfway through is not a broken
+// backend, and an implementation that always reported nothing would be a lie about what it
+// does. `report` is called from the drawing goroutine, may be called any number of times,
+// and is never required for the draw to finish — a caller that passes nil gets exactly
+// Generate's behaviour.
+type Progressive interface {
+	GenerateWithProgress(ctx context.Context, req Request, report func(Progress)) (Result, error)
 }
 
 // Model is a checkpoint the server offers.

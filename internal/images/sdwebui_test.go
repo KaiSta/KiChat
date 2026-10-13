@@ -488,6 +488,104 @@ func TestSDWebUIPicksTheSeedItSends(t *testing.T) {
 	}
 }
 
+// jpegBytes is a JPEG header, distinct enough for the sniffer and not valid base64 itself.
+var jpegBytes = []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0x01, 0x02}
+
+// TestSDWebUIReportsTheStepAndAPreviewWhileItDraws is the WebUI half of live progress. The
+// draw itself is a blocking POST — nothing is streamed on `/sdapi/v1/txt2img` until the
+// picture is finished — so the reporting is a second route polled beside it, and this checks
+// that the two really run at once rather than one after the other.
+//
+// It is also where the shape of that answer is pinned: the step comes from `state`, not from
+// the flat `progress` fraction, because stable-diffusion.cpp's server leaves the fraction at
+// 0.0 for the whole draw while filling `state` in. A client reading `progress` would show
+// nothing moving on exactly the backend that needs it most.
+func TestSDWebUIReportsTheStepAndAPreviewWhileItDraws(t *testing.T) {
+	var polls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sdapi/v1/txt2img":
+			// Longer than one poll on purpose: a draw that answers before the first tick
+			// would make this test pass without any reporting having happened.
+			time.Sleep(2600 * time.Millisecond)
+			fmt.Fprintf(w, `{"images":["%s"]}`, base64.StdEncoding.EncodeToString(pngBytes))
+		case "/sdapi/v1/progress":
+			// The fraction is the trap: it reads 0.0 the way sd-server reports a draw, and
+			// `state` is what the client has to prefer.
+			fmt.Fprintf(w, `{"progress":0.0,"current_image":"%s","state":{"sampling_step":%d,"sampling_steps":12}}`,
+				base64.StdEncoding.EncodeToString(jpegBytes), polls.Add(1))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var reports []Progress
+	result, err := NewSDWebUI("sd", "SD", server.URL, "").
+		GenerateWithProgress(t.Context(), Request{Prompt: "a red fox", Steps: 12}, func(p Progress) {
+			reports = append(reports, p)
+		})
+	if err != nil {
+		t.Fatalf("GenerateWithProgress: %v", err)
+	}
+	if len(result.Images) != 1 {
+		t.Fatalf("images = %d, want the picture the draw produced", len(result.Images))
+	}
+	if len(reports) == 0 {
+		t.Fatal("a watched draw reported nothing; the progress route was never read")
+	}
+	first := reports[0]
+	if first.Step != 1 || first.Steps != 12 {
+		t.Errorf("first report = %d/%d, want 1/12 from the server's own state", first.Step, first.Steps)
+	}
+	if len(first.Preview) == 0 {
+		t.Error("the report carried no preview, though the server sent one on every poll")
+	}
+	if first.PreviewMime != MimeJPEG {
+		t.Errorf("preview mime = %q, want %q: the route answers with JPEG, not PNG", first.PreviewMime, MimeJPEG)
+	}
+	// A server that answers a new picture every poll is what a real draw does, and the
+	// second report is the one that shows the counter moving rather than merely existing.
+	if len(reports) > 1 && reports[len(reports)-1].Step <= first.Step {
+		t.Errorf("the step did not advance across %d reports: %+v", len(reports), reports)
+	}
+	if polls.Load() == 0 {
+		t.Error("the progress route was never called")
+	}
+}
+
+// TestSDWebUIAsksOnceForAProgressRouteThatIsNotThere keeps a missing feature from becoming a
+// cost. A stop of AUTOMATIC1111 that predates the progress route — or something else sharing
+// the port — answers 404, and asking once per second for the length of every draw would be a
+// request per second spent learning the same thing. The draw is unaffected either way, which
+// is why the assertion is on the *count* of requests and not on the picture.
+func TestSDWebUIAsksOnceForAProgressRouteThatIsNotThere(t *testing.T) {
+	var progressCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sdapi/v1/txt2img":
+			time.Sleep(1200 * time.Millisecond)
+			fmt.Fprintf(w, `{"images":["%s"]}`, base64.StdEncoding.EncodeToString(pngBytes))
+		case "/sdapi/v1/progress":
+			progressCalls.Add(1)
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewSDWebUI("sd", "SD", server.URL, "")
+	for i := 0; i < 2; i++ {
+		if _, err := client.GenerateWithProgress(t.Context(), Request{Prompt: "a red fox"}, func(Progress) {}); err != nil {
+			t.Fatalf("draw %d: %v", i+1, err)
+		}
+	}
+	if got := progressCalls.Load(); got != 1 {
+		t.Errorf("the absent progress route was asked %d times across two draws, want exactly 1", got)
+	}
+}
+
 // TestSDWebUIHonoursAnAskedForSeed keeps the other direction honest: a recipe that names a
 // seed must draw with *that* seed, not with a fresh random one. A redraw that quietly
 // randomises is the whole feature failing while looking like it worked.

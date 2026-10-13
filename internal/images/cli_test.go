@@ -526,6 +526,179 @@ func TestCLIEmptyPromptIsRefused(t *testing.T) {
 	}
 }
 
+// TestStepFromLogReadsTheSamplingBarAndNotTheLoadBar pins the reading that live progress
+// depends on, and it is pinned because the obvious pattern is wrong: the program draws the
+// *same* bar while it loads its tensors, so matching `n/m` alone reported the loader's 6 of
+// 265 as the step counter of a two-step draw. That is measured rather than imagined, and the
+// rate is what tells the two apart — a sampling bar names a per-step time, a load bar names a
+// throughput.
+func TestStepFromLogReadsTheSamplingBarAndNotTheLoadBar(t *testing.T) {
+	cases := []struct {
+		line  string
+		step  int
+		steps int
+		want  bool
+	}{
+		{"  |=====>              | 3/12 - 2.20s/it", 3, 12, true},
+		// The loader's own bar, which is the whole reason the pattern carries a rate.
+		{"  |#####                | 6/265 - 4.18GB/s", 0, 0, false},
+		{"  |==========>          | 2/12 - 0.53it/s", 2, 12, true},
+		// A total of zero is not a fraction, and dividing by it must not reach the panel.
+		{"  |=====>              | 3/0 - 2.20s/it", 0, 0, false},
+		{"loading tensors completed, taking 2.11s", 0, 0, false},
+		{"generating image: 1/1 - seed 4242", 0, 0, false},
+	}
+	for _, tc := range cases {
+		step, steps, ok := stepFromLog(tc.line)
+		if ok != tc.want {
+			t.Errorf("stepFromLog(%q) matched = %v, want %v", tc.line, ok, tc.want)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if step != tc.step || steps != tc.steps {
+			t.Errorf("stepFromLog(%q) = %d/%d, want %d/%d", tc.line, step, steps, tc.step, tc.steps)
+		}
+	}
+}
+
+// TestSeedFromLogNeedsTheWholeLine is a bug the loose version would have shipped: the prompt
+// is echoed into the same log, so a draw of "a robin's egg, seed 999" recorded 999 as the seed
+// that produced the picture — and the recipe then described an image nobody had drawn, which
+// is exactly the failure the seed line exists to prevent.
+func TestSeedFromLogNeedsTheWholeLine(t *testing.T) {
+	if got := seedFromLog("generating image: 1/1 - seed 4242"); got != 4242 {
+		t.Errorf("seed = %d, want 4242 from the pipeline's own line", got)
+	}
+	if got := seedFromLog("prompt: a robin's egg, seed 999"); got != 0 {
+		t.Errorf("seed = %d, want no seed: the word appearing in a prompt is not a seed line", got)
+	}
+	// A batch prints one line per image, and the batch above is always one picture.
+	if got := seedFromLog("generating image: 1/2 - seed 111\ngenerating image: 2/2 - seed 222"); got != 222 {
+		t.Errorf("seed = %d, want the last line's 222", got)
+	}
+}
+
+// cliWithPreview is a fake `sd-cli` that answers `-h` with a usage text naming the preview
+// options — which is the only thing that makes this client pass them, so the stub has to have
+// it for the feature to be exercised at all.
+const cliWithPreview = `
+if [ "$1" = "-h" ]; then
+  echo "usage: sd-cli [options]"
+  echo "  --preview <method>        preview decoding method (none, vae, tae)"
+  echo "  --preview-path <path>     write the preview to this file"
+  echo "  --preview-interval <n>    how often to update it"
+  exit 0
+fi
+out=""; prev=""
+printf '%s\n' "$@" > "$(dirname "$0")/args.txt"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    --preview-path) prev="$2"; shift 2 ;;
+    --preview|--preview-interval) shift 2 ;;
+    *) shift ;;
+  esac
+done
+echo "  |=====>              | 1/2 - 2.20s/it"
+cp "$(dirname "$0")/picture.png" "$prev"
+sleep 1.5
+echo "  |==========>          | 2/2 - 2.10s/it"
+cp "$(dirname "$0")/picture.png" "$prev"
+sleep 1.5
+cp "$(dirname "$0")/picture.png" "$out"
+echo "generating image: 1/1 - seed 4242"
+exit 0
+`
+
+// TestCLIReportsStepsAndAPreviewWhileItDraws is the CLI half of live progress, and it is an
+// end-to-end test on purpose: the two sources are the program's own — a bar it redraws into
+// its log and a file it rewrites on every step — and only running a process demonstrates that
+// either is read at the right moment rather than after the draw has finished.
+//
+// It also pins the flags. `--preview-path` is what makes the file exist at all, and it is
+// passed only because this build's own help lists it.
+func TestCLIReportsStepsAndAPreviewWhileItDraws(t *testing.T) {
+	binary := fakeCLI(t, cliWithPreview)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+
+	var reports []Progress
+	result, err := client.GenerateWithProgress(t.Context(), Request{Prompt: "a red fox"}, func(p Progress) {
+		reports = append(reports, p)
+	})
+	if err != nil {
+		t.Fatalf("GenerateWithProgress: %v", err)
+	}
+	if len(reports) == 0 {
+		t.Fatal("a watched draw reported nothing at all")
+	}
+	if len(reports) < 2 {
+		t.Errorf("only %d report(s) arrived; the step counter is meant to move: %+v", len(reports), reports)
+	}
+
+	args := argsOf(t, binary)
+	if !strings.Contains(strings.Join(args, " "), "--preview-path") {
+		t.Fatalf("the preview path was never passed, so the file this client polls cannot exist:\n%s", strings.Join(args, " "))
+	}
+
+	first := reports[0]
+	if first.Step != 1 || first.Steps != 2 {
+		t.Errorf("first report = %d/%d, want 1/2 from the program's own bar", first.Step, first.Steps)
+	}
+	if len(first.Preview) == 0 || first.PreviewMime != MimePNG {
+		t.Errorf("first report carries no usable preview: %d bytes, mime %q", len(first.Preview), first.PreviewMime)
+	}
+	last := reports[len(reports)-1]
+	if last.Step != 2 {
+		t.Errorf("last report = %d/%d, want the second step — a counter that never moves is not progress", last.Step, last.Steps)
+	}
+	// The draw itself is unaffected by having been watched, down to the seed the recipe
+	// records: the log is read line by line now rather than collected at the end.
+	if result.Seed != 4242 {
+		t.Errorf("seed = %d, want the 4242 the log reports", result.Seed)
+	}
+	if len(result.Images) != 1 {
+		t.Errorf("images = %d, want the one picture the run wrote", len(result.Images))
+	}
+	if !strings.Contains(result.Info, "generating image:") {
+		t.Errorf("Result.Info = %q, want the report lines worth keeping", result.Info)
+	}
+}
+
+// TestCLIDoesNotPreviewForABuildThatHasNoSuchFlag is the reason the flags are asked about
+// rather than assumed: an unknown option fails the *whole run* on this binary, so passing
+// `--preview-path` to a build that predates it would turn "no preview" into "no picture".
+// The command line is what the assertion is on, because that is where the mistake lives.
+func TestCLIDoesNotPreviewForABuildThatHasNoSuchFlag(t *testing.T) {
+	binary := fakeCLI(t, cliRecorder)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+
+	if _, err := client.GenerateWithProgress(t.Context(), Request{Prompt: "a fox"}, func(Progress) {}); err != nil {
+		t.Fatalf("GenerateWithProgress: %v", err)
+	}
+	if joined := strings.Join(argsOf(t, binary), " "); strings.Contains(joined, "--preview") {
+		t.Errorf("preview flags were passed to a build whose help does not list them:\n%s", joined)
+	}
+}
+
+// TestCLILeavesThePreviewAloneIfTheUserSetIt is the same rule as every other argument in this
+// client: the user's own command line comes first and wins. There is no control for the
+// preview method or its interval, so appending ours would silently overrule what they wrote —
+// and an unwatched draw is a far smaller loss than a draw with the wrong method.
+func TestCLILeavesThePreviewAloneIfTheUserSetIt(t *testing.T) {
+	binary := fakeCLI(t, cliWithPreview)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"},
+		Options{Extra: []string{"--preview", "none"}})
+
+	if _, err := client.GenerateWithProgress(t.Context(), Request{Prompt: "a fox"}, func(Progress) {}); err != nil {
+		t.Fatalf("GenerateWithProgress: %v", err)
+	}
+	if joined := strings.Join(argsOf(t, binary), " "); strings.Contains(joined, "--preview-path") {
+		t.Errorf("the client overrode the user's own preview choice:\n%s", joined)
+	}
+}
+
 // TestCLIListsAreNeverNull is the bug this codebase has shipped twice: a nil Go slice
 // marshals to JSON `null`, not `[]`, and the settings panel iterates whatever it gets. This
 // backend has no listing route and no sampler table to ask for, which makes it the most

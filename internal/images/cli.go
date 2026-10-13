@@ -1,6 +1,7 @@
 package images
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -144,6 +146,61 @@ type CLI struct {
 	opts   Options
 	// Timeout bounds one draw; see DefaultCLITimeout.
 	Timeout time.Duration
+
+	// helpOnce memoises the one `-h` probe. Two callers want it — Health proves the process
+	// starts, previewSupport learns whether this build has the preview options — and
+	// spawning the binary twice to answer one question would be silly. A failed probe is
+	// memoised too, which is what keeps a binary that cannot answer from being spawned on
+	// every draw.
+	helpOnce sync.Once
+	helpOut  string
+	helpErr  error
+}
+
+// help runs the binary's own `-h` once and keeps what it printed.
+//
+// The option table is the only documentation this backend has: the project tells users to
+// run `-h` rather than publishing a stable list, so the app asks the same way a person
+// would. Measured on the build in the repository's notes: 293 lines, on stdout, exit 0, in
+// well under a second — cheap enough to be worth the one call.
+func (c *CLI) help(ctx context.Context, binary string) (string, error) {
+	c.helpOnce.Do(func() {
+		probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(probeCtx, binary, "-h").Output()
+		c.helpOut, c.helpErr = string(out), err
+	})
+	return c.helpOut, c.helpErr
+}
+
+// previewSupport reports whether this build's own help lists the preview options.
+//
+// It is asked rather than assumed. Those flags are newer than the first `sd-cli` builds, and
+// an unknown option fails the *whole run* — so a build without them would turn "no progress
+// display" into "no picture". A build whose help does not answer at all is treated the same
+// way, which falls back to exactly the behaviour this client had before previews.
+func (c *CLI) previewSupport(ctx context.Context, binary string) bool {
+	help, err := c.help(ctx, binary)
+	if err != nil && help == "" {
+		return false
+	}
+	return strings.Contains(help, "--preview")
+}
+
+// userPicksPreview reports whether the user's own arguments already decide the preview.
+//
+// Their choice of method or path stays theirs: this app has no control for either, and
+// appending its own would silently overrule the command line the user wrote (our arguments
+// come last, which is the rule everywhere else in this file). The draw then runs unwatched
+// rather than wrongly watched.
+func (c *CLI) userPicksPreview() bool {
+	for _, arg := range c.opts.Extra {
+		if arg == "--preview" || strings.HasPrefix(arg, "--preview=") ||
+			arg == "--preview-path" || strings.HasPrefix(arg, "--preview-path=") {
+			return true
+		}
+	}
+	return false
 }
 
 // program is the executable one draw runs: the folder's own sd-cli when a folder is
@@ -215,11 +272,9 @@ func (c *CLI) Health(ctx context.Context) error {
 		}
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	// Output is discarded: `-h` writes its usage to stdout, and a usage text is not a
-	// diagnosis. Only "the process could not be started or did not exit" is.
-	if err := exec.CommandContext(probeCtx, binary, "-h").Run(); err != nil {
+	// The usage text itself is not a diagnosis, and it is kept for previewSupport rather
+	// than thrown away: only "the process could not be started or did not exit" is.
+	if _, err := c.help(ctx, binary); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return nil
@@ -273,6 +328,24 @@ func (c *CLI) Samplers(context.Context) ([]string, error) {
 // interpreted — the process's exit code, and the tail of its log when that is non-zero, are
 // the whole diagnosis.
 func (c *CLI) Generate(ctx context.Context, req Request) (Result, error) {
+	return c.GenerateWithProgress(ctx, req, nil)
+}
+
+// GenerateWithProgress is Generate, with the draw reported while it runs.
+//
+// Two sources, both of them the program's own and neither invented here. It writes a preview
+// image to the path `--preview-path` names — measured on the build in §2 of the notes: the
+// file is rewritten on every denoiser step, so a poll of it is a live picture of the draw —
+// and it prints the sampling step into its log as a bar (`  |=====>    | 3/12 - 2.20s/it`).
+// Neither is required: a build without those flags, or a draw nobody is watching, takes the
+// same path with no preview and no reports.
+//
+// The log is read line by line rather than collected and read at the end, because two of the
+// three things in it are only useful while the draw is running: the step, which is the
+// progress, and the seed, which makes a recipe record the number the program really used
+// rather than the one it was asked for. The recent lines are kept in a ring, which is what
+// a failure prints.
+func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func(Progress)) (Result, error) {
 	binary, err := c.program()
 	if err != nil {
 		return Result{}, err
@@ -305,13 +378,19 @@ func (c *CLI) Generate(ctx context.Context, req Request) (Result, error) {
 	}
 	defer os.RemoveAll(dir)
 	output := filepath.Join(dir, "bild.png")
+	previewPath := filepath.Join(dir, "preview.png")
+
+	args := c.cliArgs(req, prompt, *seed, output)
+	watch := report != nil && !c.userPicksPreview() && c.previewSupport(ctx, binary)
+	if watch {
+		args = append(args, "--preview", cliPreviewMethod,
+			"--preview-interval", cliPreviewInterval, "--preview-path", previewPath)
+	}
 
 	drawCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
 
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(drawCtx, binary, c.cliArgs(req, prompt, *seed, output)...)
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	cmd := exec.CommandContext(drawCtx, binary, args...)
 	// Stop is a kill on this backend, so the child is given a group of its own and the kill
 	// is aimed at the group: a configured "binary" may be a wrapper script, and a script
 	// that started sd-cli without `exec` would otherwise survive the stop and keep drawing.
@@ -323,7 +402,58 @@ func (c *CLI) Generate(ctx context.Context, req Request) (Result, error) {
 	// for as long as that grandchild lives. That is precisely what a Stop that "did nothing"
 	// looks like from the window, and it is how this bound was found.
 	cmd.WaitDelay = 5 * time.Second
-	runErr := cmd.Run()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	// A pipe this file owns rather than `cmd.StdoutPipe()`, and the difference is not academic:
+	// a pipe the *command* owns is closed by `Wait`, so anything still in it is read by nobody,
+	// while this one keeps EOF meaning "the program and every process it started are done
+	// writing". That is what lets the drain below be bounded without throwing the tail away —
+	// and what lets the reading finish before the wait does, rather than after it.
+	stdout, stdoutW, err := os.Pipe()
+	if err != nil {
+		return Result{}, fmt.Errorf("%s: %v", binary, err)
+	}
+	defer stdout.Close()
+	cmd.Stdout = stdoutW
+	sdlog := &cliLog{}
+	if err := cmd.Start(); err != nil {
+		stdoutW.Close()
+		return Result{}, fmt.Errorf("%s: %v", binary, err)
+	}
+	// The parent's copy of the write end goes at once: an fd left open here would be a writer
+	// of our own, and the scanner would then wait for a line nobody is going to write.
+	stdoutW.Close()
+	scanned := make(chan struct{})
+	go func() {
+		defer close(scanned)
+		scanner := bufio.NewScanner(stdout)
+		// Progress bars are long single lines, and a wide terminal's worth of them exceeds the
+		// scanner's default limit; a log that cannot be read would silently cost the seed line.
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			sdlog.write(scanner.Text())
+		}
+	}()
+	stopWatch := make(chan struct{})
+	if watch {
+		go watchPreview(stopWatch, previewPath, sdlog, report)
+	}
+	// The draw is the wait, and the watching has to last exactly as long: stopping the preview
+	// watcher before the process exits would leave every draw longer than the bound un-
+	// reported after that point, which is the entire case progress exists for. Measured while
+	// fixing this: with the drain placed before the wait and bounded by a flat two seconds, a
+	// three-second draw reported exactly one step and then went quiet.
+	runErr := cmd.Wait()
+	close(stopWatch)
+	// The drain runs after, so the lines the program wrote on its way out are in hand before
+	// the result is built. Its bound is for the case WaitDelay was added for in the first
+	// place — a wrapper script that started the program without `exec` and left a grandchild
+	// holding the pipe open, where EOF never arrives — and it is a bound on the *drain* rather
+	// than on the draw, which is why the tail is what a timeout costs and never the report.
+	select {
+	case <-scanned:
+	case <-time.After(2 * time.Second):
+	}
 
 	// The caller's own cancellation is reported as such, so the draw path can tell a user's
 	// Stop from a failure. Killing the process is what Stop *is* on this backend: there is
@@ -335,25 +465,27 @@ func (c *CLI) Generate(ctx context.Context, req Request) (Result, error) {
 		if drawCtx.Err() != nil {
 			return Result{}, fmt.Errorf("das Zeichnen hat länger als %s gedauert", c.Timeout)
 		}
-		return Result{}, fmt.Errorf("%s: %v%s", binary, runErr, logTail(stderr.String(), stdout.String()))
+		return Result{}, fmt.Errorf("%s: %v%s", binary, runErr, logTail(stderr.String(), sdlog.tail()))
 	}
 
 	data, err := os.ReadFile(output)
 	if err != nil {
-		return Result{}, fmt.Errorf("das Programm hat kein Bild geschrieben%s", logTail(stderr.String(), stdout.String()))
+		return Result{}, fmt.Errorf("das Programm hat kein Bild geschrieben%s", logTail(stderr.String(), sdlog.tail()))
 	}
 	mime, ext := SniffImage(data, MimePNG, "png")
 	result := Result{
 		Images: []Image{{Data: data, Mime: mime, Ext: ext}},
 		Seed:   *seed,
 		Model:  c.files.Label(),
-		Info:   strings.TrimSpace(stdout.String()),
+		Info:   sdlog.summary(),
 	}
 	// A seed the log names wins, even when it differs from the one this app sent. That is
 	// not a theoretical case: a build may ignore `--seed`, and a recipe that recorded the
 	// number KiChat *asked* for would then describe a picture that was never drawn — a
 	// redraw would produce a different image every time and look like a broken feature.
-	if reported := seedFromLog(stdout.String()); reported != 0 {
+	if reported := sdlog.seed(); reported != 0 {
+		result.Seed = reported
+	} else if reported := seedFromLog(sdlog.tail()); reported != 0 {
 		result.Seed = reported
 	}
 	return result, nil
@@ -431,13 +563,65 @@ func (c *CLI) cliArgs(req Request, prompt string, seed int64, output string) []s
 	return args
 }
 
+// The knobs of the preview, and why each has the value it has.
+const (
+	// cliPreviewMethod asks for the cheap decoder: `tae` is a small network rather than the
+	// full VAE, and the preview is a thumbnail of a draw in progress, not the picture.
+	// Measured on a build with no taesd file in its folder: real PNG previews regardless.
+	cliPreviewMethod = "tae"
+	// cliPreviewInterval is passed rather than left to the flag's own default. How often the
+	// picture on screen changes is a choice this app makes for the user, not one it inherits
+	// from whichever build happens to be installed.
+	cliPreviewInterval = "1"
+	// cliPreviewPoll is how often the preview file is looked at: below the ~2-3 s a step
+	// takes on a mid-range GPU, and far above the cost of a stat call. A poll that finds the
+	// file untouched reports nothing.
+	cliPreviewPoll = 700 * time.Millisecond
+	// cliPreviewMaxBytes bounds one preview read. A preview is a full-resolution picture of
+	// the latent, so a 2048² draw can produce megabytes of it per step; past this the step
+	// counter is still reported and the picture is not, because pushing eight megabytes
+	// through the bridge per step costs more than the preview is worth.
+	cliPreviewMaxBytes = 4 << 20
+	// cliLogLines is how many lines of the program's own log are kept, as the tail a failure
+	// prints. A 150-step draw at 2048² writes megabytes of progress bars and nobody reads
+	// them afterwards.
+	cliLogLines = 400
+)
+
+// cliStepLine finds the sampling step in the progress bar the program redraws with carriage
+// returns: `  |=====>    | 3/12 - 2.20s/it`.
+//
+// The rate is part of the pattern, and that is the whole trick. The *model load* draws the
+// same bar — `|#####     | 6/265 - 4.18GB/s` — so a pattern matching `n/m` alone reports the
+// load's tensors as the draw's steps: measured, "step 6 of 265" for a two-step picture. A
+// sampling bar names a per-step time (`s/it`, `it/s`); a load bar names a throughput.
+var cliStepLine = regexp.MustCompile(`\|[ \t]*([0-9]+)/([0-9]+)[ \t]*-[ \t]*[0-9.]+[ \t]*(?:s/it|it/s)`)
+
+// stepFromLog reads one sampling step out of one log line.
+func stepFromLog(line string) (int, int, bool) {
+	m := cliStepLine.FindStringSubmatch(line)
+	if m == nil {
+		return 0, 0, false
+	}
+	step, stepErr := strconv.Atoi(m[1])
+	steps, stepsErr := strconv.Atoi(m[2])
+	if stepErr != nil || stepsErr != nil || steps <= 0 {
+		return 0, 0, false
+	}
+	return step, steps, true
+}
+
 // cliSeedLine finds the seed in the binary's own log.
 //
 // The line is `generating image: <i>/<n> - seed <n>` from the shared image pipeline
-// (`LOG_INFO` in src/pipeline/image.cpp), printed once per picture. The *last* match wins
-// because a batch prints one per image and the batch above is always one picture; taking the
-// first would report the first image's seed for a later one.
-var cliSeedLine = regexp.MustCompile(`(?m)seed[ \t]+(-?[0-9]+)`)
+// (`LOG_INFO` in src/pipeline/image.cpp) — measured on the build in the notes — printed once
+// per picture. The *last* match wins because a batch prints one per image and the batch above
+// is always one picture; taking the first would report the first image's seed for a later one.
+//
+// It is matched whole rather than by the word `seed`, which is what it used to be, because a
+// prompt is echoed into that same log: a draw of "a robin's egg, seed 999" would otherwise
+// record 999 as the seed that produced it.
+var cliSeedLine = regexp.MustCompile(`generating image:[ \t]*[0-9]+/[0-9]+[ \t]*-[ \t]*seed[ \t]+(-?[0-9]+)`)
 
 // seedFromLog returns the seed the log reports, 0 when it reports none. Zero is this
 // package's "no seed is known", and the value is rejected rather than returned for that
@@ -453,6 +637,150 @@ func seedFromLog(log string) int64 {
 		return 0
 	}
 	return n
+}
+
+// cliLog is what this client reads out of the program's own log while it runs.
+//
+// Three things, each for a different caller: the seed (so a recipe records the number that
+// was really used), the sampling step (so a draw that takes minutes is visibly moving), and
+// the recent lines (so a failure can say why). Recent lines only — see cliLogLines — and
+// guarded by a mutex, because the scanner goroutine writes while the draw's own goroutine and
+// the preview watcher read.
+type cliLog struct {
+	mu    sync.Mutex
+	lines []string
+	seedN int64
+	step  int
+	steps int
+}
+
+func (l *cliLog) write(line string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, line)
+	if len(l.lines) > cliLogLines {
+		l.lines = l.lines[len(l.lines)-cliLogLines:]
+	}
+	if seed := seedFromLog(line); seed != 0 {
+		l.seedN = seed
+	}
+	if step, steps, ok := stepFromLog(line); ok {
+		l.step, l.steps = step, steps
+	}
+}
+
+func (l *cliLog) seed() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.seedN
+}
+
+func (l *cliLog) progress() (int, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.step, l.steps
+}
+
+// tail renders the kept lines as one text block, for logTail.
+func (l *cliLog) tail() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.lines, "\n")
+}
+
+// cliSummaryMarkers are the log lines worth keeping about a draw that *worked*.
+//
+// The unmarked remainder is progress bars and backend chatter: what a person looking at a
+// finished picture wants is what was loaded, which seed was drawn with, how long the
+// sampling took, and where the file went. This is what Result.Info carries, in the program's
+// own words rather than as numbers this app re-derived.
+var cliSummaryMarkers = []string{
+	"loading diffusion model from",
+	"loading vae from",
+	"loading llm from",
+	"loading tensors completed",
+	"generating image:",
+	"sampling completed",
+	"decode_first_stage completed",
+	"generate_image completed",
+	"save result image",
+}
+
+// summary renders those lines, trimmed of the source-file suffix the program appends to each
+// one, and capped: a log line naming a path can be long, and this is a report rather than the
+// log itself.
+func (l *cliLog) summary() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, line := range l.lines {
+		keep := false
+		for _, marker := range cliSummaryMarkers {
+			if strings.Contains(line, marker) {
+				keep = true
+				break
+			}
+		}
+		if !keep {
+			continue
+		}
+		if idx := strings.Index(line, " --- "); idx > 0 {
+			line = line[:idx]
+		}
+		out = append(out, strings.TrimSpace(line))
+		if len(out) >= 12 {
+			break
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// watchPreview reports a draw while it runs, until stop is closed.
+//
+// One report carries both signals: the log's step is what makes a fraction ("3 von 12") and
+// the preview file is what makes a picture, and they are read on the same tick so a report
+// never pairs a step from one moment with a picture from another.
+func watchPreview(stop <-chan struct{}, path string, log *cliLog, report func(Progress)) {
+	ticker := time.NewTicker(cliPreviewPoll)
+	defer ticker.Stop()
+	var lastTime time.Time
+	var lastSize int64
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.Size() == 0 {
+			continue
+		}
+		if info.ModTime().Equal(lastTime) && info.Size() == lastSize {
+			continue
+		}
+		lastTime, lastSize = info.ModTime(), info.Size()
+		step, steps := log.progress()
+		update := Progress{Step: step, Steps: steps}
+		// A preview that cannot be read is not a failure: the draw is what matters, and the
+		// step counter alone is still an answer to "is it moving".
+		if data, err := readPreview(path); err == nil {
+			update.PreviewMime, _ = SniffImage(data, MimePNG, "png")
+			update.Preview = data
+		}
+		report(update)
+	}
+}
+
+// readPreview reads a preview file, refusing one bigger than the bridge should carry.
+func readPreview(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > cliPreviewMaxBytes {
+		return nil, fmt.Errorf("Vorschau ist %d Bytes groß", info.Size())
+	}
+	return os.ReadFile(path)
 }
 
 // logTail renders the last few lines of a failed run's output for an error message. The

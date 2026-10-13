@@ -259,3 +259,76 @@ func TestStopImageDrawWithNothingRunningSaysSo(t *testing.T) {
 		t.Errorf("interrupt requests = %d, want 0: nothing was in flight", got)
 	}
 }
+
+// TestStopEndsADrawTheModelStarted is the case that had no Stop at all before this: a picture
+// the *model* asked for. Every control in the window lives under a picture, and there is no
+// picture until the draw has finished — so the only id the view can offer is the message the
+// tool call is rendered on, which is what the draw is registered under.
+//
+// It is also where the cancellation has to arrive as the sentinel rather than as a failure:
+// the tool call's own result is what the transcript records, and a stopped draw must not read
+// as a broken backend.
+func TestStopEndsADrawTheModelStarted(t *testing.T) {
+	server := newSlowImageServer(t, false)
+	a, chatID := newImageDrawApp(t, server)
+
+	// The setup draw in newImageDrawApp was the fast one; this second call is the slow one,
+	// and it is driven the way a chat model drives it — through the tool, with the message
+	// that asked for it.
+	const messageID = "msg-draw"
+	done := make(chan error, 1)
+	go func() {
+		ctx := tools.WithCallingMessage(context.Background(), messageID)
+		_, err := a.currentToolService().Execute(ctx, chatID, tools.ToolGenerateImage,
+			`{"prompt":"a red fox in deep snow again"}`)
+		done <- err
+	}()
+
+	select {
+	case <-server.drawing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the draw never reached the server")
+	}
+
+	started := time.Now()
+	result := a.StopImageDraw(messageID)
+	if !result.WasDrawing {
+		t.Error("Stop reported nothing to stop while the model's own draw was in flight")
+	}
+	if !result.Interrupted {
+		t.Errorf("the server was not asked to abandon the work: %+v", result)
+	}
+
+	select {
+	case err := <-done:
+		// The tool boundary is where the sentinel stops travelling: what reaches the
+		// engine is the cancellation itself, and this asserts it is reported as such
+		// rather than as a server that broke.
+		if err == nil {
+			t.Error("a stopped draw was reported to the model as a success")
+		} else if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want the cancellation", err)
+		}
+		if elapsed := time.Since(started); elapsed > 5*time.Second {
+			t.Errorf("the draw took %s to unwind after Stop", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the draw is still waiting after Stop — the click did not reach it")
+	}
+
+	// Nothing was filed, so the chat still holds only the setup picture. The stopped draw
+	// spent minutes of GPU time for nothing; it must not also leave a row behind.
+	after, err := a.store.ListAttachments(chatID)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(after) != 1 {
+		t.Errorf("attachments after a stopped draw = %d, want the original alone", len(after))
+	}
+
+	// And the registration is gone with the draw: a second Stop finds nothing, which is
+	// what keeps the window from offering to stop something that is not running.
+	if second := a.StopImageDraw(messageID); second.WasDrawing {
+		t.Error("the draw was still registered after it ended")
+	}
+}

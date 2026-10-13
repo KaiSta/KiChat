@@ -5,6 +5,7 @@ import {
   on,
   type chat,
   type config,
+  type ImageProgressPayload,
   type llm,
   type main,
   type research,
@@ -56,6 +57,22 @@ interface StreamBuffer {
   reasoning: string
 }
 
+/**
+ * One picture being drawn, as the window knows it.
+ *
+ * `drawId` is the attachment of a redraw or the assistant message a model's draw belongs to
+ * — the row each is rendered on — and the two are one map because nothing that reads this
+ * needs to tell them apart. `preview` is a ready `data:` URL: the backend sends the picture
+ * with the step counter rather than behind a second call, so a row can paint the draw as it
+ * goes without a request per step.
+ */
+export interface DrawProgress {
+  chatId: string
+  step: number
+  steps: number
+  preview?: string
+}
+
 export interface Toast {
   id: number
   kind: 'error' | 'warning' | 'info'
@@ -82,6 +99,12 @@ interface State {
 
   /** messageId -> live buffer, only while that message is streaming. */
   streaming: Record<string, StreamBuffer>
+  /**
+   * drawId -> what is known about a picture being drawn, present only while it is being
+   * drawn: the end of a draw removes the entry, because the picture itself takes over the
+   * moment the draw answers. A row that reads this is reading "this is happening now".
+   */
+  draws: Record<string, DrawProgress>
   running: Record<string, boolean>
   /** chatId -> phase such as "tool" or "compacting". */
   phase: Record<string, string>
@@ -177,6 +200,7 @@ export const useStore = create<State>((set, get) => {
     chatLoading: false,
 
     streaming: {},
+    draws: {},
     running: {},
     phase: {},
     toasts: [],
@@ -568,6 +592,40 @@ function wireEvents(
   on<{ chatId: string }>(EV.attachments, (p) => {
     if (p.chatId !== active()) return
     void get().refreshChatState()
+  })
+
+  /*
+   * A picture being drawn reports here, and the row it belongs to reads it by draw id —
+   * the attachment for a redraw, the assistant message for a draw the model asked for.
+   *
+   * `done` removes the entry rather than being ignored, and that is what keeps a progress
+   * row from outliving its draw: the finished picture arrives as an attachment of that same
+   * message, so the moment the draw ends the preview is the wrong thing to show. Nothing is
+   * emitted for a draw the window was never told about, so an entry always has a report
+   * behind it.
+   */
+  on<ImageProgressPayload>(EV.imageProgress, (p) => {
+    // A report for a chat that is not open is dropped, the way every chat-scoped event is:
+    // the row it belongs to is not mounted, and keeping the entry would only leak it. The
+    // next report for the open chat is a few hundred milliseconds away.
+    if (p.chatId && p.chatId !== active()) return
+    set((s) => {
+      const draws = { ...s.draws }
+      if (p.done) {
+        delete draws[p.drawId]
+      } else {
+        draws[p.drawId] = {
+          chatId: p.chatId,
+          step: p.step,
+          steps: p.steps,
+          // The preview is kept from the previous report when this one has none: a server
+          // that sends its fraction and its picture separately, or a poll that landed
+          // between two of them, must not make the thumbnail blink away.
+          preview: p.preview ?? s.draws[p.drawId]?.preview,
+        }
+      }
+      return { draws }
+    })
   })
 }
 

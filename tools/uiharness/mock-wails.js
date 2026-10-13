@@ -1050,11 +1050,61 @@ Verfügbare Tools: {{tool_list}}`,
   // deliberately short: it exists so the state between "the draw was abandoned" and "the
   // server was told" can be seen, not to simulate a slow network.
   const STOP_ANSWER_MS = 150
-  const slowDraw = new URLSearchParams(location.search).get('slowdraw') === '1'
-  const noInterrupt = new URLSearchParams(location.search).get('nointerrupt') === '1'
-  // The draw the frontend is still waiting for, if any. One at a time, because the UI
-  // disables every control while one runs.
+  // One name for the query string, because three flags now come off it and repeating the
+  // constructor three times is how one of them ends up reading the wrong thing.
+  const query = new URLSearchParams(location.search)
+  const slowDraw = query.get('slowdraw') === '1'
+  const noInterrupt = query.get('nointerrupt') === '1'
+  // ?drawtool=1 is a draw the *model* started that has not finished: the chat's picture is
+  // gone and a `generate_image` tool call sits on the assistant message instead, running.
+  // That is the state the tool card could not render before — there is no picture yet, so
+  // the only place a Stop can live is the call's own row — and it is a flag rather than the
+  // default because the default chat has to stay the ordinary one, a picture that arrived.
+  const drawTool = query.get('drawtool') === '1'
+  // How often a pretending draw reports. Slower than the real single-second poll would be a
+  // boring wait; faster would spend the run repainting. It is chosen to make the counter and
+  // the thumbnail visibly move, which is the only thing this fixture exists to show.
+  const DRAW_REPORT_MS = 600
+  // The draw being pretended, if any: one at a time, because the UI disables every control
+  // while one runs. `reject` is for a redraw, whose awaiting call has to unwind; a tool draw
+  // has no such promise and gets its record flipped to `cancelled` instead.
   let pendingDraw = null
+  let drawToolStarted = false
+
+  function clearDraw(draw) {
+    if (draw?.timer) clearInterval(draw.timer)
+  }
+
+  /**
+   * Pretends a draw is under way: a step counter and a preview on the cadence the real
+   * backend reports on, for whichever row the draw belongs to.
+   *
+   * The first report goes out immediately rather than one interval later, because a Stop
+   * button that appears a second after the draw starts is a second in which the draw looks
+   * stuck — which is exactly the state this feature exists to remove.
+   */
+  function beginDraw({ id, chatId, steps, reject, toolCall }) {
+    clearDraw(pendingDraw)
+    const state = { id, chatId, steps, step: 0, reject, toolCall, timer: null }
+    pendingDraw = state
+    const report = () =>
+      emit('image:progress', {
+        drawId: id,
+        chatId,
+        step: state.step,
+        steps,
+        preview: IMAGE_DATA_URL,
+      })
+    report()
+    state.timer = setInterval(() => {
+      // A closure that outlives its draw must not keep reporting: the row it belongs to is
+      // about to be repainted with the real picture.
+      if (pendingDraw !== state) return
+      state.step = Math.min(state.step + 1, steps)
+      report()
+    }, DRAW_REPORT_MS)
+    return state
+  }
 
   // Mirrors internal/tools.slugify, in the part that matters for a filename: letters and
   // digits kept, everything else collapsed to single dashes. Unicode-aware, because a
@@ -1087,14 +1137,37 @@ Verfügbare Tools: {{tool_list}}`,
   }
 
   const messages = new Map()
+  // The tool call that produced the picture, kept on the same message it is filed on — which
+  // is what the renderer keys on and what a Stop for a *running* draw is addressed to.
+  // `?drawtool=1` puts it back with its status still `running` and takes the picture away, so
+  // the one state that only exists while a draw is in flight is renderable: a tool card with
+  // a preview where the picture will be, and a Stop that has somewhere to live.
+  const drawToolCall = {
+    id: 'call-image-1',
+    messageId: 'msg-image-1',
+    chatId: 'chat-image',
+    name: 'generate_image',
+    argsJson: JSON.stringify({ prompt: 'ein Fuchs im tiefen Schnee', width: 768, height: 768, steps: 40 }),
+    resultJson: '',
+    status: 'running',
+    durationMs: 0,
+    error: '',
+    createdAt: now(),
+  }
   messages.set('chat-image', [
     message('chat-image', 'user', 'Mal mir einen Fuchs im tiefen Schnee.', { seq: 0 }),
     // The reply the tool produced: the model's text, and the picture filed as an
     // attachment of this very message — which is what the renderer keys on.
-    message('chat-image', 'assistant', 'Ich habe das Bild erzeugt. Du kannst es über die Schaltfläche unter dem Bild speichern.', {
+    message('chat-image', 'assistant', drawTool
+      ? 'Ich zeichne das Bild — einen Moment.'
+      : 'Ich habe das Bild erzeugt. Du kannst es über die Schaltfläche unter dem Bild speichern.', {
       id: 'msg-image-1',
       seq: 1,
-      attachments: [IMAGE_ATTACHMENT, UPLOADED_ATTACHMENT],
+      toolCalls: drawTool ? [drawToolCall] : [{ ...drawToolCall, status: 'ok', durationMs: 41200, resultJson: JSON.stringify({ content: '1 Bild(er) wurden erzeugt und im Chat angezeigt.' }) }],
+      status: drawTool ? 'streaming' : 'complete',
+      // While the draw runs there is no picture yet, and that is the point: the preview on
+      // the tool card is the only thing that can show what is happening.
+      attachments: drawTool ? [] : [IMAGE_ATTACHMENT, UPLOADED_ATTACHMENT],
       promptTokens: 1860,
       completionTokens: 96,
       tokensPerSecond: 28.4,
@@ -1311,6 +1384,13 @@ Verfügbare Tools: {{tool_list}}`,
   function chatState(chatId) {
     const chat = chats.find((c) => c.id === chatId)
     if (!chat) return Promise.reject(new Error('chat not found: ' + chatId))
+    // The draw starts when its chat is first opened, not when the page loads: a report
+    // emitted before anything subscribed goes nowhere, and the row it belongs to is not
+    // mounted yet. Once is enough — a second visit finds the same draw still running.
+    if (drawTool && chatId === 'chat-image' && !pendingDraw && !drawToolStarted) {
+      drawToolStarted = true
+      beginDraw({ id: 'msg-image-1', chatId, steps: 40, toolCall: drawToolCall })
+    }
     return Promise.resolve({
       chat,
       messages: messages.get(chatId) || [],
@@ -2323,8 +2403,13 @@ Verfügbare Tools: {{tool_list}}`,
         // rather than as an error — unrenderable. It stays pending until StopImageDraw
         // rejects it, which is what a real cancellation does to the awaiting call.
         console.warn('[harness] slowdraw injection active: the draw stays pending until Stop is pressed')
+        // The reports go to the picture's own row: a redraw is registered under the
+        // attachment it will replace, so the draw is what that row renders while it runs.
+        const host = [...messages.values()]
+          .flat()
+          .find((m) => (m.attachments ?? []).some((a) => a.id === id))
         return new Promise((_resolve, reject) => {
-          pendingDraw = { id, reject }
+          beginDraw({ id, chatId: host?.chatId ?? 'chat-image', steps: 40, reject })
         })
       }
       const drawn = {
@@ -2358,12 +2443,27 @@ Verfügbare Tools: {{tool_list}}`,
       if (!running) return Promise.resolve({ wasDrawing: false, interrupted: false })
       const stopped = pendingDraw
       pendingDraw = null
+      clearDraw(stopped)
+      // The end of a draw is an event rather than the absence of reports, exactly as the
+      // backend sends it: without this the progress row would outlive the draw it describes
+      // and leave a Stop button pointing at nothing. The real emitter only sends it for a
+      // draw it reported on, which is why it is here and not in the immediate path.
+      emit('image:progress', { drawId: id, chatId: stopped.chatId, done: true })
       // The draw is abandoned at once — that is the cancellation — but the answer is held
       // for as long as the interrupt request really takes, because that is what the view's
       // controls are disabled against: re-enabling them the moment the draw unwinds would
       // let a second click start a picture the previous stop's *global* interrupt could
       // then kill. Answering instantly would make that state unrenderable.
-      stopped.reject(new Error('das Zeichnen wurde abgebrochen'))
+      if (stopped.reject) {
+        stopped.reject(new Error('das Zeichnen wurde abgebrochen'))
+      }
+      if (stopped.toolCall) {
+        // A draw the model started has no awaiting promise to reject: what the user sees
+        // ended is the tool call, which the engine records as cancelled.
+        stopped.toolCall.status = 'cancelled'
+        stopped.toolCall.error = 'das Zeichnen wurde abgebrochen'
+        emit('chat:tool', { chatId: stopped.chatId, toolCall: stopped.toolCall })
+      }
       const result = noInterrupt
         ? { wasDrawing: true, interrupted: false, interruptError: '404 Not Found: /sdapi/v1/interrupt' }
         : { wasDrawing: true, interrupted: true }

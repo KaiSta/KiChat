@@ -98,7 +98,16 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	// images.Request.Normalised.
 	req = req.Normalised()
 
-	result, err := s.Images.Generate(ctx, req)
+	// The draw is registered under the message that asked for it, which is the row the view
+	// renders the tool call on — so it is the id a Stop can be pressed next to. Without this
+	// a draw the *model* started had no way of being stopped at all: every Stop in the window
+	// lives under a picture, and there is no picture until the draw has finished.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	release := s.watchDraw(callingMessage(ctx), chatID, cancel)
+	defer release()
+
+	result, err := s.draw(ctx, callingMessage(ctx), chatID, req)
 	if err != nil {
 		return "", err
 	}
@@ -349,7 +358,13 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 	}
 	req := requestFromRecipe(recipe)
 
-	result, err := s.Images.Generate(ctx, req)
+	// This draw is *not* registered here, and that is deliberate: its caller is the bound
+	// RegenerateImage, which has already registered it under this same attachment. Both
+	// registering would mean the second registration cancelling the first — the newest
+	// recipe wins, by design — and the first holds the very context this call is running
+	// under, so the redraw would cancel itself the moment it started. The id is the
+	// attachment because that is what the view's own controls sit under.
+	result, err := s.draw(ctx, attachmentID, source.ChatID, req)
 	if err != nil {
 		return store.Attachment{}, err
 	}
@@ -380,6 +395,34 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 		}
 	}
 	return first, nil
+}
+
+// watchDraw registers a draw that is about to start, when somebody is watching. The
+// returned function is never nil, so a caller can defer it without a condition.
+func (s *Service) watchDraw(id, chatID string, cancel context.CancelFunc) func() {
+	if s.Draws == nil || id == "" {
+		return func() {}
+	}
+	if release := s.Draws(id, chatID, cancel); release != nil {
+		return release
+	}
+	return func() {}
+}
+
+// draw runs one generation, reporting it while it runs when the backend can and somebody
+// asked to hear about it.
+//
+// A backend that cannot report is not a broken backend — the interface is optional for the
+// same reason the interrupt one is — so this falls back to a plain Generate and the draw is
+// simply silent. Nothing about the result depends on the reports having happened.
+func (s *Service) draw(ctx context.Context, id, chatID string, req images.Request) (images.Result, error) {
+	progressive, ok := s.Images.(images.Progressive)
+	if !ok || s.Progress == nil || id == "" {
+		return s.Images.Generate(ctx, req)
+	}
+	return progressive.GenerateWithProgress(ctx, req, func(p images.Progress) {
+		s.Progress(id, chatID, p)
+	})
 }
 
 // InterruptDraw asks the image server to abandon the picture it is drawing.

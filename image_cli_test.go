@@ -46,6 +46,16 @@ const cliRunSeparator = "---"
 // and one that ignores it draws with its own.
 func cliScript(seed string, body string) string {
 	return `#!/bin/sh
+# The usage probe is answered and then left, before anything is recorded: the app asks every
+# build this question once (images.CLI.previewSupport) and a real sd-cli answers it without
+# drawing, so a fake that fell through to the drawing body would both count as a draw in
+# args.txt and claim a picture nobody asked for.
+if [ "$1" = "-h" ]; then
+  echo "usage: sd-cli [options]"
+  echo "  -M, --model <path>        model path"
+  echo "  -o, --output <path>       output path"
+  exit 0
+fi
 dir="$(dirname "$0")"
 printf '%s\n' "$@" >> "$dir/args.txt"
 printf -- '` + cliRunSeparator + `\n' >> "$dir/args.txt"

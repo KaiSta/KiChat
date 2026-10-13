@@ -98,6 +98,12 @@ function Row({ label, value }: { label: string; value: string }) {
 export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
   const t = useStore((s) => s.t)
   const [open, setOpen] = useState(false)
+  // A draw the model asked for is registered under the message this call is rendered on,
+  // because that is the only row the view has until the picture exists. Reading it here is
+  // what turns a tool call that means "minutes of GPU" into something the user can watch and
+  // stop — the two things a tool card could not do for a picture until now.
+  const draw = useStore((s) => s.draws[call.messageId])
+  const [stopping, setStopping] = useState(false)
 
   const tone =
     call.status === 'ok'
@@ -139,6 +145,30 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
         <span className="ml-auto faint">{formatDuration(call.durationMs)}</span>
       </button>
 
+      {draw && <LiveDraw preview={draw.preview} step={draw.step} steps={draw.steps} className="mt-2" />}
+      {draw && (
+        <div className="mt-1 flex items-center gap-2">
+          <button
+            type="button"
+            className="btn btn-sm btn-danger"
+            disabled={stopping}
+            title={t('images.stopHint')}
+            onClick={async () => {
+              setStopping(true)
+              try {
+                await App.StopImageDraw(call.messageId)
+              } catch (err) {
+                useStore.getState().toast('error', String(err))
+              } finally {
+                setStopping(false)
+              }
+            }}
+          >
+            ⏹ {t('images.stop')}
+          </button>
+        </div>
+      )}
+
       {open && (
         <div className="mt-2 space-y-2">
           <div>
@@ -167,6 +197,50 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * A picture that is still being drawn: what it looks like so far, and how far along it is.
+ *
+ * The preview is a real picture — the backend decodes a thumbnail of the latent as the draw
+ * proceeds — and it is the same element in both places a draw can be watched from: under the
+ * picture a redraw replaces, and inside the tool card of a draw the model asked for. Which is
+ * why it is one component and not two: a draw that looked different depending on who started
+ * it would be two features that have to be kept in step.
+ *
+ * A draw that cannot report its steps still renders: the step counter is simply absent and
+ * the thumbnail, when there is one, is what says the machine is working.
+ */
+function LiveDraw({
+  preview,
+  step,
+  steps,
+  className,
+}: {
+  preview?: string
+  step: number
+  steps: number
+  className?: string
+}) {
+  const t = useStore((s) => s.t)
+  return (
+    <div className={`flex items-center gap-2 ${className ?? ''}`}>
+      {preview ? (
+        <img
+          src={preview}
+          alt={t('images.preview')}
+          title={t('images.preview')}
+          className="rounded"
+          style={{ maxWidth: 160, maxHeight: 160, border: '1px solid var(--border)' }}
+        />
+      ) : null}
+      <span className="faint text-[11px]">
+        {steps > 0
+          ? t('images.progress', { step: formatNumber(step), steps: formatNumber(steps) })
+          : t('images.progressUnknown')}
+      </span>
     </div>
   )
 }
@@ -529,6 +603,9 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   // unwinds would let a second click start a picture the previous stop could then kill. It
   // is a window of milliseconds and it costs four lines to close.
   const [stoppingUi, setStoppingUi] = useState(false)
+  // What the backend knows about a draw running under *this* picture. A redraw is registered
+  // under the attachment it will replace, so this is the row's own draw and nothing else's.
+  const live = useStore((s) => s.draws[attachment.id])
 
   // Only a picture KiChat drew carries a recipe. An uploaded photo has none, and
   // offering to redraw one would offer to draw something unrelated to it.
@@ -654,7 +731,10 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   return (
     <figure className="m-0 flex flex-col gap-1">
       <img
-        src={src}
+        // While a redraw runs, this picture is the one on its way out — the new one replaces
+        // it the moment the draw answers. Showing the draw instead of the old picture is what
+        // makes a two-minute wait on a CPU server something other than a frozen window.
+        src={live?.preview ?? src}
         alt={attachment.filename}
         className="rounded"
         style={{
@@ -664,9 +744,16 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
           background: 'var(--code-bg)',
           cursor: 'zoom-in',
         }}
-        title={t('images.zoom')}
+        title={live ? t('images.preview') : t('images.zoom')}
         onClick={() => setExpanded((v) => !v)}
       />
+      {live && (
+        <span className="faint text-[11px]" title={t('images.preview')}>
+          {live.steps > 0
+            ? t('images.progress', { step: formatNumber(live.step), steps: formatNumber(live.steps) })
+            : t('images.progressUnknown')}
+        </span>
+      )}
       <figcaption className="flex flex-wrap items-center gap-2 text-[11px]">
         <span
           className="faint truncate"

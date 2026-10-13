@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,6 +41,13 @@ type SDWebUI struct {
 	// not an oversight in this client, it is what the server ships with.
 	basicAuth string
 	client    *http.Client
+
+	// progressUnsupported remembers a 404 on the progress route. It is per client rather
+	// than per draw, because the answer cannot change while the same server is being talked
+	// to, and a request per second for the length of every draw is not a cost a missing
+	// feature should carry.
+	progressMu          sync.Mutex
+	progressUnsupported bool
 }
 
 // sdwebuiClient has no total timeout. A 1024x1024 picture at 30 steps on a
@@ -204,6 +212,35 @@ type sdResponse struct {
 
 // Generate draws the requested pictures and decodes them.
 func (s *SDWebUI) Generate(ctx context.Context, req Request) (Result, error) {
+	return s.GenerateWithProgress(ctx, req, nil)
+}
+
+// sdProgress is the answer of `/sdapi/v1/progress`: a fraction, a step counter and — on
+// most builds — a JPEG of the latent decoded so far.
+//
+// `state` is read rather than `progress`, and that is measured rather than cautious:
+// stable-diffusion.cpp's `sd-server` streams `current_image` about once a second while
+// `progress` stays 0.0 for the whole draw. A1111 fills both in, so the step counter is the
+// one that works everywhere; the flat fraction is only the fallback for a server that
+// reports nothing else.
+type sdProgress struct {
+	Progress     float64 `json:"progress"`
+	CurrentImage string  `json:"current_image"`
+	State        struct {
+		SamplingStep  int `json:"sampling_step"`
+		SamplingSteps int `json:"sampling_steps"`
+	} `json:"state"`
+}
+
+// GenerateWithProgress is Generate, with the draw reported while it runs.
+//
+// The POST is a blocking call that answers when the picture is finished, so the reporting
+// is a second route polled beside it — the server's own progress route, with the same
+// address and the same credential. A server that does not have that route (a stop of
+// AUTOMATIC1111 before it landed, or something else sharing the port) answers 404 once and
+// is never asked again: the draw is unaffected either way, and a request per second for the
+// length of every draw is not a cost a missing feature should carry.
+func (s *SDWebUI) GenerateWithProgress(ctx context.Context, req Request, report func(Progress)) (Result, error) {
 	if s.baseURL == "" {
 		return Result{}, ErrNotConfigured
 	}
@@ -244,6 +281,9 @@ func (s *SDWebUI) Generate(ctx context.Context, req Request) (Result, error) {
 		payload.Override = map[string]any{"sd_model_checkpoint": model}
 	}
 
+	stopWatching := s.watchProgress(ctx, report)
+	defer stopWatching()
+
 	var decoded sdResponse
 	if err := s.post(ctx, "/sdapi/v1/txt2img", payload, &decoded); err != nil {
 		if errors.Is(err, errNoModelLoaded) {
@@ -282,6 +322,99 @@ func (s *SDWebUI) Generate(ctx context.Context, req Request) (Result, error) {
 	result.Model = info.model
 	result.Info = info.text
 	return result, nil
+}
+
+// sdProgressPoll is how often the progress route is asked. A step on a mid-range card takes
+// a second or two, so a faster poll would only repeat the same answer; the preview comes
+// from the same call, which is what makes this one request per second rather than two.
+const sdProgressPoll = time.Second
+
+// watchProgress polls the server's progress route until stopWatching is called or the draw's
+// context ends, and returns the function that stops it.
+//
+// A report is only sent when there is something in it — a step the server did not have
+// before, or a preview that differs from the last one — because each one crosses the bridge
+// and redraws a thumbnail.
+func (s *SDWebUI) watchProgress(ctx context.Context, report func(Progress)) func() {
+	if report == nil || s.progressOff() {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(sdProgressPoll)
+		defer ticker.Stop()
+		var lastImage string
+		var lastStep int
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			var p sdProgress
+			if err := s.get(ctx, "/sdapi/v1/progress", &p); err != nil {
+				// A server without the route is not a failure and is not retried: the draw runs
+				// to completion either way, just without a fraction beside it.
+				if progressMissing(err) {
+					s.markProgressOff()
+					return
+				}
+				continue
+			}
+			update := Progress{Step: p.State.SamplingStep, Steps: p.State.SamplingSteps}
+			if update.Steps == 0 && p.Progress > 0 {
+				// The flat fraction, scaled to a percentage so it fits the same "step x of y"
+				// shape the panel prints.
+				update.Steps = 100
+				update.Step = int(math.Round(p.Progress * 100))
+			}
+			if p.CurrentImage != "" && p.CurrentImage != lastImage {
+				lastImage = p.CurrentImage
+				if data, err := decodeImage(p.CurrentImage); err == nil {
+					update.PreviewMime, _ = SniffImage(data, MimeJPEG, "jpg")
+					update.Preview = data
+				}
+			}
+			if update.Preview == nil && update.Step == lastStep {
+				continue
+			}
+			lastStep = update.Step
+			report(update)
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+// progressMissing reports whether the progress route is simply not there. A 404 is the
+// answer for "no such route", and a WebUI with nothing loaded answers the same status for a
+// different reason — which is why the message is not looked at here: either way this client
+// stops asking.
+func progressMissing(err error) bool {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusNotFound
+	}
+	return errors.Is(err, errNoModelLoaded)
+}
+
+// progressOff reports whether this server has already been found not to have the route.
+func (s *SDWebUI) progressOff() bool {
+	s.progressMu.Lock()
+	defer s.progressMu.Unlock()
+	return s.progressUnsupported
+}
+
+func (s *SDWebUI) markProgressOff() {
+	s.progressMu.Lock()
+	defer s.progressMu.Unlock()
+	s.progressUnsupported = true
 }
 
 // RandomSeed picks the seed for a request that did not name one.

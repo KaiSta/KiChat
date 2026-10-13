@@ -142,6 +142,12 @@ type App struct {
 type inflightDraw struct {
 	token  uint64
 	cancel context.CancelFunc
+	// reported is whether the window was told anything about this draw while it ran. It is
+	// what makes the end-of-draw event conditional: the event exists to clear a progress row
+	// off the screen, and a draw nobody reported on has no row to clear. Guarded by the
+	// app's drawsMu rather than by a mutex of its own, because it is only ever read and
+	// written under that one.
+	reported bool
 	// service is the tool service the draw was started on, kept so that Stop asks the
 	// same provider that is drawing. A settings save mid-draw replaces the app's
 	// toolSvc, and interrupting the replacement would ask a provider that never
@@ -608,6 +614,12 @@ func (a *App) rebuildServices(settings config.Settings) {
 	toolService := tools.New(a.store, chain, scraper)
 	toolService.Images = imageProvider
 	toolService.Settings = a.Settings
+	// A draw is watched and stoppable wherever it starts. The tool path registers itself here
+	// (under the message the call belongs to, which is the row the view shows it on); a redraw
+	// registers in RegenerateImage under its attachment. One registry, so one Stop works for
+	// a picture that does not exist yet as well as for one that does.
+	toolService.Draws = a.registerDraw
+	toolService.Progress = a.reportDrawProgress
 	// A nil turns is only possible before init has run; NewEngineWithState makes its
 	// own in that case, so a half-initialised app cannot panic here.
 	engine := chat.NewEngineWithState(a.store, registry, toolService, a.Settings, a.emit, a.turns)

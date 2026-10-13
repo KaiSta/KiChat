@@ -37,6 +37,17 @@ type Service struct {
 	// what makes the tool disappear from the advertised list rather than fail: a
 	// tool the model can see but never use costs a round trip every time it tries.
 	Images images.Provider
+	// Draws registers a picture this service is about to draw, so the window has something
+	// to stop and something to watch. It is handed the id the *view* knows the draw by (the
+	// message the tool call belongs to, since that is the row it renders the call on), the
+	// chat, and the cancel function; it returns the function that releases the registration,
+	// which is called when the draw is over whatever the outcome. Nil means nobody is
+	// watching — the service is usable without an app around it, which is what the tests do.
+	Draws func(id, chatID string, cancel context.CancelFunc) (release func())
+	// Progress reports a draw that is still running: a step counter and, when the backend
+	// has one, a preview. It is a plain callback rather than an event emitter so this
+	// package goes on knowing nothing about Wails; the app decides what a report becomes.
+	Progress func(id, chatID string, progress images.Progress)
 	// Settings reads the current configuration. It is a function rather than a
 	// copy so a settings save takes effect on the next tool call, the same way the
 	// engine's own Settings does — a Service outlives one settings blob.

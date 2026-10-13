@@ -823,3 +823,136 @@ func TestTwoDrawsOfOnePromptGetDistinctFilenames(t *testing.T) {
 		t.Errorf("first filename = %q, want the plain slug", attachments[0].Filename)
 	}
 }
+
+// progressiveProvider is a backend that can say what it is doing while it draws, which is
+// the optional capability the reporting hangs on.
+type progressiveProvider struct {
+	fakeImageProvider
+	reports []images.Progress
+	// sink is called from inside the draw, so a test can assert on what the *service* did
+	// with a report rather than only on what the provider produced.
+	sink func(images.Progress)
+}
+
+func (p *progressiveProvider) GenerateWithProgress(ctx context.Context, req images.Request, report func(images.Progress)) (images.Result, error) {
+	p.got = req
+	p.calls++
+	if p.err != nil {
+		return images.Result{}, p.err
+	}
+	for _, step := range []int{1, 2} {
+		progress := images.Progress{Step: step, Steps: 2, Preview: pictureBytes, PreviewMime: images.MimePNG}
+		p.reports = append(p.reports, progress)
+		report(progress)
+		if p.sink != nil {
+			p.sink(progress)
+		}
+	}
+	return p.result, nil
+}
+
+// TestADrawIsWatchedAndStoppableUnderTheMessageThatAskedForIt is the half of progress that is
+// not about pixels: a draw the *model* started has no picture to hang a Stop button under
+// until it has finished, so it is registered under the message the tool call is rendered on
+// — and that is the id the view has, which is what makes the button reachable at all.
+//
+// The release is asserted because a registration that outlives its draw is a Stop button for
+// something that is not running, and the chat id because a progress report without one cannot
+// be delivered to the chat that asked.
+func TestADrawIsWatchedAndStoppableUnderTheMessageThatAskedForIt(t *testing.T) {
+	provider := &progressiveProvider{fakeImageProvider: fakeImageProvider{result: onePicture()}}
+	service, _, chatID := newImageService(t, provider, config.ImageSettings{})
+
+	var registeredID, registeredChat string
+	released := 0
+	service.Draws = func(id, chat string, cancel context.CancelFunc) func() {
+		registeredID, registeredChat = id, chat
+		if cancel == nil {
+			t.Error("a registered draw arrived with no way to cancel it, so Stop could not end it")
+		}
+		return func() { released++ }
+	}
+	var progressIDs []string
+	service.Progress = func(id, chat string, p images.Progress) {
+		progressIDs = append(progressIDs, id)
+		if chat != chatID {
+			t.Errorf("progress reported for chat %q, want %q", chat, chatID)
+		}
+		if len(p.Preview) == 0 || p.PreviewMime == "" {
+			t.Errorf("report %+v carries no usable preview", p)
+		}
+	}
+
+	ctx := WithCallingMessage(context.Background(), "msg-42")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage, `{"prompt":"a red fox"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if registeredID != "msg-42" {
+		t.Errorf("the draw was registered under %q, want the calling message id", registeredID)
+	}
+	if registeredChat != chatID {
+		t.Errorf("registered chat = %q, want %q", registeredChat, chatID)
+	}
+	if released != 1 {
+		t.Errorf("release called %d times, want exactly 1 — a registration that outlives its draw leaves a Stop button for nothing", released)
+	}
+	if len(progressIDs) != 2 {
+		t.Fatalf("progress reports = %d, want the 2 the provider sent", len(progressIDs))
+	}
+	for _, id := range progressIDs {
+		if id != "msg-42" {
+			t.Errorf("a report was filed under %q, want the registered id", id)
+		}
+	}
+}
+
+// TestADrawWithNobodyWatchingStillDraws is the fallback the optional interface needs: a
+// service with no app around it — which is what every test in this package is — and a backend
+// that cannot report at all must both simply draw. A missing capability is not a broken
+// backend, and a draw that failed because nothing was listening would be the worst version of
+// that mistake.
+func TestADrawWithNobodyWatchingStillDraws(t *testing.T) {
+	t.Run("the backend cannot report", func(t *testing.T) {
+		provider := &fakeImageProvider{result: onePicture()}
+		service, _, chatID := newImageService(t, provider, config.ImageSettings{})
+		// The draw is still *registered*, and that is not a contradiction: registering is
+		// about being stoppable, which this backend can be, and reporting is about being
+		// watchable, which it cannot. Only the reports have to be absent.
+		registered := 0
+		service.Draws = func(string, string, context.CancelFunc) func() {
+			registered++
+			return func() {}
+		}
+		service.Progress = func(string, string, images.Progress) {
+			t.Error("a report arrived from a backend that has none")
+		}
+		out, err := service.Execute(WithCallingMessage(context.Background(), "msg-1"), chatID, ToolGenerateImage,
+			`{"prompt":"a red fox"}`)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if !strings.Contains(out, "erzeugt") {
+			t.Errorf("result = %q, want the picture reported as drawn", out)
+		}
+		if provider.calls != 1 {
+			t.Errorf("provider calls = %d, want 1", provider.calls)
+		}
+		if registered != 1 {
+			t.Errorf("draws registered = %d, want 1: a draw a Stop cannot reach is the failure this registration exists for", registered)
+		}
+	})
+
+	t.Run("nobody is watching", func(t *testing.T) {
+		provider := &progressiveProvider{fakeImageProvider: fakeImageProvider{result: onePicture()}}
+		service, _, chatID := newImageService(t, provider, config.ImageSettings{})
+		// Draws and Progress are nil, which is how the service is built outside the app.
+		if _, err := service.Execute(WithCallingMessage(context.Background(), "msg-1"), chatID, ToolGenerateImage,
+			`{"prompt":"a red fox"}`); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if provider.calls != 1 {
+			t.Errorf("provider calls = %d, want 1", provider.calls)
+		}
+	})
+}

@@ -150,6 +150,10 @@ export const EV = {
   title: 'chat:title',
   chatsChanged: 'chats:changed',
   attachments: 'chat:attachments',
+  // Not a `chat:` name, because a draw is not something a chat engine does: it is the
+  // picture backend talking about work it is doing right now, and the row it lands on can
+  // be a picture that does not exist yet.
+  imageProgress: 'image:progress',
 } as const
 
 export interface DeltaPayload {
@@ -192,6 +196,30 @@ export interface BudgetPayload {
 export interface CompactionPayload {
   chatId: string
   compaction: store.Compaction
+}
+
+/**
+ * One report from a picture being drawn.
+ *
+ * The key is `drawId`, and there are two things a draw can be registered under: the
+ * attachment a redraw works on, and the assistant message a draw the model asked for is
+ * rendered on (its tool call lives there, and there is no picture to hang anything under
+ * until the draw is over). It is one event for both because nothing downstream needs to know
+ * which kind it is — the row is found by the id either way.
+ *
+ * `preview` is a complete `data:` URL rather than bytes or a path: a path would be blocked by
+ * the same origin rule that stops any other local file from being read in the webview, and
+ * the bytes are already in hand on the Go side — the router would be a request per step for
+ * something the emitter has just read.
+ */
+export interface ImageProgressPayload {
+  drawId: string
+  chatId: string
+  step: number
+  steps: number
+  preview?: string
+  /** True for the report that ends a draw, which exists so a progress row cannot outlive it. */
+  done?: boolean
 }
 
 /**
