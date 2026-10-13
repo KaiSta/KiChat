@@ -619,6 +619,40 @@ Verfügbare Tools: {{tool_list}}`,
     return s
   }
 
+  /**
+   * ?images=cli is the picture backend that is a local program instead of a server.
+   *
+   * It is a query flag rather than a second fixture because the two kinds are one
+   * settings section: the panel picks a form from `kind`, and the flag has to switch the
+   * settings *and* the status report together — a CLI settings row against a server
+   * status would render a form whose badge counts checkpoints it cannot list. The
+   * declaration therefore sits above the fixture it changes.
+   */
+  const imagesCLI = new URLSearchParams(location.search).get('images') === 'cli'
+  if (imagesCLI) {
+    console.warn('[harness] images=cli active: the picture backend is a local binary')
+  }
+
+  /** The sampler names stable-diffusion.cpp's own option table lists, quoted from its
+   * `examples/common/common.cpp`. They are not AUTOMATIC1111's spellings — `euler_a`
+   * against `Euler a` — which is the reason the two kinds cannot share one sampler
+   * value, so the fixture keeps them apart rather than reusing the server's list. */
+  const cliSamplers = ['euler', 'euler_a', 'heun', 'dpm++2m', 'lcm', 'res_multistep']
+
+  /**
+   * The builds stable-diffusion.cpp publishes for this machine, as `internal/images`
+   * answers them. Linux rows, because that is the platform this harness is run on and a
+   * mock cannot ask the backend; what the fixture has to make renderable is the picker
+   * and the archive name it points at. The Linux list is the interesting one anyway: it
+   * has no CUDA row, which is the absence the panel must not invent.
+   */
+  const sdBuilds = [
+    { id: 'cpu', accelerator: 'cpu', asset: 'sd-{tag}-bin-Linux-Ubuntu-24.04-x86_64.zip' },
+    { id: 'vulkan', accelerator: 'vulkan', asset: 'sd-{tag}-bin-Linux-Ubuntu-24.04-x86_64-vulkan.zip' },
+    { id: 'rocm', accelerator: 'rocm', asset: 'sd-{tag}-bin-Linux-Ubuntu-24.04-x86_64-rocm-{suite}.zip' },
+  ]
+  const sdReleasePage = 'https://github.com/leejet/stable-diffusion.cpp/releases/latest'
+
   const settings = {
     // The fixture starts in English with the English prompt bodies, because that
     // is the only state the backend can be in: normalise() rewrites an untouched
@@ -671,6 +705,30 @@ Verfügbare Tools: {{tool_list}}`,
       height: 0,
       negativePrompt: '',
       saveFolder: '/home/user/Pictures',
+      // The CLI kind's own fields. Empty here, because this fixture is the server
+      // backend; `?images=cli` fills them in and switches the kind, which is what
+      // makes the other half of the form renderable.
+      kind: imagesCLI ? 'cli' : '',
+      // The folder is the primary route and the fixture uses it, so the Program field
+      // is left empty — which is what it looks like when KiChat finds sd-cli for the
+      // user. The explicit path stays the fallback for a program the scan cannot reach.
+      cliBinary: '',
+      cliFolder: imagesCLI ? '/home/user/Downloads/sd' : '',
+      cliModel: '',
+      cliDiffusionModel: imagesCLI ? '/home/user/models/qwen-image-2.1-Q5_K_M.gguf' : '',
+      cliVae: imagesCLI ? '/home/user/models/qwen_image_2.1_vae_bf16.safetensors' : '',
+      cliLlm: imagesCLI ? '/home/user/models/Qwen3-VL-8B-Instruct-Q5_K_M.gguf' : '',
+      cliClipL: '',
+      cliClipG: '',
+      cliT5xxl: '',
+      // The one mode the panel has a switch of its own for: Flux on a card too small to
+      // hold it. On for the CLI fixture, because a checkbox that only ever renders
+      // unchecked cannot show whether its `checked` binding is wired at all.
+      cliOffloadToCpu: imagesCLI,
+      // The two flags from the command line this fixture is modelled on, one of which
+      // KiChat has no field for at all: `--sigmas` is the whole reason the extra list
+      // exists, and `--diffusion-fa` reaches a turbo model's attention kernel.
+      cliExtraArgs: imagesCLI ? '--diffusion-fa --cfg-scale 1.0 --sigmas 1.0,0.5,0.0' : '',
     },
     modelOverrides: {},
     search: {
@@ -914,6 +972,62 @@ Verfügbare Tools: {{tool_list}}`,
     placement: 'inline',
     documentId: 'doc-photo-1',
     createdAt: now(),
+  }
+
+  // The names the chat's pictures already carry. Redrawing the same recipe twice is an
+  // ordinary thing to do, and the real backend bumps a colliding name to "-2" rather than
+  // filing two pictures the user cannot tell apart; the harness has to do the same or the
+  // caption under the second one silently repeats the first.
+  const usedImageNames = new Set([IMAGE_ATTACHMENT.filename, UPLOADED_ATTACHMENT.filename])
+
+  // The pictures this session drew. They have to be renderable too: a drawn attachment is
+  // filed with a fresh id, and a mock that only answered GetAttachmentImage for the two
+  // fixtures would show every redraw as "unreadable" — which is exactly the opposite of
+  // what the feature does.
+  const drawnImageIds = new Set()
+
+  // ?slowdraw=1 leaves a draw pending until Stop is pressed, and ?nointerrupt=1 makes the
+  // server answer 404 on the interrupt route — stable-diffusion.cpp, which has no such
+  // route. Both are query flags rather than default fixtures because the default has to
+  // stay the ordinary path: a picture arrives.
+  // How long the interrupt request takes to answer. A local WebUI is fast, so this is
+  // deliberately short: it exists so the state between "the draw was abandoned" and "the
+  // server was told" can be seen, not to simulate a slow network.
+  const STOP_ANSWER_MS = 150
+  const slowDraw = new URLSearchParams(location.search).get('slowdraw') === '1'
+  const noInterrupt = new URLSearchParams(location.search).get('nointerrupt') === '1'
+  // The draw the frontend is still waiting for, if any. One at a time, because the UI
+  // disables every control while one runs.
+  let pendingDraw = null
+
+  // Mirrors internal/tools.slugify, in the part that matters for a filename: letters and
+  // digits kept, everything else collapsed to single dashes. Unicode-aware, because a
+  // German or Chinese prompt is a normal prompt here.
+  function slugify(value) {
+    return String(value)
+      .toLowerCase()
+      .trim()
+      .replace(/[^\p{L}\p{N}]+/gu, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 48)
+      .replace(/-+$/g, '')
+  }
+
+  function uniqueImageName(name) {
+    if (!usedImageNames.has(name)) {
+      usedImageNames.add(name)
+      return name
+    }
+    const dot = name.lastIndexOf('.')
+    const base = dot < 0 ? name : name.slice(0, dot)
+    const ext = dot < 0 ? '' : name.slice(dot)
+    for (let n = 2; ; n++) {
+      const candidate = `${base}-${n}${ext}`
+      if (!usedImageNames.has(candidate)) {
+        usedImageNames.add(candidate)
+        return candidate
+      }
+    }
   }
 
   const messages = new Map()
@@ -2035,18 +2149,79 @@ Verfügbare Tools: {{tool_list}}`,
     // The picture server, as a worked example: reachable, two checkpoints, the
     // three samplers a WebUI ships first. `keySet: false` is the default setup — a
     // WebUI without --api-auth takes no credential at all.
+    //
+    // With ?images=cli the same binding answers the other kind's shape: no listing at
+    // all (that backend cannot be asked), the file list it will really pass, and the
+    // sampler names that binary's own option table declares. Both halves have to be
+    // renderable, because the panel branches on `kind` and the badge reads a
+    // different field for each.
     GetImageStatus: () =>
-      Promise.resolve({
-        enabled: true,
-        baseURL: 'http://127.0.0.1:7860',
-        ok: true,
-        models: ['sdxl.safetensors [a1b2c3]', 'flux-dev.safetensors'],
-        samplers: ['Euler a', 'DPM++ 2M Karras', 'DDIM'],
-        keySet: false,
-      }),
+      Promise.resolve(
+        imagesCLI
+          ? {
+              enabled: true,
+              baseURL: '',
+              ok: true,
+              models: [],
+              samplers: cliSamplers,
+              keySet: false,
+              kind: 'cli',
+              // The program was found in the folder rather than typed, and `build` is
+              // what that folder turned out to be — a *reading*, which is why the
+              // fixture has the folder set and the Vulkan backend libraries in it.
+              binary: '/home/user/Downloads/sd/sd-cli',
+              folder: '/home/user/Downloads/sd',
+              build: 'vulkan',
+              builds: sdBuilds,
+              releasePage: sdReleasePage,
+              files: [
+                '/home/user/models/qwen-image-2.1-Q5_K_M.gguf',
+                '/home/user/models/qwen_image_2.1_vae_bf16.safetensors',
+                '/home/user/models/Qwen3-VL-8B-Instruct-Q5_K_M.gguf',
+              ],
+            }
+          : {
+              enabled: true,
+              baseURL: 'http://127.0.0.1:7860',
+              ok: true,
+              models: ['sdxl.safetensors [a1b2c3]', 'flux-dev.safetensors'],
+              samplers: ['Euler a', 'DPM++ 2M Karras', 'DDIM'],
+              keySet: false,
+              kind: '',
+              binary: '',
+              folder: '',
+              build: '',
+              builds: sdBuilds,
+              releasePage: sdReleasePage,
+              files: [],
+            },
+      ),
+    // A cancelled dialog answers with the empty string, which the panel must treat as
+    // "leave the field alone" — so this answers with a path, and the fixture keeps the
+    // other case reachable by returning nothing when the title asks for the binary.
+    PickImageFile: (title, patterns) => {
+      console.log('[harness] PickImageFile', title, patterns)
+      if (!imagesCLI) return Promise.resolve('')
+      return Promise.resolve(`/home/user/models/picked-${patterns.length}.gguf`)
+    },
+    // The folder a stable-diffusion.cpp archive unpacked into. It answers with a folder
+    // the panel's own folder field does not already hold, so a click is observable as a
+    // change rather than as the same string coming back, and the rejection the binding
+    // really can produce — a folder with no program in it — stays reachable by asking
+    // for a title the fixture recognises.
+    PickImageFolder: (title) => {
+      console.log('[harness] PickImageFolder', title)
+      if (!imagesCLI) return Promise.resolve('')
+      if (/leer|empty/i.test(title)) {
+        return Promise.reject(
+          new Error('image backend unavailable: kein sd-cli gefunden — gesucht wurde in /home/user/Downloads/leer'),
+        )
+      }
+      return Promise.resolve('/home/user/Downloads/sd-cuda')
+    },
     TestImageBackend: () => Promise.resolve('1 Bild(er) erzeugt (Stable Diffusion WebUI)'),
     GetAttachmentImage: (id) => {
-      if (id !== IMAGE_ATTACHMENT.id && id !== UPLOADED_ATTACHMENT.id) {
+      if (id !== IMAGE_ATTACHMENT.id && id !== UPLOADED_ATTACHMENT.id && !drawnImageIds.has(id)) {
         return Promise.reject(new Error('kein gespeichertes Bild'))
       }
       return Promise.resolve(IMAGE_DATA_URL)
@@ -2059,17 +2234,79 @@ Verfügbare Tools: {{tool_list}}`,
       return Promise.resolve('/home/user/Pictures/a-red-fox-in-deep-snow-1.png')
     },
     PickSaveFolder: () => Promise.resolve('/home/user/Pictures'),
-    // The redraw path. Recorded rather than dropped so the flag is observable: the point
-    // of the second argument is "another take on the same prompt", and a harness that
-    // could not show which one was asked for would not catch the two being wired
-    // backwards. It resolves a filename that differs by seed, which is what the toast
-    // prints and what has to be distinguishable from the original at a glance.
-    RegenerateImage: (id, freshSeed) => {
-      console.log('[harness] RegenerateImage', id, 'freshSeed=' + freshSeed)
-      const filename = freshSeed
-        ? 'a-red-fox-in-deep-snow-1-s9931.png'
-        : 'a-red-fox-in-deep-snow-1-s4242.png'
-      return Promise.resolve({ ...IMAGE_ATTACHMENT, id: nextId('att'), filename })
+    // The draw path. The whole recipe arrives rather than a flag, because that is what the
+    // binding takes now: a repeat, a variation and an edited recipe are one call, and the
+    // harness has to be able to tell them apart. Recorded rather than dropped — the whole
+    // point of the editor is that what the user typed is what gets drawn, and a mock that
+    // ignored the argument would toast a filename while proving nothing about it.
+    //
+    // It answers with the shape the real backend answers with: the picture filed onto the
+    // message the original is on (so the new one appears beside it, and the store's
+    // attachments listener has something to refresh), carrying the recipe it was drawn
+    // with rather than the one the original had, which is what makes a redraw of a redraw
+    // possible and what the editor prefills from. A filename that says which prompt and
+    // which seed produced it is what the toast prints.
+    RegenerateImage: (id, recipe) => {
+      console.log('[harness] RegenerateImage', id, JSON.stringify(recipe))
+      const prompt = String(recipe?.prompt ?? '').trim()
+      if (!prompt) {
+        // The real backend refuses this before it contacts the server, and the editor
+        // disables Draw for it. Kept here so a forced call shows the same message.
+        return Promise.reject(new Error('der Bild-Prompt ist leer'))
+      }
+      const seed = Number(recipe?.seed) > 0 ? Number(recipe.seed) : 9931
+      if (slowDraw) {
+        // ?slowdraw=1 is the shape the Stop button exists for: a 40-step draw on a CPU
+        // server is minutes, and a mock that answered instantly would leave the whole
+        // path — the button, the pending state, the cancellation arriving as a state
+        // rather than as an error — unrenderable. It stays pending until StopImageDraw
+        // rejects it, which is what a real cancellation does to the awaiting call.
+        console.warn('[harness] slowdraw injection active: the draw stays pending until Stop is pressed')
+        return new Promise((_resolve, reject) => {
+          pendingDraw = { id, reject }
+        })
+      }
+      const drawn = {
+        ...IMAGE_ATTACHMENT,
+        id: nextId('att'),
+        filename: uniqueImageName(`${slugify(prompt) || 'bild'}-1-s${seed}.png`),
+        generation: { ...recipe, prompt, seed },
+      }
+      drawnImageIds.add(drawn.id)
+      const host = messages.get(drawn.chatId)?.find((m) => (m.attachments ?? []).some((a) => a.id === id))
+      if (host) {
+        host.attachments = [...host.attachments, drawn]
+        emit('chat:attachments', { chatId: drawn.chatId })
+      } else {
+        console.warn('[harness] RegenerateImage found no message holding', id)
+      }
+      return Promise.resolve(drawn)
+    },
+    // The two answers the UI branches on, and they are not the same sentence: a draw that
+    // was running is over (the awaiting call rejects, and the view reports a stop), while
+    // a second click found nothing to stop (nothing rejects, and the view stays silent).
+    // `interrupted` follows the real server: the mock has the route, so it is true —
+    // `?nointerrupt=1` would be the stable-diffusion.cpp case, where it is false and
+    // `interruptError` carries the 404. Both are worth rendering, so both are reachable.
+    StopImageDraw: (id) => {
+      // One draw at a time, so a Stop for a *different* picture must not claim this one:
+      // that is the same "there was nothing to stop" answer the real backend gives for an
+      // attachment it is not drawing, and the view has to render it silently.
+      const running = pendingDraw?.id === id
+      console.log('[harness] StopImageDraw', id, running ? '(a draw is in flight)' : '(nothing was running)')
+      if (!running) return Promise.resolve({ wasDrawing: false, interrupted: false })
+      const stopped = pendingDraw
+      pendingDraw = null
+      // The draw is abandoned at once — that is the cancellation — but the answer is held
+      // for as long as the interrupt request really takes, because that is what the view's
+      // controls are disabled against: re-enabling them the moment the draw unwinds would
+      // let a second click start a picture the previous stop's *global* interrupt could
+      // then kill. Answering instantly would make that state unrenderable.
+      stopped.reject(new Error('das Zeichnen wurde abgebrochen'))
+      const result = noInterrupt
+        ? { wasDrawing: true, interrupted: false, interruptError: '404 Not Found: /sdapi/v1/interrupt' }
+        : { wasDrawing: true, interrupted: true }
+      return new Promise((resolve) => setTimeout(() => resolve(result), STOP_ANSWER_MS))
     },
     AddAttachment: (input) => Promise.resolve({ id: nextId('att'), chatId: input.chatId, filename: 'harness.txt', kind: 'text', messageId: '', placement: 'inline', sizeBytes: 12, sha256: '', pages: 1, tokenEstimate: 12, documentId: '', createdAt: now() }),
     RemoveAttachment: () => Promise.resolve(null),

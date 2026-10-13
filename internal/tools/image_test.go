@@ -396,11 +396,11 @@ func TestGenerateImageRecordsWhatTheServerActuallyUsed(t *testing.T) {
 	}
 }
 
-// TestRegenerateCoversBothHalvesOfTheControl pins the one flag that separates the two
-// buttons. They are the same call, so a swap would be invisible to any test that only
-// exercised one of them: a repeat has to pin the recorded seed, and a variation has to drop
-// it and let the server roll a new one while keeping the prompt.
-func TestRegenerateCoversBothHalvesOfTheControl(t *testing.T) {
+// TestRegenerateDrawsTheRecipeItIsHanded covers the three controls that share this one call.
+// They differ only in the recipe the panel builds, so a mistake in any of them would be
+// invisible to a test that exercised one: a repeat has to pin the recorded seed, a variation
+// has to clear it and keep the prompt, and an edit has to change what is drawn.
+func TestRegenerateDrawsTheRecipeItIsHanded(t *testing.T) {
 	provider := &fakeImageProvider{result: onePicture()}
 	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
 	ctx := WithCallingMessage(context.Background(), "msg-1")
@@ -410,8 +410,8 @@ func TestRegenerateCoversBothHalvesOfTheControl(t *testing.T) {
 	}
 	original := firstAttachment(t, st, chatID)
 
-	// A repeat: the stored recipe, seed included.
-	if _, err := service.Regenerate(context.Background(), original.ID, false); err != nil {
+	// A repeat: the stored recipe, handed straight back.
+	if _, err := service.Regenerate(context.Background(), original.ID, *original.Generation); err != nil {
 		t.Fatalf("Regenerate(repeat): %v", err)
 	}
 	if provider.got.Seed == nil || *provider.got.Seed != 4242 {
@@ -421,10 +421,12 @@ func TestRegenerateCoversBothHalvesOfTheControl(t *testing.T) {
 		t.Errorf("a repeat must reuse the recorded recipe, got %+v", provider.got)
 	}
 
-	// A variation: the same prompt and no seed, which is what lets the server pick a new
-	// one. This server reports 4242 again, so the two redraws collide on seed — which is
-	// exactly the collision the names have to survive.
-	if _, err := service.Regenerate(context.Background(), original.ID, true); err != nil {
+	// A variation: the stored recipe with the seed cleared, which is what lets the server pick
+	// a new one. This server reports 4242 again, so the two redraws collide on seed — exactly
+	// the collision the names have to survive.
+	variation := *original.Generation
+	variation.Seed = 0
+	if _, err := service.Regenerate(context.Background(), original.ID, variation); err != nil {
 		t.Fatalf("Regenerate(variation): %v", err)
 	}
 	if provider.got.Seed != nil {
@@ -434,12 +436,30 @@ func TestRegenerateCoversBothHalvesOfTheControl(t *testing.T) {
 		t.Errorf("a variation must keep the prompt, got %q", provider.got.Prompt)
 	}
 
+	// An edit: the same picture, drawn again with the fields the user changed. The prompt,
+	// the size and the steps are all here because those are what the panel's editor offers and
+	// what the request has to carry through untouched.
+	edited := *original.Generation
+	edited.Prompt = "a blue heron in reeds, watercolour"
+	edited.Width = 896
+	edited.Height = 1152
+	edited.Steps = 40
+	if _, err := service.Regenerate(context.Background(), original.ID, edited); err != nil {
+		t.Fatalf("Regenerate(edit): %v", err)
+	}
+	if provider.got.Prompt != "a blue heron in reeds, watercolour" {
+		t.Errorf("the edited prompt did not reach the server: %q", provider.got.Prompt)
+	}
+	if provider.got.Width != 896 || provider.got.Height != 1152 || provider.got.Steps != 40 {
+		t.Errorf("an edited size or step count was lost on the way: %+v", provider.got)
+	}
+
 	attachments, err := st.ListAttachments(chatID)
 	if err != nil {
 		t.Fatalf("ListAttachments: %v", err)
 	}
-	if len(attachments) != 3 {
-		t.Fatalf("attachments = %d, want the original plus two redraws", len(attachments))
+	if len(attachments) != 4 {
+		t.Fatalf("attachments = %d, want the original plus three draws", len(attachments))
 	}
 	names := map[string]bool{}
 	for _, a := range attachments {
@@ -476,7 +496,8 @@ func TestRegenerateRefusesAPictureWithoutARecipe(t *testing.T) {
 		t.Fatalf("CreateAttachment: %v", err)
 	}
 
-	_, err := service.Regenerate(context.Background(), "uploaded", true)
+	_, err := service.Regenerate(context.Background(), "uploaded",
+		store.GenerationRecipe{Prompt: "anything at all"})
 	if err == nil {
 		t.Fatal("an uploaded picture was redrawn")
 	}
@@ -492,7 +513,8 @@ func TestRegenerateRefusesAPictureWithoutARecipe(t *testing.T) {
 // feature being switched off has to refuse before it reads anything.
 func TestRegenerateNeedsAConfiguredServer(t *testing.T) {
 	service, _, _ := newImageService(t, nil, config.ImageSettings{})
-	if _, err := service.Regenerate(context.Background(), "any", true); !errors.Is(err, images.ErrNotConfigured) {
+	if _, err := service.Regenerate(context.Background(), "any",
+		store.GenerationRecipe{Prompt: "anything"}); !errors.Is(err, images.ErrNotConfigured) {
 		t.Fatalf("err = %v, want ErrNotConfigured", err)
 	}
 }
@@ -537,5 +559,267 @@ func TestUniqueNameBumpsACollision(t *testing.T) {
 	// The extension stays where it belongs, including one the slug would not produce.
 	if got := uniqueName(map[string]bool{"x.webp": true}, "x.webp"); got != "x-2.webp" {
 		t.Errorf("a webp collision = %q", got)
+	}
+}
+
+// TestAnEditedRecipeLeavesTheOriginalAlone keeps the transcript honest. A picture records how
+// it was actually made, and editing a recipe is a statement about the *next* draw rather than
+// a correction of the last one: if the edit rewrote the original, the recipe beside a picture
+// would stop describing that picture, and a later redraw would silently use something the
+// server never did.
+func TestAnEditedRecipeLeavesTheOriginalAlone(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage,
+		`{"prompt":"a red fox","width":640,"steps":20}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	original := firstAttachment(t, st, chatID)
+	before := *original.Generation
+
+	edited := before
+	edited.Prompt = "something else entirely"
+	edited.Width = 128
+	edited.Steps = 7
+	edited.Seed = 99
+	if _, err := service.Regenerate(context.Background(), original.ID, edited); err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+
+	reread, err := st.GetAttachment(original.ID)
+	if err != nil {
+		t.Fatalf("GetAttachment: %v", err)
+	}
+	if reread.Generation == nil {
+		t.Fatal("the original lost its recipe")
+	}
+	if *reread.Generation != before {
+		t.Errorf("the edit rewrote the original's recipe:\n got %+v\nwant %+v", *reread.Generation, before)
+	}
+	// And the new picture carries what it was really drawn with, so it can be edited again.
+	attachments, err := st.ListAttachments(chatID)
+	if err != nil || len(attachments) != 2 {
+		t.Fatalf("ListAttachments = %d, %v", len(attachments), err)
+	}
+	fresh := attachments[1]
+	if fresh.Generation == nil || fresh.Generation.Prompt != "something else entirely" {
+		t.Errorf("the new picture's recipe does not describe the new picture: %+v", fresh.Generation)
+	}
+}
+
+// TestRegenerateRefusesAnEmptyPromptBeforeDrawing is the editor's most likely failure: the
+// user clears the prompt box and presses Draw. The button is disabled for it, but a request
+// can arrive from anywhere, and a prompt-less generation is not a degenerate case — it is a
+// blank canvas the server draws something arbitrary on and charges for.
+func TestRegenerateRefusesAnEmptyPromptBeforeDrawing(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage, `{"prompt":"a red fox"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	original := firstAttachment(t, st, chatID)
+	provider.calls = 0
+
+	_, err := service.Regenerate(context.Background(), original.ID,
+		store.GenerationRecipe{Prompt: "   ", Width: 512})
+	if err == nil {
+		t.Fatal("a blank prompt was drawn")
+	}
+	if provider.calls != 0 {
+		t.Errorf("the server was asked to draw with no prompt: %d calls", provider.calls)
+	}
+}
+
+// TestRegenerateClampsTheStepCount covers the one field a user types as a raw number. The
+// bounds are the settings' own, and they matter more here than there: a stored recipe came
+// from this app, but an edited one comes from a box the user filled in, and a local server
+// does not refuse a 100000-step request — it attempts it, for hours.
+func TestRegenerateClampsTheStepCount(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage, `{"prompt":"a red fox"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	original := firstAttachment(t, st, chatID)
+
+	recipe := *original.Generation
+	recipe.Steps = 100000
+	if _, err := service.Regenerate(context.Background(), original.ID, recipe); err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+	if provider.got.Steps != config.MaxImageSteps {
+		t.Errorf("steps = %d, want the bound %d", provider.got.Steps, config.MaxImageSteps)
+	}
+
+	// A negative count is "the server's own" rather than an error, the same as everywhere else
+	// a size or a step count can be left empty.
+	recipe.Steps = -5
+	if _, err := service.Regenerate(context.Background(), original.ID, recipe); err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+	if provider.got.Steps != 0 {
+		t.Errorf("steps = %d, want 0 (the server's own)", provider.got.Steps)
+	}
+}
+
+// interruptibleProvider is the fake above plus the one method that makes a provider an
+// images.Interrupter. It is a separate type rather than a field on the fake on purpose:
+// the interesting half of the pair is the provider that *cannot* be asked, and a method
+// that was always present would make that case impossible to write down.
+type interruptibleProvider struct {
+	fakeImageProvider
+	interruptErr   error
+	interruptCalls int
+}
+
+func (p *interruptibleProvider) Interrupt(context.Context) error {
+	p.interruptCalls++
+	if p.interruptErr != nil {
+		return p.interruptErr
+	}
+	return nil
+}
+
+// TestInterruptDrawReportsWhetherTheServerCouldBeAsked pins the three answers the caller
+// has to tell apart. They are not one error with three texts: "there is no server" is a
+// configuration the user can fix, "this server has no interrupt route" is a fact about
+// stable-diffusion.cpp and holds nothing to fix, and "the server was asked and refused" is
+// the only one that is a failure. Collapsing them would either hide a real refusal or
+// report a failure on every stop a stable-diffusion.cpp user makes.
+func TestInterruptDrawReportsWhetherTheServerCouldBeAsked(t *testing.T) {
+	t.Run("no server configured", func(t *testing.T) {
+		asked, err := (&Service{}).InterruptDraw(context.Background())
+		if asked {
+			t.Error("a service with no provider reported that it asked one")
+		}
+		if !errors.Is(err, images.ErrNotConfigured) {
+			t.Errorf("err = %v, want ErrNotConfigured", err)
+		}
+	})
+
+	t.Run("a provider that cannot interrupt is not a failure", func(t *testing.T) {
+		// The base fake has no Interrupt method, which is what a ComfyUI client would
+		// look like here: able to draw, unable to be stopped.
+		service, _, _ := newImageService(t, &fakeImageProvider{}, config.ImageSettings{})
+		asked, err := service.InterruptDraw(context.Background())
+		if asked {
+			t.Error("a provider without Interrupt was reported as asked")
+		}
+		if err != nil {
+			t.Errorf("err = %v, want nil — a server that cannot be stopped is not broken", err)
+		}
+	})
+
+	t.Run("an interruptible provider is asked", func(t *testing.T) {
+		provider := &interruptibleProvider{fakeImageProvider: fakeImageProvider{result: onePicture()}}
+		service, _, _ := newImageService(t, provider, config.ImageSettings{})
+		asked, err := service.InterruptDraw(context.Background())
+		if !asked {
+			t.Error("an interruptible provider was not reported as asked")
+		}
+		if err != nil {
+			t.Errorf("err = %v, want nil", err)
+		}
+		if provider.interruptCalls != 1 {
+			t.Errorf("interrupt calls = %d, want 1", provider.interruptCalls)
+		}
+	})
+
+	t.Run("the provider's refusal travels", func(t *testing.T) {
+		refusal := errors.New("404 Not Found: /sdapi/v1/interrupt")
+		provider := &interruptibleProvider{
+			fakeImageProvider: fakeImageProvider{result: onePicture()},
+			interruptErr:      refusal,
+		}
+		service, _, _ := newImageService(t, provider, config.ImageSettings{})
+		asked, err := service.InterruptDraw(context.Background())
+		if !asked {
+			t.Error("a provider that was asked and refused was not reported as asked")
+		}
+		if !errors.Is(err, refusal) {
+			t.Errorf("err = %v, want the provider's own refusal", err)
+		}
+	})
+}
+
+// TestGenerateImageBoundsTheModelsOwnNumbers is the hole this closes: the tool's schema
+// advertises 64–2048 pixels and 1–150 steps, and a model is free to ignore it — the small
+// local models this app is built for are the ones that most often do. Nothing bounded the
+// numbers on this path before, so a `generate_image` call could ask a WebUI for 100000
+// steps (hours of sampling, attempted rather than refused) or a CLI build for a 20000-pixel
+// latent (tens of gigabytes).
+//
+// The recipe is asserted too, and that is the subtler half: it is written from the request,
+// so a request that was silently clamped by the provider would leave a recipe describing a
+// picture that was never drawn — "draw that again" would then produce something else.
+func TestGenerateImageBoundsTheModelsOwnNumbers(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+
+	out, err := service.Execute(ctx, chatID, ToolGenerateImage,
+		`{"prompt":"a red fox","width":20000,"height":63,"steps":100000}`)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if provider.got.Width != config.MaxImageDimension || provider.got.Height != config.MinImageDimension {
+		t.Errorf("the provider was asked for %dx%d, want the bounds %dx%d",
+			provider.got.Width, provider.got.Height, config.MaxImageDimension, config.MinImageDimension)
+	}
+	if provider.got.Steps != config.MaxImageSteps {
+		t.Errorf("the provider was asked for %d steps, want the bound %d", provider.got.Steps, config.MaxImageSteps)
+	}
+
+	got := firstAttachment(t, st, chatID)
+	if got.Generation == nil {
+		t.Fatal("the picture has no recipe")
+	}
+	if got.Generation.Width != provider.got.Width || got.Generation.Height != provider.got.Height ||
+		got.Generation.Steps != provider.got.Steps {
+		t.Errorf("the recipe describes %dx%d at %d steps while the provider drew %dx%d at %d",
+			got.Generation.Width, got.Generation.Height, got.Generation.Steps,
+			provider.got.Width, provider.got.Height, provider.got.Steps)
+	}
+	// The reply the model reads repeats the numbers it asked for, so a bound applied
+	// behind its back would have it describe a picture nobody drew.
+	if strings.Contains(out, "100000") || strings.Contains(out, "20000") {
+		t.Errorf("the summary quotes a number that was not used:\n%s", out)
+	}
+}
+
+// TestTwoDrawsOfOnePromptGetDistinctFilenames is the invariant redrawing has always kept and
+// the tool path did not: `uniqueName` guards the redraw, and this path — which a model drives
+// by simply being asked "draw that again" — wrote the same slug and the same index twice.
+// Two pictures under one name are two pictures a user cannot tell apart: the caption under
+// each one is the filename, and the save dialog offers the same name for both.
+func TestTwoDrawsOfOnePromptGetDistinctFilenames(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+
+	for i := 0; i < 2; i++ {
+		if _, err := service.Execute(ctx, chatID, ToolGenerateImage,
+			`{"prompt":"a red fox in deep snow"}`); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+	}
+	attachments, err := st.ListAttachments(chatID)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(attachments) != 2 {
+		t.Fatalf("attachments = %d, want 2", len(attachments))
+	}
+	if attachments[0].Filename == attachments[1].Filename {
+		t.Errorf("both pictures are named %q; the second draw needs a name of its own",
+			attachments[0].Filename)
+	}
+	// The first keeps the plain name, so the common case is unchanged and a numbered
+	// variant only appears when there is something to avoid.
+	if attachments[0].Filename != "a-red-fox-in-deep-snow-1.png" {
+		t.Errorf("first filename = %q, want the plain slug", attachments[0].Filename)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"strconv"
@@ -85,6 +87,34 @@ func (s *SDWebUI) Health(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// Interrupt asks the server to stop the generation it is currently running.
+//
+// The route is `POST /sdapi/v1/interrupt`, registered by AUTOMATIC1111
+// (`self.add_api_route("/sdapi/v1/interrupt", self.interruptapi, methods=["POST"])`,
+// whose handler calls `shared.state.interrupt()` and answers `{}`) and by the Forge
+// fork with the same registration. stable-diffusion.cpp's server has no equivalent:
+// its own API cancels a *job* by id, and this client does not submit jobs, so a stop
+// against it ends the wait and nothing else. That is why this is best effort and why
+// the caller treats its failure as information rather than as a failed stop.
+//
+// What it interrupts is the server's current generation, not this request. The state
+// it flips is global to the process — a picture the user is drawing in their own WebUI
+// tab stops too. KiChat draws one picture at a time against a server the user runs for
+// themselves, so the window is narrow, but a caller pressing Stop should know that is
+// what it means.
+//
+// Deliberately not retried, unlike every other route here: by the time this is sent the
+// draw it refers to has already been abandoned by the caller's context, so a second
+// attempt can only interrupt whatever the server happens to be doing by then — a later
+// generation this click did not mean to touch. One attempt, one error, and no second
+// picture's problem.
+func (s *SDWebUI) Interrupt(ctx context.Context) error {
+	if s.baseURL == "" {
+		return ErrNotConfigured
+	}
+	return s.do(ctx, http.MethodPost, "/sdapi/v1/interrupt", nil, nil)
 }
 
 // sdModel is one entry of `/sdapi/v1/sd-models`. Only three of its fields are
@@ -181,15 +211,34 @@ func (s *SDWebUI) Generate(ctx context.Context, req Request) (Result, error) {
 	if prompt == "" {
 		return Result{}, errors.New("der Bild-Prompt ist leer")
 	}
+	// The numbers are bounded here as well as by the caller that built the request; see
+	// limits.go. A caller that forgets cannot make this client the one that sends a
+	// server a 20000-pixel request.
+	req = req.Normalised()
+
+	// The seed is chosen here rather than left to the server, and that is a
+	// correctness choice rather than a preference. Only the seed that was *used*
+	// makes a picture reproducible, and not every server sharing this route reports
+	// it: A1111 repeats it in `info`, while sd-server's compatibility route documents
+	// `info` as an empty string. A request that left the seed open would then produce
+	// a picture whose seed KiChat can never learn — recorded as "none", which is the
+	// same row as a picture that cannot be drawn again. Choosing it here makes the
+	// effective seed known before the request is sent, and turns `info` into a
+	// confirmation instead of the only source of the truth.
+	seed := req.Seed
+	if seed == nil {
+		chosen := RandomSeed()
+		seed = &chosen
+	}
 
 	payload := sdRequest{
 		Prompt:         prompt,
 		NegativePrompt: strings.TrimSpace(req.NegativePrompt),
-		Width:          normaliseDimension(req.Width),
-		Height:         normaliseDimension(req.Height),
+		Width:          req.Width,
+		Height:         req.Height,
 		Steps:          req.Steps,
 		SamplerName:    strings.TrimSpace(req.Sampler),
-		Seed:           req.Seed,
+		Seed:           seed,
 	}
 	if model := strings.TrimSpace(req.Model); model != "" {
 		payload.Override = map[string]any{"sd_model_checkpoint": model}
@@ -223,10 +272,28 @@ func (s *SDWebUI) Generate(ctx context.Context, req Request) (Result, error) {
 		result.Images = append(result.Images, Image{Data: data, Mime: mime, Ext: ext})
 	}
 	info := decodeInfo(decoded.Info)
+	// What the server says it used wins, because that is the number that reproduces
+	// the picture; the seed this client sent is the fallback for a server that
+	// reports nothing at all.
 	result.Seed = info.seed
+	if result.Seed == 0 {
+		result.Seed = *seed
+	}
 	result.Model = info.model
 	result.Info = info.text
 	return result, nil
+}
+
+// RandomSeed picks the seed for a request that did not name one.
+//
+// Positive and non-zero on purpose: zero is this package's spelling of "no seed is
+// known", so a picture drawn with seed 0 and a picture whose seed was never learned
+// would be one row in the transcript — and only one of them can be drawn again. The
+// ceiling keeps the value inside what every server in the table accepts, which is
+// also the range stable-diffusion.cpp's own random path produces (`resolve_seed`
+// returns `rand()`, a 31-bit value).
+func RandomSeed() int64 {
+	return 1 + rand.Int64N(math.MaxInt32)
 }
 
 // errNoModelLoaded is the WebUI's own answer when nothing is loaded. It is
@@ -277,39 +344,15 @@ func decodeInfo(raw json.RawMessage) sdInfo {
 
 // decodeImage accepts base64 with or without a data: prefix. Older builds of the
 // WebUI returned the prefixed form, and a caller that assumes one shape produces a
-// corrupt file from the other rather than an error — base64 decoding of a string
-// containing "data:image/png;base64," fails, but only sometimes, depending on
-// where the comma falls.
+// corrupt file from the other rather than an error: a `data:` URL contains `:` and
+// `,`, which are not in the base64 alphabet, so decoding one always fails — the
+// prefix has to be stripped rather than tolerated.
 func decodeImage(encoded string) ([]byte, error) {
 	encoded = strings.TrimSpace(encoded)
 	if idx := strings.Index(encoded, "base64,"); idx >= 0 && strings.HasPrefix(encoded, "data:") {
 		encoded = encoded[idx+len("base64,"):]
 	}
 	return base64.StdEncoding.DecodeString(encoded)
-}
-
-// normaliseDimension rounds a requested size to the multiple of 8 every
-// diffusion model needs, and keeps it inside a range a local machine can finish:
-// below 64 there is no latent grid to speak of, and above 2048 one picture takes
-// minutes and often tens of gigabytes. The server would reject or thrash rather
-// than explain, so the bound is applied here where the message can name the
-// number it used.
-func normaliseDimension(value int) int {
-	if value <= 0 {
-		return 0 // omitted: the server's own default applies.
-	}
-	const (
-		minimum = 64
-		maximum = 2048
-		step    = 8
-	)
-	if value < minimum {
-		value = minimum
-	}
-	if value > maximum {
-		value = maximum
-	}
-	return (value + step/2) / step * step
 }
 
 // --- HTTP ------------------------------------------------------------------

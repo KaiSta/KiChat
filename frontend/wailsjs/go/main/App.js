@@ -126,6 +126,14 @@ export function PickFiles() {
   return window['go']['main']['App']['PickFiles']();
 }
 
+export function PickImageFile(arg1, arg2) {
+  return window['go']['main']['App']['PickImageFile'](arg1, arg2);
+}
+
+export function PickImageFolder(arg1) {
+  return window['go']['main']['App']['PickImageFolder'](arg1);
+}
+
 export function PickManagedModelFile(arg1) {
   return window['go']['main']['App']['PickManagedModelFile'](arg1);
 }
@@ -232,6 +240,10 @@ export function StartModelCheck(arg1) {
 
 export function StopGeneration(arg1) {
   return window['go']['main']['App']['StopGeneration'](arg1);
+}
+
+export function StopImageDraw(arg1) {
+  return window['go']['main']['App']['StopImageDraw'](arg1);
 }
 
 export function StopManagedModel(arg1) {

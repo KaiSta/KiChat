@@ -818,3 +818,64 @@ func TestNormaliseRestoresTheImageAddress(t *testing.T) {
 		t.Errorf("baseUrl = %q, want %q", s.Images.BaseURL, DefaultImageBaseURL)
 	}
 }
+
+// TestAnOlderSettingsBlobKeepsDrawingThroughTheServer is the no-migration rule applied to
+// the field this change added. A row written before the image backend could be anything but
+// an HTTP server carries no `kind` at all, and it has to decide exactly as it did before:
+// the server route. The check is on the *decode*, which is where an absent field could have
+// arrived as something that selects the wrong backend.
+func TestAnOlderSettingsBlobKeepsDrawingThroughTheServer(t *testing.T) {
+	raw := []byte(`{"images":{"enabled":true,"baseUrl":"http://127.0.0.1:7860",` +
+		`"model":"sdxl.safetensors","steps":25}}`)
+	// Decoded whole, exactly as app.go decodes it: over a fully populated default, so an
+	// absent field keeps what the default had.
+	s := Default()
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatalf("unmarshal an older blob: %v", err)
+	}
+	if IsImageCLI(s.Images.Kind) {
+		t.Errorf("kind %q selects the CLI backend on a row that never chose one", s.Images.Kind)
+	}
+	// And the fields it did carry survived the decode, which is what makes this a test of the
+	// new field rather than of the decoder.
+	if !s.Images.Enabled || s.Images.BaseURL != "http://127.0.0.1:7860" || s.Images.Steps != 25 {
+		t.Errorf("the older blob's own fields did not survive: %+v", s.Images)
+	}
+	if s.Images.CLIBinary != "" {
+		t.Errorf("clibinary = %q, want empty on a row that never named one", s.Images.CLIBinary)
+	}
+	// A mode nobody chose must be off. It is checked on this decode rather than on Default()
+	// because "on" here would silently offload every draw on an installation that predates
+	// the field, which is a performance change a user never asked for.
+	if s.Images.CLIOffloadToCPU {
+		t.Error("offload-to-cpu is on for a row that never chose it")
+	}
+}
+
+// TestImageKindFoldsToTheTwoSpellingsItHas pins the normalisation rule, whose whole purpose
+// is that a hand-edited blob cannot leave the app with a backend it cannot use. Only the CLI
+// kind is stored as itself; everything else — including the server kind spelled out in full
+// — becomes the empty string that already means "the HTTP server", so there is one spelling
+// per option and a typo degrades to the backend that used to work.
+func TestImageKindFoldsToTheTwoSpellingsItHas(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		why  string
+	}{
+		{"", "", "an installation predating the field keeps the server backend"},
+		{"server", "", "the server kind is spelled empty, not \"server\""},
+		{"cli", "cli", "the CLI backend is the one kind stored as itself"},
+		{"  cli  ", "cli", "a value typed with spaces is trimmed"},
+		{"sdcli", "", "a typo degrades to the backend that used to work"},
+		{"CLI", "", "the value is a key, so case matters"},
+	}
+	for _, tc := range cases {
+		s := Default()
+		s.Images.Kind = tc.in
+		s.normalise()
+		if s.Images.Kind != tc.want {
+			t.Errorf("Kind %q normalised to %q, want %q (%s)", tc.in, s.Images.Kind, tc.want, tc.why)
+		}
+	}
+}

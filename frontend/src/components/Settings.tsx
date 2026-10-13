@@ -1507,8 +1507,107 @@ function BackendsTab({
   )
 }
 
+/** The file filters the CLI backend's pickers offer. Two extensions plus `*` for a build
+ * called something else; an executable has no extension at all, which is why the binary's
+ * own picker passes an empty list instead. */
+const MODEL_PATTERNS = ['*.gguf', '*.safetensors', '*']
+
 /**
- * The picture server, on a tab of its own.
+ * The square sizes diffusion work actually starts from.
+ *
+ * Three rather than a picker of everything: these are the widths the models in the
+ * wild were trained at or near, and the point of them is to spare a user typing the
+ * same number into two boxes. Anything else is still typed, so this adds a shortcut
+ * and takes nothing away.
+ */
+const SIZE_PRESETS = [512, 768, 1024]
+
+/**
+ * Fills one CLI path from the native file dialog.
+ *
+ * A cancelled dialog answers with an empty string, and that must leave the field alone: a
+ * user who opened the picker to look around would otherwise lose the path that was already
+ * there.
+ */
+async function pickFile(
+  update: (changes: Partial<config.ImageSettings>) => void,
+  title: string,
+  patterns: string[],
+  field: keyof config.ImageSettings,
+) {
+  try {
+    const path = await App.PickImageFile(title, patterns)
+    if (path) update({ [field]: path } as Partial<config.ImageSettings>)
+  } catch (err) {
+    useStore.getState().toast('error', String(err))
+  }
+}
+
+/**
+ * Fills the program folder from the native folder dialog.
+ *
+ * A folder, not a file: that is the shape a stable-diffusion.cpp download arrives in,
+ * and KiChat finds the program inside it. The binding checks the choice before
+ * answering, so a folder with no `sd-cli` in it comes back as an error — which is why
+ * this reports one instead of quietly storing a folder nothing will be drawn with.
+ *
+ * A cancelled dialog answers with an empty string and must leave the field alone, the
+ * same rule the file picker follows.
+ */
+async function pickImageFolder(
+  update: (changes: Partial<config.ImageSettings>) => void,
+  title: string,
+) {
+  try {
+    const dir = await App.PickImageFolder(title)
+    if (dir) update({ cliFolder: dir })
+  } catch (err) {
+    useStore.getState().toast('error', String(err))
+  }
+}
+
+/**
+ * One path in the CLI backend's command line: a labelled field with a browse button.
+ *
+ * The eight of them are the same control with different text, and writing them out eight
+ * times would mean eight chances to forget the button or the hint.
+ */
+function PathField({
+  label,
+  hint,
+  value,
+  placeholder,
+  onChange,
+  onPick,
+}: {
+  label: string
+  hint: string
+  value: string
+  placeholder?: string
+  onChange: (value: string) => void
+  onPick: () => void
+}) {
+  const t = useStore((s) => s.t)
+  return (
+    <label className="text-[12px]" title={hint}>
+      {label}
+      <div className="mt-1 flex items-center gap-2">
+        <input
+          className="input mono flex-1"
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <button type="button" className="btn btn-sm" onClick={onPick}>
+          {t('settings.images.browse')}
+        </button>
+      </div>
+    </label>
+  )
+}
+
+/**
+ * The picture backend, on a tab of its own.
  *
  * It began as a section of the backends tab and moved out once the setup outgrew a
  * row beside a chat backend. Three things have no counterpart there: the server has
@@ -1535,6 +1634,29 @@ function ImagesTab({
   const [checking, setChecking] = useState(false)
   const [testing, setTesting] = useState(false)
   const images = draft.images ?? ({} as config.ImageSettings)
+  // The kind key is stored empty for the server backend, so the selector's two values are
+  // this string and the empty one. It is read once here rather than compared at every field:
+  // which half of the form is on screen has to be one answer.
+  const isCLI = images.kind === 'cli'
+  // What an empty field means, said in the selected backend's own words. It reads a little
+  // differently for each kind — a server has its own default, a one-shot program has its
+  // own too — and the shared fields below belong to both, so one of them would be wrong.
+  const auto = isCLI ? t('settings.images.autoProgram') : t('settings.images.auto')
+
+  // The builds stable-diffusion.cpp publishes for this machine, and which one the panel
+  // is pointing the user at. KiChat does not download the program, so these rows are the
+  // whole of how a user is told which archive to take: the project's own list, filtered
+  // to this platform by the backend — a CUDA archive is published for Windows and not
+  // for Linux, and offering one would send them to a file that does not exist.
+  const builds = status?.builds ?? []
+  const [sdBuild, setSdBuild] = useState('')
+  // What is already installed is the useful default — "you are on the Vulkan build, here
+  // is the file it came from" — and the first published build otherwise, which is the
+  // CPU one and runs anywhere.
+  const chosenBuild =
+    builds.find((b) => b.id === sdBuild) ??
+    builds.find((b) => b.id === (status?.build || 'cpu')) ??
+    builds[0]
 
   const update = (changes: Partial<config.ImageSettings>) =>
     patch({ images: { ...images, ...changes } as config.ImageSettings })
@@ -1614,49 +1736,239 @@ function ImagesTab({
             {t('settings.fail')}
           </span>
         ) : status?.ok ? (
-          <span className={`badge ${status.models.length > 0 ? 'badge-ok' : 'badge-warn'}`}>
-            {t('settings.images.ok')} · {status.models.length} {t('settings.images.models')}
-          </span>
+          // The CLI backend has no listing to count, so its badge counts the files it will
+          // load instead. Reporting "0 models" on a configured backend would read as a
+          // broken setup rather than as a question this backend cannot be asked.
+          isCLI ? (
+            <span className="badge badge-ok">
+              {t('settings.images.ok')} · {status.files.length} {t('settings.images.files')}
+            </span>
+          ) : (
+            <span className={`badge ${status.models.length > 0 ? 'badge-ok' : 'badge-warn'}`}>
+              {t('settings.images.ok')} · {status.models.length} {t('settings.images.models')}
+            </span>
+          )
         ) : (
           <span className="badge">{checking ? '…' : t('settings.notChecked')}</span>
         )}
       </div>
 
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="text-[12px]">{t('settings.images.kind')}</span>
+        <select
+          className="input"
+          aria-label={t('settings.images.kind')}
+          value={images.kind ?? ''}
+          onChange={(e) => update({ kind: e.target.value })}
+        >
+          <option value="">{t('settings.images.kindServer')}</option>
+          <option value="cli">{t('settings.images.kindCLI')}</option>
+        </select>
+        <span className="faint flex-1 text-[11px]">
+          {isCLI ? t('settings.images.kindCLIHint') : t('settings.images.kindServerHint')}
+        </span>
+      </div>
+
       <div className="grid gap-2 sm:grid-cols-2">
-        <label className="text-[12px]">
-          {t('settings.images.baseUrl')}
-          <input
-            className="input mono mt-1"
-            value={images.baseUrl ?? ''}
-            onChange={(e) => update({ baseUrl: e.target.value })}
-            placeholder="http://127.0.0.1:7860"
-          />
-        </label>
-        <label className="text-[12px]" title={t('settings.images.keyHint')}>
-          {t('settings.images.key')}
-          <input
-            className="input mono mt-1"
-            type="password"
-            value={images.apiKey ?? ''}
-            onChange={(e) => update({ apiKey: e.target.value })}
-            placeholder={status?.keySet ? '••••••••' : 'user:pass'}
-          />
-        </label>
-        <label className="text-[12px]">
-          {t('settings.images.model')}
-          <select
-            className="input mt-1"
-            value={images.model ?? ''}
-            onChange={(e) => update({ model: e.target.value })}
-          >
-            <option value="">{t('settings.images.auto')}</option>
-            {(status?.models ?? []).map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-        </label>
+        {isCLI ? (
+          <>
+            {/* How stable-diffusion.cpp gets here. KiChat does not download it: the
+                project publishes one archive per accelerator, so this panel's job is to
+                say which one to take for this machine, then to find the program inside
+                whatever folder it was unpacked into. */}
+            <PathField
+              label={t('settings.images.cliFolder')}
+              hint={t('settings.images.cliFolderHint')}
+              value={images.cliFolder ?? ''}
+              placeholder="/home/user/Downloads/sd"
+              onChange={(v) => update({ cliFolder: v })}
+              onPick={() => pickImageFolder(update, t('settings.images.cliFolder'))}
+            />
+            {/* Which archive to download, for this machine. The list is the project's own,
+                filtered to this platform by the backend: a CUDA archive is published for
+                Windows and not for Linux, and a row for it would send a user to a file
+                that does not exist. */}
+            {builds.length > 0 ? (
+              <div className="text-[12px] sm:col-span-2">
+                {t('settings.images.cliBuild')}
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <select
+                    className="input"
+                    aria-label={t('settings.images.cliBuild')}
+                    value={chosenBuild?.id ?? ''}
+                    onChange={(e) => setSdBuild(e.target.value)}
+                  >
+                    {builds.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.id}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => {
+                      const url = status?.releasePage
+                      if (url) void App.OpenExternal(url)
+                    }}
+                  >
+                    {t('settings.images.cliBuildOpen')}
+                  </button>
+                </div>
+                {chosenBuild?.asset ? (
+                  <span className="faint mono mt-1 block text-[11px]">{chosenBuild.asset}</span>
+                ) : null}
+                {chosenBuild?.noteKey ? (
+                  <span className="faint mt-1 block text-[11px]">{t(chosenBuild.noteKey)}</span>
+                ) : null}
+                {/* What is installed, read off the folder's own libraries — which is a
+                    different question from the archive the picker above is pointing at,
+                    and the one that decides what a draw actually runs. */}
+                {status?.binary ? (
+                  <span className="faint mt-1 block text-[11px]">
+                    {t('settings.images.cliDetected')}:{' '}
+                    {status.build || t('settings.images.cliBuildCpu')}
+                  </span>
+                ) : null}
+              </div>
+            ) : (
+              <span className="faint text-[11px] sm:col-span-2">
+                {t('settings.images.cliBuildNone')}
+              </span>
+            )}
+            <PathField
+              label={t('settings.images.cliBinary')}
+              hint={t('settings.images.cliBinaryHint')}
+              value={images.cliBinary ?? ''}
+              placeholder="sd-cli"
+              onChange={(v) => update({ cliBinary: v })}
+              onPick={() => pickFile(update, t('settings.images.cliBinary'), [], 'cliBinary')}
+            />
+            {/* Named one per flag, because the flags are the only documentation there is: a
+                user with a working command line can copy the paths across one for one, and
+                an empty one is simply not passed. */}
+            <PathField
+              label={t('settings.images.cliModel')}
+              hint={t('settings.images.cliModelHint')}
+              value={images.cliModel ?? ''}
+              placeholder="v1-5-pruned-emaonly.safetensors"
+              onChange={(v) => update({ cliModel: v })}
+              onPick={() => pickFile(update, t('settings.images.cliModel'), MODEL_PATTERNS, 'cliModel')}
+            />
+            <PathField
+              label={t('settings.images.cliDiffusionModel')}
+              hint={t('settings.images.cliPartsHint')}
+              value={images.cliDiffusionModel ?? ''}
+              placeholder="qwen-image-2.1-Q5_K_M.gguf"
+              onChange={(v) => update({ cliDiffusionModel: v })}
+              onPick={() =>
+                pickFile(update, t('settings.images.cliDiffusionModel'), MODEL_PATTERNS, 'cliDiffusionModel')
+              }
+            />
+            <PathField
+              label={t('settings.images.cliVae')}
+              hint={t('settings.images.cliPartsHint')}
+              value={images.cliVae ?? ''}
+              placeholder="qwen_image_2.1_vae_bf16.safetensors"
+              onChange={(v) => update({ cliVae: v })}
+              onPick={() => pickFile(update, t('settings.images.cliVae'), MODEL_PATTERNS, 'cliVae')}
+            />
+            <PathField
+              label={t('settings.images.cliLlm')}
+              hint={t('settings.images.cliPartsHint')}
+              value={images.cliLlm ?? ''}
+              placeholder="Qwen3-VL-8B-Instruct-Q5_K_M.gguf"
+              onChange={(v) => update({ cliLlm: v })}
+              onPick={() => pickFile(update, t('settings.images.cliLlm'), MODEL_PATTERNS, 'cliLlm')}
+            />
+            <PathField
+              label={t('settings.images.cliClipL')}
+              hint={t('settings.images.cliPartsHint')}
+              value={images.cliClipL ?? ''}
+              onChange={(v) => update({ cliClipL: v })}
+              onPick={() => pickFile(update, t('settings.images.cliClipL'), MODEL_PATTERNS, 'cliClipL')}
+            />
+            <PathField
+              label={t('settings.images.cliClipG')}
+              hint={t('settings.images.cliPartsHint')}
+              value={images.cliClipG ?? ''}
+              onChange={(v) => update({ cliClipG: v })}
+              onPick={() => pickFile(update, t('settings.images.cliClipG'), MODEL_PATTERNS, 'cliClipG')}
+            />
+            <PathField
+              label={t('settings.images.cliT5xxl')}
+              hint={t('settings.images.cliPartsHint')}
+              value={images.cliT5xxl ?? ''}
+              onChange={(v) => update({ cliT5xxl: v })}
+              onPick={() => pickFile(update, t('settings.images.cliT5xxl'), MODEL_PATTERNS, 'cliT5xxl')}
+            />
+            {/* A mode, not a value: Flux on a card too small to hold it is why the switch
+                exists, and a user flips it per model rather than per picture. It is sent
+                as a bare flag, so nothing here has to agree with a build that spells the
+                value differently. */}
+            <label
+              className="flex items-center gap-2 text-[12px] sm:col-span-2"
+              title={t('settings.images.cliOffloadToCpuHint')}
+            >
+              <input
+                type="checkbox"
+                checked={images.cliOffloadToCpu ?? false}
+                aria-label={t('settings.images.cliOffloadToCpu')}
+                onChange={(e) => update({ cliOffloadToCpu: e.target.checked })}
+              />
+              <span>{t('settings.images.cliOffloadToCpu')}</span>
+              <span className="faint flex-1 text-[11px]">
+                {t('settings.images.cliOffloadToCpuHint')}
+              </span>
+            </label>
+            <label className="text-[12px] sm:col-span-2" title={t('settings.images.cliExtraHint')}>
+              {t('settings.images.cliExtra')}
+              <input
+                className="input mono mt-1"
+                value={images.cliExtraArgs ?? ''}
+                onChange={(e) => update({ cliExtraArgs: e.target.value })}
+                placeholder="--diffusion-fa --cfg-scale 1.0 --sigmas 1.0,0.5,0.0"
+              />
+            </label>
+          </>
+        ) : (
+          <>
+            <label className="text-[12px]">
+              {t('settings.images.baseUrl')}
+              <input
+                className="input mono mt-1"
+                value={images.baseUrl ?? ''}
+                onChange={(e) => update({ baseUrl: e.target.value })}
+                placeholder="http://127.0.0.1:7860"
+              />
+            </label>
+            <label className="text-[12px]" title={t('settings.images.keyHint')}>
+              {t('settings.images.key')}
+              <input
+                className="input mono mt-1"
+                type="password"
+                value={images.apiKey ?? ''}
+                onChange={(e) => update({ apiKey: e.target.value })}
+                placeholder={status?.keySet ? '••••••••' : 'user:pass'}
+              />
+            </label>
+            <label className="text-[12px]">
+              {t('settings.images.model')}
+              <select
+                className="input mt-1"
+                value={images.model ?? ''}
+                onChange={(e) => update({ model: e.target.value })}
+              >
+                <option value="">{auto}</option>
+                {(status?.models ?? []).map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
         <label className="text-[12px]">
           {t('settings.images.sampler')}
           <select
@@ -1664,7 +1976,7 @@ function ImagesTab({
             value={images.sampler ?? ''}
             onChange={(e) => update({ sampler: e.target.value })}
           >
-            <option value="">{t('settings.images.auto')}</option>
+            <option value="">{auto}</option>
             {(status?.samplers ?? []).map((s) => (
               <option key={s} value={s}>
                 {s}
@@ -1681,7 +1993,7 @@ function ImagesTab({
             max={150}
             value={images.steps || ''}
             onChange={(e) => update({ steps: Number(e.target.value) || 0 })}
-            placeholder={t('settings.images.auto')}
+            placeholder={auto}
           />
         </label>
         <label className="text-[12px]">
@@ -1709,6 +2021,23 @@ function ImagesTab({
               placeholder="512"
             />
           </div>
+          {/* The trained-at squares, one click each. Setting both numbers is the whole
+              of what a preset does, so a size that is not square — or not one of these
+              three — is still typed into the boxes above. */}
+          <div className="mt-1 flex items-center gap-1">
+            {SIZE_PRESETS.map((n) => (
+              <button
+                key={n}
+                type="button"
+                className="btn btn-sm"
+                aria-label={`${t('settings.images.sizePreset')} ${n}`}
+                title={`${t('settings.images.sizePreset')} ${n}×${n}`}
+                onClick={() => update({ width: n, height: n })}
+              >
+                {n}²
+              </button>
+            ))}
+          </div>
         </label>
         <label className="text-[12px] sm:col-span-2">
           {t('settings.images.negative')}
@@ -1716,7 +2045,7 @@ function ImagesTab({
             className="input mt-1"
             value={images.negativePrompt ?? ''}
             onChange={(e) => update({ negativePrompt: e.target.value })}
-            placeholder={t('settings.images.auto')}
+            placeholder={auto}
           />
         </label>
         <label className="text-[12px] sm:col-span-2">
@@ -1754,7 +2083,12 @@ function ImagesTab({
         >
           {testing ? t('settings.images.testing') : t('settings.images.test')}
         </button>
-        <span className="faint text-[11px]">{t('settings.images.defaults')}</span>
+        {/* The CLI backend's test is not the same promise as the server's: it loads the
+            model from disk to draw one picture, which is minutes on a CPU. Saying which
+            one this is costs a sentence and saves the user thinking the app hung. */}
+        <span className="faint text-[11px]">
+          {isCLI ? t('settings.images.cliDefaults') : t('settings.images.defaults')}
+        </span>
       </div>
 
       {images.enabled && status?.error && (
@@ -1762,7 +2096,7 @@ function ImagesTab({
           {status.error}
         </div>
       )}
-      {images.enabled && status?.ok && status.models.length === 0 && (
+      {images.enabled && !isCLI && status?.ok && status.models.length === 0 && (
         <div className="mt-2 text-[11px]" style={{ color: 'var(--warn)' }}>
           {t('settings.images.noModels')}
         </div>

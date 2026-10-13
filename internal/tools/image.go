@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -89,6 +90,13 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 		Model: cfg.Model,
 		Seed:  seedFromValue(args.Seed),
 	}
+	// Bounded before anything is drawn *or recorded*. The recipe written below is built from
+	// this request, and the schema this call answers to advertises 64–2048 and 1–150 — but a
+	// model is free to invent a number, and the smallest local ones often do. A recipe that
+	// named a size the provider quietly replaced would describe a picture that does not
+	// exist, so the clamp happens here rather than only at the backend; see
+	// images.Request.Normalised.
+	req = req.Normalised()
 
 	result, err := s.Images.Generate(ctx, req)
 	if err != nil {
@@ -99,14 +107,26 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	// and no parsing of the prose summary below.
 	recipe := recipeFrom(req, result)
 	messageID := callingMessage(ctx)
+	// The names this chat already shows, so a second draw of one prompt does not land under
+	// the name the first one took. Redrawing has guarded this from the start (uniqueName);
+	// this path did not, and it is the one a model drives — "draw that again" is a single
+	// sentence to a model that will happily comply, and it produced two pictures under one
+	// name, which are two pictures a user cannot tell apart in the caption or in the save
+	// dialog that offers the same filename twice.
+	used, err := s.usedFilenames(chatID)
+	if err != nil {
+		return "", fmt.Errorf("die vergebenen Bildnamen konnten nicht gelesen werden: %w", err)
+	}
 	for i, img := range result.Images {
-		if _, err := s.storeGeneratedImage(chatID, messageID, imageFilename(prompt, i, img.Ext), img, &recipe); err != nil {
+		name := uniqueName(used, imageFilename(prompt, i, img.Ext))
+		if _, err := s.storeGeneratedImage(chatID, messageID, name, img, &recipe); err != nil {
 			// The picture is already drawn and paid for, so an error here loses it
 			// entirely. Reporting the failure is still right: silently returning a
 			// cheerful result would leave the user with a tool card claiming a
 			// picture that exists nowhere.
 			return "", fmt.Errorf("das erzeugte Bild konnte nicht gespeichert werden: %w", err)
 		}
+		used[name] = true
 	}
 
 	return summarizeGeneration(req, result), nil
@@ -257,13 +277,17 @@ func recipeFrom(req images.Request, result images.Result) store.GenerationRecipe
 	return recipe
 }
 
-// requestFromRecipe turns a stored recipe back into a request.
+// requestFromRecipe turns a recipe into a request.
 //
-// freshSeed drops the seed so the server picks a new one, which is the difference between
-// reproducing a picture and asking for another take on the same prompt. A recipe that
-// never learned a seed (the server did not report one) behaves the same way, because there
-// is no number to pin it to.
-func requestFromRecipe(recipe store.GenerationRecipe, freshSeed bool) images.Request {
+// Seed 0 is "let the server choose", which is both what a picture whose server never
+// reported a seed asks for again and how the panel's editor spells an emptied seed box.
+//
+// Every number is bounded by the same call the tool's own path uses, and that is not
+// belt-and-braces: a stored recipe came from this app, but an *edited* one comes from a box
+// the user typed into, and a local server does not refuse a 100000-step request — it
+// attempts it, for hours. Which bound, and why zero and negative mean "the server's own",
+// is limits.go's business rather than this function's.
+func requestFromRecipe(recipe store.GenerationRecipe) images.Request {
 	req := images.Request{
 		Prompt:         recipe.Prompt,
 		NegativePrompt: recipe.NegativePrompt,
@@ -273,23 +297,33 @@ func requestFromRecipe(recipe store.GenerationRecipe, freshSeed bool) images.Req
 		Sampler:        recipe.Sampler,
 		Model:          recipe.Model,
 	}
-	if !freshSeed && recipe.Seed != 0 {
+	if recipe.Seed > 0 {
 		seed := recipe.Seed
 		req.Seed = &seed
 	}
-	return req
+	return req.Normalised()
 }
 
-// Regenerate draws a picture again from its own stored recipe and files the result beside
-// the original — the same chat and the same message, so it appears next to the picture it
-// came from rather than somewhere the user has to go looking for it.
+// Regenerate draws a picture from a recipe and files the result beside the one it was
+// redrawn from — the same chat and the same message, so it appears next to its source
+// rather than somewhere the user has to go looking for it.
 //
-// This is the one path into image generation that does not go through a chat model. The
-// recipe is data rather than a request in words, so nothing has to be asked of the model
-// to use it, and the user gets the picture without paying for a turn. What it costs is
-// real GPU time, which is why it is a control the user presses and not something the app
-// does on its own.
-func (s *Service) Regenerate(ctx context.Context, attachmentID string, freshSeed bool) (store.Attachment, error) {
+// This is the one path into image generation that does not go through a chat model. A recipe
+// is data rather than a request in words, so nothing has to be asked of the model to use it,
+// and the user gets the picture without paying for a turn. What it costs is real GPU time,
+// which is why it is a control the user presses and not something the app does on its own.
+//
+// The recipe passed in is the whole of what gets drawn, not a patch over the stored one. A
+// zero field is therefore "the server's own", exactly as it is in Settings and in the tool's
+// own arguments — which is what makes an emptied box in the panel's editor mean what it
+// looks like it means. The three controls are the same call: redrawing passes the stored
+// recipe back unchanged, a variation passes it with the seed cleared, and the editor passes
+// whatever the user typed over the prefilled fields.
+//
+// The source attachment's own recipe is never modified. A picture records how it was
+// actually made, and an edit is a statement about the next draw rather than a correction of
+// the last one — so the transcript keeps telling the truth about the picture above it.
+func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe store.GenerationRecipe) (store.Attachment, error) {
 	if s.Images == nil {
 		return store.Attachment{}, images.ErrNotConfigured
 	}
@@ -307,7 +341,13 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, freshSeed
 			"%s hat kein Rezept: nur ein von KiChat erzeugtes Bild lässt sich erneut zeichnen",
 			source.Filename)
 	}
-	req := requestFromRecipe(*source.Generation, freshSeed)
+	if strings.TrimSpace(recipe.Prompt) == "" {
+		// A picture with no prompt is a blank canvas: the server draws something arbitrary
+		// and charges for it. The editor disables the button for this, but a request can
+		// arrive from anywhere.
+		return store.Attachment{}, errors.New("der Bild-Prompt ist leer")
+	}
+	req := requestFromRecipe(recipe)
 
 	result, err := s.Images.Generate(ctx, req)
 	if err != nil {
@@ -317,7 +357,10 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, freshSeed
 		return store.Attachment{}, images.ErrNoModel
 	}
 
-	recipe := recipeFrom(req, result)
+	// What the *server* used, which becomes the new picture's own recipe — not the recipe
+	// that was asked for, since only the server's seed reproduces the result and an editor
+	// may well have left the seed open.
+	effective := recipeFrom(req, result)
 	// The names this chat already shows, so a second redraw of the same seed does not land
 	// under the name the first one took.
 	used, err := s.usedFilenames(source.ChatID)
@@ -326,8 +369,8 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, freshSeed
 	}
 	var first store.Attachment
 	for i, img := range result.Images {
-		name := uniqueName(used, redrawFilename(req.Prompt, recipe.Seed, img.Ext, i))
-		attachment, err := s.storeGeneratedImage(source.ChatID, source.MessageID, name, img, &recipe)
+		name := uniqueName(used, redrawFilename(req.Prompt, effective.Seed, img.Ext, i))
+		attachment, err := s.storeGeneratedImage(source.ChatID, source.MessageID, name, img, &effective)
 		if err != nil {
 			return store.Attachment{}, err
 		}
@@ -337,6 +380,28 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, freshSeed
 		}
 	}
 	return first, nil
+}
+
+// InterruptDraw asks the image server to abandon the picture it is drawing.
+//
+// Two answers, and both are facts the caller needs to tell apart rather than collapse
+// into one error: whether the provider can be asked at all (a server that cannot —
+// stable-diffusion.cpp has no interrupt route — is not a failure, and holds nothing
+// for a user to fix), and whether asking it failed (a 404 on a route the server does
+// not have, or a connection that went away).
+//
+// The wait is not this call's business. The caller has already cancelled the draw's
+// context, which is what ends it on every server; this only exists so the server does
+// not spend the next few minutes drawing a picture nobody will see.
+func (s *Service) InterruptDraw(ctx context.Context) (bool, error) {
+	if s.Images == nil {
+		return false, images.ErrNotConfigured
+	}
+	interrupter, ok := s.Images.(images.Interrupter)
+	if !ok {
+		return false, nil
+	}
+	return true, interrupter.Interrupt(ctx)
 }
 
 // usedFilenames is the set of names a chat's pictures already carry.

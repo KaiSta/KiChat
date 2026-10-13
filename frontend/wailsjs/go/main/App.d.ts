@@ -70,6 +70,10 @@ export function OpenExternal(arg1:string):Promise<void>;
 
 export function PickFiles():Promise<Array<string>>;
 
+export function PickImageFile(arg1:string,arg2:Array<string>):Promise<string>;
+
+export function PickImageFolder(arg1:string):Promise<string>;
+
 export function PickManagedModelFile(arg1:string):Promise<string>;
 
 export function PickModelFolder(arg1:string):Promise<string>;
@@ -82,7 +86,7 @@ export function RedactSecrets(arg1:string):Promise<string>;
 
 export function Regenerate(arg1:string,arg2:string,arg3:string):Promise<void>;
 
-export function RegenerateImage(arg1:string,arg2:boolean):Promise<store.Attachment>;
+export function RegenerateImage(arg1:string,arg2:store.GenerationRecipe):Promise<store.Attachment>;
 
 export function RemoveAttachment(arg1:string):Promise<void>;
 
@@ -123,6 +127,8 @@ export function StartManagedModel(arg1:string):Promise<void>;
 export function StartModelCheck(arg1:string):Promise<main.ModelCheckStatus>;
 
 export function StopGeneration(arg1:string):Promise<boolean>;
+
+export function StopImageDraw(arg1:string):Promise<main.StopDrawResult>;
 
 export function StopManagedModel(arg1:string):Promise<void>;
 

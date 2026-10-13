@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -370,5 +371,151 @@ func TestParseSeed(t *testing.T) {
 	got := ParseSeed(" 42 ")
 	if got == nil || *got != 42 {
 		t.Errorf("ParseSeed(42) = %v, want 42", got)
+	}
+}
+
+// TestSDWebUIInterruptPostsTheRouteThatStopsTheServer pins the one route this client
+// sends that is not about the answer it is waiting for. Wrong path or wrong method and
+// the request is a 404/405 that the caller deliberately tolerates — so a stop would look
+// like it worked, tear down the wait, and leave the server grinding out a picture nobody
+// asked for any more. That is exactly the failure this test exists to catch.
+//
+// The credential is asserted as well: a WebUI started with `--api-auth` refuses an
+// interrupt without it, and the stop would then silently be a no-op on the one setup
+// where the user bothered to protect the server.
+func TestSDWebUIInterruptPostsTheRouteThatStopsTheServer(t *testing.T) {
+	var calls atomic.Int32
+	var method, path, auth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		method, path, auth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		// A1111 answers `{}` with a 200 (the handler returns an empty dict).
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+
+	if err := NewSDWebUI("sd", "SD", server.URL, "user:secretpass").Interrupt(t.Context()); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	if method != http.MethodPost {
+		t.Errorf("method = %q, want POST — the WebUI registers the route as methods=[\"POST\"]", method)
+	}
+	if path != "/sdapi/v1/interrupt" {
+		t.Errorf("path = %q, want /sdapi/v1/interrupt", path)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:secretpass"))
+	if auth != want {
+		t.Errorf("Authorization = %q, want %q", auth, want)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("requests = %d, want exactly 1", got)
+	}
+}
+
+// TestSDWebUIInterruptFailsOnceOnAServerWithoutTheRoute is the other half of the contract,
+// and the half that makes this call safe to attempt at all. stable-diffusion.cpp's server
+// has no interrupt route, so a creator who runs it must get exactly one failed request —
+// not three, which is what the retry used on every other route would produce. An interrupt
+// retried a second later can only hit whatever the server has moved on to, and it would
+// report a failure the caller has no use for while doing damage it did not intend.
+func TestSDWebUIInterruptFailsOnceOnAServerWithoutTheRoute(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	err := NewSDWebUI("sd", "SD", server.URL, "").Interrupt(t.Context())
+	if err == nil {
+		t.Fatal("a server without the route reported a successful interrupt")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("requests = %d, want 1: an interrupt must not be retried", got)
+	}
+}
+
+// TestSDWebUIInterruptNeedsAnAddress keeps the sentinel consistent with every other route:
+// a switched-off feature is not a server that refused.
+func TestSDWebUIInterruptNeedsAnAddress(t *testing.T) {
+	if err := NewSDWebUI("sd", "SD", "", "").Interrupt(t.Context()); !errors.Is(err, ErrNotConfigured) {
+		t.Errorf("err = %v, want ErrNotConfigured", err)
+	}
+}
+
+// TestSDWebUIPicksTheSeedItSends is the difference between a picture that can be drawn
+// again and one that cannot. A request that leaves the seed open used to hand that choice
+// to the server and learn the answer from `info` — which works on A1111 and does not work
+// on stable-diffusion.cpp, whose compatibility route documents `info` as an empty string.
+// Choosing it here means the effective seed is known before the request leaves, whatever
+// the server reports back.
+//
+// The assertion on the *request body* is the load-bearing one: a client that reported a
+// seed without sending it would record a number that never drew anything.
+func TestSDWebUIPicksTheSeedItSends(t *testing.T) {
+	var gotBody map[string]any
+	// A server that reports nothing: no `info` at all, which is sd-server's documented
+	// shape. The picture is still real, and its seed must still be known.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		fmt.Fprintf(w, `{"images":["%s"],"info":""}`, base64.StdEncoding.EncodeToString(pngBytes))
+	}))
+	defer server.Close()
+
+	result, err := NewSDWebUI("sd", "SD", server.URL, "").
+		Generate(t.Context(), Request{Prompt: "a red fox"})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	sent, ok := gotBody["seed"].(float64)
+	if !ok {
+		t.Fatalf("the request carried no seed: %v", gotBody)
+	}
+	if int64(sent) != result.Seed {
+		t.Errorf("result seed = %d, but the request sent %d — the recorded number did not draw anything",
+			result.Seed, int64(sent))
+	}
+	// Zero is how this package spells "no seed is known", so it must never be the seed a
+	// request goes out with.
+	if result.Seed <= 0 {
+		t.Errorf("seed = %d, want a positive one", result.Seed)
+	}
+	if result.Seed > math.MaxInt32 {
+		t.Errorf("seed = %d, beyond what a server with a 31-bit RNG accepts", result.Seed)
+	}
+}
+
+// TestSDWebUIHonoursAnAskedForSeed keeps the other direction honest: a recipe that names a
+// seed must draw with *that* seed, not with a fresh random one. A redraw that quietly
+// randomises is the whole feature failing while looking like it worked.
+func TestSDWebUIHonoursAnAskedForSeed(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		// And the server's own report disagrees, which is what makes the assertion below
+		// about the *reported* seed rather than about the sent one.
+		fmt.Fprintf(w, `{"images":["%s"],"info":"{\"seed\": 4242}"}`,
+			base64.StdEncoding.EncodeToString(pngBytes))
+	}))
+	defer server.Close()
+
+	want := int64(777)
+	result, err := NewSDWebUI("sd", "SD", server.URL, "").
+		Generate(t.Context(), Request{Prompt: "a red fox", Seed: &want})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if sent, _ := gotBody["seed"].(float64); int64(sent) != want {
+		t.Errorf("seed sent = %v, want the asked-for %d", gotBody["seed"], want)
+	}
+	// What the server reports still wins, because that is the number that reproduces the
+	// picture — the sent value is only the fallback.
+	if result.Seed != 4242 {
+		t.Errorf("seed = %d, want the 4242 the server reported using", result.Seed)
 	}
 }

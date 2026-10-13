@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { App, formatDuration, formatNumber, formatSpeed } from '../lib/api'
 import type { store as storeTypes } from '../lib/api'
 import { useThrottled } from '../lib/stream'
@@ -365,7 +365,7 @@ export function AttachmentChips({
  * ---------------------------------------------------------------------- */
 
 /**
- * Data URLs are fetched once per attachment and kept for the session.
+ * Data URLs are fetched once per attachment and kept, most recent first.
  *
  * The payload is a whole picture — hundreds of kilobytes for a 1024x1024 PNG —
  * and the message tree re-renders on every delta of a streamed reply. Reading it
@@ -373,17 +373,38 @@ export function AttachmentChips({
  * so the promise is cached. The key is the attachment id, which never changes, so
  * an entry cannot go stale; a rejected promise is dropped rather than remembered,
  * because a failure that lasted one startup should not be permanent.
+ *
+ * It is bounded on purpose. A session that draws pictures keeps every payload it
+ * ever showed, and a chat with a dozen 1024x1024 pictures held tens of megabytes
+ * of base64 in the webview with the decoded bitmaps on top — memory the user pays
+ * for and cannot see. The cap is well above what is on screen at once (the chat
+ * view is virtualised, so only a window of messages is mounted), and the oldest
+ * entry is the one that has been off screen longest: for a picture the user scrolls
+ * back to, re-reading it through the bridge costs one call, which is the cheap half
+ * of the trade. The Map iterates in insertion order, so refreshing an entry is a
+ * delete-and-set rather than a bookkeeping structure of its own.
  */
+const IMAGE_CACHE_LIMIT = 24
 const imageCache = new Map<string, Promise<string>>()
 
 function attachmentImage(id: string): Promise<string> {
-  let entry = imageCache.get(id)
-  if (!entry) {
-    entry = App.GetAttachmentImage(id).catch((err) => {
-      imageCache.delete(id)
-      throw err
-    })
-    imageCache.set(id, entry)
+  const known = imageCache.get(id)
+  if (known) {
+    // Re-inserted so it is the newest rather than the oldest: the picture the user is
+    // looking at now must not be the one evicted by the next one they open.
+    imageCache.delete(id)
+    imageCache.set(id, known)
+    return known
+  }
+  const entry = App.GetAttachmentImage(id).catch((err) => {
+    imageCache.delete(id)
+    throw err
+  })
+  imageCache.set(id, entry)
+  while (imageCache.size > IMAGE_CACHE_LIMIT) {
+    const oldest = imageCache.keys().next()
+    if (oldest.done) break
+    imageCache.delete(oldest.value)
   }
   return entry
 }
@@ -418,6 +439,68 @@ export function MessageImages({ attachments }: { attachments: storeTypes.Attachm
   )
 }
 
+/* The bounds the editor's number boxes carry, mirrored from internal/config
+ * (MaxImageDimension, MaxImageSteps). There is no bridge for a constant, and the
+ * settings screen's own inputs carry the same numbers by hand. They matter more here
+ * than there: a stored recipe came from this app, but an edited one comes from a box
+ * the user filled in, and a local server attempts a 100000-step request rather than
+ * refusing it.
+ */
+const MAX_IMAGE_DIMENSION = 2048
+const MAX_IMAGE_STEPS = 150
+
+/** The recipe fields as the strings a form holds.
+ *
+ * Numbers live as text rather than as numbers so an emptied box can mean "the server's
+ * own" — the backend reads a zero exactly that way. A `0` rendered into the box would
+ * look like a value the user chose, and one they then could not clear. */
+type RecipeDraft = {
+  prompt: string
+  negativePrompt: string
+  width: string
+  height: string
+  steps: string
+  seed: string
+  sampler: string
+  model: string
+}
+
+function draftFromRecipe(recipe: storeTypes.GenerationRecipe): RecipeDraft {
+  const num = (value: number | undefined) => (value ? String(value) : '')
+  return {
+    prompt: recipe.prompt ?? '',
+    negativePrompt: recipe.negativePrompt ?? '',
+    width: num(recipe.width),
+    height: num(recipe.height),
+    steps: num(recipe.steps),
+    seed: num(recipe.seed),
+    sampler: recipe.sampler ?? '',
+    model: recipe.model ?? '',
+  }
+}
+
+/** The inverse, with the same reading of an empty box the settings screen uses: text
+ * that is not a number, or a number that is not positive, is "the server's own". The
+ * bounds are applied here so the field's own max is honoured before the request leaves;
+ * the backend clamps again, because a request can arrive from anywhere. */
+function recipeFromDraft(draft: RecipeDraft): storeTypes.GenerationRecipe {
+  const num = (value: string, max?: number) => {
+    const n = Math.floor(Number(value))
+    if (!Number.isFinite(n) || n <= 0) return 0
+    return max === undefined ? n : Math.min(n, max)
+  }
+  return {
+    prompt: draft.prompt.trim(),
+    negativePrompt: draft.negativePrompt.trim(),
+    width: num(draft.width, MAX_IMAGE_DIMENSION),
+    height: num(draft.height, MAX_IMAGE_DIMENSION),
+    steps: num(draft.steps, MAX_IMAGE_STEPS),
+    seed: num(draft.seed),
+    sampler: draft.sampler.trim(),
+    model: draft.model.trim(),
+  }
+}
+
 function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   const t = useStore((s) => s.t)
   const [src, setSrc] = useState<string | null>(null)
@@ -427,9 +510,25 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   // the enlarged view is what makes "is this the one I want?" answerable before
   // the file is saved.
   const [expanded, setExpanded] = useState(false)
-  // Which redraw is in flight, if any. Two buttons that both spend GPU seconds are
-  // safe to press twice otherwise, and the second click would draw a second picture.
-  const [redrawing, setRedrawing] = useState<'same' | 'new' | null>(null)
+  // Which draw is in flight, if any. Every control here spends GPU seconds, so they are
+  // mutually disabled while one runs — otherwise a second click draws a second picture.
+  const [busy, setBusy] = useState<'same' | 'new' | 'edit' | null>(null)
+  // The editor is closed until the user opens it: a chat full of pictures would
+  // otherwise be a chat full of forms.
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<RecipeDraft | null>(null)
+  // Whether a draw in flight is one the user has asked to stop. The rejection that
+  // follows is that cancellation rather than a failure, and this is what tells the two
+  // apart: a red error toast for the user's own click reads as a crash, and the picture
+  // list is unchanged either way. It is a ref rather than state because the draw's own
+  // promise, not a re-render, is what reads it.
+  const stopping = useRef(false)
+  // And while the stop itself is in flight. The draw's own promise rejects the moment the
+  // request is cancelled, but the server is interrupted a moment later — a *global*
+  // interrupt of whatever it is drawing — so re-enabling the controls as soon as the draw
+  // unwinds would let a second click start a picture the previous stop could then kill. It
+  // is a window of milliseconds and it costs four lines to close.
+  const [stoppingUi, setStoppingUi] = useState(false)
 
   // Only a picture KiChat drew carries a recipe. An uploaded photo has none, and
   // offering to redraw one would offer to draw something unrelated to it.
@@ -464,21 +563,66 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
     }
   }
 
-  /* Draws again from the stored recipe. Nothing goes to the model: the recipe is the
-   * prompt, the settings and the seed, so the picture is redrawn from data rather
-   * than from a request in words. The new picture is filed onto this same message,
-   * which is what puts it beside the original — the backend's attachments event is
-   * what makes this component see it. */
-  const redraw = async (freshSeed: boolean) => {
-    setRedrawing(freshSeed ? 'new' : 'same')
+  /* Draws from a recipe, and the one place all three controls meet: a repeat passes the
+   * stored recipe back, a variation passes it with the seed cleared, and Draw passes what
+   * the editor holds. Nothing goes to the model — a recipe is the prompt, the size and the
+   * seed, so the picture is drawn from data rather than from a request in words. What was
+   * typed is what is drawn: a box left empty means "the server's own" rather than the
+   * stored value, so the editor's promise is that it shows the whole recipe.
+   *
+   * The new picture is filed onto this same message, which is what puts it beside the
+   * original; the backend's attachments event is what makes this component see it. */
+  // One condition for every control that spends GPU seconds, so a state where some of them
+  // are live cannot be reached by editing one of them alone.
+  const blocked = busy !== null || stoppingUi
+
+  const draw = async (next: storeTypes.GenerationRecipe, mode: 'same' | 'new' | 'edit') => {
+    setBusy(mode)
+    stopping.current = false
     try {
-      const drawn = await App.RegenerateImage(attachment.id, freshSeed)
+      const drawn = await App.RegenerateImage(attachment.id, next)
       useStore.getState().toast('info', `${t('images.redrawn')}: ${drawn.filename}`)
     } catch (err) {
+      if (stopping.current) {
+        useStore.getState().toast('info', t('images.drawStopped'))
+      } else {
+        useStore.getState().toast('error', String(err))
+      }
+    } finally {
+      setBusy(null)
+      stopping.current = false
+    }
+  }
+
+  /* Ends a draw the user will not wait for. The backend does both halves: it cancels the
+   * request, which is what makes this take effect at once, and asks the image server to
+   * abandon the work behind it — a 40-step draw on a CPU server is minutes of fan noise
+   * for a picture nobody wants any more.
+   *
+   * `wasDrawing` false means there was nothing to stop, which is a second click or a draw
+   * that finished between the render and the click: the flag is cleared so the next
+   * rejection is reported as the failure it is, and nothing is toasted for a stop that
+   * did not happen. */
+  const stop = async () => {
+    stopping.current = true
+    setStoppingUi(true)
+    try {
+      const result = await App.StopImageDraw(attachment.id)
+      if (!result.wasDrawing) stopping.current = false
+    } catch (err) {
+      stopping.current = false
       useStore.getState().toast('error', String(err))
     } finally {
-      setRedrawing(null)
+      setStoppingUi(false)
     }
+  }
+
+  /* Opens the editor prefilled with the picture's own recipe. Closing and reopening is
+   * also how a half-finished edit is abandoned, which is why there is no reset button. */
+  const openEditor = () => {
+    if (!recipe) return
+    setDraft(draftFromRecipe(recipe))
+    setEditing(true)
   }
 
   if (error) {
@@ -546,25 +690,219 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
             <button
               type="button"
               className="btn btn-sm btn-ghost"
-              disabled={redrawing !== null}
+              disabled={blocked}
               title={t('images.redrawHint')}
-              onClick={() => void redraw(false)}
+              onClick={() => void draw(recipe, 'same')}
             >
-              {redrawing === 'same' ? t('images.redrawing') : t('images.redraw')}
+              {busy === 'same' ? t('images.redrawing') : t('images.redraw')}
             </button>
             <button
               type="button"
               className="btn btn-sm btn-ghost"
-              disabled={redrawing !== null}
+              disabled={blocked}
               title={t('images.variationHint')}
-              onClick={() => void redraw(true)}
+              onClick={() => void draw({ ...recipe, seed: 0 }, 'new')}
             >
-              {redrawing === 'new' ? t('images.redrawing') : t('images.variation')}
+              {busy === 'new' ? t('images.redrawing') : t('images.variation')}
             </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              disabled={blocked}
+              title={t('images.editHint')}
+              onClick={() => (editing ? setEditing(false) : openEditor())}
+            >
+              {editing ? t('images.editClose') : t('images.edit')}
+            </button>
+            {/* Stop appears beside the two buttons it stops, and only while one is
+                running: a draw from the editor gets its Stop on the editor's own button
+                instead, so there is never a Stop for a draw it cannot reach. */}
+            {(busy === 'same' || busy === 'new') && (
+              <button
+                type="button"
+                className="btn btn-sm btn-danger"
+                title={t('images.stopHint')}
+                onClick={() => void stop()}
+              >
+                ⏹ {t('images.stop')}
+              </button>
+            )}
           </>
         )}
       </figcaption>
+      {/* The editor sits inside the figure, under the caption it belongs to: it is a form
+          about *this* picture, and a variation or a Draw from it lands beside it. */}
+      {editing && draft && (
+        <RecipeEditor
+          draft={draft}
+          onChange={setDraft}
+          drawing={busy === 'edit'}
+          busy={blocked}
+          onDraw={() => void draw(recipeFromDraft(draft), 'edit')}
+          onStop={() => void stop()}
+        />
+      )}
     </figure>
+  )
+}
+
+/**
+ * The recipe editor: the whole recipe in boxes, prefilled from the picture's own, with
+ * one Draw that sends what is in them.
+ *
+ * Every field is the *whole* of what will be drawn rather than a patch over the stored
+ * recipe, because that is what the backend reads: a box emptied is a choice left to the
+ * server, not a field quietly kept. It is also what makes this an iteration loop rather
+ * than two buttons — change the prompt, draw, look, change it again.
+ *
+ * The checkpoint and the sampler are free text rather than dropdowns. The settings screen
+ * can offer a list because it also asks the server what it has; here that would mean a
+ * request per picture rendered, and a name that is no longer installed is refused by the
+ * server with a message, which is a better answer than a stale list.
+ */
+function RecipeEditor({
+  draft,
+  onChange,
+  drawing,
+  busy,
+  onDraw,
+  onStop,
+}: {
+  draft: RecipeDraft
+  onChange: (next: RecipeDraft) => void
+  drawing: boolean
+  busy: boolean
+  onDraw: () => void
+  onStop: () => void
+}) {
+  const t = useStore((s) => s.t)
+  const set = (patch: Partial<RecipeDraft>) => onChange({ ...draft, ...patch })
+  // A prompt-less generation is a blank canvas the server draws something arbitrary on,
+  // and the backend refuses it. Disabling the button here is what turns that refusal into
+  // a control the user can see rather than an error after the wait.
+  const ready = draft.prompt.trim() !== ''
+
+  return (
+    <div
+      className="mt-1 flex flex-col gap-2 rounded p-2 text-[11px]"
+      style={{ border: '1px solid var(--border)', background: 'var(--code-bg)', maxWidth: 460 }}
+    >
+      <span className="faint">{t('images.editTitle')}</span>
+      <label className="text-[11px]">
+        {t('images.editPrompt')}
+        <textarea
+          className="input mt-1"
+          rows={3}
+          value={draft.prompt}
+          onChange={(e) => set({ prompt: e.target.value })}
+        />
+      </label>
+      <label className="text-[11px]">
+        {t('settings.images.negative')}
+        <input
+          className="input mt-1"
+          value={draft.negativePrompt}
+          onChange={(e) => set({ negativePrompt: e.target.value })}
+          placeholder={t('settings.images.auto')}
+        />
+      </label>
+      <label className="text-[11px]">
+        {t('settings.images.size')}
+        <div className="mt-1 flex items-center gap-2">
+          <input
+            className="input mono"
+            type="number"
+            min={0}
+            max={MAX_IMAGE_DIMENSION}
+            step={8}
+            value={draft.width}
+            onChange={(e) => set({ width: e.target.value })}
+            placeholder={t('settings.images.auto')}
+          />
+          <span className="faint">×</span>
+          <input
+            className="input mono"
+            type="number"
+            min={0}
+            max={MAX_IMAGE_DIMENSION}
+            step={8}
+            value={draft.height}
+            onChange={(e) => set({ height: e.target.value })}
+            placeholder={t('settings.images.auto')}
+          />
+        </div>
+      </label>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="text-[11px]">
+          {t('settings.images.steps')}
+          <input
+            className="input mono mt-1"
+            type="number"
+            min={0}
+            max={MAX_IMAGE_STEPS}
+            value={draft.steps}
+            onChange={(e) => set({ steps: e.target.value })}
+            placeholder={t('settings.images.auto')}
+          />
+        </label>
+        <label className="text-[11px]" title={t('settings.images.defaults')}>
+          {t('images.seed')}
+          <input
+            className="input mono mt-1"
+            type="number"
+            value={draft.seed}
+            onChange={(e) => set({ seed: e.target.value })}
+            placeholder={t('settings.images.auto')}
+          />
+        </label>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="text-[11px]">
+          {t('settings.images.model')}
+          <input
+            className="input mono mt-1"
+            value={draft.model}
+            onChange={(e) => set({ model: e.target.value })}
+            placeholder={t('settings.images.auto')}
+          />
+        </label>
+        <label className="text-[11px]">
+          {t('settings.images.sampler')}
+          <input
+            className="input mono mt-1"
+            value={draft.sampler}
+            onChange={(e) => set({ sampler: e.target.value })}
+            placeholder={t('settings.images.auto')}
+          />
+        </label>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {/* The button the click came from is the button that stops it: a 40-step draw on a
+            CPU server is minutes, and sending the user to the far side of the picture for
+            the Stop is the difference between a control that helps and one they hunt for. */}
+        {drawing ? (
+          <button
+            type="button"
+            className="btn btn-sm btn-danger"
+            title={t('images.stopHint')}
+            onClick={onStop}
+          >
+            ⏹ {t('images.stop')}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            disabled={!ready || busy}
+            title={ready ? t('images.editDrawHint') : t('images.editEmptyPrompt')}
+            onClick={onDraw}
+          >
+            {t('images.editDraw')}
+          </button>
+        )}
+        <span className="faint">{ready ? t('settings.images.defaults') : t('images.editEmptyPrompt')}</span>
+      </div>
+    </div>
   )
 }
 

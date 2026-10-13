@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"kichat/internal/config"
 )
 
 // TestLiveSDWebUI exercises the client against a real WebUI on this machine. It is
@@ -43,7 +41,7 @@ func TestLiveSDWebUI(t *testing.T) {
 	}
 	baseURL := os.Getenv("KICHAT_SD_URL")
 	if baseURL == "" {
-		baseURL = config.DefaultImageBaseURL
+		baseURL = DefaultBaseURL
 	}
 	client := NewSDWebUI("images", "Stable Diffusion WebUI", baseURL, os.Getenv("KICHAT_SD_AUTH"))
 

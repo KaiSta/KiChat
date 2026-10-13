@@ -119,12 +119,34 @@ type App struct {
 	checkReason  string
 	checkHidden  int
 
+	// draws is every image draw in flight, keyed by the attachment it was redrawn from,
+	// so a Stop can end the wait on the picture the user is looking at. Each entry
+	// carries a token as well as the cancel function: a func value cannot be compared in
+	// Go, so the token is what tells a finishing draw whether the entry is still its own.
+	// Without it, a second draw of the same picture that started while the first was
+	// unwinding would have its entry deleted by the first one's cleanup, and Stop would
+	// then find nothing to cancel while a picture was still being drawn.
+	drawsMu   sync.Mutex
+	draws     map[string]inflightDraw
+	drawToken uint64
+
 	// installCompleted records that a build was downloaded during this session.
 	// A server that was already running keeps the binary it was started from, so
 	// without it the panel's "restart the model" line would disappear exactly when
 	// the update landed — the moment the restart is owed. A managed start clears
 	// it, because that server is running the new build.
 	installCompleted bool
+}
+
+// inflightDraw is one image draw this app is waiting for.
+type inflightDraw struct {
+	token  uint64
+	cancel context.CancelFunc
+	// service is the tool service the draw was started on, kept so that Stop asks the
+	// same provider that is drawing. A settings save mid-draw replaces the app's
+	// toolSvc, and interrupting the replacement would ask a provider that never
+	// received this request — while the one that did keeps drawing.
+	service *tools.Service
 }
 
 // NewApp creates the application.
@@ -576,13 +598,12 @@ func (a *App) rebuildServices(settings config.Settings) {
 		CacheHours:        settings.Search.ScrapeCacheHours,
 	}, a.extractor.PDFExtractorFunc())
 
-	// The image server is built from the same snapshot. Off means nil, and nil is
+	// The image backend is built from the same snapshot. Off means nil, and nil is
 	// what removes generate_image from the model's tool list rather than leaving a
 	// tool that can only ever fail.
 	var imageProvider images.Provider
 	if settings.Images.Enabled {
-		imageProvider = images.NewSDWebUI("images", "Stable Diffusion WebUI",
-			settings.Images.BaseURL, settings.Images.APIKey)
+		imageProvider = newImageProvider(settings)
 	}
 	toolService := tools.New(a.store, chain, scraper)
 	toolService.Images = imageProvider
@@ -619,6 +640,61 @@ func (a *App) currentRegistry() *llm.Registry {
 	a.servicesMu.RLock()
 	defer a.servicesMu.RUnlock()
 	return a.registry
+}
+
+// newImageProvider builds the backend the settings select.
+//
+// Two kinds, one settings section: the difference is where the work happens, not what the
+// panel configures. The server kind contacts an HTTP endpoint the user runs; the CLI kind
+// runs their binary once per picture. Everything downstream — the tool, the recipe, the
+// attachment — is written against images.Provider and cannot tell them apart, which is what
+// makes this a switch rather than a second feature.
+//
+// The CLI fields are named one per flag and are passed straight through, empty ones omitted,
+// so "which files does this pipeline load" is answered by the same panel that names them. The
+// extra arguments go through rt.SplitArgs, the shell-free splitter the managed llama.cpp
+// server already uses: this text is a command line the user typed, and the one thing the app
+// must never do with it is hand it to a shell. CPU offload travels beside them as a typed
+// switch rather than as text, because a user flips it per model and a checkbox says that
+// better than remembering a flag.
+func newImageProvider(settings config.Settings) images.Provider {
+	if config.IsImageCLI(settings.Images.Kind) {
+		return images.NewCLI("images", "sd-cli", settings.Images.CLIBinary,
+			images.ModelFiles{
+				Model:          settings.Images.CLIModel,
+				DiffusionModel: settings.Images.CLIDiffusionModel,
+				VAE:            settings.Images.CLIVAE,
+				LLM:            settings.Images.CLILLM,
+				ClipL:          settings.Images.CLIClipL,
+				ClipG:          settings.Images.CLIClipG,
+				T5XXL:          settings.Images.CLIT5XXL,
+			}, images.Options{
+				// Where the program is, when the user pointed KiChat at the folder a
+				// release archive unpacked into. The executable is found inside it, so
+				// the path nobody has to type is the one nobody can get wrong.
+				Folder: settings.Images.CLIFolder,
+				// A mode, and the only one this app models itself: the rest of a moving
+				// command line's surface stays in the user's own arguments.
+				OffloadToCPU: settings.Images.CLIOffloadToCPU,
+				Extra:        rt.SplitArgs(settings.Images.CLIExtraArgs),
+			})
+	}
+	return images.NewSDWebUI("images", "Stable Diffusion WebUI",
+		settings.Images.BaseURL, settings.Images.APIKey)
+}
+
+// imageDrawTimeout bounds one draw by the backend that performs it.
+//
+// The two are minutes apart because the work is: a server that already holds its model in
+// memory spends the whole bound on sampling, while the CLI backend pays a model load before
+// the first step — a bound that would be generous for the first cuts the second off
+// mid-load and reports it as a failure. Both are guards against a wedged process rather than
+// a promise to the user: Stop is what ends a draw that is merely slow.
+func imageDrawTimeout(settings config.Settings) time.Duration {
+	if config.IsImageCLI(settings.Images.Kind) {
+		return images.DefaultCLITimeout
+	}
+	return 10 * time.Minute
 }
 
 // currentImageProvider is the picture server in use, nil when image generation is

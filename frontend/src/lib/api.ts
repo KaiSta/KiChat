@@ -106,6 +106,8 @@ export namespace research {
 
 export namespace store {
   export type Attachment = Plain<Gen.store.Attachment>
+  /** What a picture this app drew was made with, so it can be drawn again. */
+  export type GenerationRecipe = Plain<Gen.store.GenerationRecipe>
   export type Chat = Plain<Gen.store.Chat>
   export type Chunk = Plain<Gen.store.Chunk>
   export type Compaction = Plain<Gen.store.Compaction>

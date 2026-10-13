@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"kichat/internal/config"
+	"kichat/internal/images"
 )
 
 // frontendDictPath is the frontend's dictionary file.
@@ -70,6 +71,20 @@ func TestEveryTranslatedNameExistsInEveryDictionary(t *testing.T) {
 		}
 		keys = append(keys, v.Key)
 	}
+	// And the sentences the image backend attaches to a published stable-diffusion.cpp
+	// build. They travel as interface *keys* for the same reason the template variables
+	// do — the backend knows the condition, the dictionary knows the language — so a key
+	// missing from one dictionary is an English line in a German panel. Every platform's
+	// list is walked, because a note that only exists on Windows is still a sentence a
+	// Windows user reads.
+	for _, platform := range [][2]string{{"linux", "amd64"}, {"windows", "amd64"}, {"darwin", "arm64"}} {
+		for _, b := range images.SDBuilds(platform[0], platform[1]) {
+			if b.NoteKey != "" {
+				keys = append(keys, b.NoteKey)
+			}
+		}
+	}
+
 	if len(keys) == 0 {
 		t.Fatal("no translated names to check; did the backend stop naming them?")
 	}

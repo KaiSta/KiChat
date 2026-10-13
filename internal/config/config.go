@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"kichat/internal/images"
 	"kichat/internal/llm"
 	"kichat/internal/secret"
 	"kichat/internal/store"
@@ -95,12 +96,104 @@ type ImageSettings struct {
 	// offer the same place, and re-picking it every time is the sort of friction
 	// that makes a feature unused.
 	SaveFolder string `json:"saveFolder"`
+
+	// Kind is which of the two backends draws. Empty is the server kind, which is
+	// what every installation that predates this field is, so an old settings blob
+	// keeps working without a migration — the same rule the other fields follow.
+	Kind string `json:"kind"`
+
+	// The CLI kind's own fields. They are named after the flags they become, because
+	// that is the only thing a user can check them against: there is no server to ask
+	// what it offers, and stable-diffusion.cpp's own README tells users to run `-h`
+	// rather than publishing a stable list.
+	//
+	// CLIBinary is the executable run once per picture: `sd-cli`, or a wrapper script
+	// that sets up an environment first. Absolute, because a Settings field is filled
+	// in by hand and "which directory was the app started from" is not something a
+	// user can see.
+	CLIBinary string `json:"cliBinary"`
+	// CLIFolder is the directory the program and its libraries live in — what a
+	// `sd-cli` release archive unpacked (or the folder above it). It is the *primary*
+	// way to supply stable-diffusion.cpp: the executable is found inside it
+	// (images.FindProgram) instead of being typed, so the only path a user has to get
+	// right is the one they downloaded into.
+	//
+	// A set folder does not fall back to CLIBinary when the lookup finds nothing.
+	// Pointing at a place is a statement about where the program is, and drawing with
+	// an older typed path instead would run a program nobody chose.
+	//
+	// Which accelerator build that folder holds is deliberately *not* a setting. It is
+	// read off the folder's own backend libraries (images.AcceleratorOf), which is the
+	// only thing that answers the question once the archive's name is gone — so a
+	// stored copy could only ever disagree with reality, and the panel would have two
+	// answers to print. The picker in the panel drives which archive the user is told
+	// to fetch; the reading says which one they actually have.
+	CLIFolder string `json:"cliFolder"`
+	// CLIModel is a single-file checkpoint, passed as `-m`.
+	CLIModel string `json:"cliModel"`
+	// CLIDiffusionModel, CLIVAE and CLILLM are the standalone parts of a pipeline newer
+	// than SD1.x — Qwen-Image, Flux, SD3 — passed as `--diffusion-model`, `--vae` and
+	// `--llm`. A pipeline that names its parts has no single checkpoint, and passing a
+	// `-m` as well would hand the binary two models to load.
+	CLIDiffusionModel string `json:"cliDiffusionModel"`
+	CLIVAE            string `json:"cliVae"`
+	CLILLM            string `json:"cliLlm"`
+	// CLIClipL, CLIClipG and CLIT5XXL are the separate text encoders some pipelines
+	// ask for. The flags have underscores and so do these names, so one can be read
+	// off the other.
+	CLIClipL string `json:"cliClipL"`
+	CLIClipG string `json:"cliClipG"`
+	CLIT5XXL string `json:"cliT5xxl"`
+	// CLIOffloadToCPU passes `--offload-to-cpu`: the sampling runs on the host CPU
+	// while the weights stay where they were loaded. It is a *mode* a user flips per
+	// model rather than a value — Flux on a card too small to hold it is the case it
+	// was asked for — which is why it is a switch here and not only a line in
+	// CLIExtraArgs. It is passed as a bare flag, spelled the way a working command line
+	// spells it; a build that wants `--offload-to-cpu 1` can be spelled that way in the
+	// extra arguments instead.
+	//
+	// It is deliberately not part of a picture's recipe: it changes where the work
+	// happens, not what the picture is, so it is read from settings on every draw the
+	// way the step count is, rather than stored with the picture.
+	CLIOffloadToCPU bool `json:"cliOffloadToCpu"`
+	// CLIExtraArgs is the rest of the user's command line as one string, split by
+	// runtime.SplitArgs before it is used. It is placed before the arguments KiChat
+	// builds, so a field with its own control — the prompt, the size, the seed, the
+	// step count — wins over a flag typed twice, while anything KiChat has no control
+	// for still reaches the binary.
+	//
+	// It exists because that binary documents that its options change between builds.
+	// Modelling every flag here would mean shipping a new KiChat whenever
+	// stable-diffusion.cpp renamed one, and a flag this app does not know — the
+	// `--sigmas` schedule, `--diffusion-fa`, a `-v` log level — is exactly what a turbo
+	// model needs.
+	CLIExtraArgs string `json:"cliExtraArgs"`
 }
+
+// Image backend kinds, as stored in ImageSettings.Kind.
+const (
+	// ImageKindServer is an HTTP server behind the /sdapi/v1/txt2img route:
+	// AUTOMATIC1111, its Forge fork, or stable-diffusion.cpp's sd-server.
+	ImageKindServer = "server"
+	// ImageKindCLI is a local binary run once per picture — stable-diffusion.cpp's
+	// `sd-cli` — which needs no daemon and reaches flags the compatibility route does
+	// not expose, at the cost of loading the model on every draw.
+	ImageKindCLI = "cli"
+)
+
+// IsImageCLI reports whether the CLI backend is selected. An empty or unrecognised
+// kind is the server backend, so a blob written by hand cannot leave the app with no
+// backend at all.
+func IsImageCLI(kind string) bool { return kind == ImageKindCLI }
 
 // DefaultImageBaseURL is AUTOMATIC1111's own default listen address, and is
 // also what Forge and stable-diffusion.cpp's sd-server use when left alone. It is
 // offered rather than probed: nothing is contacted until the feature is enabled.
-const DefaultImageBaseURL = "http://127.0.0.1:7860"
+// The address is declared in internal/images, which is where the client that dials
+// it lives; this is the name the settings layer and its tests read it from. One
+// string, one home: the address that is offered and the address that is dialled
+// cannot drift apart.
+const DefaultImageBaseURL = images.DefaultBaseURL
 
 // ImageAPIKeyName is the secret-store key the image server's credential lives
 // under. It is spelled like the backend keys so GetSecretStatus can report it in
@@ -110,13 +203,21 @@ const ImageAPIKeyName = "images"
 // Image bounds. They exist to stop a hand-edited settings blob — or a model that
 // passes a number it invented — from asking for a 20000-pixel picture, which a
 // local machine would spend minutes and tens of gigabytes on rather than refuse.
+//
+// The values are declared in internal/images and only *named* here, because the
+// providers are what a bound protects and what enforces it now (see
+// images.Request.Normalised): a second copy in this package is how the two ends
+// came apart before, with a size rounded by one backend and passed through by the
+// other. The settings layer keeps the names because this is where the panel and
+// the settings tests read them from.
+
 const (
 	// MaxImageDimension is the largest side a request may ask for.
-	MaxImageDimension = 2048
+	MaxImageDimension = images.MaxDimension
 	// MinImageDimension is the smallest size worth drawing.
-	MinImageDimension = 64
+	MinImageDimension = images.MinDimension
 	// MaxImageSteps bounds the sampling step count.
-	MaxImageSteps = 150
+	MaxImageSteps = images.MaxSteps
 )
 
 // NormaliseImageClamps repairs the numeric image fields in place, reporting
@@ -147,6 +248,19 @@ func NormaliseImageClamps(s *ImageSettings) bool {
 	}
 	if next := clamp(s.Steps, 1, MaxImageSteps); next != s.Steps {
 		s.Steps = next
+		changed = true
+	}
+	// Only the CLI kind is stored as itself: the server backend is spelled empty, which is
+	// what every installation predating the field already carries. So a typo in a
+	// hand-edited blob degrades to the backend that used to work rather than to no backend
+	// at all, `server` written out in full is folded to the same empty value instead of
+	// leaving two spellings of one thing, and the selector has one value per option.
+	kind := strings.TrimSpace(s.Kind)
+	if kind != ImageKindCLI {
+		kind = ""
+	}
+	if kind != s.Kind {
+		s.Kind = kind
 		changed = true
 	}
 	return changed

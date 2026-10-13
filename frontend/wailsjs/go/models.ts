@@ -174,6 +174,18 @@ export namespace config {
 	    height: number;
 	    negativePrompt: string;
 	    saveFolder: string;
+	    kind: string;
+	    cliBinary: string;
+	    cliFolder: string;
+	    cliModel: string;
+	    cliDiffusionModel: string;
+	    cliVae: string;
+	    cliLlm: string;
+	    cliClipL: string;
+	    cliClipG: string;
+	    cliT5xxl: string;
+	    cliOffloadToCpu: boolean;
+	    cliExtraArgs: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ImageSettings(source);
@@ -191,6 +203,18 @@ export namespace config {
 	        this.height = source["height"];
 	        this.negativePrompt = source["negativePrompt"];
 	        this.saveFolder = source["saveFolder"];
+	        this.kind = source["kind"];
+	        this.cliBinary = source["cliBinary"];
+	        this.cliFolder = source["cliFolder"];
+	        this.cliModel = source["cliModel"];
+	        this.cliDiffusionModel = source["cliDiffusionModel"];
+	        this.cliVae = source["cliVae"];
+	        this.cliLlm = source["cliLlm"];
+	        this.cliClipL = source["cliClipL"];
+	        this.cliClipG = source["cliClipG"];
+	        this.cliT5xxl = source["cliT5xxl"];
+	        this.cliOffloadToCpu = source["cliOffloadToCpu"];
+	        this.cliExtraArgs = source["cliExtraArgs"];
 	    }
 	}
 	export class ManagedModel {
@@ -398,6 +422,29 @@ export namespace config {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace images {
+	
+	export class SDBuild {
+	    id: string;
+	    accelerator: string;
+	    asset: string;
+	    noteKey?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SDBuild(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.accelerator = source["accelerator"];
+	        this.asset = source["asset"];
+	        this.noteKey = source["noteKey"];
+	    }
 	}
 
 }
@@ -623,6 +670,13 @@ export namespace main {
 	    models: string[];
 	    samplers: string[];
 	    keySet: boolean;
+	    kind: string;
+	    binary: string;
+	    folder: string;
+	    build: string;
+	    builds: images.SDBuild[];
+	    releasePage: string;
+	    files: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new ImageStatus(source);
@@ -637,7 +691,32 @@ export namespace main {
 	        this.models = source["models"];
 	        this.samplers = source["samplers"];
 	        this.keySet = source["keySet"];
+	        this.kind = source["kind"];
+	        this.binary = source["binary"];
+	        this.folder = source["folder"];
+	        this.build = source["build"];
+	        this.builds = this.convertValues(source["builds"], images.SDBuild);
+	        this.releasePage = source["releasePage"];
+	        this.files = source["files"];
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class InstalledBuild {
 	    dir: string;
@@ -929,6 +1008,22 @@ export namespace main {
 	        this.backend = source["backend"];
 	        this.model = source["model"];
 	        this.regenerate = source["regenerate"];
+	    }
+	}
+	export class StopDrawResult {
+	    wasDrawing: boolean;
+	    interrupted: boolean;
+	    interruptError?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new StopDrawResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.wasDrawing = source["wasDrawing"];
+	        this.interrupted = source["interrupted"];
+	        this.interruptError = source["interruptError"];
 	    }
 	}
 

@@ -24,6 +24,7 @@ import (
 	rt "kichat/internal/runtime"
 	"kichat/internal/secret"
 	"kichat/internal/store"
+	"kichat/internal/tools"
 	"kichat/internal/version"
 )
 
@@ -1028,6 +1029,59 @@ func (a *App) PickManagedModelFile(title string) (string, error) {
 	})
 }
 
+// PickImageFile asks for one of the CLI backend's paths: the binary, or one of the model
+// files a pipeline is made of.
+//
+// One binding for both rather than two, because the difference is only the filter: a model
+// file is `*.gguf`/`*.safetensors`, while the executable has no extension at all on Linux and
+// `.exe` on Windows, so an empty pattern list — "all files" — is the only filter that shows
+// either. Getting that wrong hides the very file the user was told to pick.
+//
+// Patterns reach Wails as one semicolon-separated string, which is its own format rather than
+// glob alternation, and the title comes from the UI so it follows the interface language.
+// The dialog opens in the model folder the app already knows about: the Qwen-Image triple is
+// the shape this backend exists for, and it is downloaded to one folder.
+func (a *App) PickImageFile(title string, patterns []string) (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	opts := runtime.OpenDialogOptions{Title: title, DefaultDirectory: a.defaultModelDir()}
+	if len(patterns) > 0 {
+		opts.Filters = []runtime.FileFilter{{DisplayName: "Modelldateien", Pattern: strings.Join(patterns, ";")}}
+	}
+	return runtime.OpenFileDialog(a.ctx, opts)
+}
+
+// PickImageFolder asks for the folder a stable-diffusion.cpp release unpacked into.
+//
+// A folder rather than a file, because that is the shape a download arrives in: the
+// archive holds the program, its backend libraries and its DLLs or `.so` files
+// together, and asking a user to find `sd-cli` inside it is asking them to open
+// folders until they see a name with no extension. What the app does with the answer
+// is find the program itself (images.FindProgram), including the single root directory
+// an archive lays down one level below.
+//
+// The choice is checked before it is returned: a folder with no program in it is a
+// mistake the user can still correct, and saying so here is one sentence instead of a
+// red badge on the next reload. An empty answer is a cancelled dialog, which is
+// neither success nor failure and is left for the caller to ignore.
+func (a *App) PickImageFolder(title string) (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(dir) == "" {
+		return "", nil
+	}
+	if _, err := images.FindProgram(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // ModelFolders lists the folders a model may already be in, most likely first,
 // each saying whether it is there. A user who already has LM Studio has models on
 // disk, and re-downloading a 5 GB file to run it in KiChat instead would be an
@@ -1836,7 +1890,7 @@ func (a *App) SetAttachmentPlacement(attachmentID, placement string) (store.Atta
 
 // --- image generation -------------------------------------------------------
 
-// ImageStatus is the picture server as the Settings panel reads it.
+// ImageStatus is the picture backend as the Settings panel reads it.
 type ImageStatus struct {
 	Enabled bool   `json:"enabled"`
 	BaseURL string `json:"baseURL"`
@@ -1849,6 +1903,63 @@ type ImageStatus struct {
 	Models   []string `json:"models"`
 	Samplers []string `json:"samplers"`
 	KeySet   bool     `json:"keySet"`
+	// Kind is which backend draws: "" for the HTTP server, "cli" for a local binary.
+	// The panel needs it to render the right controls, and it is the *stored* kind
+	// rather than anything derived, so a hand-edited blob shows what it says.
+	Kind string `json:"kind"`
+	// Binary is the CLI kind's executable, empty for the server kind. It is reported
+	// separately from BaseURL rather than reusing one field: a path and a URL are
+	// checked, opened and copied differently, and a single field meaning one in each
+	// kind ends up in a log line as a broken link.
+	//
+	// It is the *resolved* program — the one a draw would run — not necessarily what
+	// was typed: a configured program folder supplies it (images.ResolveProgram), and
+	// the panel showing the file that will really be started is the point of resolving
+	// it here rather than making the view re-do the search.
+	Binary string `json:"binary"`
+	// Folder is the CLI kind's program folder, empty when the program is named by path
+	// instead. Reported so the panel can say which of the two is supplying the
+	// executable, because they are not equivalent: a set folder wins, and one that
+	// holds no program is a failure rather than a fallback.
+	Folder string `json:"folder"`
+	// Build is what the program folder *is*, read off its backend libraries:
+	// "vulkan", "cuda", "rocm", "metal", or empty for the plain CPU build. It is a
+	// reading rather than the stored CLIBuild, which is what the user meant to
+	// download — and the two disagreeing is exactly what is worth showing.
+	Build string `json:"build"`
+	// Builds are the builds the project publishes for this machine (images.SDBuilds),
+	// so the panel can offer only what can really be downloaded and name the archive to
+	// look for. Never nil, because the panel iterates it.
+	Builds []images.SDBuild `json:"builds"`
+	// ReleasePage is where those archives live. It travels in the status rather than
+	// being written into the interface a second time: it is the project's address, and
+	// a copy of it in the frontend is a copy that goes stale on its own.
+	ReleasePage string `json:"releasePage"`
+	// Files are the CLI kind's model paths, in the order they reach the binary. Both
+	// this and Samplers exist so the panel can show what will really be loaded
+	// without re-deriving it from the settings, and neither is ever nil.
+	Files []string `json:"files"`
+}
+
+// imageStatusFiles lists the model paths the CLI backend will pass, in argument order,
+// skipping the empty ones. An empty field is not listed: it is omitted from the command
+// line, and a blank row in the panel would suggest the binary is being handed something.
+func imageStatusFiles(s config.ImageSettings) []string {
+	out := []string{}
+	for _, path := range (images.ModelFiles{
+		Model:          s.CLIModel,
+		DiffusionModel: s.CLIDiffusionModel,
+		VAE:            s.CLIVAE,
+		LLM:            s.CLILLM,
+		ClipL:          s.CLIClipL,
+		ClipG:          s.CLIClipG,
+		T5XXL:          s.CLIT5XXL,
+	}).Paths() {
+		if trimmed := strings.TrimSpace(path); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // GetImageStatus reports the image server's state: whether the feature is on,
@@ -1868,6 +1979,21 @@ func (a *App) GetImageStatus() (ImageStatus, error) {
 		BaseURL:  settings.Images.BaseURL,
 		Models:   []string{},
 		Samplers: []string{},
+		Kind:     settings.Images.Kind,
+		Binary:   settings.Images.CLIBinary,
+		Folder:   settings.Images.CLIFolder,
+		Files:    imageStatusFiles(settings.Images),
+		Builds:   images.SDBuilds(goruntime.GOOS, goruntime.GOARCH),
+
+		ReleasePage: images.ReleasePage,
+	}
+	// What the program folder really holds, when there is one to read. The program is
+	// resolved exactly as a draw resolves it, so the panel reports the build the next
+	// picture would use rather than the one the folder is named after; a folder that
+	// yields no program is left to Health, which is where the reason belongs.
+	if binary, err := images.ResolveProgram(settings.Images.CLIFolder, settings.Images.CLIBinary); err == nil {
+		status.Binary = binary
+		status.Build = images.AcceleratorOf(filepath.Dir(binary))
 	}
 	_, status.KeySet = a.secrets.Get(config.ImageAPIKeyName)
 
@@ -1898,6 +2024,10 @@ func (a *App) GetImageStatus() (ImageStatus, error) {
 // TestImageBackend runs one generation and discards the result, so a user can
 // find out that their WebUI is reachable and has a model loaded without spending
 // a chat turn on it.
+//
+// The bound is the backend's own, exactly as it is for a redraw: the CLI kind pays a model
+// load before its first step, and a fixed five minutes would report a working setup as a
+// failure on a machine that needed six.
 func (a *App) TestImageBackend() (string, error) {
 	if err := a.ensure(); err != nil {
 		return "", err
@@ -1907,7 +2037,7 @@ func (a *App) TestImageBackend() (string, error) {
 		return "", images.ErrNotConfigured
 	}
 	settings := a.Settings()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), imageDrawTimeout(settings))
 	defer cancel()
 	result, err := provider.Generate(ctx, images.Request{
 		Prompt:         "a simple color test pattern",
@@ -1928,17 +2058,21 @@ func (a *App) TestImageBackend() (string, error) {
 	return report, nil
 }
 
-// RegenerateImage draws a picture again from its own recorded recipe and returns the new
-// attachment. freshSeed asks for a variation — the same prompt with a seed the server
-// picks — rather than a repeat of the one on screen.
+// RegenerateImage draws a picture from the recipe it is handed and returns the new
+// attachment.
 //
-// This is the only path into image generation that does not go through a chat model: the
-// recipe is data, not a request in words, so nothing has to be asked of the model to use
-// it. The picture is filed onto the message it was redrawn from, which is what puts it
-// beside the original, and the attachments event is emitted because the view holds that
-// message's attachment list — without it the new picture would exist and stay invisible
-// until a manual reload.
-func (a *App) RegenerateImage(attachmentID string, freshSeed bool) (store.Attachment, error) {
+// This is the only path into image generation that does not go through a chat model: a
+// recipe is data, not a request in words, so nothing has to be asked of the model to use it.
+// The panel sends the whole recipe every time, which is what gives it three controls out of
+// one call — a repeat passes the stored recipe back untouched, a variation passes it with
+// the seed cleared, and the editor passes the fields the user changed. A zero field means
+// "the server's own", so an emptied box in the editor means what it looks like it means.
+//
+// The picture is filed onto the message it was redrawn from, which is what puts it beside
+// the original, and the attachments event is emitted because the view holds that message's
+// attachment list — without it the new picture would exist and stay invisible until a manual
+// reload.
+func (a *App) RegenerateImage(attachmentID string, recipe store.GenerationRecipe) (store.Attachment, error) {
 	if err := a.ensure(); err != nil {
 		return store.Attachment{}, err
 	}
@@ -1949,16 +2083,116 @@ func (a *App) RegenerateImage(attachmentID string, freshSeed bool) (store.Attach
 	if a.ctx == nil {
 		return store.Attachment{}, errors.New("App ist noch nicht bereit")
 	}
-	// Generous, because a local server drawing a large picture takes minutes on a CPU,
-	// and present at all so a wedged server cannot hold the click open indefinitely.
-	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Minute)
+	// Generous, because a local backend drawing a large picture takes minutes on a CPU, and
+	// present at all so a wedged process cannot hold the click open indefinitely. How
+	// generous is the backend's own answer: a server holds its model in memory and spends
+	// the bound on sampling, while the CLI kind loads one from disk first. A user who will
+	// not wait that long presses Stop, which cancels this context — that, rather than the
+	// bound, is the control for a draw that is merely slow.
+	ctx, cancel := context.WithTimeout(a.ctx, imageDrawTimeout(a.Settings()))
 	defer cancel()
-	attachment, err := service.Regenerate(ctx, attachmentID, freshSeed)
+	token := a.beginDraw(attachmentID, cancel, service)
+	defer a.endDraw(attachmentID, token)
+
+	attachment, err := service.Regenerate(ctx, attachmentID, recipe)
 	if err != nil {
+		// A stopped draw is not a failure and must not travel as one. The context is the
+		// only thing that can have cancelled this call, so a cancelled context is what
+		// tells the user's own click from a server that broke — and the *parent* being
+		// gone is the app closing rather than a stop, which is left to read as what it is.
+		if errors.Is(ctx.Err(), context.Canceled) && a.ctx.Err() == nil {
+			return store.Attachment{}, images.ErrCancelled
+		}
 		return store.Attachment{}, err
 	}
 	a.emit(events.Attachments, map[string]any{"chatId": attachment.ChatID})
 	return attachment, nil
+}
+
+// StopDrawResult is what stopping an image draw achieved.
+//
+// Three facts rather than a bare bool, because they are different sentences and the UI
+// has to be able to pick the right one: a draw was running and is now over (say so),
+// nothing was running (say nothing — this is a second click, or a draw that finished
+// between the render and the click), and whether the *server* was also told to stop.
+type StopDrawResult struct {
+	// WasDrawing is true when a draw was in flight and is now over.
+	WasDrawing bool `json:"wasDrawing"`
+	// Interrupted is true when the image server was asked to abandon the work behind it.
+	// False is not a failure: stable-diffusion.cpp has no route for it.
+	Interrupted bool `json:"interrupted"`
+	// InterruptError says why the server could not be asked. It is reported rather than
+	// dropped so a server that has the route can be told from one that does not — but it
+	// is never a failure *of the stop*: the wait it was pressed to end is already over.
+	InterruptError string `json:"interruptError,omitempty"`
+}
+
+// StopImageDraw ends the wait on a picture being drawn and asks the server to abandon
+// the work behind it.
+//
+// Both halves matter and neither replaces the other. Cancelling the request is what makes
+// the click take effect at once — a 40-step draw on a CPU server is minutes, and the
+// ten-minute bound on the call is not a promise the user should be held to. The interrupt
+// is what stops the server spending those minutes on a picture nobody will ever see, and
+// it exists on AUTOMATIC1111 and Forge and not on stable-diffusion.cpp, so it is attempted
+// and never required.
+//
+// Nothing is stored either way: the picture only exists once the server answers with it,
+// so a stopped draw leaves the transcript exactly as it was.
+func (a *App) StopImageDraw(attachmentID string) StopDrawResult {
+	result := StopDrawResult{}
+	if a.ctx == nil {
+		return result
+	}
+	a.drawsMu.Lock()
+	draw, ok := a.draws[attachmentID]
+	a.drawsMu.Unlock()
+	if !ok {
+		return result
+	}
+	result.WasDrawing = true
+	draw.cancel()
+	// A fresh, short context on purpose: the draw's own context was cancelled by the line
+	// above, and an interrupt sent on it would never leave the machine.
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+	defer cancel()
+	asked, err := draw.service.InterruptDraw(ctx)
+	result.Interrupted = asked && err == nil
+	if err != nil {
+		result.InterruptError = err.Error()
+	}
+	return result
+}
+
+// beginDraw registers a draw so Stop can find it, and returns the token that identifies
+// this registration.
+func (a *App) beginDraw(attachmentID string, cancel context.CancelFunc, service *tools.Service) uint64 {
+	a.drawsMu.Lock()
+	defer a.drawsMu.Unlock()
+	if a.draws == nil {
+		a.draws = map[string]inflightDraw{}
+	}
+	// A draw already running for this picture is cancelled first. Nothing in the UI can
+	// start two (every control is disabled while one runs), so reaching this means a
+	// request arrived from somewhere else, and the newest recipe is then the one the user
+	// is waiting for.
+	if previous, ok := a.draws[attachmentID]; ok {
+		previous.cancel()
+	}
+	a.drawToken++
+	a.draws[attachmentID] = inflightDraw{token: a.drawToken, cancel: cancel, service: service}
+	return a.drawToken
+}
+
+// endDraw removes a registration, but only if it is still the one this call made. A later
+// draw of the same picture must keep its own entry: deleting it here would leave that
+// draw uncancellable while Stop reported nothing to stop.
+func (a *App) endDraw(attachmentID string, token uint64) {
+	a.drawsMu.Lock()
+	defer a.drawsMu.Unlock()
+	if draw, ok := a.draws[attachmentID]; ok && draw.token == token {
+		delete(a.draws, attachmentID)
+	}
 }
 
 // GetAttachmentImage returns an attachment's payload as a data: URL the webview

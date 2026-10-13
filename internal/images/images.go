@@ -26,9 +26,11 @@ type Request struct {
 	Height         int
 	Steps          int
 	Sampler        string
-	// Seed is nil to let the server choose. A chosen seed comes back in the
-	// result, because a server that picks one and does not report it has produced
-	// a picture the user can never ask for again.
+	// Seed is the seed to draw with. nil asks for a fresh random one, which the
+	// *provider* picks and reports back rather than leaving the choice to the
+	// server: only the seed that was used makes a picture reproducible, and a
+	// server that picks one and does not report it has produced a picture the user
+	// can never ask for again. See Result.Seed.
 	Seed *int64
 	// Model names the checkpoint to use for this request only. Empty means the
 	// server's own current selection, and is the right default: a user who set up
@@ -81,9 +83,11 @@ func SniffImage(data []byte, fallbackMime, fallbackExt string) (string, string) 
 // Result is what one generation produced.
 type Result struct {
 	Images []Image
-	// Seed is the seed the server says it used, 0 when it did not say. Zero is
-	// not a valid seed in practice, so it doubles as "not reported" without a
-	// second flag.
+	// Seed is the seed that reproduces this picture: the one the server reported
+	// using, or — when the server reports nothing — the one this app chose and sent.
+	// 0 means no seed is known, which is why a seed this app picks is never 0. The
+	// distinction matters downstream: a recipe with no seed can only be redrawn as a
+	// variation, while a recipe with one draws the same picture again.
 	Seed int64
 	// Model is the checkpoint the server reported using, empty when it did not
 	// name one.
@@ -121,11 +125,50 @@ type Provider interface {
 	Generate(ctx context.Context, req Request) (Result, error)
 }
 
+// Interrupter is a provider that can stop work it has already been handed.
+//
+// It is a separate interface rather than a method on Provider because not every
+// image server has a way to do it: AUTOMATIC1111 and Forge answer
+// `POST /sdapi/v1/interrupt`, while stable-diffusion.cpp's server cancels by job id
+// and has no such route at all. A provider that cannot interrupt simply does not
+// implement this — a truer statement than an Interrupt method that always fails.
+//
+// The caller must not depend on it for ending a draw. Cancelling the request's
+// context is what ends the wait, and it works against every server; interrupting is
+// what stops the *server* burning GPU minutes on a picture nobody will see, and is
+// therefore worth attempting and never worth requiring.
+type Interrupter interface {
+	// Interrupt asks the server to abandon the generation it is running, and returns
+	// its error when the server was asked and refused (a 404 from a server without
+	// the route, a dead connection).
+	Interrupt(ctx context.Context) error
+}
+
+// DefaultBaseURL is the address every server this package talks to listens on when
+// nothing was configured. It is AUTOMATIC1111's own default, which its Forge fork and
+// stable-diffusion.cpp's sd-server share, and it is offered as the starting value in
+// Settings rather than probed: nothing is contacted until the feature is switched on.
+//
+// It lives here rather than in the settings package because the two must not drift apart —
+// the settings that offer an address and the client that dials it describe one fact — and
+// because this package's own live test connects to it, which a constant copied into two
+// packages cannot do without an import cycle.
+const DefaultBaseURL = "http://127.0.0.1:7860"
+
 // ErrUnavailable marks a server that could not be reached.
 var ErrUnavailable = errors.New("image backend unavailable")
 
 // ErrNotConfigured marks a request made with no image server configured.
 var ErrNotConfigured = errors.New("no image backend is configured")
+
+// ErrCancelled marks a draw the user stopped.
+//
+// It is its own error because it is the one generation failure that is not a failure:
+// the picture was not drawn, nothing was charged for it, and the state the UI reports
+// is "nothing happened" rather than "something broke". Without a distinct value the
+// caller can only see a context error through an HTTP client's own wrapping, and the
+// user's own click reads as a crash.
+var ErrCancelled = errors.New("das Zeichnen wurde abgebrochen")
 
 // ErrNoModel marks a generation request against a server that has no checkpoint
 // loaded. It is its own error because the fix is specific and the message a bare
