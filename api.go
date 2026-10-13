@@ -2368,6 +2368,8 @@ func (a *App) SaveAttachmentAs(attachmentID string) (string, error) {
 		pattern, filterName = "*.jpg", "JPEG-Bild"
 	case "image/webp":
 		pattern, filterName = "*.webp", "WebP-Bild"
+	case "image/gif":
+		pattern, filterName = "*.gif", "GIF-Bild"
 	}
 	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
 		Title:            "Bild speichern",
@@ -2459,6 +2461,20 @@ type ImageCache struct {
 	Folder string `json:"folder"`
 }
 
+// encodedSize is how many bytes a picture's payload occupies in KiChat's own store.
+//
+// The document holds the payload base64-encoded, so the row is about a third larger
+// than the picture itself. Reporting the decoded size would under-tell the space a
+// clear actually frees, and "why is my KiChat data directory gigabytes?" is the one
+// question this panel exists to answer — so it counts what is on disk, not what the
+// file would be once decoded.
+func encodedSize(n int64) int64 {
+	if n <= 0 {
+		return 0
+	}
+	return (n + 2) / 3 * 4
+}
+
 // drawnPictures returns every picture KiChat drew, newest last, in the order the store
 // holds them.
 //
@@ -2497,12 +2513,12 @@ func (a *App) GetImageCache() (ImageCache, error) {
 	chats := map[string]bool{}
 	for _, picture := range pictures {
 		cache.Count++
-		cache.Bytes += picture.SizeBytes
+		cache.Bytes += encodedSize(picture.SizeBytes)
 		if picture.SavedPath != "" {
 			continue
 		}
 		cache.UnsavedCount++
-		cache.UnsavedBytes += picture.SizeBytes
+		cache.UnsavedBytes += encodedSize(picture.SizeBytes)
 		chats[picture.ChatID] = true
 	}
 	cache.UnsavedChats = len(chats)
@@ -2549,7 +2565,7 @@ func (a *App) ClearImageCache() (ImageCacheClear, error) {
 			return result, fmt.Errorf("Bild %s entfernen: %w", picture.Filename, err)
 		}
 		result.Removed++
-		result.Bytes += picture.SizeBytes
+		result.Bytes += encodedSize(picture.SizeBytes)
 		if picture.ChatID != "" {
 			affected[picture.ChatID] = true
 		}

@@ -76,6 +76,13 @@ func newPictureCacheApp(t *testing.T, pictures int) (*App, string) {
 // an image attachment with a document holding the payload and no recipe. It is the row the
 // clear button must never touch, and it is written through the store rather than through the
 // picker because a native dialog cannot open in a test.
+// cachedBytes is what the panel reports for a number of drawn pictures: the base64-encoded
+// payload the store actually holds, which is what a clear frees. It is not the decoded size
+// of the PNGs, because the row a clear deletes is the encoded one.
+func cachedBytes(pictures int) int64 {
+	return int64(pictures) * ((int64(len(cachePicture)) + 2) / 3 * 4)
+}
+
 func attachPhoto(t *testing.T, a *App, chatID string) store.Attachment {
 	t.Helper()
 	now := time.Now()
@@ -116,9 +123,9 @@ func TestTheImageCacheCountsDrawnPicturesAndTheirUnsavedPart(t *testing.T) {
 	if cache.Count != 2 {
 		t.Errorf("count = %d, want the 2 pictures KiChat drew (the attached photo is not a cache entry)", cache.Count)
 	}
-	wantBytes := int64(2 * len(cachePicture))
+	wantBytes := cachedBytes(2)
 	if cache.Bytes != wantBytes {
-		t.Errorf("bytes = %d, want %d", cache.Bytes, wantBytes)
+		t.Errorf("bytes = %d, want %d (the base64 rows the store holds, not the decoded pictures)", cache.Bytes, wantBytes)
 	}
 	if cache.UnsavedCount != 2 || cache.UnsavedBytes != wantBytes {
 		t.Errorf("unsaved = %d pictures / %d bytes, want all of them: nothing was exported",
@@ -171,15 +178,15 @@ func TestClearingThePictureCacheRemovesOnlyWhatNobodySaved(t *testing.T) {
 	if cache.Count != 2 || cache.UnsavedCount != 1 {
 		t.Errorf("cache = %d pictures with %d unsaved, want 2 and 1", cache.Count, cache.UnsavedCount)
 	}
-	if cache.UnsavedBytes != int64(len(cachePicture)) {
-		t.Errorf("unsaved bytes = %d, want exactly the one picture's %d", cache.UnsavedBytes, len(cachePicture))
+	if cache.UnsavedBytes != cachedBytes(1) {
+		t.Errorf("unsaved bytes = %d, want exactly the one picture's %d", cache.UnsavedBytes, cachedBytes(1))
 	}
 
 	cleared, err := a.ClearImageCache()
 	if err != nil {
 		t.Fatalf("ClearImageCache: %v", err)
 	}
-	if cleared.Removed != 1 || cleared.Bytes != int64(len(cachePicture)) {
+	if cleared.Removed != 1 || cleared.Bytes != cachedBytes(1) {
 		t.Errorf("cleared = %d pictures / %d bytes, want the 1 unsaved one", cleared.Removed, cleared.Bytes)
 	}
 
