@@ -2038,15 +2038,24 @@ func (a *App) TestImageBackend() (string, error) {
 	settings := a.Settings()
 	ctx, cancel := context.WithTimeout(context.Background(), imageDrawTimeout(settings))
 	defer cancel()
+	// The size is the user's own when they chose one, and a small square otherwise:
+	// a setup that only works at its trained size would otherwise fail a test that
+	// real draws pass. Bounded by the same call every other request goes through.
+	dimension := func(value int) int {
+		if value > 0 {
+			return value
+		}
+		return 512
+	}
 	result, err := provider.Generate(ctx, images.Request{
 		Prompt:         "a simple color test pattern",
 		NegativePrompt: settings.Images.NegativePrompt,
-		Width:          512,
-		Height:         512,
+		Width:          dimension(settings.Images.Width),
+		Height:         dimension(settings.Images.Height),
 		Steps:          settings.Images.Steps,
 		Sampler:        settings.Images.Sampler,
 		Model:          settings.Images.Model,
-	})
+	}.Normalised())
 	if err != nil {
 		return "", err
 	}
@@ -2214,6 +2223,12 @@ func (a *App) StopImageDraw(drawID string) StopDrawResult {
 	}
 	result.WasDrawing = true
 	draw.cancel()
+	// A draw registered before the tool service existed — or by a path that never
+	// filled the field — has nothing to ask. The wait it was pressed to end is over
+	// either way, so this is the same answer as a backend that cannot be interrupted.
+	if draw.service == nil {
+		return result
+	}
 	// A fresh, short context on purpose: the draw's own context was cancelled by the line
 	// above, and an interrupt sent on it would never leave the machine.
 	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
