@@ -516,7 +516,10 @@ here — each is the program's own, and each is read at the moment it is useful:
   one that works everywhere and the fraction is only the fallback for a server that reports
   nothing else. The POST is a blocking call that answers when the picture is finished, so this
   is a second route polled *beside* it — one request a second, not two, because the preview
-  comes from the same answer.
+  comes from the same answer. A frame larger than 4 MB is dropped while its step is still
+  reported (`sdPreviewMaxBytes`), mirroring the program backend's own cap
+  (`cliPreviewMaxBytes`): a build that returns the full picture rather than a thumbnail
+  would otherwise push megabytes through the bridge once a second.
 - **The program** (`sd-cli`) writes a preview image to the path `--preview-path` names — the
   file is rewritten on every denoiser step, so a poll of it is a live picture of the draw — and
   prints the sampling step into its log as a bar (`  |=====>    | 3/12 - 2.20s/it`). The log is
@@ -557,13 +560,16 @@ stoppable at all: every Stop in the window lives under a picture, and there is n
 the draw has finished. `image:progress` is in `events.All()`, so `internal/events`' test
 requires it in the frontend's `EV` map.
 
+- **A draw announces itself before the backend says anything.** Registering it
+  (`tools.Service.Draws`) is followed by one zero report through `tools.Service.Progress`, so
+  the row — and the Stop button under it — exists from the first moment on *every* backend.
+  Without it a model-started draw was only stoppable once a backend happened to report, which
+  an `sd-cli` build without `--preview` and a server without the progress route never do: the
+  draw was registered and cancellable, and the button that would have cancelled it was never
+  rendered.
 - **The end of a draw is the same event with `done` set**, not a second name, and it is sent
-  **only for a draw that was reported on**. Its whole purpose is to clear a progress row off
-  the screen; a draw nobody reported on has no row, and the event exists so a Stop button
-  cannot outlive the thing it stops.
-- **Registration is not reporting.** `tools.Service.Draws` is called for every draw — that is
-  what makes a silent backend's draw stoppable — while `tools.Service.Progress` is only called
-  by a backend that implements `Progressive`.
+  once per registered draw — the start report marks it as reported, so the release always emits
+  it and a progress row cannot outlive the thing it stops.
 - **The release runs on the drawing goroutine**, so it only touches the emitter, which is safe
   from any goroutine; the `reported` flag it reads lives under the app's `drawsMu`.
 
@@ -607,6 +613,10 @@ every time is what makes an export button annoying enough not to use.
 A cancelled dialog returns an empty path, which is neither success nor failure, so the
 UI says nothing at all. A failure to *remember* the folder is reported as a warning and
 does not turn the save into an error: the picture is already on disk.
+
+The dialog's file filter follows the stored MIME type — PNG, JPEG, WebP or GIF — so a
+picture the server returned as JPEG is not offered under a `*.png` filter, which is what
+made such a file look like it could not be saved here.
 
 `GetAttachmentImage` returns the payload as a `data:` URL for the webview. The stored
 document is already base64, so nothing is re-encoded, and a `data:` URL rather than a
@@ -653,7 +663,10 @@ the two apart — a drawn picture records how it was made, an attached one has n
 
 Both numbers come from **one walk of the attachment table**, so `count`/`bytes` and
 `unsavedCount`/`unsavedBytes` cannot contradict each other, and `unsavedChats` is what makes the
-warning honest — it is how many conversations lose a picture. `image_cache_test.go` asserts the
+warning honest — it is how many conversations lose a picture. The byte counts are the **stored**
+size, base64 included: the row a clear deletes is the encoded `documents.text`, about a third
+larger than the decoded picture, so the number is what deleting frees rather than what the PNG
+weighs. `image_cache_test.go` asserts the
 three rules separately, because they fail differently: the attachment survives, the saved
 picture survives, and the *cleared* one is gone from the chat's own attachment list rather than
 merely from the totals.
