@@ -13,6 +13,21 @@
  * chat renderer supports: headings, emphasis, lists, a table, a fenced code
  * block with syntax highlighting, inline and display math, a blockquote and a
  * link. Rendering it is the point of the harness.
+ *
+ * A **second, unlabelled** fence sits beside the highlighted one on purpose. A
+ * fence with no language is the shape a model most often writes for a shell
+ * command, and it is the one case where the syntax palette must NOT apply:
+ * rehype-highlight returns before adding `hljs` when a fence names no language
+ * and detection is off, so such a block inherits `--text` — which is what makes
+ * it readable in the light theme, where the labelled one used to be #c9d1d9 on
+ * #f2f4f7 (1.4:1). Both are rendered here so the difference is visible rather
+ * than argued about. Inline `code` is the third surface and is pinned too.
+ *
+ * The `markdown` fence is the fourth, and it is the only place a `hljs-section`
+ * token appears in a chat: highlight.js's markdown grammar tags an ATX heading
+ * with it. That is the one dark-theme value KiChat overrides (github-dark's
+ * #1f6feb measures 4.17:1 on the dark code background), so it is rendered here
+ * rather than only in a synthetic node.
  */
 ;(function () {
   'use strict'
@@ -40,6 +55,26 @@
     'func toFeet(m float64) float64 {',
     '\treturn m * 3.28084',
     '}',
+    '```',
+    '',
+    'Derselbe Aufruf ohne Sprachangabe, wie ihn ein Modell für die Kommandozeile schreibt:',
+    '',
+    '```',
+    'sd-cli \\',
+    '  --diffusion-model models/qwen-unc/qwen-image-2.1-UC-Q6_K.gguf \\',
+    '  --vae models/qwen-unc/qwen_image_2.1_vae_bf16.safetensors \\',
+    '  -p "a lighthouse at dusk" \\',
+    '  -o out.png',
+    '```',
+    '',
+    'Inline steht dasselbe als `sd-cli --help` in einem Satz.',
+    '',
+    'Und so sieht Markdown-Quelltext aus:',
+    '',
+    '```markdown',
+    '# Quellenlage',
+    '',
+    'Ein Absatz.',
     '```',
     '',
     'Pythagoras: $a^2 + b^2 = c^2$',

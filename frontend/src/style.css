@@ -1,6 +1,9 @@
 @import 'tailwindcss';
 @import 'katex/dist/katex.min.css';
 @import 'highlight.js/styles/github-dark.css';
+/* The light half of the syntax palette. The dark stylesheet above cannot switch
+ * with the theme, so the light colours live here, scoped to the attribute. */
+@import './hljs-light.css';
 
 /*
  * KiChat is dark-first. Colours live in CSS variables so the theme toggle is a
@@ -307,6 +310,19 @@ body {
   padding: 0;
   font-size: 0.85em;
   line-height: 1.5;
+}
+/* One syntax token from the dark palette is too dim to read, and it is the only
+ * one: github-dark's #1f6feb for a markup heading measures 4.17:1 on --code-bg
+ * (#0b0e14), under the 4.5:1 that body text needs — GitHub leans on the bold
+ * weight for this token in its own dark theme. #409eff is the same token from
+ * GitHub's high-contrast dark theme (@primer/primitives 11.10.0), measured
+ * 6.95:1 here. The bold weight is left as github-dark sets it.
+ *
+ * This is the whole dark half: everything else in the dark palette cleared AA as
+ * shipped (7.7:1 to 15:1). The light half needs a palette of its own rather than
+ * a correction, so it lives in hljs-light.css. */
+[data-theme='dark'] .hljs-section {
+  color: #409eff;
 }
 .md table {
   border-collapse: collapse;

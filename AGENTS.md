@@ -209,8 +209,13 @@ type, read the accessibility tree, take screenshots, read the console. The page 
 a purple **MOCK BRIDGE** badge, so a harness page is never mistaken for the real app.
 
 - `tools/uiharness/mock-wails.js` holds the fixtures: a chat whose assistant reply uses
-  every markdown feature (headings, table, blockquote, highlighted code, inline and
-  display math), a second chat with a seeded search message and a compaction, and
+  every markdown feature (headings, table, blockquote, inline and display math) — and a
+  highlighted code block *next to an unlabelled one*, because the two get different classes
+  and so a different colour: the unlabelled fence is the shape a shell command is usually
+  written in, and the light theme's syntax palette must not reach it. A `markdown` fence
+  follows, since that is the only shape in which a `hljs-section` heading token appears —
+  the one dark-theme value KiChat overrides. A second chat has a seeded search message and a
+  compaction, and
   streaming replies driven by real `chat:*` events over a simulated 40 ms cadence. The
   mock is `go:embed`ed, so a running harness picks up an edit to it only after a restart
   — use `go run`, or rebuild before restarting.

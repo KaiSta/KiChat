@@ -1,0 +1,145 @@
+/*
+ * Syntax colours for the light theme.
+ *
+ * There is only one highlight.js stylesheet in the app — `github-dark.css`,
+ * imported by style.css — and it could not switch with the theme: the theme is
+ * an attribute on <html>, not a `prefers-color-scheme` query, so a second
+ * `@import` would have applied both palettes at once. The dark one therefore
+ * stayed on in light mode, which is the whole report. Measured in the harness on
+ * one highlighted Go reply, before this file existed:
+ *
+ *   base text   #c9d1d9 on --code-bg #f2f4f7   1.4:1
+ *   keyword     #ff7b72                        2.3:1
+ *   title       #d2a8ff                        1.8:1
+ *   number      #79c0ff                        1.8:1
+ *
+ * Not one token reached 2.4:1. A shell command is the plain case and the worst
+ * of it: highlight.js's bash grammar leaves `sd-cli --vae …` without any token
+ * class — measured, only a quoted argument comes back as a `hljs-string` — so
+ * that text *is* the base colour, and the base colour was 1.4:1. GitHub's own
+ * light palette was not enough either: its `hljs-built_in` orange (`#e36209`,
+ * which other grammars do emit) measures 3.2:1 on this background, so this is
+ * not a verbatim copy of `styles/github.css` either. The values below are
+ * GitHub's current light syntax tokens, from `@primer/primitives@11.10.0`
+ * (dist/css/functional/themes/light.css), which is the palette github.com
+ * paints today: darker across the board, and every role clears 4.5:1 on this
+ * app's code background.
+ *
+ * Scoping with `[data-theme='light']` is what makes these win: a class plus an
+ * attribute outranks the dark file's plain `.hljs-*` selectors whatever order
+ * the bundler emits them in, and the attribute flip is the app's only theme
+ * mechanism. The dark half is left as highlight.js ships it (measured 7.7:1 to
+ * 12.5:1); the two halves are therefore not the same vintage, and that is fine —
+ * this file exists to fix what was unreadable, not to re-theme the app.
+ *
+ * Three deliberate deviations from the upstream role mapping:
+ *   - the `background` upstream puts on `.hljs`, and the padding on
+ *     `pre code.hljs`, are dropped. `.md pre` already paints `--code-bg` and
+ *     `.md pre code` is transparent, so a white patch inside the grey box would
+ *     be the other half of the same complaint.
+ *   - `hljs-regexp` takes the `string-regexp` token rather than sharing the
+ *     string colour, which is what the token for it is for.
+ *   - the token backgrounds of `addition`/`deletion` are kept: those are diff
+ *     marks, they are meant to be read as such, and they sit on spans rather
+ *     than on the block.
+ *
+ * The class names are the ones this app actually gets: rehype-highlight with its
+ * default prefix, and with detection off. A block the model leaves unlabelled
+ * gets no `hljs` class at all — rehype-highlight returns before adding one when
+ * there is neither a language nor detection — so it inherits `--text` and needs
+ * nothing here. The classes below appear only once a fence names a language.
+ */
+[data-theme='light'] .hljs {
+  /* fg-default: the unmarked remainder of a line */
+  color: #1f2328;
+}
+[data-theme='light'] .hljs-doctag,
+[data-theme='light'] .hljs-keyword,
+[data-theme='light'] .hljs-meta .hljs-keyword,
+[data-theme='light'] .hljs-template-tag,
+[data-theme='light'] .hljs-template-variable,
+[data-theme='light'] .hljs-type,
+[data-theme='light'] .hljs-variable.language_ {
+  /* prettylights-syntax-keyword */
+  color: #cf222e;
+}
+[data-theme='light'] .hljs-title,
+[data-theme='light'] .hljs-title.class_,
+[data-theme='light'] .hljs-title.class_.inherited__,
+[data-theme='light'] .hljs-title.function_ {
+  /* prettylights-syntax-entity */
+  color: #6639ba;
+}
+[data-theme='light'] .hljs-attr,
+[data-theme='light'] .hljs-attribute,
+[data-theme='light'] .hljs-literal,
+[data-theme='light'] .hljs-meta,
+[data-theme='light'] .hljs-number,
+[data-theme='light'] .hljs-operator,
+[data-theme='light'] .hljs-variable,
+[data-theme='light'] .hljs-selector-attr,
+[data-theme='light'] .hljs-selector-class,
+[data-theme='light'] .hljs-selector-id {
+  /* prettylights-syntax-constant */
+  color: #0550ae;
+}
+[data-theme='light'] .hljs-regexp {
+  /* prettylights-syntax-string-regexp */
+  color: #116329;
+}
+[data-theme='light'] .hljs-string,
+[data-theme='light'] .hljs-meta .hljs-string {
+  /* prettylights-syntax-string */
+  color: #0a3069;
+}
+[data-theme='light'] .hljs-built_in,
+[data-theme='light'] .hljs-symbol {
+  /* prettylights-syntax-variable */
+  color: #953800;
+}
+[data-theme='light'] .hljs-comment,
+[data-theme='light'] .hljs-code,
+[data-theme='light'] .hljs-formula {
+  /* prettylights-syntax-comment */
+  color: #59636e;
+}
+[data-theme='light'] .hljs-name,
+[data-theme='light'] .hljs-quote,
+[data-theme='light'] .hljs-selector-tag,
+[data-theme='light'] .hljs-selector-pseudo {
+  /* prettylights-syntax-entity-tag */
+  color: #0550ae;
+}
+[data-theme='light'] .hljs-subst {
+  /* prettylights-syntax-storage-modifier-import */
+  color: #1f2328;
+}
+[data-theme='light'] .hljs-section {
+  /* prettylights-syntax-markup-heading */
+  color: #0550ae;
+  font-weight: bold;
+}
+[data-theme='light'] .hljs-bullet {
+  /* prettylights-syntax-markup-list */
+  color: #3b2300;
+}
+[data-theme='light'] .hljs-emphasis {
+  /* prettylights-syntax-markup-italic */
+  color: #1f2328;
+  font-style: italic;
+}
+[data-theme='light'] .hljs-strong {
+  /* prettylights-syntax-markup-bold */
+  color: #1f2328;
+  font-weight: bold;
+}
+[data-theme='light'] .hljs-addition {
+  /* prettylights-syntax-markup-inserted */
+  color: #116329;
+  background-color: #dafbe1;
+}
+[data-theme='light'] .hljs-deletion {
+  /* prettylights-syntax-markup-deleted */
+  color: #82071e;
+  background-color: #ffebe9;
+}
