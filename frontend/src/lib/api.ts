@@ -96,6 +96,10 @@ export namespace main {
   export type ModelCheckStatus = Plain<Gen.main.ModelCheckStatus>
   /** The picture server's reachability and what it offers. */
   export type ImageStatus = Plain<Gen.main.ImageStatus>
+  /** How much of KiChat's own storage is pictures it drew, and what a clear would free. */
+  export type ImageCache = Plain<Gen.main.ImageCache>
+  /** What clearing the unsaved pictures removed. */
+  export type ImageCacheClear = Plain<Gen.main.ImageCacheClear>
 }
 
 export namespace research {

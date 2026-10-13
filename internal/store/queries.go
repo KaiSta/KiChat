@@ -487,7 +487,8 @@ func (s *Store) PruneExpiredCaches() (int64, error) {
 }
 
 const attachmentColumns = `id,chat_id,message_id,kind,filename,mime,size_bytes,
-  sha256,pages,token_estimate,placement,document_id,warning,created_at,generation_json`
+  sha256,pages,token_estimate,placement,document_id,warning,created_at,generation_json,
+  saved_path`
 
 func scanAttachment(row interface{ Scan(...any) error }) (Attachment, error) {
 	var a Attachment
@@ -495,7 +496,7 @@ func scanAttachment(row interface{ Scan(...any) error }) (Attachment, error) {
 	var generation string
 	err := row.Scan(&a.ID, &a.ChatID, &a.MessageID, &a.Kind, &a.Filename, &a.Mime,
 		&a.SizeBytes, &a.SHA256, &a.Pages, &a.TokenEstimate, &a.Placement,
-		&a.DocumentID, &a.Warning, &created, &generation)
+		&a.DocumentID, &a.Warning, &created, &generation, &a.SavedPath)
 	if err != nil {
 		return Attachment{}, err
 	}
@@ -536,6 +537,42 @@ func (s *Store) ListAttachments(chatID string) ([]Attachment, error) {
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// AllAttachments returns every attachment in the database, newest last.
+//
+// It exists for the questions that are about the store as a whole rather than about one
+// chat — how much of it pictures take up, and which of them nothing outside the database
+// holds a copy of. Aggregating those in SQL would mean the store knowing what an image is
+// (`ingest.KindImage`), which is a fact about how the app reads a file rather than about
+// how a row is stored; the caller that already knows that classification does the
+// counting instead.
+func (s *Store) AllAttachments() ([]Attachment, error) {
+	rows, err := s.db.Query(`SELECT ` + attachmentColumns + ` FROM attachments ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Attachment{}
+	for rows.Next() {
+		a, err := scanAttachment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// SetAttachmentSavedPath records where an attachment was exported to.
+//
+// A separate statement rather than a field on UpdateAttachment: that one persists the
+// fields a reader may edit (placement, warning, the document a re-read produced), and an
+// export is not an edit of the attachment — it is a note that a copy now exists elsewhere.
+// Passing an empty path is allowed and means the copy is gone as far as this app knows.
+func (s *Store) SetAttachmentSavedPath(id, path string) error {
+	_, err := s.db.Exec(`UPDATE attachments SET saved_path=? WHERE id=?`, path, id)
+	return err
 }
 
 // --- documents and chunks --------------------------------------------------

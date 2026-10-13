@@ -662,6 +662,42 @@ export namespace main {
 	        this.toSeq = source["toSeq"];
 	    }
 	}
+	export class ImageCache {
+	    count: number;
+	    bytes: number;
+	    unsavedCount: number;
+	    unsavedBytes: number;
+	    unsavedChats: number;
+	    folder: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImageCache(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.count = source["count"];
+	        this.bytes = source["bytes"];
+	        this.unsavedCount = source["unsavedCount"];
+	        this.unsavedBytes = source["unsavedBytes"];
+	        this.unsavedChats = source["unsavedChats"];
+	        this.folder = source["folder"];
+	    }
+	}
+	export class ImageCacheClear {
+	    removed: number;
+	    bytes: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImageCacheClear(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.removed = source["removed"];
+	        this.bytes = source["bytes"];
+	    }
+	}
 	export class ImageStatus {
 	    enabled: boolean;
 	    baseURL: string;
@@ -1241,6 +1277,7 @@ export namespace store {
 	    warning?: string;
 	    // Go type: time
 	    createdAt: any;
+	    savedPath?: string;
 	    generation?: GenerationRecipe;
 	
 	    static createFrom(source: any = {}) {
@@ -1263,6 +1300,7 @@ export namespace store {
 	        this.documentId = source["documentId"];
 	        this.warning = source["warning"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
+	        this.savedPath = source["savedPath"];
 	        this.generation = this.convertValues(source["generation"], GenerationRecipe);
 	    }
 	

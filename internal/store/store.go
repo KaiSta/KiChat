@@ -250,6 +250,16 @@ CREATE TABLE IF NOT EXISTS counters (
 	// nothing earlier. Adding the column to migration 2's CREATE TABLE would leave
 	// every existing database without it, and every attachment read would then fail.
 	`ALTER TABLE attachments ADD COLUMN generation_json TEXT NOT NULL DEFAULT ''`,
+	// 5: where a picture was exported to.
+	//
+	// It exists so the pictures panel can tell a picture its owner already has a file of
+	// from one that lives only in this database. An empty path is "no copy outside KiChat",
+	// which is also what every row written before this migration is, and that is the
+	// honest reading: nothing recorded a copy, so the app cannot claim there is one. It is
+	// appended here for the same reason migration 4 is — the runner resumes at the version
+	// a database is already at, so an existing installation runs this entry and nothing
+	// earlier.
+	`ALTER TABLE attachments ADD COLUMN saved_path TEXT NOT NULL DEFAULT ''`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

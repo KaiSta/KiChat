@@ -2142,7 +2142,140 @@ function ImagesTab({
           {t('settings.images.noModels')}
         </div>
       )}
+
+      <PictureStore />
     </Section>
+  )
+}
+
+/**
+ * The pictures KiChat is holding, and the one control that frees them.
+ *
+ * A drawn picture is an attachment like any other, which means it lives in the app's own
+ * database — that is where an unsaved picture "is", and it is what this row answers. The
+ * store keeps them for as long as the chat exists, and nothing ever removes them: a long
+ * session of drawing quietly grows the data directory, and a user who never presses Save
+ * has no way to say they are finished with a picture.
+ *
+ * The removal is deliberately narrow. It touches neither a picture its owner has a file of
+ * (the export note, written by SaveAttachmentAs) nor a picture the *user* attached — the
+ * backend tells those apart by the recipe, which only a drawn picture has, so a photo dropped
+ * into the composer can never be swept up by a cache button.
+ *
+ * It also asks twice. "Clear cache" is the kind of label that sounds like it costs a
+ * re-download, and what it actually costs is a picture the chat will never show again — so
+ * the second press names the count, the size and how many conversations lose something.
+ */
+function PictureStore() {
+  const t = useStore((s) => s.t)
+  const [cache, setCache] = useState<main.ImageCache | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+
+  const refresh = async () => {
+    try {
+      setCache(await App.GetImageCache())
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    }
+  }
+
+  // Read once when the panel opens, like the backend probe above: the count is what the
+  // store holds right now, and re-reading it on every keystroke in an unrelated field would
+  // be a database walk per character.
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  const clear = async () => {
+    setBusy(true)
+    try {
+      const result = await App.ClearImageCache()
+      useStore
+        .getState()
+        .toast('info', t('settings.images.cacheCleared', { count: result.removed, bytes: formatBytes(result.bytes) }))
+    } catch (err) {
+      useStore.getState().toast('error', `${t('settings.images.cacheFailed')}: ${String(err)}`)
+    } finally {
+      setBusy(false)
+      setConfirming(false)
+      await refresh()
+    }
+  }
+
+  // Read as an object with numbers defaulted rather than trusted: this renders on a fresh
+  // install, where every field is zero, and a missing one must not print "undefined".
+  const count = cache?.count ?? 0
+  const bytes = cache?.bytes ?? 0
+  const unsavedCount = cache?.unsavedCount ?? 0
+  const unsavedBytes = cache?.unsavedBytes ?? 0
+  const unsavedChats = cache?.unsavedChats ?? 0
+
+  return (
+    <div className="mt-4 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+      <div className="mb-1 text-[12px]">{t('settings.images.cache')}</div>
+      <p className="faint mb-2 text-[11px]">{t('settings.images.cacheHint')}</p>
+
+      {count === 0 ? (
+        <div className="faint text-[11px]">{t('settings.images.cacheEmpty')}</div>
+      ) : (
+        <>
+          <div className="text-[12px]">
+            {t('settings.images.cacheCount', { count: formatNumber(count), bytes: formatBytes(bytes) })}
+          </div>
+          {unsavedCount > 0 ? (
+            <div className="text-[12px]" style={{ color: 'var(--warn)' }}>
+              {t('settings.images.cacheUnsaved', {
+                count: formatNumber(unsavedCount),
+                bytes: formatBytes(unsavedBytes),
+                chats: formatNumber(unsavedChats),
+              })}
+            </div>
+          ) : (
+            <div className="faint text-[12px]">{t('settings.images.cacheAllSaved')}</div>
+          )}
+        </>
+      )}
+
+      {/* The honest limit of the reading, said before the button rather than after the
+          loss: this app only knows about a copy it was told about. */}
+      <p className="faint mt-1 text-[11px]">{t('settings.images.cacheOlder')}</p>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {confirming ? (
+          <>
+            <span className="text-[11px]" style={{ color: 'var(--danger)' }}>
+              {t('settings.images.cacheConfirm', {
+                count: formatNumber(unsavedCount),
+                bytes: formatBytes(unsavedBytes),
+                chats: formatNumber(unsavedChats),
+              })}
+            </span>
+            <button
+              type="button"
+              className="btn btn-sm btn-danger"
+              disabled={busy}
+              onClick={() => void clear()}
+            >
+              {t('settings.images.cacheConfirmYes', { count: formatNumber(unsavedCount) })}
+            </button>
+            <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setConfirming(false)}>
+              {t('settings.images.cacheCancel')}
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={busy || unsavedCount === 0}
+            title={t('settings.images.cacheClearHint')}
+            onClick={() => setConfirming(true)}
+          >
+            {t('settings.images.cacheClear')}
+          </button>
+        )}
+      </div>
+    </div>
   )
 }
 

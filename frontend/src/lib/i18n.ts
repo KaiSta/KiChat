@@ -412,6 +412,27 @@ const de = {
   'settings.images.negative': 'Negativ-Prompt',
   'settings.images.saveFolder': 'Zielordner',
   'settings.images.pickFolder': 'Ordner wählen',
+  'settings.images.cache': 'Bilder in KiChat',
+  'settings.images.cacheHint':
+    'Selbst gezeichnete Bilder liegen in der Datenbank von KiChat, auch wenn du sie nie gespeichert hast — ein Chat zeigt sie, solange es ihn gibt. „Speichern“ legt zusätzlich eine Datei an; Bilder ohne eine solche Kopie kannst du hier entfernen. Sie verschwinden dann auch aus ihren Chats, und das lässt sich nicht rückgängig machen.',
+  'settings.images.cacheOlder':
+    'Gespeichert heißt hier: KiChat hat sich den Speicherort gemerkt. Bei Bildern, die du vor dieser Version gespeichert hast, fehlt dieser Vermerk — sie gelten deshalb als nicht gespeichert.',
+  // "Bild(er)" rather than "Bilder": the dictionaries have no plural machinery, and this
+  // app already writes a count that way where the Go side reports one ("%d Bild(er)").
+  'settings.images.cacheCount': '{{count}} Bild(er) · {{bytes}}',
+  'settings.images.cacheUnsaved':
+    '{{count}} davon ohne Datei ({{bytes}}), verteilt auf {{chats}} Chats',
+  'settings.images.cacheAllSaved': 'Alle diese Bilder wurden schon als Datei gespeichert.',
+  'settings.images.cacheEmpty': 'KiChat hält keine selbst gezeichneten Bilder.',
+  'settings.images.cacheClear': 'Nicht gespeicherte Bilder entfernen',
+  'settings.images.cacheClearHint':
+    'Entfernt nur Bilder, für die kein Speicherort vermerkt ist. Angehängte Dateien und gespeicherte Bilder bleiben unberührt.',
+  'settings.images.cacheConfirm':
+    'Wirklich {{count}} Bild(er) ({{bytes}}) aus {{chats}} Chats löschen?',
+  'settings.images.cacheConfirmYes': 'Ja, {{count}} Bild(er) löschen',
+  'settings.images.cacheCancel': 'Abbrechen',
+  'settings.images.cacheCleared': '{{count}} Bild(er) entfernt ({{bytes}})',
+  'settings.images.cacheFailed': 'Bilder konnten nicht entfernt werden',
   'settings.images.test': 'Verbindung testen',
   'settings.images.testing': 'Wird getestet …',
   'settings.images.ok': 'erreichbar',
@@ -910,6 +931,25 @@ const en: Record<keyof typeof de, string> = {
   'settings.images.negative': 'Negative prompt',
   'settings.images.saveFolder': 'Save folder',
   'settings.images.pickFolder': 'Choose folder',
+  'settings.images.cache': 'Pictures in KiChat',
+  'settings.images.cacheHint':
+    'Pictures KiChat drew live in the app’s own database even when you never saved them — a chat keeps showing them for as long as it exists. “Save” writes a file as well; pictures without such a copy can be removed here. They then disappear from their chats too, and that cannot be undone.',
+  'settings.images.cacheOlder':
+    'Saved here means KiChat noted where the copy went. Pictures you saved before this version carry no such note, so they count as unsaved.',
+  // "picture(s)", for the reason the German side spells it "Bild(er)": there is no plural
+  // form in a dictionary keyed by name.
+  'settings.images.cacheCount': '{{count}} picture(s) · {{bytes}}',
+  'settings.images.cacheUnsaved': '{{count}} of them with no file ({{bytes}}), in {{chats}} chats',
+  'settings.images.cacheAllSaved': 'All of these pictures have been saved to a file.',
+  'settings.images.cacheEmpty': 'KiChat holds no pictures it drew itself.',
+  'settings.images.cacheClear': 'Remove unsaved pictures',
+  'settings.images.cacheClearHint':
+    'Removes only pictures with no recorded save location. Attachments and saved pictures are untouched.',
+  'settings.images.cacheConfirm': 'Really delete {{count}} picture(s) ({{bytes}}) from {{chats}} chats?',
+  'settings.images.cacheConfirmYes': 'Yes, delete {{count}} picture(s)',
+  'settings.images.cacheCancel': 'Cancel',
+  'settings.images.cacheCleared': '{{count}} picture(s) removed ({{bytes}})',
+  'settings.images.cacheFailed': 'The pictures could not be removed',
   'settings.images.test': 'Test connection',
   'settings.images.testing': 'Testing…',
   'settings.images.ok': 'reachable',
@@ -1393,6 +1433,22 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.negative': '负面提示词',
   'settings.images.saveFolder': '保存文件夹',
   'settings.images.pickFolder': '选择文件夹',
+  'settings.images.cache': 'KiChat 中的图片',
+  'settings.images.cacheHint':
+    'KiChat 自己绘制的图片存放在应用自己的数据库中，即使你从未保存过它们——只要聊天还在，它就一直在那里显示。"保存"会额外写入一个文件；没有这种副本的图片可以在这里删除。它们也会从所在的聊天中消失，且无法撤销。',
+  'settings.images.cacheOlder':
+    '这里的"已保存"指的是 KiChat 记录了副本存放的位置。在此版本之前保存的图片没有这条记录，因此会被视为未保存。',
+  'settings.images.cacheCount': '{{count}} 张图片 · {{bytes}}',
+  'settings.images.cacheUnsaved': '其中 {{count}} 张没有文件（{{bytes}}），分布在 {{chats}} 个聊天中',
+  'settings.images.cacheAllSaved': '这些图片都已保存为文件。',
+  'settings.images.cacheEmpty': 'KiChat 中没有自己绘制的图片。',
+  'settings.images.cacheClear': '删除未保存的图片',
+  'settings.images.cacheClearHint': '只删除没有保存位置记录的图片。附件和已保存的图片不受影响。',
+  'settings.images.cacheConfirm': '确实要从 {{chats}} 个聊天中删除 {{count}} 张图片（{{bytes}}）吗？',
+  'settings.images.cacheConfirmYes': '是，删除 {{count}} 张图片',
+  'settings.images.cacheCancel': '取消',
+  'settings.images.cacheCleared': '已删除 {{count}} 张图片（{{bytes}}）',
+  'settings.images.cacheFailed': '无法删除图片',
   'settings.images.test': '测试连接',
   'settings.images.testing': '正在测试…',
   'settings.images.ok': '可访问',

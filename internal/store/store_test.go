@@ -713,8 +713,15 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if _, err := st.DB().Exec(`ALTER TABLE attachments DROP COLUMN generation_json`); err != nil {
-		t.Fatalf("drop the column to build the older schema: %v", err)
+	// Every column a later migration adds, not just the first one: the version below is
+	// rolled back to 3, so a real database from that version has neither of them — and
+	// dropping only one leaves an `ALTER TABLE ... ADD COLUMN` in the runner failing on a
+	// column that is already there, which is how this test broke when the second one
+	// arrived. A column added by migration N is dropped here in the same commit that adds it.
+	for _, column := range []string{"generation_json", "saved_path"} {
+		if _, err := st.DB().Exec(`ALTER TABLE attachments DROP COLUMN ` + column); err != nil {
+			t.Fatalf("drop %s to build the older schema: %v", column, err)
+		}
 	}
 	if _, err := st.DB().Exec(`PRAGMA user_version = 3`); err != nil {
 		t.Fatalf("roll the version back: %v", err)
@@ -753,6 +760,11 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 	}
 	if old.Generation != nil {
 		t.Errorf("a file attached before the column existed reports a recipe: %+v", old.Generation)
+	}
+	// And the second new column: an attachment that predates it has no recorded export, which
+	// is the honest reading — nothing recorded a copy, so the app cannot claim there is one.
+	if old.SavedPath != "" {
+		t.Errorf("a file attached before the export column existed reports an export: %q", old.SavedPath)
 	}
 }
 
@@ -839,5 +851,82 @@ func TestACorruptRecipeFailsTheRead(t *testing.T) {
 	}
 	if _, err := st.GetAttachment("a1"); err == nil {
 		t.Error("an unparseable recipe was accepted as \"no recipe\"")
+	}
+}
+
+// TestTheExportPathRoundTrips is what the pictures panel reads, and the trap it guards is the
+// column list: `saved_path` travelled through `attachmentColumns` when it was added, and a
+// rename or a missing entry there fails silently — the row is written, the reader gets an
+// empty string, and every exported picture then reads as one its owner has no copy of, which
+// is the state the clear button deletes.
+func TestTheExportPathRoundTrips(t *testing.T) {
+	st := newStore(t)
+	now := time.Now()
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateAttachment(Attachment{ID: "a1", ChatID: "c1", Kind: "image",
+		Filename: "a-red-fox.png", Mime: "image/png", SizeBytes: 2048,
+		Placement: PlacementInline, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A picture nobody exported yet: empty, which is not an error and not a zero value to
+	// be normalised away — "no copy outside KiChat" is a fact about the picture.
+	fresh, err := st.GetAttachment("a1")
+	if err != nil {
+		t.Fatalf("GetAttachment: %v", err)
+	}
+	if fresh.SavedPath != "" {
+		t.Errorf("SavedPath = %q on a picture that was never exported, want empty", fresh.SavedPath)
+	}
+
+	if err := st.SetAttachmentSavedPath("a1", "/home/user/Pictures/a-red-fox.png"); err != nil {
+		t.Fatalf("SetAttachmentSavedPath: %v", err)
+	}
+	exported, err := st.GetAttachment("a1")
+	if err != nil {
+		t.Fatalf("GetAttachment: %v", err)
+	}
+	if exported.SavedPath != "/home/user/Pictures/a-red-fox.png" {
+		t.Errorf("SavedPath = %q, want the exported path", exported.SavedPath)
+	}
+	// The note is not an edit of the attachment, so the fields a reader may edit must be
+	// untouched by it — and it must survive the update that follows a placement switch.
+	if err := st.UpdateAttachment(exported); err != nil {
+		t.Fatalf("UpdateAttachment: %v", err)
+	}
+	if again, err := st.GetAttachment("a1"); err != nil {
+		t.Fatalf("GetAttachment: %v", err)
+	} else if again.SavedPath != exported.SavedPath {
+		t.Errorf("SavedPath = %q after an update, want %q", again.SavedPath, exported.SavedPath)
+	}
+
+	// An empty path is allowed and means the copy is gone as far as this app knows.
+	if err := st.SetAttachmentSavedPath("a1", ""); err != nil {
+		t.Fatalf("SetAttachmentSavedPath(\"\"): %v", err)
+	}
+	if again, err := st.GetAttachment("a1"); err != nil {
+		t.Fatalf("GetAttachment: %v", err)
+	} else if again.SavedPath != "" {
+		t.Errorf("SavedPath = %q after clearing it, want empty", again.SavedPath)
+	}
+
+	// And the whole-table reader the panel uses sees the same row.
+	all, err := st.AllAttachments()
+	if err != nil {
+		t.Fatalf("AllAttachments: %v", err)
+	}
+	if len(all) != 1 || all[0].ID != "a1" {
+		t.Errorf("AllAttachments = %+v, want the one picture", all)
+	}
+	// Never nil: a slice that marshals to null is the bug this codebase has shipped
+	// twice, and the caller here is a panel that walks it.
+	empty, err := newStore(t).AllAttachments()
+	if err != nil {
+		t.Fatalf("AllAttachments on an empty store: %v", err)
+	}
+	if empty == nil {
+		t.Error("AllAttachments returned nil for an empty store; the caller iterates it")
 	}
 }

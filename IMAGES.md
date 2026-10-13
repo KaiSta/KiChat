@@ -620,22 +620,77 @@ streamed reply; re-reading it each time would push that payload through the brid
 every keystroke. A rejected promise is dropped rather than cached, so a failure that
 lasted one startup is not permanent.
 
+A successful save also **records where the copy went** (`attachments.saved_path`, migration 5,
+`Store.SetAttachmentSavedPath`). A separate statement rather than a field on
+`UpdateAttachment`: that one persists what a reader may edit, and an export is not an edit of
+the attachment — it is a note that a copy now exists elsewhere. The note is what tells a
+picture its owner has a file of from one that lives only in this database, and that reading is
+the whole of §6.1. **Failing to write it is a warning, not a failed save**: the bytes are on
+disk, and the note is a reading.
+
+### 6.1 What KiChat keeps, and the button that clears it
+
+An unsaved picture is not nowhere, which is the question the panel answers: a drawn picture is
+an ordinary inline attachment (§4), so it lives in the app's own SQLite store — `attachments`
+row plus the base64 payload in a `documents` row — for as long as the chat does. Nothing ever
+removed one, so a session of drawing quietly grows the data directory and a user who never
+presses Save has no way to say they are finished with a picture.
+
+`GetImageCache` and `ClearImageCache` are that way. Three rules make them safe rather than
+merely useful:
+
+- **Only pictures KiChat drew are candidates.** A photograph the user dropped into the
+  composer is an image attachment too, and it is emphatically not a cache entry: the file it
+  came from still exists, this app was simply never told where. The **recipe** is what tells
+the two apart — a drawn picture records how it was made, an attached one has nothing to record
+  (`Generation != nil`) — and both the reading and the clear go through one helper
+  (`App.drawnPictures`) so they cannot disagree about what a candidate is. Deleting an attached
+  photo would take a picture out of a conversation to free nothing.
+- **Saved pictures stay.** The clear skips every attachment with a recorded export, so what it
+  frees is exactly what the panel counts as unsaved.
+- **Nothing happens without the press.** There is no automatic cleanup, no size threshold and no
+  age rule: this is the one destructive control in the feature, and it is a button.
+
+Both numbers come from **one walk of the attachment table**, so `count`/`bytes` and
+`unsavedCount`/`unsavedBytes` cannot contradict each other, and `unsavedChats` is what makes the
+warning honest — it is how many conversations lose a picture. `image_cache_test.go` asserts the
+three rules separately, because they fail differently: the attachment survives, the saved
+picture survives, and the *cleared* one is gone from the chat's own attachment list rather than
+merely from the totals.
+
+**The honest limit, printed in the panel rather than left implicit.** "Unsaved" means this app
+recorded no export, which is not quite "there is no copy": a picture saved before this version
+carries no note, so it reads exactly like one nobody ever saved. The panel says so above the
+button, and the migration comment takes the same line — nothing recorded a copy, so the app
+cannot claim there is one. The alternative (treating an empty note as "assume the user has it")
+would silently keep every picture, which is the state the button exists to end.
+
+The panel **asks twice**: the second press names the count, the size and how many chats are
+affected. "Clear cache" is the kind of label that sounds like it costs a re-download, and what
+it actually costs is a picture the chat will never show again — so the last thing before the
+deletion is a sentence that says that, in numbers. After it, the row re-reads itself, which is
+what proves the press did anything.
+
 ## 7. Where it lives
 
 ```
 internal/images/        types + the two providers: the /sdapi/v1 client (sdwebui.go,
                         sdwebui_test.go) and the sd-cli one (cli.go, proc_unix.go,
-                        proc_other.go), the optional Interrupter, ErrCancelled
+                        proc_other.go), the optional Interrupter and Progressive,
+                        Progress, ErrCancelled
 internal/tools/image.go the generate_image tool: arguments, storage, the model's reply,
-                        the recipe, Regenerate (a whole recipe in, one picture out) and
-                        InterruptDraw
+                        the recipe, Regenerate (a whole recipe in, one picture out),
+                        InterruptDraw, and the optional Draws/Progress hooks
 internal/config/        config.ImageSettings, DefaultImageBaseURL, NormaliseImageClamps
-internal/store/         GenerationRecipe on the attachment, migration 4, the queries
-app.go                  rebuildServices builds the provider, or nil when off
+internal/store/         GenerationRecipe on the attachment, migration 4; SavedPath and
+                        migration 5, AllAttachments, SetAttachmentSavedPath
+app.go                  rebuildServices builds the provider, or nil when off; inflightDraw
+                        and the draws registry, one map for both kinds of draw
 api.go                  GetImageStatus, TestImageBackend, GetAttachmentImage,
-                        SaveAttachmentAs, PickSaveFolder, RegenerateImage, StopImageDraw
-imgs  (frontend)        MessageParts.MessageImages / MessageImage / RecipeEditor, ChatView,
-                        Settings
+                        SaveAttachmentAs, PickSaveFolder, RegenerateImage, StopImageDraw,
+                        GetImageCache, ClearImageCache
+imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
+                        RecipeEditor / ToolCallCard, ChatView, Settings.PictureStore
 ```
 
 ## 8. Verification
@@ -802,6 +857,10 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / RecipeEditor
   server was reachable from here to tell the two apart. Everything else about the picture
   works: it is stored, shown, saved and redrawn. Deciding this properly is a per-backend
   answer (send it, or name it in text), which is not written yet.
+- **The store only knows about an export it recorded.** A picture saved before `saved_path`
+  existed counts as unsaved (§6.1), and there is no per-picture delete in the panel: the whole
+  unsaved set goes at once, with no list to pick from. A list would need a browsing surface
+  (thumbnails, a chat per picture, a size per picture) that this panel deliberately is not.
 - **A draw that hits its bound leaves the server drawing.** `StopImageDraw` interrupts, but a
   timeout only abandons the wait: KiChat hangs up and the server finishes a picture nobody
   will see. Sending the interrupt on timeout was considered and left out, because the interrupt

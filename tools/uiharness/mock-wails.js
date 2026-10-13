@@ -1071,6 +1071,18 @@ Verfügbare Tools: {{tool_list}}`,
   let pendingDraw = null
   let drawToolStarted = false
 
+  // What KiChat's own store holds, as the panel reads it. Three pictures drawn, one of them
+  // saved to a file — the state in which the clear button has something to refuse to touch
+  // as well as something to remove.
+  let pictureStore = {
+    count: 3,
+    bytes: 4_718_592,
+    unsavedCount: 2,
+    unsavedBytes: 3_145_728,
+    unsavedChats: 2,
+    folder: '/home/user/Pictures',
+  }
+
   function clearDraw(draw) {
     if (draw?.timer) clearInterval(draw.timer)
   }
@@ -2375,6 +2387,32 @@ Verfügbare Tools: {{tool_list}}`,
       return Promise.resolve('/home/user/Pictures/a-red-fox-in-deep-snow-1.png')
     },
     PickSaveFolder: () => Promise.resolve('/home/user/Pictures'),
+    // The picture store's reading, and the one destructive call in the panel. Both are
+    // modelled rather than stubbed, because the interesting state is the *pair*: the row
+    // has to say how much is held, how much of it has no file, and then read zero after
+    // the clear — a mock that answered a constant would leave the re-read after the
+    // deletion unrenderable, and that re-read is what proves the button did anything.
+    //
+    // The numbers are shaped like a session of drawing: three pictures held, one of them
+    // saved (so the clear is not simply "delete everything"), and the saved one deliberately
+    // still counted afterwards.
+    GetImageCache: () => {
+      console.log('[harness] GetImageCache', JSON.stringify(pictureStore))
+      return Promise.resolve(pictureStore)
+    },
+    ClearImageCache: () => {
+      const removed = { removed: pictureStore.unsavedCount, bytes: pictureStore.unsavedBytes }
+      console.log('[harness] ClearImageCache', JSON.stringify(removed))
+      pictureStore = {
+        ...pictureStore,
+        count: pictureStore.count - removed.removed,
+        bytes: pictureStore.bytes - removed.bytes,
+        unsavedCount: 0,
+        unsavedBytes: 0,
+        unsavedChats: 0,
+      }
+      return Promise.resolve(removed)
+    },
     // The draw path. The whole recipe arrives rather than a flag, because that is what the
     // binding takes now: a repeat, a variation and an edited recipe are one call, and the
     // harness has to be able to tell them apart. Recorded rather than dropped — the whole

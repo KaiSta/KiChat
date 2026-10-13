@@ -80,6 +80,11 @@ type Attachment struct {
 	DocumentID    string    `json:"documentId"`
 	Warning       string    `json:"warning,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
+	// SavedPath is where this attachment was exported to, empty when it was never saved to
+	// a file. It is a fact about the *copy* rather than about the attachment: the picture
+	// itself lives in the document either way, so an empty path means "the only copy is the
+	// one in this database" and nothing more. That is what the pictures panel reads it for.
+	SavedPath string `json:"savedPath,omitempty"`
 
 	// Generation is the recipe a picture this app drew was made with, so it can be
 	// drawn again. It is nil for a file the user attached: a photograph has no

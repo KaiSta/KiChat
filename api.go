@@ -2387,6 +2387,15 @@ func (a *App) SaveAttachmentAs(attachmentID string) (string, error) {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return "", fmt.Errorf("Bild konnte nicht gespeichert werden: %w", err)
 	}
+	// Recorded, because it is the whole difference between a picture its owner has a
+	// file of and one that lives only in this database — and that is the question the
+	// pictures panel asks (§10). A failure here is not a failed save: the file is on
+	// disk and the note is a reading, so it is a warning rather than an error.
+	if err := a.store.SetAttachmentSavedPath(attachment.ID, path); err != nil {
+		a.emit(events.Warning, map[string]any{
+			"warning": "Der Speicherort konnte nicht vermerkt werden: " + err.Error(),
+		})
+	}
 
 	if dir := filepath.Dir(path); dir != "" && dir != a.Settings().Images.SaveFolder {
 		a.settingsMu.Lock()
@@ -2413,6 +2422,145 @@ func (a *App) PickSaveFolder() (string, error) {
 		Title:            "Ordner für gespeicherte Bilder",
 		DefaultDirectory: a.Settings().Images.SaveFolder,
 	})
+}
+
+// ImageCache is the app's own picture storage as the settings panel reads it.
+//
+// It answers the two questions a user asks in one breath — where did those pictures go,
+// and what may I throw away — from a single walk of the attachment table, so the numbers
+// cannot disagree with each other.
+//
+// **Only pictures KiChat drew count.** A photograph the user dropped into the composer is
+// an image attachment too, and it is emphatically not a cache entry: the file it came from
+// still exists, this app simply was never told where, and deleting it would take a picture
+// out of a conversation to free nothing. The recipe is what tells the two apart — a drawn
+// picture records how it was drawn, an attached one has nothing to record.
+//
+// Unsaved means no export was ever recorded for it, which is not quite the same as "there is
+// no copy": a picture saved before that note existed reads exactly like one nobody ever
+// saved. The panel says so rather than pretending otherwise, and nothing here deletes
+// anything without the user pressing the button that does.
+//
+// No field is a nullable slice, but `UnsavedChats` is the count that makes the button's
+// warning honest: it is how many conversations lose a picture.
+type ImageCache struct {
+	// Count and Bytes are every picture KiChat drew that its store still holds.
+	Count int   `json:"count"`
+	Bytes int64 `json:"bytes"`
+	// UnsavedCount and UnsavedBytes are the part of that no export records. They are the
+	// only thing the clear button touches, and zero when every picture was saved.
+	UnsavedCount int   `json:"unsavedCount"`
+	UnsavedBytes int64 `json:"unsavedBytes"`
+	// UnsavedChats is how many chats hold at least one of those pictures.
+	UnsavedChats int `json:"unsavedChats"`
+	// Folder is where the save dialog starts — the place a user already chose for their own
+	// pictures, so the panel can point at it while explaining what "saved" means. It is the
+	// stored setting, not a live reading: an empty one means the dialog has no default yet.
+	Folder string `json:"folder"`
+}
+
+// drawnPictures returns every picture KiChat drew, newest last, in the order the store
+// holds them.
+//
+// It is the one place the store's rows are turned into "a picture this app drew", so the
+// status and the clear cannot disagree about what a candidate is: a recipe is present (so
+// it is drawn, not attached) and the row is an image attachment.
+func (a *App) drawnPictures() ([]store.Attachment, error) {
+	all, err := a.store.AllAttachments()
+	if err != nil {
+		return nil, err
+	}
+	out := []store.Attachment{}
+	for _, attachment := range all {
+		if attachment.Generation == nil {
+			continue
+		}
+		if attachment.Kind != string(ingest.KindImage) && !strings.HasPrefix(strings.ToLower(attachment.Mime), "image/") {
+			continue
+		}
+		out = append(out, attachment)
+	}
+	return out, nil
+}
+
+// GetImageCache reports how much of KiChat's own storage is pictures it drew, and how much
+// of that only KiChat holds.
+func (a *App) GetImageCache() (ImageCache, error) {
+	if err := a.ensure(); err != nil {
+		return ImageCache{}, err
+	}
+	cache := ImageCache{Folder: a.Settings().Images.SaveFolder}
+	pictures, err := a.drawnPictures()
+	if err != nil {
+		return ImageCache{}, err
+	}
+	chats := map[string]bool{}
+	for _, picture := range pictures {
+		cache.Count++
+		cache.Bytes += picture.SizeBytes
+		if picture.SavedPath != "" {
+			continue
+		}
+		cache.UnsavedCount++
+		cache.UnsavedBytes += picture.SizeBytes
+		chats[picture.ChatID] = true
+	}
+	cache.UnsavedChats = len(chats)
+	return cache, nil
+}
+
+// ImageCacheClear is what clearing the picture cache achieved.
+//
+// Two numbers rather than a bare count, because they are what the confirmation promised:
+// the panel says "14 Bilder, 12 MB" before the click and has to be able to say what really
+// went. A picture that could not be deleted is not counted and not silently ignored — the
+// error travels, and whatever was removed before it stays removed, because each deletion
+// is its own transaction.
+type ImageCacheClear struct {
+	Removed int   `json:"removed"`
+	Bytes   int64 `json:"bytes"`
+}
+
+// ClearImageCache deletes every picture KiChat drew that has no recorded export.
+//
+// This is the one destructive thing in the image panel, and it is deliberately narrow: it
+// touches neither an attached file (§ the drawnPictures rule) nor a picture its owner has a
+// copy of, and it is never automatic. What it buys is the answer to "why is my KiChat data
+// directory gigabytes?" — a session that draws pictures leaves every one of them in the
+// store, and a user who never saves one has no other way to say they are finished with it.
+//
+// Each chat that lost something is told once, at the end, rather than per picture: the event
+// makes the view re-read that chat, and one re-read per chat is what it costs either way.
+func (a *App) ClearImageCache() (ImageCacheClear, error) {
+	if err := a.ensure(); err != nil {
+		return ImageCacheClear{}, err
+	}
+	pictures, err := a.drawnPictures()
+	if err != nil {
+		return ImageCacheClear{}, err
+	}
+	result := ImageCacheClear{}
+	affected := map[string]bool{}
+	for _, picture := range pictures {
+		if picture.SavedPath != "" {
+			continue
+		}
+		if err := a.store.DeleteAttachment(picture.ID); err != nil {
+			return result, fmt.Errorf("Bild %s entfernen: %w", picture.Filename, err)
+		}
+		result.Removed++
+		result.Bytes += picture.SizeBytes
+		if picture.ChatID != "" {
+			affected[picture.ChatID] = true
+		}
+	}
+	for chatID := range affected {
+		a.emit(events.Attachments, map[string]any{"chatId": chatID})
+	}
+	if a.ctx != nil && result.Removed > 0 {
+		runtime.LogInfof(a.ctx, "%d nicht gespeicherte Bilder entfernt", result.Removed)
+	}
+	return result, nil
 }
 
 // PickFiles opens a native file dialog and returns the chosen paths.

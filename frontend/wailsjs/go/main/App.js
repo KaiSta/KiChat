@@ -18,6 +18,10 @@ export function ClearHiddenModels(arg1) {
   return window['go']['main']['App']['ClearHiddenModels'](arg1);
 }
 
+export function ClearImageCache() {
+  return window['go']['main']['App']['ClearImageCache']();
+}
+
 export function CompactNow(arg1) {
   return window['go']['main']['App']['CompactNow'](arg1);
 }
@@ -60,6 +64,10 @@ export function GetDocument(arg1) {
 
 export function GetHealth() {
   return window['go']['main']['App']['GetHealth']();
+}
+
+export function GetImageCache() {
+  return window['go']['main']['App']['GetImageCache']();
 }
 
 export function GetImageStatus() {
