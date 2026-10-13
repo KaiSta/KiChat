@@ -297,6 +297,30 @@ func TestSDWebUIRedactsTheCredentialItSent(t *testing.T) {
 	}
 }
 
+// A short credential leaks exactly as well as a long one. The redactor used to skip
+// anything under eight characters, which left a `user:pass` shorter than that in the clear in
+// precisely the string this helper exists to clean.
+func TestSDWebUIRedactsAShortCredentialToo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, `rejected credentials: %s`, r.Header.Get("Authorization"))
+	}))
+	defer server.Close()
+
+	const basic = "usr:pw"
+	err := NewSDWebUI("sd", "SD", server.URL, basic).Health(context.Background())
+	if err == nil {
+		t.Fatal("a 401 was reported as healthy")
+	}
+	if strings.Contains(err.Error(), base64.StdEncoding.EncodeToString([]byte(basic))) ||
+		strings.Contains(err.Error(), basic) {
+		t.Fatalf("the short credential survived into the error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("nothing was redacted at all: %v", err)
+	}
+}
+
 func TestSDWebUIRetriesATransientFailure(t *testing.T) {
 	var attempts int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -551,6 +575,47 @@ func TestSDWebUIReportsTheStepAndAPreviewWhileItDraws(t *testing.T) {
 	}
 	if polls.Load() == 0 {
 		t.Error("the progress route was never called")
+	}
+}
+
+// A preview larger than the bridge should carry is dropped while the step is still reported.
+// A build whose `current_image` is the full-size picture rather than a thumbnail would
+// otherwise push megabytes through the bridge once a second, which costs more than the
+// preview is worth.
+func TestSDWebUIDropsAPreviewTooLargeForTheBridge(t *testing.T) {
+	big := make([]byte, sdPreviewMaxBytes+1)
+	copy(big, jpegBytes)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sdapi/v1/txt2img":
+			// Long enough for one poll to land while the draw is still open.
+			time.Sleep(1300 * time.Millisecond)
+			fmt.Fprintf(w, `{"images":["%s"]}`, base64.StdEncoding.EncodeToString(pngBytes))
+		case "/sdapi/v1/progress":
+			fmt.Fprintf(w, `{"current_image":"%s","state":{"sampling_step":3,"sampling_steps":12}}`,
+				base64.StdEncoding.EncodeToString(big))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var reports []Progress
+	if _, err := NewSDWebUI("sd", "SD", server.URL, "").
+		GenerateWithProgress(t.Context(), Request{Prompt: "a red fox"}, func(p Progress) {
+			reports = append(reports, p)
+		}); err != nil {
+		t.Fatalf("GenerateWithProgress: %v", err)
+	}
+	if len(reports) == 0 {
+		t.Fatal("a watched draw reported nothing; the step should survive even when the picture does not")
+	}
+	first := reports[0]
+	if first.Step != 3 || first.Steps != 12 {
+		t.Errorf("first report = %d/%d, want the step even though the picture was dropped", first.Step, first.Steps)
+	}
+	if len(first.Preview) != 0 || first.PreviewMime != "" {
+		t.Errorf("an oversized preview was carried anyway: %d bytes, mime %q", len(first.Preview), first.PreviewMime)
 	}
 }
 

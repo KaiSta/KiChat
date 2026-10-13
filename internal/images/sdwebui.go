@@ -329,6 +329,14 @@ func (s *SDWebUI) GenerateWithProgress(ctx context.Context, req Request, report 
 // from the same call, which is what makes this one request per second rather than two.
 const sdProgressPoll = time.Second
 
+// sdPreviewMaxBytes bounds one preview frame read off the progress route.
+//
+// The route usually answers with a small JPEG of the latent, but a build can return the
+// full-size picture instead, and pushing megabytes through the bridge once a second costs
+// more than the preview is worth. Past this the step counter is still reported and the frame
+// is not. It mirrors the CLI backend's own cap (cliPreviewMaxBytes).
+const sdPreviewMaxBytes = 4 << 20
+
 // watchProgress polls the server's progress route until stopWatching is called or the draw's
 // context ends, and returns the function that stops it.
 //
@@ -374,7 +382,7 @@ func (s *SDWebUI) watchProgress(ctx context.Context, report func(Progress)) func
 			}
 			if p.CurrentImage != "" && p.CurrentImage != lastImage {
 				lastImage = p.CurrentImage
-				if data, err := decodeImage(p.CurrentImage); err == nil {
+				if data, err := decodeImage(p.CurrentImage); err == nil && len(data) <= sdPreviewMaxBytes {
 					update.PreviewMime, _ = SniffImage(data, MimeJPEG, "jpg")
 					update.Preview = data
 				}
@@ -641,8 +649,13 @@ func looksLikeMissingModel(status int, body string) bool {
 // redact removes the credentials this client sent from a body that echoed them
 // back. A proxied or misconfigured WebUI can repeat the request it refused, and
 // the body travels to a toast.
+//
+// Redacted whatever its length: a short credential leaks exactly as well as a long one,
+// and "the echo is only live for short secrets" is not a rule that helps the user it
+// exposes. The replacement is literal, so a body that does not contain the credential is
+// returned unchanged.
 func (s *SDWebUI) redact(body string) string {
-	if s.basicAuth == "" || len(s.basicAuth) < 8 {
+	if s.basicAuth == "" {
 		return body
 	}
 	encoded := base64.StdEncoding.EncodeToString([]byte(s.basicAuth))
