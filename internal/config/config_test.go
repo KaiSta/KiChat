@@ -411,6 +411,21 @@ func TestNormaliseAddsMissingBackendsWithoutClobberingEdits(t *testing.T) {
 		t.Error("the repaired NVIDIA entry is enabled")
 	}
 
+	// Groq arrives the same way — the fourth hosted backend shipped after this
+	// test was written, and the one whose address is not a bare host plus /v1: the
+	// repair has to land on `/openai/v1`, or the settings field would show an
+	// address no route of that API answers on.
+	groq, ok := byID["groq"]
+	if !ok {
+		t.Fatalf("Groq did not reach existing settings: %+v", s.Backends)
+	}
+	if groq.Kind != "groq" || groq.BaseURL != llm.GroqDefaultBaseURL {
+		t.Errorf("added entry = %+v, want the shipped Groq config", groq)
+	}
+	if groq.Enabled {
+		t.Error("the repaired Groq entry is enabled")
+	}
+
 	// And an entry the user has already configured is left exactly as it is.
 	s2 := Default()
 	s2.Backends = []llm.BackendConfig{
@@ -462,6 +477,7 @@ func TestNormaliseRestoresAShippedBackendsAddress(t *testing.T) {
 		{ID: "deepseek", Name: "DeepSeek", Kind: "deepseek", Enabled: true},
 		{ID: "mistral", Name: "Mistral", Kind: "mistral", Enabled: true},
 		{ID: "nvidia", Name: "NVIDIA", Kind: "nvidia", Enabled: true},
+		{ID: "groq", Name: "Groq", Kind: "groq", Enabled: true},
 		{ID: "my-server", Name: "Eigenbau", Kind: "custom", Enabled: true},
 	}
 	s.normalise()
@@ -486,6 +502,12 @@ func TestNormaliseRestoresAShippedBackendsAddress(t *testing.T) {
 	// empty field to the bare host would name one no route of that API answers on.
 	if got["nvidia"] != llm.NvidiaDefaultBaseURL {
 		t.Errorf("nvidia address = %q, want %q", got["nvidia"], llm.NvidiaDefaultBaseURL)
+	}
+	// The strongest case for that reason: a bare host completed with the usual
+	// `/v1` would be right for every other kind here and wrong for this one, so
+	// the repaired field is the whole documented path.
+	if got["groq"] != llm.GroqDefaultBaseURL {
+		t.Errorf("groq address = %q, want %q", got["groq"], llm.GroqDefaultBaseURL)
 	}
 	if got["my-server"] != "" {
 		t.Errorf("a custom endpoint was given an invented address: %q", got["my-server"])

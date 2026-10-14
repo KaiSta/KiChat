@@ -125,6 +125,7 @@ const (
 	flavourLlamaCpp
 	flavourMistral
 	flavourNvidia
+	flavourGroq
 )
 
 // The field Mistral documents for "do not think". Its request schema spells the
@@ -273,6 +274,11 @@ func (p *openAICompatProvider) mapModelEntries(raw []json.RawMessage) []ModelInf
 	// skipped rather than offered as a nameless row.
 	if p.modelsFlavour == flavourNvidia {
 		return p.mapNvidiaEntries(raw)
+	}
+	// Groq's is its own shape: a rich listing whose fields decide the mapping,
+	// including whether an entry can be offered at all (see groq.go).
+	if p.modelsFlavour == flavourGroq {
+		return p.mapGroqEntries(raw)
 	}
 	out := make([]ModelInfo, 0, len(raw))
 	for _, entry := range raw {

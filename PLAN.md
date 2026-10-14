@@ -21,7 +21,7 @@ numbers about what is being sent to the model.
 
 | Area | Delivered |
 | --- | --- |
-| Backends | LM Studio (`:1234`) and Ollama (`:11434`), plus DeepSeek, Mistral, NVIDIA (build.nvidia.com) and llama.cpp (`:9931`) shipped prepared-but-off, plus a generic OpenAI-compatible endpoint |
+| Backends | LM Studio (`:1234`) and Ollama (`:11434`), plus DeepSeek, Mistral, NVIDIA (build.nvidia.com), Groq and llama.cpp (`:9931`) shipped prepared-but-off, plus a generic OpenAI-compatible endpoint |
 | Local models | The llama.cpp entry can also be provided by KiChat itself: it fetches `llama-server` from a build source — upstream llama.cpp, or PrismML's fork when a ternary model is wanted — from the family that platform publishes (CPU, Vulkan, ROCm, CUDA, SYCL, OpenVINO or the Adreno build), starts a GGUF of the user's choosing on a free port, and stops it with the app, started again on every launch while the switch is on. The GGUF does not have to be downloaded again: the picker lists what is already in the folder LM Studio uses |
 | Context | Automatic and manual compaction, live context-window fullness meter, per-segment inspector |
 | Research | Brave Search (API key) with DuckDuckGo fallback, page scraping with SSRF guard, optional search-before-answer |
@@ -59,6 +59,10 @@ internal/
     nvidia.go        build.nvidia.com: the four-field listing, which carries no
                      capability or window and lists models the account may not
                      call — so the provider filters nothing and the window stays 0
+    groq.go          Groq: the listing that publishes each model's window,
+                     modalities and features — so the capabilities are the
+                     vendor's own claims and the models that cannot chat
+                     (Whisper's transcription, the TTS voices) are dropped
     probe.go         One token per model, to learn what no listing can say; the
                      verdicts become the picker's blacklist (see NVIDIA.md)
     llamacpp.go      llama.cpp /props: the loaded window, template caps, timings

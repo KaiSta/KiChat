@@ -227,7 +227,7 @@ const de = {
   'settings.apiKeyRequired': 'API-Schlüssel (erforderlich)',
   'settings.apiKeyOptional': 'API-Schlüssel (optional)',
   'settings.backendsHint':
-    'LM Studio auf Port 1234, Ollama auf 11434. DeepSeek, Mistral und NVIDIA sind vorbereitet, aber aus, bis ein Schlüssel hinterlegt ist; llama.cpp ist ebenfalls vorbereitet und aus, weil der Port frei wählbar ist. Weitere OpenAI-kompatible Server können als eigener Eintrag ergänzt werden.',
+    'LM Studio auf Port 1234, Ollama auf 11434. DeepSeek, Mistral, NVIDIA und Groq sind vorbereitet, aber aus, bis ein Schlüssel hinterlegt ist; llama.cpp ist ebenfalls vorbereitet und aus, weil der Port frei wählbar ist. Weitere OpenAI-kompatible Server können als eigener Eintrag ergänzt werden.',
   'settings.managed.title': 'Lokales Modell — KiChat startet llama.cpp selbst',
   'settings.managed.hint':
     'KiChat lädt llama-server von llama.cpp herunter, startet es mit einem GGUF deiner Wahl auf einem freien Port und beendet es zusammen mit der App. Die Chats erreichen das Modell über den Eintrag oben.',
@@ -812,7 +812,7 @@ const en: Record<keyof typeof de, string> = {
   'settings.apiKeyRequired': 'API key (required)',
   'settings.apiKeyOptional': 'API key (optional)',
   'settings.backendsHint':
-    'LM Studio on port 1234, Ollama on 11434. DeepSeek, Mistral and NVIDIA are prepared but off until a key is set; llama.cpp is prepared but off too, since the port is yours to pick. Further OpenAI-compatible servers can be added as their own entry.',
+    'LM Studio on port 1234, Ollama on 11434. DeepSeek, Mistral, NVIDIA and Groq are prepared but off until a key is set; llama.cpp is prepared but off too, since the port is yours to pick. Further OpenAI-compatible servers can be added as their own entry.',
   'settings.managed.title': 'Local model — KiChat runs llama.cpp itself',
   'settings.managed.hint':
     'KiChat downloads llama-server from llama.cpp, starts it with a GGUF of your choosing on a free port, and stops it with the app. Chats reach it through the entry above.',
@@ -1379,7 +1379,7 @@ const zh: Record<keyof typeof de, string> = {
   'settings.apiKeyRequired': 'API 密钥（必填）',
   'settings.apiKeyOptional': 'API 密钥（可选）',
   'settings.backendsHint':
-    'LM Studio 使用 1234 端口，Ollama 使用 11434 端口。DeepSeek、Mistral 和 NVIDIA 已预置，但需填入密钥后才会启用；llama.cpp 同样已预置但默认关闭，因为端口由你自行指定。其他 OpenAI 兼容服务器可作为独立条目添加。',
+    'LM Studio 使用 1234 端口，Ollama 使用 11434 端口。DeepSeek、Mistral、NVIDIA 和 Groq 已预置，但需填入密钥后才会启用；llama.cpp 同样已预置但默认关闭，因为端口由你自行指定。其他 OpenAI 兼容服务器可作为独立条目添加。',
   'settings.managed.title': '本地模型 —— KiChat 自行运行 llama.cpp',
   'settings.managed.hint':
     'KiChat 从 llama.cpp 下载 llama-server，用你选择的 GGUF 在空闲端口上启动，并随应用一起关闭。对话通过上方的条目访问该模型。',

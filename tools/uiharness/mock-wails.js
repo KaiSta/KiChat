@@ -318,6 +318,29 @@
       contextLimit: 0,
       capabilities: ['tool_use'],
     },
+    // Groq's listing is the opposite of NVIDIA's: every model states its window and
+    // the features the vendor supports, so the fixture carries a real number and a
+    // capability list rather than an empty window. Two entries for the two the probe
+    // counts: one text model, and the vision one whose claims come from its image
+    // input modality.
+    {
+      id: 'openai/gpt-oss-20b',
+      backend: 'groq',
+      publisher: 'OpenAI',
+      state: 'loaded',
+      type: 'llm',
+      contextLimit: 131072,
+      capabilities: ['tool_use', 'thinking'],
+    },
+    {
+      id: 'qwen/qwen3.8-27b',
+      backend: 'groq',
+      publisher: 'Alibaba Cloud',
+      state: 'loaded',
+      type: 'vlm',
+      contextLimit: 131072,
+      capabilities: ['tool_use', 'thinking', 'vision'],
+    },
     {
       id: PATH_MODEL_ID,
       backend: 'lmstudio',
@@ -389,6 +412,10 @@
     // NVIDIA ships off too, and its probe is the one that says the listing answers
     // while most of what it lists does not: see the note on its models above.
     { id: 'nvidia', ok: true, models: 2 },
+    // Groq ships off as well. Unlike NVIDIA's, its listing publishes a window and
+    // its capabilities per model, so the probe answers with the count of the models
+    // that can actually chat — the ones whose output modalities name text.
+    { id: 'groq', ok: true, models: 2 },
     // llama.cpp has no result until a server is started, which the runtime flags do.
     { id: 'llamacpp', ok: false, error: 'llm: backend unavailable: connection refused', models: 0 },
   ]
@@ -775,6 +802,10 @@ Verfügbare Tools: {{tool_list}}`,
       // key field is the other thing this row proves: the kind is what decides
       // whether the field is marked required (NVIDIA.md §2).
       { id: 'nvidia', name: 'NVIDIA', kind: 'nvidia', baseUrl: 'https://integrate.api.nvidia.com/v1', enabled: false },
+      // Groq ships disabled on the address the vendor documents, which is the one
+      // base URL here whose path is not a bare /v1: the API lives under /openai/v1,
+      // and the row is what shows it.
+      { id: 'groq', name: 'Groq', kind: 'groq', baseUrl: 'https://api.groq.com/openai/v1', enabled: false },
       // llama.cpp ships disabled on the port its server now defaults to, and it
       // is the one kind KiChat can run itself — without this entry the whole
       // local-model section has nothing to render, which is how a fixture that

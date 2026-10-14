@@ -40,7 +40,7 @@ func newCustomProvider(id, name, baseURL, apiKey string) *openAICompatProvider {
 type BackendConfig struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
-	Kind    string `json:"kind"` // lmstudio | ollama | custom | deepseek | mistral | nvidia | llamacpp
+	Kind    string `json:"kind"` // lmstudio | ollama | custom | deepseek | mistral | nvidia | groq | llamacpp
 	BaseURL string `json:"baseUrl"`
 	APIKey  string `json:"apiKey"`
 	Enabled bool   `json:"enabled"`
@@ -114,6 +114,8 @@ func (r *Registry) Reconfigure(configs []BackendConfig) {
 			providers = append(providers, newMistralProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		case "nvidia":
 			providers = append(providers, newNvidiaProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
+		case "groq":
+			providers = append(providers, newGroqProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		case "llamacpp":
 			providers = append(providers, newLlamaCppProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		}
@@ -419,6 +421,13 @@ func DefaultBackendConfigs() []BackendConfig {
 			Name:    "NVIDIA",
 			Kind:    "nvidia",
 			BaseURL: NvidiaDefaultBaseURL,
+			Enabled: false,
+		},
+		{
+			ID:      "groq",
+			Name:    "Groq",
+			Kind:    "groq",
+			BaseURL: GroqDefaultBaseURL,
 			Enabled: false,
 		},
 	}

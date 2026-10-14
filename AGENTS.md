@@ -15,6 +15,7 @@ points at one document per subsystem for the measured detail behind it:
 | `MISTRAL.md` | the Mistral backend: the measured listing and stream shapes, the alias collapse, the typed content chunks, the bugs review found |
 | `DEEPSEEK.md` | the DeepSeek backend: the listing that reports a window, `reasoning_content`, the `/v1` alias, refusals |
 | `NVIDIA.md` | the build.nvidia.com backend: the four-field listing, the catalogue that lists models the account may not call (why the provider filters nothing, and the one-token availability check that filters on evidence instead), the reasoning field that arrives twice, refusals |
+| `GROQ.md` | the Groq backend: the listing that publishes each model's window, modalities and features (so the capability claims are the vendor's own, and the four entries that cannot chat are dropped on the vendor's 400), the two classification entries that can be called but not streamed and why they are kept anyway, the `reasoning` field beside its `channel` marker, the `reasoning_effort` that has no off value, refusals |
 | `LLAMACPP.md` | llama.cpp on both sides: the provider's `/props`-driven metadata (and why a missing claim is not `false`), and the managed runtime that installs and runs `llama-server` — two release sources including PrismML's fork, the update check, GPU offload, the ternary models |
 | `RESEARCH.md` | web search and scraping: the Brave and DuckDuckGo providers, the metered LLM-context route that search-first uses, what classifies a refusal, the scraper's SSRF and robots guards, the token budgets, and the search-first seeded turn |
 | `IMAGES.md` | image generation: three kinds of backend — the one `/sdapi/v1/txt2img` route that covers AUTOMATIC1111, Forge and stable-diffusion.cpp's `sd-server`, the local `sd-cli` run once per picture through the binary's own flags, and the *same* build run as a `sd-server` KiChat starts and stops itself (the port chosen free because 1234 is LM Studio's, `/sdapi/v1/sd-models` as the readiness route because sd-server serves no `/health`, start-with-app off by default, and a *reading* that asks for a restart instead of restarting on save) (the published per-accelerator archives, and the folder KiChat finds the program in, with several builds in one folder reported rather than picked) — how a generation parameter is decided (§3): the model chooses it per call through its `generate_image` arguments — including the guidance scale, the one that used to live in the extra command-line arguments — an empty field then falls through to the server's or the program's own default, and a value typed in Settings is *fixed* and overrides what the model asked for — the named profiles that save that configuration and switch a model in one pick (§3), the single place every request's size and step count are bounded, the `generate_image` tool, and how a picture becomes an ordinary image attachment — which is what lets a vision model see a *user's* attachment on the next turn, while the same thing for a picture KiChat drew is unverified (§9) |
@@ -139,6 +140,16 @@ KICHAT_LIVE=1 KICHAT_NVIDIA_KEY=<key> go test ./internal/llm/ -run TestLiveNvidi
 #   models most keys cannot call, so this drives one model rather than walking
 #   the listing; TestLiveNvidia is the one that asserts a window of 0.
 
+# Groq: metered, needs a key; skips without KICHAT_GROQ_KEY
+KICHAT_LIVE=1 KICHAT_GROQ_KEY=<key> go test ./internal/llm/ -run TestLiveGroq -v
+#   optional: KICHAT_GROQ_BASE, KICHAT_GROQ_MODEL (defaults to
+#   `openai/gpt-oss-20b`, which publishes tools and reasoning) and
+#   KICHAT_GROQ_VISION_MODEL, which adds the image check. The account's
+#   token-per-minute allowance is small and one 128x128 PNG costs ~1300 prompt
+#   tokens, so the vision check is opt-in.
+#   the unanchored pattern also picks up TestLiveGroqShippedEntryReachesTheAPI,
+#   which drives the entry DefaultBackendConfigs ships through NewRegistry.
+
 # PrismML's fork: one release lookup, a 17 MB download and a real model load
 KICHAT_LIVE=1 go test ./internal/runtime/ -run TestLivePrism -v
 #   optional: KICHAT_PRISM_MODEL=<path.gguf>, otherwise the smallest model in
@@ -180,6 +191,22 @@ short version:
   chosen model is offered `loaded` with tools and a window of **0** (no route of this API
   publishes one, so a value there would be invented), `include_usage` is honoured, and a real
   tool call streams.
+- `TestLiveGroq` — GROQ.md §3 and §7: the listing publishes each model's window,
+  modalities and features, so the capabilities asserted are the vendor's own claims and the
+  entries that cannot chat (Whisper's `transcription`, the TTS voices) are absent — which is
+  the one place this provider filters, and the filter is the API's own 400 "does not support
+  chat completions" rather than a rule about the ids. Measured against the live account:
+  its catalogue of 11 entries maps to 7 chat models, `include_usage` is honoured, a tool call
+  streams, and a fake key is refused with `invalid_api_key` rather than a throttle. It also
+  pins the row the filter deliberately keeps and cannot use: the two prompt-guard classifiers
+  answer a call *without* `stream` and refuse the streaming one with HTTP 400 "do not support
+  streaming", so those two rows can only fail in a client that always streams — asserted, so
+  the gap is a measurement rather than a memory.
+- `TestLiveGroqShippedEntryReachesTheAPI` — GROQ.md §8: the wiring rather than the mapper.
+  It takes the entry `DefaultBackendConfigs` ships, switches it on and gives it the key
+  exactly as the settings panel leaves it, builds it through `NewRegistry`, and makes it list
+  and answer. A `case "groq"` that stopped building a provider, or a shipped address that had
+  drifted from `/openai/v1`, fails here and nowhere else.
 - `TestLiveMistralTemperatureAboveThePublishedMaximum` — MISTRAL.md §5 and §10.4: one
   request at `temperature: 1.8`, above the schema's published `[0, 1.5]` and inside what
   Settings offers, reporting whether the service enforces the bound. It asserts nothing:

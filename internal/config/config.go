@@ -900,7 +900,7 @@ func (s *Settings) normalise() {
 	s.ImageProfiles = profiles
 	// Ensure the shipped backends always exist, even if the user removed them
 	// from an older settings blob. This is also how a backend shipped in a later
-	// release — DeepSeek, then Mistral, then NVIDIA — reaches an installation
+	// release — DeepSeek, then Mistral, then NVIDIA, then Groq — reaches an installation
 	// that predates it.
 	seen := map[string]bool{}
 	for _, b := range s.Backends {
@@ -931,6 +931,11 @@ func (s *Settings) normalise() {
 				// self-hosted NIM container on another port is the user's edit to
 				// this field rather than a different kind.
 				s.Backends[i].BaseURL = llm.NvidiaDefaultBaseURL
+			case "groq":
+				// Same reason once more, and this vendor's path is the longest of
+				// them: the API lives under /openai/v1, so an empty field has to
+				// show the whole address rather than a host.
+				s.Backends[i].BaseURL = llm.GroqDefaultBaseURL
 			case "llamacpp":
 				// Same reason as DeepSeek: 9931 is llama-server's documented
 				// default, and an empty field would otherwise hide it.

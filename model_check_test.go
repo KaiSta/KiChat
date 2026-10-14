@@ -95,12 +95,21 @@ func (b *nvidiaBackend) start(t *testing.T) *httptest.Server {
 // ensure never reaches either.
 func newModelCheckApp(t *testing.T, baseURL string) *App {
 	t.Helper()
-	settings := config.Default()
-	settings.AutoTitle = false
-	settings.Backends = []llm.BackendConfig{{
+	return newModelCheckAppWith(t, llm.BackendConfig{
 		ID: "nvidia", Name: "NVIDIA", Kind: "nvidia",
 		BaseURL: baseURL, APIKey: "nvapi-test", Enabled: true,
-	}}
+	})
+}
+
+// newModelCheckAppWith is the same App with a backend of the caller's choosing,
+// so a sweep can be driven against another kind's answers. The spellings that make
+// a probe a refusal are per backend — a 404 on one, a 400 only this client can
+// provoke on another — and what the check does with them has to hold either way.
+func newModelCheckAppWith(t *testing.T, backend llm.BackendConfig) *App {
+	t.Helper()
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.Backends = []llm.BackendConfig{backend}
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
