@@ -24,8 +24,9 @@ func TestLoadKeepsDefaultsForFieldsAddedLater(t *testing.T) {
 	}
 	defer st.Close()
 
-	// A blob written before the LLM-context option existed.
-	older := `{"language":"de","search":{"providerOrder":["brave","duckduckgo"],"resultCount":8,"cacheMinutes":60}}`
+	// A blob written before the LLM-context option existed, and before a managed
+	// model carried a projector.
+	older := `{"language":"de","search":{"providerOrder":["brave","duckduckgo"],"resultCount":8,"cacheMinutes":60},"runtime":{"models":{"llamacpp":{"modelPath":"/models/a.gguf"}}}}`
 	if err := st.PutSetting("settings", json.RawMessage(older)); err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +47,16 @@ func TestLoadKeepsDefaultsForFieldsAddedLater(t *testing.T) {
 	if got.Compact.SummaryModel != (llm.Ref{}) {
 		t.Errorf("summaryModel = %+v, want an empty ref meaning the chat's own model",
 			got.Compact.SummaryModel)
+	}
+	// A managed model saved before the projector field existed keeps an empty one, and
+	// empty means "the projector beside the model" rather than "run text-only": a
+	// multimodal GGUF nobody can pair by hand is the state this field exists to end, so
+	// the migration has to be nothing at all.
+	if projector := got.Runtime.Models["llamacpp"].MMProj; projector != "" {
+		t.Errorf("mmproj = %q, want it empty so the file beside the model is used", projector)
+	}
+	if path := got.Runtime.Models["llamacpp"].ModelPath; path != "/models/a.gguf" {
+		t.Errorf("modelPath = %q, want the stored model kept", path)
 	}
 }
 

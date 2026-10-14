@@ -49,6 +49,47 @@ func TestTheCallersCommandLineAndLabelWin(t *testing.T) {
 	}
 }
 
+// TestTheProjectorTravelsAsAFlag: `--mmproj` is the difference between a vision model
+// answering an image and it answering 500 "image input is not supported" — measured on
+// the user's own Qwen3-VL-8B, both ways. It has to reach the command line, it has to be
+// able to be overridden by the user's own arguments, and a text-only model must not be
+// handed the flag at all: llama-server reads an empty value as a path.
+func TestTheProjectorTravelsAsAFlag(t *testing.T) {
+	got := Options{Model: "/m.gguf", Port: 1234, MMProj: " /mm/mmproj-Model-F16.gguf "}.commandArgs()
+	if !hasFlag(got, "--mmproj", "/mm/mmproj-Model-F16.gguf") {
+		t.Errorf("arguments = %v, want the trimmed --mmproj path", got)
+	}
+
+	// The user's arguments come last, so a projector typed under "Further arguments"
+	// is the one that wins over the one the app detected.
+	both := Options{Model: "/m.gguf", Port: 1234, MMProj: "/auto.gguf",
+		Extra: []string{"--mmproj", "/typed.gguf"}}.commandArgs()
+	if seen := lastValueOf(both, "--mmproj"); seen != "/typed.gguf" {
+		t.Errorf("the last --mmproj is %q, want the user's own /typed.gguf: %v", seen, both)
+	}
+
+	plain := Options{Model: "/m.gguf", Port: 1234}.commandArgs()
+	if contains(plain, "--mmproj") {
+		t.Errorf("a text-only model was given a projector flag: %v", plain)
+	}
+	blank := Options{Model: "/m.gguf", Port: 1234, MMProj: "   "}.commandArgs()
+	if contains(blank, "--mmproj") {
+		t.Errorf("a blank projector became a flag: %v", blank)
+	}
+}
+
+// lastValueOf is the value of a flag's last occurrence, which is the one llama-server
+// keeps when a flag is given twice.
+func lastValueOf(args []string, flag string) string {
+	value := ""
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			value = args[i+1]
+		}
+	}
+	return value
+}
+
 func hasFlag(args []string, flag, value string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == flag && args[i+1] == value {

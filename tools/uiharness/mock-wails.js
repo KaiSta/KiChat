@@ -1947,6 +1947,18 @@ Verfügbare Tools: {{tool_list}}`,
       startTimer = null
     }
   }
+  /*
+   * ?mmproj= is the vision projector of a configured model, and it is only reachable
+   * through the ?fit= fixture below, which is what puts a model there. `auto` (the
+   * default) is the ordinary state: LM Studio downloaded the projector beside the model
+   * and the app pairs it without being asked, so the panel shows the file name as a
+   * statement about what the model can do. `typed` is the user who pointed at one
+   * somewhere else — the two halves are not always downloaded together — and `none` is
+   * the model that cannot see, which is the only state where the row warns.
+   */
+  const mmprojParam = new URLSearchParams(location.search).get('mmproj') || 'auto'
+  const DETECTED_PROJECTOR =
+    '/mnt/models/lmstudio/lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF/mmproj-Ministral-3-3B-Instruct-2512-F16.gguf'
 
   /*
    * ?fit= is how a configured GPU model is reached at all, since the default
@@ -1969,6 +1981,13 @@ Verfügbare Tools: {{tool_list}}`,
       enabled: true,
       modelPath:
         '/mnt/models/lmstudio/lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf',
+      // Empty means "the projector beside the model", which is what the app finds
+      // itself. `?mmproj=typed` is the user who pointed at one somewhere else, and
+      // `?mmproj=none` is the model that can see nothing — see the row below.
+      mmproj:
+        mmprojParam === 'typed'
+          ? '/mnt/models/extra/mmproj-Ministral-3-3B-Instruct-2512-F16.gguf'
+          : '',
       ctxSize: 8192,
       extraArgs: '',
     }
@@ -2212,10 +2231,19 @@ Verfügbare Tools: {{tool_list}}`,
       error: '',
       models: Object.keys(models).map((id) => {
         const mm = models[id] || {}
+        // The projector, which the real backend resolves in Go (MatchProjector) and sends
+        // as data. Three answers are modelled because the panel renders all three
+        // differently: the file it found beside the model, the one the user typed, and
+        // none at all — the last being the only state where the row warns, since a
+        // multimodal GGUF without its mmproj answers every image with a 500.
+        const paired =
+          !mm.mmproj && mmprojParam !== 'none' && mm.modelPath ? DETECTED_PROJECTOR : ''
         return {
           backendId: id,
           enabled: Boolean(mm.enabled),
           modelPath: mm.modelPath || '',
+          mmproj: mm.mmproj || paired,
+          mmprojDetected: Boolean(paired),
           ctxSize: mm.ctxSize || 0,
           extraArgs: mm.extraArgs || '',
           state: managed.state,

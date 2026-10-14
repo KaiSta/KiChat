@@ -584,6 +584,20 @@ function LocalModelSection({
     }
   }
 
+  // The second half of a vision model. Not always downloaded beside the first — a folder
+  // assembled by hand, or a projector kept on another drive, is what this button is for.
+  // An empty field is not a missing answer: it means "the one beside the model", which is
+  // what the app looks for itself. The same file dialog as the model above, because an
+  // mmproj is a GGUF and nothing else; only the title differs.
+  const chooseProjector = async () => {
+    try {
+      const picked = await App.PickManagedModelFile(t('settings.managed.mmprojPickTitle'))
+      if (picked) update({ mmproj: picked })
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
   // An empty folder is not "no folder": it asks the backend for the folder it
   // would use, which is the first remembered folder that is there when the user
   // picked one, and LM Studio's otherwise. That is what makes the models a user
@@ -1108,6 +1122,53 @@ function LocalModelSection({
             <span className="badge badge-warn shrink-0">{t('settings.managed.unsaved')}</span>
           )}
         </div>
+      )}
+
+      {/* A multimodal GGUF is only half a model: the vision tower lives in a separate
+          mmproj file, and llama.cpp refuses every image without it — "image input is not
+          supported", as a 500 on the turn, which reads as this app being broken rather
+          than as a model that cannot see. The app pairs the file beside the model on its
+          own, so the line under this field is the answer to "can this model read an
+          image?": a name means yes and nothing to do, the box is for the two halves that
+          were downloaded apart, and the warning is the case the app will not guess.
+
+          Only once a model is chosen: a projector on its own is half of nothing, and a
+          warning about the file beside a model that does not exist yet is noise on every
+          backend the user has not configured. */}
+      {model.modelPath && (
+        <>
+          <div className="mb-1 flex items-center gap-2">
+            <input
+              className="input mono flex-1"
+              placeholder={
+                mine?.mmproj && mine.mmprojDetected
+                  ? modelLabel(mine.mmproj)
+                  : t('settings.managed.mmprojPlaceholder')
+              }
+              value={model.mmproj ?? ''}
+              onChange={(e) => update({ mmproj: e.target.value })}
+            />
+            <button type="button" className="btn btn-sm" onClick={() => void chooseProjector()}>
+              {t('settings.managed.choose')}
+            </button>
+          </div>
+          <div className="mb-2 text-[11px]">
+            {model.mmproj ? (
+              <span className="faint">{t('settings.managed.mmprojTyped')}</span>
+            ) : mine?.mmproj ? (
+              <span style={{ color: 'var(--accent)' }}>
+                ✓ {t('settings.managed.mmprojPaired', { name: modelLabel(mine.mmproj) })}
+              </span>
+            ) : (
+              // A sentence rather than a badge: this one names the file the model needs
+              // and what happens without it, and a nowrap badge cut it off at the edge of
+              // the card — which is how the meanest of the three states ends up unread.
+              <span className="block" style={{ color: 'var(--warn)' }}>
+                {t('settings.managed.mmprojMissing')}
+              </span>
+            )}
+          </div>
+        </>
       )}
 
       {/* A user who already has LM Studio has models on disk. Listing them here is

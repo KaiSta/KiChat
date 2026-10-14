@@ -408,6 +408,14 @@ type ManagedModel struct {
 	Enabled bool `json:"enabled"`
 	// ModelPath is the GGUF file to load.
 	ModelPath string `json:"modelPath"`
+	// MMProj is the multimodal projector loaded beside it, llama.cpp's `--mmproj`.
+	// A vision model is two files — the language model and the vision tower — and a
+	// server started with only the first refuses an image ("image input is not
+	// supported"), so a multimodal GGUF that is selected without its projector is a
+	// text-only server that looks like a vision one. Empty means "whatever sits
+	// beside the model": that is where every download puts the pair, and the app
+	// finds it itself. A path here pins it to that file instead.
+	MMProj string `json:"mmproj"`
 	// CtxSize is the context window to load it with; 0 lets the server choose,
 	// which is llama.cpp's own `-c` default of "loaded from model".
 	CtxSize int `json:"ctxSize"`

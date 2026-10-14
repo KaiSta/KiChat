@@ -299,14 +299,21 @@ type ManagedStatus struct {
 	// marked the selection as "in use" would be claiming a switch that has not
 	// happened. A stopped server and a failed start both report nothing here, even
 	// though the supervisor still has the path in its status.
-	LoadedModel string   `json:"loadedModel,omitempty"`
-	CtxSize     int      `json:"ctxSize"`
-	ExtraArgs   string   `json:"extraArgs"`
-	State       string   `json:"state"`
-	Port        int      `json:"port"`
-	URL         string   `json:"url"`
-	Error       string   `json:"error,omitempty"`
-	Log         []string `json:"log,omitempty"`
+	LoadedModel string `json:"loadedModel,omitempty"`
+	CtxSize     int    `json:"ctxSize"`
+	ExtraArgs   string `json:"extraArgs"`
+	// MMProj is the multimodal projector a start would load, empty for a text-only
+	// model, and MMProjDetected says the app found it beside the model rather than
+	// being pointed at it. The panel needs the difference: a detected file is a path
+	// nobody typed, so it has to be *shown* as the reason images work, while a typed
+	// one is already in the field above it.
+	MMProj         string   `json:"mmproj,omitempty"`
+	MMProjDetected bool     `json:"mmprojDetected,omitempty"`
+	State          string   `json:"state"`
+	Port           int      `json:"port"`
+	URL            string   `json:"url"`
+	Error          string   `json:"error,omitempty"`
+	Log            []string `json:"log,omitempty"`
 	// ModelBytes is the size of the GGUF on disk, 0 when it cannot be read. The
 	// panel measures it against DeviceFreeBytes, because it is the one part of a
 	// model's memory use this app can know without loading it — the weights have to
@@ -733,9 +740,11 @@ func runtimeStatusBase(settings config.Settings, goos, goarch string) RuntimeSta
 	}
 	for _, id := range sortedRuntimeIDs(settings) {
 		mm := settings.Runtime.Models[id]
+		projector, detected := projectorReading(mm)
 		status.Models = append(status.Models, ManagedStatus{
 			BackendID: id, Enabled: mm.Enabled, ModelPath: mm.ModelPath,
 			CtxSize: mm.CtxSize, ExtraArgs: mm.ExtraArgs, State: rt.StateStopped,
+			MMProj: projector, MMProjDetected: detected,
 		})
 	}
 	return status
@@ -1228,6 +1237,7 @@ func (a *App) SetManagedModel(backendID string, mm config.ManagedModel) error {
 		return errors.New("kein Backend angegeben")
 	}
 	mm.ModelPath = strings.TrimSpace(mm.ModelPath)
+	mm.MMProj = strings.TrimSpace(mm.MMProj)
 	mm.ExtraArgs = strings.TrimSpace(mm.ExtraArgs)
 	if mm.CtxSize != 0 && mm.CtxSize < config.MinCtxSize {
 		mm.CtxSize = config.MinCtxSize

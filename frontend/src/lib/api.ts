@@ -152,6 +152,10 @@ export function defaultManagedModel(): config.ManagedModel {
   return {
     enabled: false,
     modelPath: '',
+    // The projector the app pairs on its own: the empty string means "the one beside the
+    // model", and a path pins it. It is here rather than only in Settings because a first
+    // start from the chat picker sends this same entry.
+    mmproj: '',
     ctxSize: 8192,
     flashAttention: 'auto',
     cacheTypeK: 'f16',

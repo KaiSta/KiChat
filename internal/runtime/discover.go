@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -230,6 +231,133 @@ func ScanModelFolder(dir string) (ModelFolderScan, error) {
 		return scan.Files[i].Name < scan.Files[j].Name
 	})
 	return scan, nil
+}
+
+// fileTypeToken matches the parts of a GGUF file name that say what *kind* of file
+// this is rather than which model it holds: the numeric format, the quantization, and
+// the projector marker itself.
+//
+// They are dropped before two names are compared, because a model and its projector
+// are published in different quants by design — `Qwen3-VL-8B-Instruct-Q4_K_M.gguf`
+// sits beside `mmproj-Qwen3-VL-8B-Instruct-F16.gguf` — and counting them would make a
+// model and its own projector look less alike than two projectors of that model look
+// to each other.
+var fileTypeToken = regexp.MustCompile(`^(mmproj|f\d+|bf\d+|fp\d+|i?q\d+.*)$`)
+
+// modelTokens is the set of tokens in a GGUF file name that identify the model,
+// lowercased and with the file-type tokens above removed.
+func modelTokens(name string) map[string]bool {
+	lower := strings.ToLower(strings.TrimSuffix(name, ".gguf"))
+	tokens := map[string]bool{}
+	for _, token := range strings.FieldsFunc(lower, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	}) {
+		if token == "" || fileTypeToken.MatchString(token) {
+			continue
+		}
+		tokens[token] = true
+	}
+	return tokens
+}
+
+// ProjectorsBeside lists the projector GGUFs in the folder a model file lives in,
+// sorted by name so two scans of one folder agree.
+//
+// Only that one folder is read. It is where a download puts the pair — LM Studio
+// beside each model, Hugging Face beside each quant — and a walk of the whole tree
+// would pair a model with a projector belonging to a different model three levels
+// away.
+func ProjectorsBeside(modelPath string) []string {
+	if strings.TrimSpace(modelPath) == "" {
+		return []string{}
+	}
+	dir := filepath.Dir(modelPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return []string{}
+	}
+	found := []string{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(name), ".gguf") || !isProjector(name) {
+			continue
+		}
+		found = append(found, filepath.Join(dir, name))
+	}
+	sort.Strings(found)
+	return found
+}
+
+// MatchProjector names the projector that belongs to a model file, or "" when the
+// folder holds none, holds one that belongs to a different model, or holds several that
+// fit equally well.
+//
+// Two rules, and the name decides both. A projector whose name carries model tokens that
+// this model's name does not contain is another model's, however alone it is in the
+// folder: `mmproj-Llama-3-8B-F16.gguf` beside a Qwen3-VL-8B shares the size and nothing
+// else, and a vision tower that does not fit the model it is loaded with is worse than
+// none — so the whole name has to be contained, not merely to overlap. A projector whose
+// name carries no identity at all (`mmproj.gguf`, `mmproj-f16.gguf`) contradicts nothing
+// and is kept, which is what a hand-assembled folder looks like. What remains is decided
+// by shared tokens, which is how the projector of `Qwen3-VL-8B-Instruct-Q4_K_M.gguf` is
+// told from a 4B sibling's in the same folder.
+//
+// A tie is reported as *no answer* rather than broken by name order. Two projectors that
+// fit one model equally well are two quants of one file, and a silent pick from an
+// arbitrary sort is how a model ends up loading a vision tower nobody chose — which is a
+// 500 on the next image rather than an error anyone can read.
+func MatchProjector(modelPath string) string {
+	candidates := ProjectorsBeside(modelPath)
+	if len(candidates) == 0 {
+		return ""
+	}
+	want := modelTokens(filepath.Base(modelPath))
+	kept, scores := []string{}, []int{}
+	for _, candidate := range candidates {
+		tokens := modelTokens(filepath.Base(candidate))
+		score := 0
+		for token := range tokens {
+			if want[token] {
+				score++
+			}
+		}
+		if !subsetOf(tokens, want) {
+			continue
+		}
+		kept, scores = append(kept, candidate), append(scores, score)
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	if len(kept) == 1 {
+		return kept[0]
+	}
+	best, bestScore, tied := "", 0, false
+	for i, candidate := range kept {
+		switch {
+		case scores[i] > bestScore:
+			best, bestScore, tied = candidate, scores[i], false
+		case scores[i] == bestScore:
+			// Reached by the first candidate too, when every score is 0: several
+			// nameless projectors fit equally well, so the answer stays empty.
+			tied = true
+		}
+	}
+	if bestScore == 0 || tied {
+		return ""
+	}
+	return best
+}
+
+// subsetOf reports whether every token of sub is also in super, which is the test that
+// rules out another model's projector without ruling out a nameless one.
+func subsetOf(sub, super map[string]bool) bool {
+	for token := range sub {
+		if !super[token] {
+			return false
+		}
+	}
+	return true
 }
 
 // relativeModel names the folder a file was found in, relative to the root, so a

@@ -560,15 +560,25 @@ wails build                    # when webkit2gtk-4.0 is available
   dropped and the platform defaults are offered instead — but a user who moved their
   models with a future LM Studio would have to point the picker at the folder once by
   hand.
-- **A vision model is offered without its projector.** The scanner skips a model
-  projector — any GGUF whose file name carries `mmproj` as a token, whether it is
-  `mmproj-<model>-F16.gguf` as LM Studio names it or `<model>-mmproj-BF16.gguf` as it
-  comes off Hugging Face — because `llama-server` cannot load one as a model (it comes
-  back with "the current context does not support logits computation"); the token rule
-  replaced a prefix test that offered the Hugging Face spelling, which is what the
-  PrismML ternary model's own folder holds. A multimodal GGUF selected from the list
-  therefore starts as a text-only server, and pairing the projector through `--mmproj`
-  is something the user has to add under *Further arguments* for now.
+- **A vision model's projector is paired from one folder, and a tie is left to the
+  user.** The scanner still skips a model projector — any GGUF whose file name carries
+  `mmproj` as a token, whether it is `mmproj-<model>-F16.gguf` as LM Studio names it or
+  `<model>-mmproj-BF16.gguf` as it comes off Hugging Face — because `llama-server`
+  cannot load one as a model (it comes back with "the current context does not support
+  logits computation"); the token rule replaced a prefix test that offered the Hugging
+  Face spelling, which is what the PrismML ternary model's own folder holds. The
+  projector is now found and passed by the app instead (LLAMACPP.md §3.12), in the
+  model's own folder only. So a projector kept somewhere else, with the two halves of
+  the model downloaded apart, has to be named in the field that exists for it, and two
+  projectors that fit one model equally well leave the row warning rather than picking
+  one — the app will not guess at a vision tower, and a wrong one is worse than none.
+- **A model that cannot see is still offered images.** `--mmproj` and the projector
+  field decide whether the server has a vision tower, and the provider reads the answer
+  its own way: `/props` `modalities.vision` types a projector-less start as text-only
+  (LLAMACPP.md §3.12). Nothing holds an attachment back on that basis — the chat context
+  attaches an image to the turn whoever the model is, with a warning from the ingest
+  layer as the only notice. With a projector present this is invisible; without one the
+  backend's own 500 is what the user reads.
 - **The fork is a third party's build, and the app installs it whole.** Selecting PrismML
   as the source downloads binaries published by that project rather than by llama.cpp's
   own maintainers, from a fork that tracks upstream but can lag it, restructure its

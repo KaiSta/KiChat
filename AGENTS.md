@@ -266,8 +266,9 @@ a purple **MOCK BRIDGE** badge, so a harness page is never mistaken for the real
 - `?crash=render` injects an unrenderable message to prove the error boundary still
   catches a render fault instead of leaving a blank window.
 - The **runtime and Backends fixtures** — the update row, the source picker, the placement
-  reading and the cleanup list — are query flags with their own table in LLAMACPP.md §6.
-  Every one of them installs a launcher first, so the rows that depend on one are there.
+  reading, the projector pairing and the cleanup list — are query flags with their own table
+  in LLAMACPP.md §6. Every one of them installs a launcher first, so the rows that depend on
+  one are there.
 - The **picture-server fixtures** — `?images=sdserver` with `?server=running|starting|failed|restart`
   and `?startwithapp=1` — are query flags with their own rows in IMAGES.md §8. The mock models
   `StartImageServer`/`StopImageServer` as the *transitions* they are, so a start really passes

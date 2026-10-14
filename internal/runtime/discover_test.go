@@ -257,6 +257,117 @@ func TestScanModelFolderOnSomethingThatIsNotThere(t *testing.T) {
 	}
 }
 
+// TestMatchProjectorPairsAModelWithItsOwnProjector: a vision model is two files, and a
+// server started with only the first refuses every image ("image input is not
+// supported"), so the app looks for the projector itself — but only where the folder
+// answers the question. The shapes below are the ones measured on this machine's LM
+// Studio folder: `mmproj-<model>-F16.gguf` beside `<model>-Q4_K_M.gguf`, and the Hugging
+// Face spelling `Ternary-Bonsai-2-27B-mmproj-BF16.gguf` the ternary download ships.
+//
+// The last cases are the ones that matter as much as the matches: a tie and a folder
+// with nothing in common both answer *nothing*, because a silent pick from an arbitrary
+// sort is how a model ends up loading another model's vision tower.
+func TestMatchProjectorPairsAModelWithItsOwnProjector(t *testing.T) {
+	cases := []struct {
+		name   string
+		files  []string
+		model  string
+		want   string
+		reason string
+	}{
+		{
+			name:   "one projector beside its model",
+			files:  []string{"mmproj-Qwen3-VL-8B-Instruct-F16.gguf"},
+			model:  "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+			want:   "mmproj-Qwen3-VL-8B-Instruct-F16.gguf",
+			reason: "the ordinary LM Studio shape",
+		},
+		{
+			name: "two models' projectors in one folder",
+			files: []string{
+				"mmproj-Qwen3-VL-4B-Instruct-F16.gguf",
+				"mmproj-Qwen3-VL-8B-Instruct-F16.gguf",
+			},
+			model:  "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+			want:   "mmproj-Qwen3-VL-8B-Instruct-F16.gguf",
+			reason: "the 8B is the model's own; the 4B sibling's shares fewer tokens",
+		},
+		{
+			name:   "the model's name first, mmproj in the middle",
+			files:  []string{"Ternary-Bonsai-2-27B-mmproj-BF16.gguf"},
+			model:  "Ternary-Bonsai-2-27B-PQ2_0.gguf",
+			want:   "Ternary-Bonsai-2-27B-mmproj-BF16.gguf",
+			reason: "the Hugging Face spelling, whose quant differs from the model's by design",
+		},
+		{
+			name:   "a generically named projector",
+			files:  []string{"mmproj.gguf"},
+			model:  "Some-Model-Q4_K_M.gguf",
+			want:   "mmproj.gguf",
+			reason: "one candidate is unambiguous by position alone, whatever it is called",
+		},
+		{
+			name: "two quants of one projector",
+			files: []string{
+				"mmproj-Qwen3-VL-8B-Instruct-BF16.gguf",
+				"mmproj-Qwen3-VL-8B-Instruct-F16.gguf",
+			},
+			model:  "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+			want:   "",
+			reason: "a tie is the user's choice, not the sort order's",
+		},
+		{
+			name:   "an unrelated projector",
+			files:  []string{"mmproj-Llama-3-8B-F16.gguf"},
+			model:  "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+			want:   "",
+			reason: "nothing in common is no match, not the closest one",
+		},
+		{
+			name:   "no projector at all",
+			files:  []string{"Qwen3-VL-8B-Instruct-Q4_K_M.gguf"},
+			model:  "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+			want:   "",
+			reason: "a text-only folder has to answer nothing",
+		},
+		{
+			name:   "a model whose name merely contains the letters",
+			files:  []string{"mmproject-7B-Q4_K_M.gguf"},
+			model:  "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+			want:   "",
+			reason: "`mmproject` is not `mmproj`, the same rule the model list uses",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("GGUF"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			model := filepath.Join(dir, tc.model)
+			want := ""
+			if tc.want != "" {
+				want = filepath.Join(dir, tc.want)
+			}
+			if got := MatchProjector(model); got != want {
+				t.Errorf("MatchProjector = %q, want %q — %s", got, want, tc.reason)
+			}
+		})
+	}
+
+	// A model that is not there, and no path at all, are answered rather than read:
+	// the status row asks this for every configured model, including a path the user
+	// typed and has not saved yet.
+	if got := MatchProjector(""); got != "" {
+		t.Errorf("MatchProjector(\"\") = %q, want empty", got)
+	}
+	if got := MatchProjector(filepath.Join(t.TempDir(), "nope", "a.gguf")); got != "" {
+		t.Errorf("MatchProjector of an absent folder = %q, want empty", got)
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

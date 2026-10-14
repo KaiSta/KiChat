@@ -44,6 +44,12 @@ type Options struct {
 	// program it is the primary file of the set the command line names, because this
 	// is what a start checks for and what the row shows.
 	Model string
+	// MMProj is the multimodal projector to load beside the model, `--mmproj`, and
+	// empty for a text-only server. A vision model is two files: without the
+	// projector llama.cpp has no vision tower to hand an image to, so it answers the
+	// turn with "image input is not supported" — a 500 the user reads as this app
+	// being broken, on a model that looks like it should be able to see.
+	MMProj string
 	// Args, when set, is the whole command line after the binary, built by the caller.
 	// It replaces the llama.cpp argument list this package builds, which is how a
 	// second program is supervised by the same code: everything else a start does —
@@ -561,6 +567,12 @@ func (o Options) args() []string {
 	}
 	if v := strings.TrimSpace(o.CacheTypeV); v != "" && v != CacheTypeF16 {
 		args = append(args, "--cache-type-v", v)
+	}
+	// The projector is the other half of a vision model. Before Extra, like every
+	// flag above: a user who names a different one themselves types it as an extra
+	// argument, and theirs is the one that counts.
+	if p := strings.TrimSpace(o.MMProj); p != "" {
+		args = append(args, "--mmproj", p)
 	}
 	return append(args, o.Extra...)
 }

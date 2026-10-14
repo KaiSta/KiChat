@@ -257,6 +257,7 @@ export namespace config {
 	export class ManagedModel {
 	    enabled: boolean;
 	    modelPath: string;
+	    mmproj: string;
 	    ctxSize: number;
 	    flashAttention: string;
 	    cacheTypeK: string;
@@ -272,6 +273,7 @@ export namespace config {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.enabled = source["enabled"];
 	        this.modelPath = source["modelPath"];
+	        this.mmproj = source["mmproj"];
 	        this.ctxSize = source["ctxSize"];
 	        this.flashAttention = source["flashAttention"];
 	        this.cacheTypeK = source["cacheTypeK"];
@@ -873,6 +875,8 @@ export namespace main {
 	    loadedModel?: string;
 	    ctxSize: number;
 	    extraArgs: string;
+	    mmproj?: string;
+	    mmprojDetected?: boolean;
 	    state: string;
 	    port: number;
 	    url: string;
@@ -895,6 +899,8 @@ export namespace main {
 	        this.loadedModel = source["loadedModel"];
 	        this.ctxSize = source["ctxSize"];
 	        this.extraArgs = source["extraArgs"];
+	        this.mmproj = source["mmproj"];
+	        this.mmprojDetected = source["mmprojDetected"];
 	        this.state = source["state"];
 	        this.port = source["port"];
 	        this.url = source["url"];

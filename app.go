@@ -305,6 +305,13 @@ func (a *App) startManagedModel(backendID string) error {
 	}
 
 	srv := a.serverFor(backendID, settings)
+	// The projector is resolved here rather than at save time: it is a file on disk that
+	// can be downloaded, moved or replaced after the model was picked, and what a start
+	// loads has to be what is there now.
+	projector, err := managedProjector(mm)
+	if err != nil {
+		return err
+	}
 	// Only the build this app installed is asked for its trace log. The placement
 	// reading — which device, how many layers — is printed at that level and nowhere
 	// else, but `-lv` is a flag an older binary a user points at may not know, and an
@@ -314,6 +321,7 @@ func (a *App) startManagedModel(backendID string) error {
 	err = srv.Start(rt.Options{
 		Binary:         binary,
 		Model:          mm.ModelPath,
+		MMProj:         projector,
 		Ctx:            mm.CtxSize,
 		FlashAttention: mm.FlashAttention,
 		CacheTypeK:     mm.CacheTypeK,
@@ -330,6 +338,40 @@ func (a *App) startManagedModel(backendID string) error {
 		a.clearInstallCompleted()
 	}
 	return err
+}
+
+// managedProjector resolves the multimodal projector for a managed model: the file the
+// user named, or the one sitting beside the model when they named none.
+//
+// A detected file is deliberately *not* written back into the settings. An empty field
+// keeps meaning "whatever is beside the model", so a projector replaced by another quant
+// — or a whole model folder moved with its projector — is picked up on the next start
+// without anyone clearing a stale path first.
+func managedProjector(mm config.ManagedModel) (string, error) {
+	if named := strings.TrimSpace(mm.MMProj); named != "" {
+		if info, statErr := os.Stat(named); statErr != nil || info.IsDir() {
+			// Named but not there. llama-server would load the whole language model first
+			// and only then fail to open the projector, so the answer belongs here, where
+			// the sentence can name the file the user typed.
+			return "", fmt.Errorf("die mmproj-Datei %s ist nicht vorhanden", named)
+		}
+		return named, nil
+	}
+	return rt.MatchProjector(strings.TrimSpace(mm.ModelPath)), nil
+}
+
+// projectorReading is what a status row says about the projector: the file a start would
+// load, and whether the app found it beside the model rather than being given it.
+//
+// An empty path is the honest answer for a text-only model, and it is one the panel says
+// out loud — a model that cannot see is worth knowing before an image is attached to a
+// turn, since the failure otherwise arrives as the server's own 500.
+func projectorReading(mm config.ManagedModel) (path string, detected bool) {
+	if named := strings.TrimSpace(mm.MMProj); named != "" {
+		return named, false
+	}
+	found := rt.MatchProjector(strings.TrimSpace(mm.ModelPath))
+	return found, found != ""
 }
 
 // llamaServerPath resolves the launcher: the user's own copy if they gave one,
