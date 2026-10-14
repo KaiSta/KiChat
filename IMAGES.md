@@ -29,7 +29,7 @@ Two things it is **not**:
 - It is not `img2img`, inpainting or a LoRA browser. Those are routes on the same
   server, and adding them is a request field each rather than a new design.
 
-## 2. One client, three servers — and a second kind that needs no server
+## 2. One client, three servers — and two more kinds that run locally
 
 `internal/images/sdwebui.go` speaks **`/sdapi/v1/txt2img`**, and one client covers
 three servers because they share the route:
@@ -127,9 +127,11 @@ needs).
 Flags are spelled exactly as `examples/common/common.cpp` declares them, including the two
 that prose about the project habitually gets wrong: the scheduler is `--scheduler`, not
 `--schedule`, and the CLIP encoders are `--clip_l`/`--clip_g` with underscores. Anything
-outside that verified set travels in `ExtraArgs`, which is how a turbo model's `--sigmas`,
-`--cfg-scale` and `--diffusion-fa` stay reachable without a new KiChat release. A working
-command line copies across field for field:
+outside that verified set travels in `ExtraArgs`, which is how a turbo model's `--sigmas` and
+`--diffusion-fa` stay reachable without a new KiChat release. `--cfg-scale` used to be in that
+list and no longer is — it is a *generation* parameter the model is given a say in (§3), so it
+needs a name this app can set and record, and one command line can be seen twice in the
+wild. A working command line copies across field for field:
 
 ```bash
 ./sd-cli -m ../models/qwen-image-2.1-Q5_K_M.gguf \
@@ -171,8 +173,12 @@ A second working line shows the other shape — a Flux pipeline with one part pa
 
 Six of those flags have a home in the panel and three do not, and the split is the design
 rather than an oversight: `--steps` is **Steps**, `--offload-to-cpu` is the switch below, and
-`--cfg-scale`, `-v` and `--diffusion-fa` are the extra arguments, because each of them
-carries a value or a spelling this app has no reason to model.
+`-v` and `--diffusion-fa` are the extra arguments, because each of them carries a spelling
+this app has no reason to model, and `--cfg-scale` now has a field of its own (§3). The rule
+that separates them is what a flag can change: `-v` and `--diffusion-fa` decide how the run is
+*logged* and whether the attention is the fast kernel, and neither changes what the picture is,
+while the guidance scale is the one parameter here that a model can reason about and a recipe
+has to record.
 
 Six details are decisions rather than plumbing:
 
@@ -202,10 +208,129 @@ value, spelled the way a working command line spells it. It is deliberately the 
 with a control of its own: every flag that carries a value stays in the extra arguments,
 where a renamed option costs nothing. It is also not part of a recipe — it changes where the
 work happens, not what the picture is — so a redraw reads it from settings rather than from
-the stored picture.
-- **The draw bound is this backend's own** (`images.DefaultCLITimeout`, 30 minutes). A bound
-carried over from the server unchanged would cut a real draw off mid-load and report it as a
-failure; Stop, not the bound, is the control for a draw that is merely slow.
+the stored picture.- **The draw bound is this backend's own** (`images.DefaultCLITimeout`, 30 minutes). A bound
+  carried over from the server unchanged would cut a real draw off mid-load and report it as a
+  failure; Stop, not the bound, is the control for a draw that is merely slow.
+
+### The same program as a server, started and stopped by KiChat
+
+`ImageSettings.Kind = "sdserver"` is the third kind, and it is the *same* build in its other
+lifetime: `sd-server` out of the same folder, with the same model set, started by KiChat and
+left running until the user stops it or the app exits. It exists because of one measurement
+and one cost. The measurement is the trade the CLI kind states: a one-shot process pays a
+model load per picture — minutes on a CPU for a q5 diffusion model — while a server pays it
+once and then spends only the sampling. The cost is the other side of the same trade, and it
+is why this is not the default: a process that stays up holds the memory its model was loaded
+into, so *"KiChat can run this for me"* and *"KiChat starts this every time I open the
+window"* are two statements, and only the second one spends the user's VRAM on a decision
+they had not made yet.
+
+Nothing about *what* is loaded is decided here. The command line is the model half of the
+CLI's own (`cli.go`, `modelArgs`) with a listener appended, because `sd-cli` and `sd-server`
+are one executable's two faces from one archive: same flags, same folder, same model set.
+Keeping those two command lines in one place is the whole of the reason `modelArgs` exists,
+and it is what makes switching between the two lifetimes a change of `kind` rather than a
+second configuration to fill in. Three details are deliberate:
+
+- **The listener is bound to the loopback interface** (`--listen-ip 127.0.0.1`), the way the
+  managed llama.cpp server is. This is a local model with no authentication at all; an
+  endpoint on every interface is a port on the network rather than a convenience.
+- **The port is chosen by the app, never defaulted.** `sd-server` documents 1234 as its own
+  default, and 1234 is LM Studio's default too — a backend this app is already pointed at on
+  many machines. A collision there would either fail the start or, worse, leave KiChat talking
+  to the wrong server. The start takes a free port before the process exists, which is why the
+  args carry the final one and why `ServerKey` is built the way it is below.
+- **The build is asked whether it has a server mode at all** (`serverSupport`).
+  `--listen-port` is looked for in the program's own `-h` output, the way `previewSupport`
+  looks for `--preview`, because the project tells users to read `-h` rather than publishing a
+  stable option list. A build that ignored an unknown flag and carried on would listen on 1234
+  — LM Studio's address — and a picture would then be requested from whatever answered there.
+  A build that cannot answer `-h` at all is *not* refused: there is no evidence against it,
+  which is the line `Health` already takes about the one-shot program.
+
+The start is the chat runtime's supervisor with three things made callable rather than
+assumed (`rt.Options.Args`, `.ReadyPath`, `.Label`): the command line, the route readiness is
+asked on, and the name the messages use. Two consequences are worth naming.
+
+- **The readiness route is `/sdapi/v1/sd-models`, not `/health`.** That is llama.cpp's route;
+  `sd-server` documents no health endpoint, and the A1111-shaped routes it does serve are the
+  ones this app already uses. `/sdapi/v1/sd-models` answers 200 once a model is loaded, which
+  is exactly the question a start has to answer — a probe on any other route would certify a
+  server that cannot yet draw. `label()` is what keeps the failure messages honest: a row that
+  said *"llama-server wurde beendet"* about sd-server would be wrong in the one place a user
+  looks for a reason.
+- **The bound is 15 minutes** (`images.DefaultServerReadyTimeout`), not the chat runtime's
+  180 seconds. The thing being loaded is not the same size or shape: a llama.cpp GGUF streams
+  off disk, while a q5 diffusion pipeline plus its VAE and text encoder is several gigabytes
+  and takes minutes on a CPU — the very load `DefaultCLITimeout` gives half an hour to, since
+  the one-shot kind pays it on *every* picture.
+
+**Starting is also restarting**, and there is no second call for it. `sd-server` creates its
+context once before it listens and documents no way to replace it, so one pipeline per process
+is the whole of the model-switching story: a different model is a different process. The app
+therefore never has to decide between "start" and "restart" — a start replaces whatever was
+running, which is what a user who pressed it meant either way.
+
+What it must *not* do is reload on its own. A save never restarts the server, by the same rule
+the managed chat models follow: a model that may have taken minutes to load is not reloaded
+because an unrelated field was edited. Instead the row is told, from a reading rather than
+from a flag: `imageServerRestartNeeded` compares the command line the running server was
+started from (`images.ServerKey`, recorded at the start) with the one the settings now
+describe, and the panel shows **Restart needed** beside a button that is already labelled
+*Restart*. `ServerKey` is the program plus the model half of the command line, deliberately
+*without* the port — a port is chosen per start, so including one would make every server look
+out of date the moment it came up — and it is compared as *configured* (the folder and the
+typed path) rather than as resolved, because resolving is a filesystem walk that can fail, and
+a comparison that has to fail before it can answer is a comparison the panel would have to
+render as an error. A profile's Apply uses the same reading to decide between **Apply** and
+**Apply & restart**, and it restarts *after* the save: the settings are what a start reads, so
+restarting first would load the model the user just moved away from.
+
+Two settings govern the lifetime, and neither is inferred:
+
+- **`startWithApp` starts it at launch, and is off.** Choosing the kind says "KiChat may run
+  this for me"; this says "KiChat runs it every time I open the window", and the second is the
+  one that costs memory on a machine whose user is about to do something else.
+- **Nothing stops it but the user**, and that is the design rather than an omission: the point
+  of a resident model is that it is already loaded, so an idle timer would take the memory
+  back exactly when the next picture was about to be asked for. The Stop button is in front of
+  the user, the row says what stopping costs, and the app's own exit stops it — `stopAllManaged`
+  walks the same map the chat servers live in, so a picture server cannot outlive the window
+  with nothing left in the UI to stop it.
+
+A few consequences of the kind living in the settings section it shares with the other two:
+
+- **The kind survives a save and a reload.** `normalise` keeps `cli` and `sdserver` as
+  themselves and folds everything else to the empty string that means the HTTP server, so a
+  hand-edited blob degrades to a backend that works — but a *known* kind has to come back out
+  of the database unchanged, or a user's own sd-server would be silently replaced on the next
+  launch by whatever answers on the stored HTTP address. The address a draw uses is the
+  running server's own, taken from its status, never the stored field: a stale one must not
+  become a way to draw from somebody else's server. That URL is deliberately *not* adopted
+  back into `ImageSettings.BaseURL` the way a managed chat model's address is written into its
+  own backend entry. There the field belongs to the server it names; here it is the *other*
+  picture backend's address — the WebUI the user typed in — and a randomly chosen port written
+  into it would rewrite that setting as a side effect of running a local program. Nothing needs
+  it either: the provider is built from the running status, and the row shows that URL out of
+  the process's own status rather than out of the settings.
+- **With the server down there is no provider at all**, so `generate_image` is not offered.
+  That is the honest state rather than a technicality: a backend that could only answer
+  "nothing is listening" would put a tool in front of the model that costs a wasted round every
+  time it was called. Starting the server brings the tool back without a restart of the app,
+  because the state change rebuilds the services — which is what `ServerKey`, the address and
+  the rebuild are all for.
+- **A running server keeps its row when the kind is switched away** (`isSD && running` is not
+  the only case that renders it): a multi-gigabyte process with nothing left in the window that
+  stops it is exactly the state the chat backends' own model switch refuses to leave behind,
+  so the row says the server belongs to another backend choice and offers Stop. What makes that
+  render is the backend rather than the panel: `GetImageStatus` reports the process row for
+  *every* kind — `stopped` when nothing runs — because a row filled only for `sdserver` would
+  hide precisely the process it exists to stop. The panel then decides, and it offers only Stop
+  in that state: the command line a start builds comes from the settings the other kind just
+  replaced, so starting from this form would load something nobody asked for.
+- **Stop against a *draw* is best effort on this kind**: `sd-server` has no
+  `/sdapi/v1/interrupt`, so the wait ends and the server is not told (§5). One pipeline per
+  process is the same fact seen from the other side.
 
 ### Where the program comes from
 
@@ -271,13 +396,13 @@ no backend to load is. Note that ROCm's backend library is spelled `-hip`, never
 files are named on the command line, so the panel offers a file picker per field instead of a
 checkpoint list. `Health` checks paths — the binary is a file, is executable, and every named
 model exists — and runs `-h` only to prove the process starts at all, ignoring its exit code
-because a build that does not answer that option can still draw. The `Kind` itself is
-normalised by `config.NormaliseImageKinds`: only the literal `cli` is stored as itself, and
-everything else — including the server kind spelled out in full — folds to the empty string
-that already means the HTTP server, so a hand-edited blob degrades to the backend that used to
-work rather than to none at all.
+because a build that does not answer that option can still draw. The `Kind` is folded to the
+three spellings it has by `config.NormaliseImageClamps`: `cli` and `sdserver` are stored as
+themselves, and everything else — `server` written out in full included — becomes the empty
+string that already means the HTTP server, so a hand-edited blob degrades to the backend that
+used to work rather than to none at all.
 
-## 3. Empty means "leave it to your server"
+## 3. Empty means "the model decides" — and then "leave it to your server"
 
 Every generation field in Settings may be left empty, and an empty one is **omitted
 from the request** rather than sent as a default:
@@ -288,17 +413,108 @@ from the request** rather than sent as a default:
 | credentials | no `Authorization` header | a WebUI ships with no authentication; sending one anyway is a request it may refuse |
 | checkpoint | no `override_settings` | the user's WebUI has a model loaded; overriding it with a guess ignores their setup |
 | sampler, steps, size | omitted | same reason — their WebUI already has a choice |
+| guidance scale (`cfg_scale`) | omitted | 7.0 is what A1111 and sd-cli are shipped with, but `sd-server` falls back to a `txt_cfg` living inside the model file, so the real default is a number only the model can report |
 | negative prompt | omitted | an empty *sent* string would **replace** a negative prompt configured in their WebUI; omitting the field leaves it in force |
 
 This is the same instinct as the model picker offering the GGUF files a user already
 has: the app must not quietly substitute its own guess for a decision the user made
 elsewhere. The Settings section says so under the fields.
 
+### The model decides first, and a filled field is an instruction
+
+For a picture the *model* asked for, the sampler, step count, size and negative prompt are
+answered in two steps rather than one, and the order is the whole design:
+
+1. **The model, per call.** All of it is in the `generate_image` schema — `prompt`,
+   `negative_prompt`, `width`, `height`, `steps`, `seed`, `sampler`, `cfg_scale`, with their
+   bounds spelled out — so a model that knows a sketch wants 8 steps and a portrait 40 says so,
+   and one that knows nothing says nothing. Its answers are the thing this app defaults to; the
+   fields below are not defaults at all.
+2. **The backend, when nobody answered.** A value neither side set is omitted from the request,
+   which is the reading the table above describes: the server's or the program's own default
+   applies.
+
+**A value typed into Settings is not a default — it is a fixed value, and it wins.** Per field,
+and *against* the model: a pinned size stays that size whether or not the model asked for
+something else (`internal/tools/image.go`, `pinInt`/`pinFloat`/`pinString`). The asymmetry is
+deliberate.
+A model choosing 8 steps for a sketch and 40 for a portrait is the feature working; a model
+*overruling* the step count, size or sampler that someone typed into Settings is a standing
+instruction being ignored by a component that cannot see the machine, the installed model or
+the licence it was bought with. Only the user knows those, so a value they entered is the last
+word and the model's is the fallback.
+
+Three consequences worth stating, because each of them looks like a detail and is not:
+
+- **It is per field.** Pinning the size leaves the step count, the sampler and the negative
+  prompt to the model — which is what makes "I want 1024×1024, otherwise you choose" one click
+  rather than a configuration with holes punched in it.
+- **The panel says which it is.** The empty state of those five fields reads *The model
+  decides* rather than a backend default, and the group carries one sentence naming what a typed
+  value costs and buys (`settings.images.pinHint`). The checkpoint selector beside them keeps
+  its *Server default*, because that one really is the server's own — an empty checkpoint means
+  no `override_settings` at all.
+- **The recipe still records what was drawn.** `recipeFrom` is built from the request after
+  the pins and the clamps, so a picture remembers the size it really has — which is what keeps
+  Redraw and the picture editor honest: those two read the *recipe*, not Settings, and a
+  redraw of a picture made before a value was pinned still reproduces that picture rather than
+  silently adopting the new pin.
+
+The tool description and `ImageProtocolHint` say the same thing to the model in words, because
+a capability it does not know about is one it will fight: the call decides, and a value the user
+fixed cannot be changed by it. `summarizeGeneration` reports the size, the steps, **the sampler
+and the guidance scale** that were used, so a model that has to explain the picture it just made
+can name the values that were really drawn with rather than the ones it asked for.
+
+#### The guidance scale, and why it is the one that left the extra arguments
+
+`cfg_scale` is the fifth field, added after the first four for a reason that is about *where a
+value comes from* rather than about the field itself. Of everything the CLI kind passes through
+untouched, it is the only parameter that decides what the picture *is* and that the A1111-shaped
+route also takes per request, under two spellings that mean the same thing:
+
+| backend | spelling | its own default |
+| --- | --- | --- |
+| AUTOMATIC1111, Forge | `cfg_scale` on `/sdapi/v1/txt2img` | `7.0` (`modules/processing.py`, `cfg_scale: float = 7.0`) |
+| stable-diffusion.cpp `sd-server` | `cfg_scale`, same route | the model's own `txt_cfg` — `j.value("cfg_scale", …guidance.txt_cfg)` |
+| stable-diffusion.cpp `sd-cli` | `--cfg-scale`, a float option | `7.0` (`examples/common/common.cpp`) |
+
+The middle row is why "unset" had to stay unset rather than become a number: for a pipeline
+whose guidance lives in the model file, the right value is whatever that file says, and no
+configuration on this machine can know it. The scale is also the one parameter a model has a
+reason to choose for itself — 1 for a distilled or flow-matching model (Flux, Qwen-Image,
+SDXL-Turbo), where the guidance term is inert and a larger value does not sharpen the prompt so
+much as wreck the picture, and 4–8 for the ordinary checkpoints where a low scale is looser and a
+high one holds harder to the prompt. That is exactly the shape of the feature: a model deciding
+1 for a Flux request and 7 for an SDXL one is the point, and a value the user typed is an
+instruction that a component unable to see the installed weights does not get to overrule.
+
+Two consequences are deliberate and worth naming:
+
+- **It is clamped by the app, not by a vendor.** The range is 1–30
+  (`images.MinCfgScale`/`MaxCfgScale`), chosen to bracket what the three backends document —
+  7.0 is the shipped default of two of them and 1.0 is where a flow model is run — rather than
+  quoted from a schema. Above 30 a picture stops getting better and gets *harder*, for the same
+  GPU seconds; a model that invents 250 is believed about neither. A NaN (reachable: the tool
+  decodes "nan" through `strconv.ParseFloat`) folds to "unset" rather than failing the draw,
+  because `encoding/json` refuses to marshal one at all.
+- **A user's `--cfg-scale` in the extra arguments now loses to the model.** The extra arguments
+  are placed first on the command line and this app's own values last, so a value KiChat now
+  sets wins — and that is the intended direction, because the recipe records the scale that was
+  really drawn with. What a user wrote for a Flux pipeline therefore stays in force only while
+  nobody chooses another: the field above is how to say "always 1", and the panel's
+  extra-arguments hint says exactly that.
+
+The live tests are where the honoured value can be *seen*: both servers copy it into their
+`info` (`Processed.js()` on A1111, `jsoninfo["cfg_scale"]` on `sd-server`), so
+`TestLiveSDWebUI` and `TestLiveSDServer` send 2.5 and assert it comes back. `sd-cli` reports no
+such thing, so for that kind the evidence is the command line itself.
+
 The numbers are bounded in **one place**: `images.Request.Normalised()`
 (`internal/images/limits.go`) clamps a side to 64–2048 and rounds it to the multiple of 8
-every diffusion model's latent grid needs, clamps the step count to 150, and leaves 0 — and a
-negative, which is the same statement — alone, because 0 is the spelling of "the server's
-own". `config.NormaliseImageClamps` applies those bounds to a stored blob too, and the
+every diffusion model's latent grid needs, clamps the step count to 150, clamps the guidance
+scale to 1–30, and leaves 0 — and a negative, which is the same statement — alone, because 0
+is the spelling of "the server's own". `config.NormaliseImageClamps` applies those bounds to a stored blob too, and the
 settings constants are *named* in `internal/config` and **declared** in `internal/images`, so
 there is one copy of each.
 
@@ -318,6 +534,55 @@ A local server refuses none of these; it attempts them, for hours of sampling or
 gigabytes of latent, on the machine the user is sitting in front of. The tool's own schema
 advertises 64–2048 and 1–150, so a model that reads it is safe — and the small local models
 this app is built for are the ones that most often ignore it.
+
+### Profiles: the same fields, saved under a name
+
+A model is not a server. One WebUI serves several checkpoints, and the `cli` kind is one
+program pointed at one pipeline's files at a time, so "switch to the other setup" meant
+retyping a checkpoint, a sampler, a step count, a size and a negative prompt every time —
+which is the kind of friction that ends with the wrong sampler on the next picture.
+`config.ImageProfile` is that set of fields under a name, and `config.Settings.ImageProfiles`
+is the list of them; the Images tab offers it as a dropdown with Apply, Delete and a
+save/update button.
+
+**A profile *is* an `ImageSettings`, stored next to `Images` rather than inside it.** The panel
+applies it by copying those fields into the live ones, so a profile that were a different shape
+from the configuration it restores could drift field by field, invisibly. It is the field the
+system-prompt presets already established: a named list of saved configurations, kept whole in
+the settings blob, so a field added later needs no migration.
+
+**Three fields deliberately do not travel with it**, and `Settings.normalise` clears them so a
+hand-written blob cannot put them back:
+
+| not stored | why |
+| --- | --- |
+| `enabled` | applying a profile must not be able to switch the feature *off* — the switch says whether the model has a `generate_image` tool at all (§5) |
+| `saveFolder` | where exports go is about the user's disk, not about how a picture is drawn |
+| `apiKey` | the `user:pass` belongs to the *server*, which every profile talks to, so it stays the feature's own keyring entry. Per-profile secrets would also mean one keyring entry per profile for a field most setups leave empty — and a copy of the credential inside a profile is exactly the plain-text settings row `api.sanitize` exists to prevent |
+
+Every profile's numbers go through `NormaliseImageClamps` as well, because applying one writes
+them into the live fields: a profile that kept a 20000-pixel side would re-arm, once per pick,
+the request §3's clamp exists to prevent. An unnamed profile is dropped and so is a repeated
+name — the panel addresses a profile *by name*, so nothing could ever select the first and an
+"update this profile" click would have two candidates. Of two profiles that share a name the
+*first* wins, so a repair never hands the second one's configuration to the first one's name.
+
+**The three buttons save immediately** rather than editing the draft: a profile that vanished
+on the way to another tab is the opposite of what a *save* button promises, and the point of the
+list is that switching is one click. Selecting a name also fills the name box, which is what
+makes "pick it, correct one field, press update" the whole editing story; the button's label
+says which of the two it will do, because the same click is a create or an overwrite and only
+the name decides. A delete asks twice, the way §6.1's clear does.
+
+The mock-bridge harness ships three profiles, one per kind. A list of two server profiles would
+not render the thing that matters, which is that picking the `cli` one switches the backend as
+well as the sampler and the step count; and the third one names the *managed* server, which is
+the only profile whose apply can be a *reload* — the only one that can differ from a running
+`sdserver` in the fields a start reads, and therefore the only fixture in which the button's
+"Apply & restart" label is reachable at all. The other two, applied while a server runs, leave
+it alone: they name a kind that is not the managed server, so there is nothing to reload and the
+running process is still the row's own Stop to deal with. `?profiles=none` is the empty state a
+fresh install is in, where the dropdown, Apply and Delete are all inert.
 
 ## 4. The picture is an attachment, and that is the whole trick
 
@@ -343,8 +608,8 @@ No schema change, and three properties fall out for free:
 ### The recipe: what makes a picture drawable again
 
 The picture is an attachment; the *recipe* is a column on it. `attachments.generation_json`
-holds the prompt, the negative prompt, the size, the steps, the sampler, the seed and the
-checkpoint, and it is what turns "draw that again" into a control instead of a
+holds the prompt, the negative prompt, the size, the steps, the sampler, the guidance scale,
+the seed and the checkpoint, and it is what turns "draw that again" into a control instead of a
 conversation: the recipe is data, not a request in words, so no model has to be asked to
 use it.
 
@@ -422,7 +687,8 @@ is what makes three controls out of one call:
 - **Redraw** passes the stored recipe back untouched — the same picture.
 - **Variation** passes it with the seed cleared, so the server chooses a new one.
 - **Edit recipe** opens the recipe in a form under the picture — prompt, negative prompt,
-  size, steps, seed, checkpoint, sampler — prefilled from the picture's own, and **Draw**
+  size, steps, guidance scale, seed, checkpoint, sampler — prefilled from the picture's own,
+  and **Draw**
 sends what is in the boxes. This is the iteration loop: change the prompt, draw, look at the
 result beside the original, change it again. The editor stays open after a draw for exactly
 that reason.
@@ -720,10 +986,12 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   #   KICHAT_SD_URL (default http://127.0.0.1:7860), KICHAT_SD_AUTH=user:pass
   ```
 
-  It asserts the three things the offline tests can only fake: the server names its
+  It asserts the four things the offline tests can only fake: the server names its
   checkpoints on `/sdapi/v1/sd-models`; the sampler this client sends is echoed back in
-  `info`, which is what proves a real server recognised it instead of ignoring it; and
-  the payload carries PNG magic, so a server answering with a URL or with a `data:`
+  `info`, which is what proves a real server recognised it instead of ignoring it; the
+  guidance scale is echoed there too — 2.5, a value neither default would produce —
+  which is the only place a guidance scale can be shown *honoured* rather than merely sent;
+  and the payload carries PNG magic, so a server answering with a URL or with a `data:`
   prefix — bytes that are not a picture — is told apart from one that answered properly.
   A closed port and a reachable-but-empty server are both reported as *skips* rather than
   failures: the test describes a running server, it does not insist that one exists. It
@@ -741,10 +1009,15 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   rendered `{{tool_list}}` line and from the text-protocol hint, and present in each of
   the three once a provider exists. It drives a real turn and reads the request the model
   actually received, which is the only place all three are visible together.
-- `internal/tools/image_test.go` — the whole feature in one test: defaults from
-  settings, the model's arguments winning, the attachment landing on the calling
-  message, the document holding base64, the filename following the payload's real
-  format, and the "do not describe it" instruction. It runs against a real SQLite
+- `internal/tools/image_test.go` — the whole feature in one test: the precedence of §3 in
+  *both* directions — the model's numbers and words reach the provider when the field is empty
+  (`TestTheModelDecidesEveryFieldTheUserLeftEmpty`), a fixed value beats what the model asked
+  for (`TestASettingTheUserFixedBeatsTheModelsArgument`), and one pinned field does not take the
+  other three with it (`TestAFixedFieldLeavesTheRestToTheModel`), which a test of the pinning
+  half alone would pass for a builder that dropped the model's arguments entirely — the
+  attachment landing
+  on the calling message, the document holding base64, the filename following the payload's
+  real format, and the "do not describe it" instruction. It runs against a real SQLite
   store in a temp directory. The recipe is asserted against the seed and checkpoint the
   *server* reported rather than the ones requested; a repeat pins the recorded seed while
   a variation drops it; both land on the message the original is on, under names that do
@@ -761,8 +1034,59 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   rather than degrading to "no recipe", and an **older database gains the column**: the
   upgrade path is built by dropping the column and rolling `user_version` back, because a
   migration placed at the wrong index is skipped silently and breaks every installation.
+- `internal/images/limits_test.go` — the guidance scale's own table, because its reading of "unset"
+  has to survive a float: zero stays zero rather than being raised to the floor, a negative says
+  the same as an empty box, 250 lands on the ceiling, and a NaN — reachable through
+  `strconv.ParseFloat("nan")`, and fatal to a draw because `encoding/json` refuses to marshal one
+  — folds to unset. The same file's provider tests assert `cfg_scale` on the wire and its absence
+  when nobody chose one, and `--cfg-scale` in the command line the other kind runs.
 - `internal/config/config_test.go` — the feature ships off, the fields stay empty, and
-  the clamps hold; `Kind` folds to its two spellings, so only `cli` survives as itself.
+  the clamps hold; `Kind` keeps exactly the three spellings it has, so `cli` and `sdserver`
+  survive as themselves and everything else — `server` written out in full included — folds to
+  the empty value that means the HTTP server.
+- `internal/images/sdserver_test.go` — the managed kind's own unit: the model half of the
+  command line with `--listen-ip`/`--listen-port` appended (the user's arguments first, the
+  listener last so a typed `--listen-port` cannot outvote the port the app will probe), the two
+  new refusals before a process exists — no model at all, and a build whose own `-h` does not
+  list the listener flag — and `ServerKey` ignoring the port while following every field that
+  reaches the command line.
+- `internal/runtime/supervise_test.go` — the supervisor generalisation, on a real process: a
+  caller-built `Args` is run *as given* rather than wrapped in llama.cpp's `-m`/`--host`, the
+  probe lands on the caller's `ReadyPath`, and the messages carry the caller's `Label`.
+- `image_server_test.go` (package `main`) — the whole kind through the app, with this test
+  binary playing `sd-server` (the same trick `cleanup_running_test.go` uses for llama-server,
+  so nothing outside the Go toolchain has to be installed): the folder supplies the program,
+  the start reaches `running` on the route the app probes, the address the row names is the
+  address the process answers on, a draw through the tool becomes an ordinary attachment with
+  the seed the *server* reported, and Stop takes the provider and the tool away again. A save
+  that changes the model leaves the server running and sets the restart reading; the restart
+  loads the edited set. `startWithApp` starts it only when set, and the app's own shutdown
+  leaves no process behind. `TestTheServerKindSurvivesASaveAndAReload` is the round trip: the
+  kind is saved, loaded back through `config.Load`, and used to start a server again — the
+  assertion that catches the normaliser folding a known kind away.
+- `internal/images/live_sdserver_test.go` — `TestLiveSDServer`, the opt-in counterpart that
+  starts a **real** `sd-server` and measures the claim this kind is built on:
+
+  ```bash
+  KICHAT_LIVE=1 KICHAT_SD_FOLDER=~/Downloads/sd go test ./internal/images/ -run TestLiveSDServer -v
+  #   optional: KICHAT_SD_DIFFUSION_MODEL, KICHAT_SD_MODEL, KICHAT_SD_VAE, KICHAT_SD_LLM,
+  #   KICHAT_SD_CLIP_L, KICHAT_SD_CLIP_G, KICHAT_SD_T5XXL
+  ```
+
+  Two skips guard it, and both are deliberate: `KICHAT_LIVE=1` says real work may happen, and
+  `KICHAT_SD_FOLDER` names the folder — there is no default, because this test does not merely
+  talk to a process, it starts one that loads gigabytes and holds them until it is killed. It
+  settles what no offline test can: that the published archive really carries `sd-server`
+  beside `sd-cli`, that the build accepts the listener flag the app refuses it without, that a
+  loaded server answers the readiness route the start hangs on, that this build parses the
+  `cfg_scale` key (it comes back in the server's own `info`, and a build that refused an
+  unexpected key would fail every draw rather than one), and — the measurement — the
+  time to ready followed by the wall time of two pictures, which is where "the load is paid
+  once" stops being an argument and becomes a number. The arithmetic is *reported rather than
+  asserted*: whether a draw is cheaper than a load depends on the model, the accelerator and
+  the step count, so a threshold would fail for a reason that has nothing to do with the
+  client. What is asserted is what the client depends on: two pictures come back as real PNGs
+  with a seed, and the second pays no load again.
 - `internal/images/cli_test.go` — the CLI provider against a stub binary: the flag-by-flag
   command line, the `-m` and `--diffusion-model` shapes, empty fields omitted, the extra
   arguments passed through untouched, the failure tail, and the seed that is *sent* versus
@@ -783,7 +1107,12 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   parameters are asserted from settings to argv there too — `-W 1024 -H 1024 --steps 8
   --sampling-method euler` — because "the size the user picked is the size that gets drawn"
   is a claim about settings reaching a command line, which the provider's own test (starting
-  from a `Request`) cannot make. A row that fills both model slots is refused before the
+  from a `Request`) cannot make. The guidance scale is where that path shows both directions at
+  once: the model asks for 9, the settings row pins 2.5, the recipe records 2.5, and the
+  command line carries the user's own `--cfg-scale 1.0` from the extra arguments *followed* by
+  the 2.5 — which is the order that makes the recorded value the one that wins. The redraw
+  afterwards sends the recorded 2.5 back rather than reading the field again, the same rule the
+  seed follows. A row that fills both model slots is refused before the
   process starts (`TestCLIRefusesTwoDiffusionModels`, plus the health subtests).
 - `internal/images/locate_test.go` — how the program is supplied: the published-build table
   per platform, including the assertion that **CUDA is not offered for Linux**; the three
@@ -805,7 +1134,16 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
 - `config.ImageSettings` and `main.ImageStatus` are in the generated bindings, so
   `tsc` fails if the two sides drift.
 - The **mock-bridge harness** (`tools/uiharness`) carries a `Bildgenerierung` chat
-  whose reply has a generated picture attached, and models every new binding. It
+  whose reply has a generated picture attached, and models every new binding. Its flags for
+  this kind are `?images=sdserver` (the third kind, with the folder and the model set filled
+  in), `?server=running|starting|failed|restart` (the process row: a loaded model with an
+  address and a log, a start still loading — which is what the row's own polling interval is
+  for — a start that died, whose log and reason the row shows, and the running row the saved
+  settings no longer describe), `?startwithapp=1`, and `?images=cli` / `?images=off` unchanged
+  for the other local kind. `StartImageServer`/`StopImageServer` are modelled as the
+  *transitions* they are: a start flips the row to `starting` and settles on a timer, and the
+  restart reading is computed from the stored command line rather than stored as a constant,
+  so a save that changes the model under a running server really does raise the badge. It
   proves the rendering, the caption, the save button, the Settings section with its
   populated checkpoint and sampler pickers, the test-connection flow, and all three draw
   controls. The mock logs the recipe it is handed rather than a flag, which is what makes
@@ -850,6 +1188,15 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   program path pointing at a *different* folder, the pair that reads as double: it is the
   state the disabled field, its note and the `Gefunden:` line exist for, and a fixture that
   only ever held one of the two could not show that rule at all.
+- `?profiles=none` is the profile list's empty state — a fresh install, or one whose profiles
+  were all deleted — where the dropdown has only its placeholder and Apply, Delete and the
+  save button are all inert. Driven with the fixture list against the mock bridge: picking the
+  `cli` profile switched the backend selector, the sampler, the step count and the size while
+  the feature switch and the export folder stayed as they were; a save under a new name appeared
+  in the dropdown with the button relabelled *Update profile*; updating it changed what a later
+  Apply restored (steps 20 → 12, and the list still held four entries rather than five); and the
+  delete asked once with the profile's name in the sentence, let Cancel put the plain button
+  back, and on the second press removed the row and cleared the selection and the name box.
 
 ## 9. What it does not do yet
 
@@ -857,11 +1204,11 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   `b64_image`, Stability, fal, Replicate) behind the same `images.Provider` interface.
   The interface was written for that: `Provider` has no HTTP in it. The CLI kind is the
   second `Provider` and is what showed the interface holds two unlike backends at once.
-- **The CLI kind never streams progress**, and there is nothing to poll: the binary writes
-  its PNG at the end. A draw reports the tool status pill and then the picture, like the
-  server's synchronous route. The child's own log is collected into a buffer and read only when
-  the run ends, so a first draw spends minutes on a model load behind an indefinite spinner;
-  streaming it would be the difference between "working" and "stuck".
+- **A one-shot draw's model load is still silent.** Its sampling reports (§5) — the binary's
+  own step lines and the `--preview` file it writes — but the load before the first step prints
+  nothing this app can turn into a fraction, so a first draw on a CPU still spends minutes
+  behind an indefinite spinner. On the managed server the same load is a `starting` row with a
+  bound on it, which is the other half of the same problem.
 - **A picture KiChat drew travels in an *assistant* message, and that is unverified.**
   `context.go` attaches a message's inline images to the message that owns them, which for a
   generated picture is the assistant turn, and `openai.go`/`ollama.go` render image parts for
@@ -883,7 +1230,21 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
 - **`img2img`, inpainting, upscaling** — same server, another route.
 - **A grid for several pictures.** The client already returns every image the server
   produced and files each one; nothing yet asks for more than one per call.
-- **Progress.** A 30-step 1024×1024 generation takes tens of seconds with no feedback
-  but a `tool` status pill, because `/sdapi/v1/txt2img` is synchronous and answers only
-  when it is done. A real progress bar needs the WebUI's `/sdapi/v1/progress` poll or a
-  queued route.
+- **The managed server holds its model until the user stops it,** and there is deliberately no
+  idle timeout that gives the memory back: the point of a resident model is that it is already
+  loaded, so a timer would release it exactly when the next picture was about to be asked for.
+  The price is stated in the row, and Stop is in front of the user (§2).
+- **One pipeline per process, so a model switch is a restart.** `sd-server` creates its
+  context once before it listens and documents no way to replace it, which is why Start doubles
+  as Restart and why `ServerKey` and the **Restart needed** badge exist rather than a quiet
+  reload. Stopping and starting again costs the whole load — minutes on a CPU.
+- **Stop against a *draw* is best effort on this kind.** `sd-server` has no
+  `/sdapi/v1/interrupt`, so cancelling ends the wait and the server finishes a picture nobody
+  will see, the same hazard §5 describes for the WebUI family. Its native API cancels by *job
+  id*, and this client does not submit jobs.
+- **The load-once arithmetic is an argument here, not a measurement.** No `sd-server` was
+  available on the machine this was written on — the same caveat §2 carries for the WebUI
+  flags — so "a server pays the load once and then only the sampling" is the trade the CLI kind
+  states, not a number this repo has. `TestLiveSDServer` (§8) is what turns it into one, and it
+  also settles the assumption the folder lookup rests on: that the published archives really
+  carry `sd-server` beside `sd-cli`.

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -47,6 +48,10 @@ func callingMessage(ctx context.Context) string {
 // optional and tolerates a string where a number belongs, which is what
 // decodeLoose plus the `any` type is for: small local models emit "512" as often
 // as 512, and refusing the call over that would waste a whole tool round.
+//
+// These are the *model's* choices, and they are what the drawing uses — unless the user has
+// fixed the same value in Settings, which wins (see pinInt/pinString below). The split is the
+// point of the whole mechanism: a model decides per picture, and a user decides once.
 type generateImageArgs struct {
 	Prompt         string `json:"prompt"`
 	NegativePrompt string `json:"negative_prompt"`
@@ -55,6 +60,10 @@ type generateImageArgs struct {
 	Steps          any    `json:"steps"`
 	Seed           any    `json:"seed"`
 	Sampler        string `json:"sampler"`
+	// CfgScale is the guidance scale: how hard the prompt is pushed. A float, and so
+	// the one `any` here that is not read as an int — `7.5` is a scale a model may
+	// well ask for, and `looseInt` would take it for 7.
+	CfgScale any `json:"cfg_scale"`
 }
 
 // generateImage draws the requested picture and files it in the chat.
@@ -76,14 +85,17 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	cfg := s.imageSettings()
 	req := images.Request{
 		Prompt: prompt,
-		// The tool's own argument wins over the configured default, and an empty
-		// one on both sides means "send nothing", which is what leaves a negative
-		// prompt configured in the user's own WebUI in force.
-		NegativePrompt: firstNonEmptyString(args.NegativePrompt, cfg.NegativePrompt),
-		Width:          looseInt(args.Width, cfg.Width),
-		Height:         looseInt(args.Height, cfg.Height),
-		Steps:          looseInt(args.Steps, cfg.Steps),
-		Sampler:        firstNonEmptyString(args.Sampler, cfg.Sampler),
+		// The model decides these, *except* where the user has fixed one in Settings — a value
+		// typed there is an instruction, not a default, so it overrides what the model asked
+		// for. An empty field on both sides means "send nothing", which is what leaves a
+		// negative prompt configured in the user's own WebUI in force. Why the two directions
+		// are not symmetrical is in pinInt/pinFloat/pinString below.
+		NegativePrompt: pinString(cfg.NegativePrompt, args.NegativePrompt),
+		Width:          pinInt(cfg.Width, args.Width),
+		Height:         pinInt(cfg.Height, args.Height),
+		Steps:          pinInt(cfg.Steps, args.Steps),
+		Sampler:        pinString(cfg.Sampler, args.Sampler),
+		CfgScale:       pinFloat(cfg.CfgScale, args.CfgScale),
 		// The checkpoint is a setting rather than an argument: which models are
 		// installed is a property of the machine, and a model that guessed a name
 		// would get a silent fallback to whatever was already loaded.
@@ -160,6 +172,18 @@ func summarizeGeneration(req images.Request, result images.Result) string {
 		}
 		sb.WriteString("\n")
 	}
+	// Reported for the same reason the size and the step count are: the values drawn with are
+	// not necessarily the ones the model asked for — a setting the user fixed wins — and a
+	// model that describes the picture it just made has to be able to name what was really used.
+	if req.Sampler != "" {
+		fmt.Fprintf(&sb, "Sampler: %s\n", req.Sampler)
+	}
+	// The guidance scale for the same reason, and with one more purpose: two pictures of one
+	// prompt that look different are most often a different scale, so a model asked to redraw
+	// something has to be able to see the one that was used.
+	if req.CfgScale > 0 {
+		fmt.Fprintf(&sb, "CFG-Scale: %s\n", strconv.FormatFloat(req.CfgScale, 'f', -1, 64))
+	}
 	// The seed is the one number worth reporting even when the request left it
 	// open: the server chose one, and quoting it is what lets the user ask for the
 	// same picture again.
@@ -174,6 +198,42 @@ func summarizeGeneration(req images.Request, result images.Result) string {
 		"Wenn der Nutzer das Bild ändern will, rufe generate_image mit einem angepassten " +
 		"Prompt erneut auf.")
 	return sb.String()
+}
+
+// pinInt is a value the user fixed in Settings, or — when they fixed nothing — what the model
+// asked for. Zero means "nobody made this decision", which is the same reading an empty field
+// has in the request builder: nothing is sent, and the server's own default applies.
+//
+// The direction is deliberately the opposite of what a "default" would do. A model choosing
+// 8 steps for a sketch and 40 for a portrait is the feature working; a model *overriding* the
+// step count a user typed in Settings is the user's own instruction being ignored by
+// something that cannot see the machine, the model or the licence they paid for. So the
+// argument wins only where the field is empty, and a recipe records what was really drawn
+// rather than what was asked for either way.
+func pinInt(pinned int, asked any) int {
+	if pinned > 0 {
+		return pinned
+	}
+	return looseInt(asked, 0)
+}
+
+// pinFloat is pinInt for the guidance scale, the one field here that is not a whole number:
+// a scale fixed in Settings wins, an empty field leaves it to the model, and `7.5` is read
+// as the float it is rather than truncated.
+func pinFloat(pinned float64, asked any) float64 {
+	if pinned > 0 {
+		return pinned
+	}
+	return looseFloat(asked, 0)
+}
+
+// pinString is pinInt for the two text fields: a configured value is fixed, an empty one
+// leaves the choice to the model.
+func pinString(pinned, asked string) string {
+	if trimmed := strings.TrimSpace(pinned); trimmed != "" {
+		return trimmed
+	}
+	return strings.TrimSpace(asked)
 }
 
 // imageSettings reads the current image configuration. It goes through a function
@@ -262,6 +322,11 @@ func seedFromValue(value any) *int64 {
 // recipeFrom records what a generation was made with, so the picture can be drawn again
 // from its own fields rather than from the prose summary the model reads.
 //
+// The guidance scale is recorded as the request carries it, after the clamp and after a
+// Settings pin won: it is a number this app sent, and no backend reports one back that would
+// disagree. Only the server's *own* fallback — a `txt_cfg` living in the model file — is
+// never seen, and a recipe claiming a number there would be inventing one.
+//
 // The effective value wins wherever the request and the answer disagree. A request that
 // left the seed open was given one by the server, and only that number reproduces the
 // picture — the requested value was "none". The checkpoint follows the same rule, because
@@ -275,6 +340,7 @@ func recipeFrom(req images.Request, result images.Result) store.GenerationRecipe
 		Height:         req.Height,
 		Steps:          req.Steps,
 		Sampler:        req.Sampler,
+		CfgScale:       req.CfgScale,
 		Model:          firstNonEmptyString(result.Model, req.Model),
 	}
 	switch {
@@ -304,6 +370,7 @@ func requestFromRecipe(recipe store.GenerationRecipe) images.Request {
 		Height:         recipe.Height,
 		Steps:          recipe.Steps,
 		Sampler:        recipe.Sampler,
+		CfgScale:       recipe.CfgScale,
 		Model:          recipe.Model,
 	}
 	if recipe.Seed > 0 {

@@ -158,7 +158,9 @@ func (s *Service) Definitions() []llm.ToolDefinition {
 			Description: "Erzeugt ein Bild aus einer Beschreibung und zeigt es im Chat an. Nutze dieses " +
 				"Tool, wenn der Nutzer ein Bild, eine Illustration, eine Grafik oder ein Foto haben möchte. " +
 				"Der Prompt beschreibt das Motiv selbst, nicht die Handlung (\"a red fox in deep snow, " +
-				"golden hour, photorealistic\").",
+				"golden hour, photorealistic\"). Schritte, Größe, Sampler, CFG-Scale und Negativ-Prompt " +
+				"wählst du selbst passend zum Motiv; einen Wert, den der Nutzer in den Einstellungen " +
+				"festgelegt hat, kannst du nicht ändern — er gilt und überschreibt deinen.",
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -188,8 +190,18 @@ func (s *Service) Definitions() []llm.ToolDefinition {
 						"description": "Seed für ein reproduzierbares Bild. Weglassen für eine neue Zufallszahl.",
 					},
 					"sampler": map[string]any{
-						"type":        "string",
-						"description": "Name des Samplers, z. B. \"Euler a\". Weglassen für den Standard des Servers.",
+						"type": "string",
+						"description": "Name des Samplers, z. B. \"Euler a\". Weglassen: dann gilt, was " +
+							"in den Einstellungen festgelegt ist — sonst der Standard des Servers.",
+					},
+					"cfg_scale": map[string]any{
+						"type": "number",
+						"description": "Wie stark der Prompt das Bild bestimmt (1–30, üblicher Standard 7). " +
+							"Niedrig ist lockerer und malt mehr aus dem Modell selbst, hoch hält sich " +
+							"streng an den Prompt. Für destillierte bzw. Turbo-/Flow-Modelle (Flux, " +
+							"Qwen-Image, SDXL-Turbo) ist 1 richtig — dort gibt es keine Führung. " +
+							"Weglassen: dann gilt, was in den Einstellungen festgelegt ist — sonst der " +
+							"Standard des Backends.",
 					},
 				},
 				"required": []string{"prompt"},
@@ -463,6 +475,27 @@ func looseInt(value any, fallback int) int {
 	return fallback
 }
 
+// looseFloat is looseInt for the one fractional value a tool takes — the image tool's
+// guidance scale. A string is parsed as a float rather than as an int, because "7.5" is a
+// scale a model may well emit and an integer parse would drop it to nothing. What comes back
+// is not trusted: the bounds in internal/images read a NaN as "nobody chose one" and an
+// infinity as the maximum.
+func looseFloat(value any, fallback float64) float64 {
+	switch v := value.(type) {
+	case nil:
+		return fallback
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	case string:
+		if n, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
 // --- text protocol ---------------------------------------------------------
 
 var (
@@ -538,8 +571,10 @@ Verfügbare Tools: search_web ({"query": string, "freshness"?: "pd|pw|pm|py"}), 
 // call that is then answered with an error.
 const ImageProtocolHint = "Zusätzlich verfügbar: generate_image ({\"prompt\": string, " +
 	"\"negative_prompt\"?: string, \"width\"?: number, \"height\"?: number, \"steps\"?: number, " +
-	"\"seed\"?: number, \"sampler\"?: string}). Damit erzeugst du ein Bild; es erscheint direkt " +
-	"im Chat. Du siehst das Bild danach nicht — beschreibe seinen Inhalt nicht."
+	"\"seed\"?: number, \"sampler\"?: string, \"cfg_scale\"?: number}). Damit erzeugst du ein " +
+	"Bild; es erscheint direkt im Chat. Du siehst das Bild danach nicht — beschreibe seinen " +
+	"Inhalt nicht. Schritte, Größe, Sampler, CFG-Scale und Negativ-Prompt wählst du passend " +
+	"zum Motiv; in den Einstellungen festgelegte Werte haben Vorrang."
 
 func firstNonEmptyString(values ...string) string {
 	for _, v := range values {

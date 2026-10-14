@@ -86,6 +86,7 @@ func TestCLIArgsCarryTheModelSetAndTheRecipe(t *testing.T) {
 		Height:         1024,
 		Steps:          8,
 		Sampler:        "euler",
+		CfgScale:       7.5,
 		Seed:           &seed,
 	})
 	if err != nil {
@@ -111,6 +112,11 @@ func TestCLIArgsCarryTheModelSetAndTheRecipe(t *testing.T) {
 		"-W 1024",
 		"-H 1024",
 		"--sampling-method euler",
+		// Last, and therefore the winner over the `--cfg-scale 1.0` the user's own extra
+		// arguments carry at the front of this same command line: the flag moved out of
+		// Extra when the model was given a say in it, and the recipe has to describe the
+		// scale that was really drawn with.
+		"--cfg-scale 7.5",
 		// Always sent, never omitted: the flag's own default is 42.
 		"-s 4242",
 		"-o ",

@@ -193,14 +193,20 @@ func (s *SDWebUI) Samplers(ctx context.Context) ([]string, error) {
 // which is what makes the omitted fields a real "leave it to the user's WebUI"
 // rather than a re-implementation of its settings.
 type sdRequest struct {
-	Prompt         string         `json:"prompt"`
-	NegativePrompt string         `json:"negative_prompt,omitempty"`
-	Width          int            `json:"width,omitempty"`
-	Height         int            `json:"height,omitempty"`
-	Steps          int            `json:"steps,omitempty"`
-	SamplerName    string         `json:"sampler_name,omitempty"`
-	Seed           *int64         `json:"seed,omitempty"`
-	Override       map[string]any `json:"override_settings,omitempty"`
+	Prompt         string `json:"prompt"`
+	NegativePrompt string `json:"negative_prompt,omitempty"`
+	Width          int    `json:"width,omitempty"`
+	Height         int    `json:"height,omitempty"`
+	Steps          int    `json:"steps,omitempty"`
+	SamplerName    string `json:"sampler_name,omitempty"`
+	// cfg_scale is the name both server flavours read it under: A1111 declares
+	// `cfg_scale` on `StableDiffusionProcessingTxt2Img` (default 7.0), and
+	// stable-diffusion.cpp's `sd-server` parses the same key and falls back to the
+	// model's own `txt_cfg` when it is missing. Omitted when nobody chose one, for the
+	// same reason the fields above are.
+	CfgScale float64        `json:"cfg_scale,omitempty"`
+	Seed     *int64         `json:"seed,omitempty"`
+	Override map[string]any `json:"override_settings,omitempty"`
 }
 
 // sdResponse is the txt2img answer. `images` holds base64 with no data: prefix —
@@ -275,6 +281,7 @@ func (s *SDWebUI) GenerateWithProgress(ctx context.Context, req Request, report 
 		Height:         req.Height,
 		Steps:          req.Steps,
 		SamplerName:    strings.TrimSpace(req.Sampler),
+		CfgScale:       req.CfgScale,
 		Seed:           seed,
 	}
 	if model := strings.TrimSpace(req.Model); model != "" {

@@ -216,6 +216,27 @@ func ResolveProgram(folder, binary string) (string, error) {
 	return FindProgram(folder)
 }
 
+// ResolveServerProgram is ResolveProgram for the other executable in the same archive: the
+// folder wins, and the typed path is the fallback for an installation that has no folder at
+// all.
+//
+// The two are separate functions rather than one taking a name, because the *folder* is one
+// thing and the two names are what differs: a folder is a build, and both programs live in
+// it. Only the typed-path fallback is handed through unchanged, which is deliberate — a user
+// who typed a path named a program, and nothing here should second-guess them. That a typed
+// `sd-cli` cannot then be run *as* a server is not this function's job: `ServerSpec` asks the
+// build's own help for the listener flag and refuses a program that does not list it, so the
+// mistake is reported by name rather than run.
+func ResolveServerProgram(folder, binary string) (string, error) {
+	if strings.TrimSpace(folder) == "" {
+		if strings.TrimSpace(binary) == "" {
+			return "", ErrNotConfigured
+		}
+		return strings.TrimSpace(binary), nil
+	}
+	return FindServerProgram(folder)
+}
+
 // ProgramName is the executable's name on a platform. It is a function rather than a
 // constant so the extension is read from the platform being asked about, which is
 // what lets the lookups below be pinned for Windows from a Linux test run.
@@ -224,6 +245,17 @@ func ProgramName(goos string) string {
 		return "sd-cli.exe"
 	}
 	return "sd-cli"
+}
+
+// ServerProgramName is the name of the same project's *server* executable, which every
+// published archive carries beside the program above. One release unpacked once is
+// therefore enough for both lifetimes: the folder a user points at for one picture at a
+// time also holds the daemon they can leave loaded.
+func ServerProgramName(goos string) string {
+	if goos == "windows" {
+		return "sd-server.exe"
+	}
+	return "sd-server"
 }
 
 // FindProgram locates the sd-cli executable in (or under) a directory the user picked.
@@ -246,6 +278,20 @@ func ProgramName(goos string) string {
 // candidate is reported, not resolved — the one exception being a program *directly* in
 // the picked folder (or in its `bin`), which is authoritative and ends the search.
 func FindProgram(dir string) (string, error) {
+	return findProgram(dir, ProgramName(runtime.GOOS))
+}
+
+// FindServerProgram locates the sd-server executable with the same rules as
+// FindProgram, which is the whole point: it is the other program in the same folder, so
+// "inside the archive's root", "its bin subdirectory" and "one level down" are the same
+// answers, and a folder holding several builds is the same question to the user.
+func FindServerProgram(dir string) (string, error) {
+	return findProgram(dir, ServerProgramName(runtime.GOOS))
+}
+
+// findProgram is the search both lookups share: the folder itself and its `bin` first,
+// then one level down, one candidate resolved and several reported.
+func findProgram(dir, name string) (string, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return "", errors.New("kein Programmordner angegeben")
@@ -257,8 +303,6 @@ func FindProgram(dir string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("%w: %s ist ein Ordner mit Dateien darin, keine Datei", ErrUnavailable, dir)
 	}
-
-	name := ProgramName(runtime.GOOS)
 
 	// The folder itself is asked first and is authoritative: a program directly in it, or in
 	// its `bin`, is the program the user meant, and nothing found below it can outvote that.

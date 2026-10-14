@@ -77,6 +77,15 @@ type App struct {
 	serversMu sync.Mutex
 	servers   map[string]*rt.Server
 
+	// imageSpec is the command line the managed picture server was last started
+	// with, empty when nothing was started. It is what tells a settings change that
+	// swapped the model from one that did not, and it is compared as a whole rather
+	// than field by field: the argv is the entire input of a start, so a second list
+	// of "the fields that matter" is a list that can drift from the one that builds
+	// the line.
+	imageMu   sync.Mutex
+	imageSpec string
+
 	// versions caches what each llama-server reported about itself. The status is
 	// polled while a model loads, so asking the binary again on every call would
 	// start a process every 1.2 seconds for an answer that does not change; a path
@@ -171,6 +180,10 @@ func (a *App) startup(ctx context.Context) {
 		runtime.LogErrorf(ctx, "Initialisierung fehlgeschlagen: %v", err)
 	}
 	a.startEnabledModels()
+	// The picture server is off unless the user asked for it, so this does nothing on
+	// most installs; see ImageSettings.StartWithApp for why it is not implied by
+	// choosing the kind.
+	a.startEnabledImages()
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -255,6 +268,24 @@ func (a *App) startEnabledModels() {
 			// the user can read what to fix.
 			runtime.LogErrorf(a.ctx, "Modell %s starten: %v", id, err)
 		}
+	}
+}
+
+// startEnabledImages starts the managed picture server if the user asked KiChat to.
+//
+// It is the only place that starts it without being asked, and it is a setting rather than a
+// consequence of the kind: a resident model holds the memory it was loaded into, so an app
+// that loaded one on every launch because a folder was configured would be spending the
+// user's VRAM on a decision they never made.
+func (a *App) startEnabledImages() {
+	settings := a.Settings()
+	if !settings.Images.Enabled || !config.IsImageSD(settings.Images.Kind) || !settings.Images.StartWithApp {
+		return
+	}
+	if err := a.startImageServer(); err != nil {
+		// Not fatal to the app, like a managed chat model that will not start: the
+		// reason lands on the row the user can read and fix.
+		runtime.LogErrorf(a.ctx, "Bildserver starten: %v", err)
 	}
 }
 
@@ -571,7 +602,10 @@ func (a *App) stopAllManaged() {
 	a.serversMu.Unlock()
 	for _, srv := range servers {
 		if err := srv.Stop(); err != nil {
-			runtime.LogErrorf(a.ctx, "llama-server beenden: %v", err)
+			// The program's own name: this map holds the chat backends' llama-server
+			// *and* the picture server, and "llama-server beenden" about a failed
+			// sd-server would send a reader looking at the wrong process.
+			runtime.LogErrorf(a.ctx, "%s beenden: %v", srv.Program(), err)
 		}
 	}
 }
@@ -616,7 +650,7 @@ func (a *App) rebuildServices(settings config.Settings) {
 	// tool that can only ever fail.
 	var imageProvider images.Provider
 	if settings.Images.Enabled {
-		imageProvider = newImageProvider(settings)
+		imageProvider = newImageProvider(settings, a.runningImageServerURL())
 	}
 	toolService := tools.New(a.store, chain, scraper)
 	toolService.Images = imageProvider
@@ -676,30 +710,230 @@ func (a *App) currentRegistry() *llm.Registry {
 // must never do with it is hand it to a shell. CPU offload travels beside them as a typed
 // switch rather than as text, because a user flips it per model and a checkbox says that
 // better than remembering a flag.
-func newImageProvider(settings config.Settings) images.Provider {
+func newImageProvider(settings config.Settings, serverURL string) images.Provider {
 	if config.IsImageCLI(settings.Images.Kind) {
-		return images.NewCLI("images", "sd-cli", settings.Images.CLIBinary,
-			images.ModelFiles{
-				Model:          settings.Images.CLIModel,
-				DiffusionModel: settings.Images.CLIDiffusionModel,
-				VAE:            settings.Images.CLIVAE,
-				LLM:            settings.Images.CLILLM,
-				ClipL:          settings.Images.CLIClipL,
-				ClipG:          settings.Images.CLIClipG,
-				T5XXL:          settings.Images.CLIT5XXL,
-			}, images.Options{
-				// Where the program is, when the user pointed KiChat at the folder a
-				// release archive unpacked into. The executable is found inside it, so
-				// the path nobody has to type is the one nobody can get wrong.
-				Folder: settings.Images.CLIFolder,
-				// A mode, and the only one this app models itself: the rest of a moving
-				// command line's surface stays in the user's own arguments.
-				OffloadToCPU: settings.Images.CLIOffloadToCPU,
-				Extra:        rt.SplitArgs(settings.Images.CLIExtraArgs),
-			})
+		return imageCLI(settings)
+	}
+	if config.IsImageSD(settings.Images.Kind) {
+		// The server KiChat runs itself, while it runs. Stopped, there is no provider at
+		// all — and that is the honest state rather than a technicality: a backend that
+		// could only answer with "nothing is listening" would put a tool in front of the
+		// model that costs a wasted round every time it is called. The panel says so where
+		// the Start button is, and starting the server is what brings the tool back, with
+		// no restart of the app: the services are rebuilt on every state change.
+		//
+		// The address is the running server's own rather than the stored BaseURL. A port
+		// is picked when the process starts, and the one field that could hold a stale
+		// address must not become a way to draw from somebody else's server —
+		// 127.0.0.1:1234 is sd-server's own default *and* LM Studio's.
+		if strings.TrimSpace(serverURL) == "" {
+			return nil
+		}
+		return images.NewSDWebUI("images", "sd-server", serverURL, settings.Images.APIKey)
 	}
 	return images.NewSDWebUI("images", "Stable Diffusion WebUI",
 		settings.Images.BaseURL, settings.Images.APIKey)
+}
+
+// imageCLI builds the local-build client the *two* local kinds are described by: the
+// one-shot program, and the server KiChat starts from the same folder and the same model
+// set. One constructor for both, because everything but the lifetime is the same object —
+// which is what makes the server's command line the model half of the CLI's own (see
+// images.ServerSpec).
+func imageCLI(settings config.Settings) *images.CLI {
+	return images.NewCLI("images", "sd-cli", settings.Images.CLIBinary,
+		images.ModelFiles{
+			Model:          settings.Images.CLIModel,
+			DiffusionModel: settings.Images.CLIDiffusionModel,
+			VAE:            settings.Images.CLIVAE,
+			LLM:            settings.Images.CLILLM,
+			ClipL:          settings.Images.CLIClipL,
+			ClipG:          settings.Images.CLIClipG,
+			T5XXL:          settings.Images.CLIT5XXL,
+		}, images.Options{
+			// Where the program is, when the user pointed KiChat at the folder a
+			// release archive unpacked into. The executable is found inside it, so
+			// the path nobody has to type is the one nobody can get wrong.
+			Folder: settings.Images.CLIFolder,
+			// A mode, and the only one this app models itself: the rest of a moving
+			// command line's surface stays in the user's own arguments.
+			OffloadToCPU: settings.Images.CLIOffloadToCPU,
+			Extra:        rt.SplitArgs(settings.Images.CLIExtraArgs),
+		})
+}
+
+// --- the managed picture server ---------------------------------------------
+
+// imageServerID keys the supervised picture server in a.servers. It is not a backend
+// id, and nothing that iterates Backends sees it; the map is keyed by string only
+// because one supervisor per thing is all the app ever needs.
+const imageServerID = "images"
+
+// imageServerFor returns the supervisor of the managed picture server, creating it if
+// this is the first time it is needed.
+func (a *App) imageServerFor() *rt.Server {
+	a.serversMu.Lock()
+	defer a.serversMu.Unlock()
+	if a.servers == nil {
+		a.servers = map[string]*rt.Server{}
+	}
+	srv, ok := a.servers[imageServerID]
+	if !ok {
+		srv = rt.NewServer(imageServerID)
+		srv.SetStateHandler(a.onImageServerState)
+		a.servers[imageServerID] = srv
+	}
+	// A diffusion model plus its VAE and text encoder is several gigabytes, and the CLI
+	// kind pays exactly that load on every single picture — which is why its own bound
+	// is half an hour. A start is given the same patience for the same reason.
+	srv.SetReadyTimeout(images.DefaultServerReadyTimeout)
+	return srv
+}
+
+// runningImageServerURL is the address of the supervised server, empty when it is not
+// running. It is read when the picture backend is built, so a draw can only ever reach a
+// server this app is really running.
+func (a *App) runningImageServerURL() string {
+	srv := a.existingServer(imageServerID)
+	if srv == nil {
+		return ""
+	}
+	st := srv.Status()
+	if st.State != rt.StateRunning {
+		return ""
+	}
+	return st.URL
+}
+
+// onImageServerState rebuilds the services on every state change.
+//
+// That is what makes the *tool* follow the process: generate_image is offered only while a
+// backend can answer it, so a stop takes the tool away and a start brings it back without a
+// restart of the app.
+//
+// The address is deliberately *not* written into the settings, which is where this differs
+// from the managed chat models' own handler. There the address belongs to the backend that
+// server serves, so adopting it is exactly how the entry comes to name the running process;
+// here ImageSettings.BaseURL is the address of the *other* picture backend, and adopting a
+// chosen port into it would rewrite the user's WebUI address as a side effect of running a
+// local program. Nothing here needs it: the provider is built from the running server's own
+// URL (newImageProvider), which is also what keeps a stale address from ever being drawn
+// from, and the panel's row shows that URL out of the process status.
+func (a *App) onImageServerState(rt.Status) {
+	a.rebuildServices(a.Settings())
+}
+
+// startImageServer starts the managed picture server, or restarts it when it is already
+// running.
+//
+// Restarting is the same call because it has to be: sd-server loads one pipeline when it
+// starts and documents no way to change it afterwards, so a different model is a different
+// process. The app therefore never has to decide between "start" and "restart" — a start
+// replaces whatever was running, which is what a user who pressed it meant either way.
+func (a *App) startImageServer() error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	settings := a.Settings()
+	if !config.IsImageSD(settings.Images.Kind) {
+		return errors.New("die Bildgenerierung steht nicht auf dem lokalen Server")
+	}
+	port, err := rt.FreePort()
+	if err != nil {
+		return fmt.Errorf("freien Port finden: %w", err)
+	}
+	cli := imageCLI(settings)
+	// The `-h` probe happens here, before a process is spawned for real: a build without
+	// a server mode has to be refused rather than started on its own default port.
+	ctx := a.ctx
+	if ctx == nil {
+		// A bound call before startup completed has no app context yet; the probe still
+		// needs one, and a background context is the right parent for a question that is
+		// not part of any user request.
+		ctx = context.Background()
+	}
+	spec, err := cli.ServerSpec(ctx, port)
+	if err != nil {
+		return err
+	}
+	err = a.imageServerFor().Start(rt.Options{
+		Binary:    spec.Program,
+		Model:     spec.Model,
+		Args:      spec.Args,
+		ReadyPath: images.ServerReadyPath,
+		Label:     "sd-server",
+		Port:      port,
+	})
+	if err != nil {
+		return err
+	}
+	a.imageMu.Lock()
+	a.imageSpec = cli.ServerKey()
+	a.imageMu.Unlock()
+	return nil
+}
+
+// stopImageServer stops the managed picture server. It is safe when nothing runs.
+func (a *App) stopImageServer() error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	srv := a.existingServer(imageServerID)
+	if srv == nil {
+		return nil
+	}
+	return srv.Stop()
+}
+
+// imageServerStatus is the managed picture server as the Settings panel reads it.
+func (a *App) imageServerStatus(settings config.Settings) ImageServerStatus {
+	// A kind with no process of its own reports a stopped row with no address rather
+	// than an empty one: the panel renders the same row in both cases, and "stopped" is
+	// what a server that was never started is.
+	out := ImageServerStatus{
+		State:        rt.StateStopped,
+		Log:          []string{},
+		StartWithApp: settings.Images.StartWithApp,
+	}
+	srv := a.existingServer(imageServerID)
+	if srv == nil {
+		return out
+	}
+	st := srv.Status()
+	out.State, out.URL, out.Port, out.PID, out.Error = st.State, st.URL, st.Port, st.PID, st.Error
+	if st.Log != nil {
+		out.Log = st.Log
+	}
+	out.RestartNeeded = a.imageServerRestartNeeded()
+	return out
+}
+
+// imageServerRestartNeeded reports whether the running server was started from a different
+// command line than the settings now describe.
+//
+// It is answered rather than acted on. Saving settings must not restart a server that may
+// have spent minutes loading — the same rule the managed chat models follow — so the panel
+// is told, and the restart is a click. A server that is not running needs nothing: the next
+// start reads the settings anyway.
+func (a *App) imageServerRestartNeeded() bool {
+	srv := a.existingServer(imageServerID)
+	if srv == nil || srv.Status().State != rt.StateRunning {
+		return false
+	}
+	a.imageMu.Lock()
+	started := a.imageSpec
+	a.imageMu.Unlock()
+	if started == "" {
+		return false
+	}
+	settings := a.Settings()
+	if !config.IsImageSD(settings.Images.Kind) {
+		// The kind was switched away from the local server while it was running. That is
+		// a restart's worth of difference in itself: the process is doing a job nothing
+		// is asking it to do any more.
+		return true
+	}
+	return started != imageCLI(settings).ServerKey()
 }
 
 // imageDrawTimeout bounds one draw by the backend that performs it.

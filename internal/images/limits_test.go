@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -57,6 +58,44 @@ func TestNormalisedBoundsEveryNumber(t *testing.T) {
 	}
 }
 
+// TestNormalisedBoundsTheGuidanceScale pins the one field of a request that is not a whole
+// number, and it is a table of its own rather than a column in the one above because the
+// reading of "nobody chose one" has to survive a float: zero is the sentinel and must not be
+// raised to the minimum, which would turn an empty box into a scale nobody asked for.
+//
+// Not-a-number is in the table because it is reachable rather than theoretical: the tool
+// decodes arguments loosely, `strconv.ParseFloat` accepts "nan", and a NaN that reached a
+// JSON payload would fail the *entire* draw at marshal time — `encoding/json` refuses to
+// represent one. Reading it as "nobody chose one" is the only answer that keeps a picture
+// drawable.
+func TestNormalisedBoundsTheGuidanceScale(t *testing.T) {
+	cases := []struct {
+		name string
+		in   float64
+		want float64
+		why  string
+	}{
+		{"a scale in the range is untouched", 7.5, 7.5, "a fractional scale is a real request"},
+		{"one is the floor's own value", MinCfgScale, MinCfgScale, "a distilled or flow-matching model is run at 1"},
+		{"below the floor is raised", 0.2, MinCfgScale, "at 1 the guidance term is inert, not wrong; below it there is no such reading"},
+		{"above the ceiling is capped", 250, MaxCfgScale, "past it a picture only gets harder, for the same GPU seconds"},
+		{"the ceiling itself", MaxCfgScale, MaxCfgScale, "the bound is inclusive"},
+		{"zero is the backend's own", 0, 0, "an empty field means the model decides, and this is how that is spelled"},
+		{"a negative scale is the same statement", -7, 0, "a model passing -1 means an empty box, and omitempty would keep a negative on the wire"},
+		{"not a number is the same statement", math.NaN(), 0, "json.Marshal refuses a NaN, so it would fail the whole request"},
+		{"infinity lands on the ceiling", math.Inf(1), MaxCfgScale, "it is above the maximum like any other large number"},
+	}
+	for _, c := range cases {
+		got := Request{CfgScale: c.in}.Normalised()
+		if got.CfgScale != c.want {
+			t.Errorf("%s: Normalised(%v).CfgScale = %v, want %v — %s", c.name, c.in, got.CfgScale, c.want, c.why)
+		}
+		if again := got.Normalised(); again != got {
+			t.Errorf("%s: normalising twice changed the request: %+v then %+v", c.name, got, again)
+		}
+	}
+}
+
 // TestSDWebUIBoundsTheRequestItSends is the half the callers cannot give: the number has to
 // be bounded by the provider as well, because a future caller is free to build a request
 // and never normalise it. Everything asserted here is read off the bytes that reached the
@@ -75,7 +114,7 @@ func TestSDWebUIBoundsTheRequestItSends(t *testing.T) {
 	client := NewSDWebUI("sd", "Stable Diffusion", server.URL, "")
 
 	if _, err := client.Generate(context.Background(), Request{
-		Prompt: "a red fox", Width: 20000, Height: 63, Steps: 100000,
+		Prompt: "a red fox", Width: 20000, Height: 63, Steps: 100000, CfgScale: 250,
 	}); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -87,6 +126,12 @@ func TestSDWebUIBoundsTheRequestItSends(t *testing.T) {
 	if got["steps"] != float64(MaxSteps) {
 		t.Errorf("steps on the wire = %v, want the bound %d", got["steps"], MaxSteps)
 	}
+	// The guidance scale travels under the name both server flavours read it by — A1111's
+	// `cfg_scale` on the processing object and stable-diffusion.cpp's `sd-server`, which
+	// falls back to the model's own `txt_cfg` when the key is absent.
+	if got["cfg_scale"] != MaxCfgScale {
+		t.Errorf("cfg_scale on the wire = %v, want the bound %v", got["cfg_scale"], MaxCfgScale)
+	}
 
 	// A negative step count is not clamped up to 1 and is not sent at all. Sending it was a
 	// real request the server had to interpret — `omitempty` drops a zero and keeps a
@@ -96,6 +141,9 @@ func TestSDWebUIBoundsTheRequestItSends(t *testing.T) {
 	}
 	if value, present := bodies[1]["steps"]; present {
 		t.Errorf("steps = %v was sent for a negative request; an unset step count is omitted", value)
+	}
+	if value, present := bodies[1]["cfg_scale"]; present {
+		t.Errorf("cfg_scale = %v was sent when nobody chose one; omitting it leaves the model's own in force", value)
 	}
 }
 
@@ -108,7 +156,7 @@ func TestCLIBoundsTheCommandLineItRuns(t *testing.T) {
 	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/v1-5.safetensors"}, Options{})
 
 	if _, err := client.Generate(context.Background(), Request{
-		Prompt: "a red fox", Width: 20000, Height: 63, Steps: 100000,
+		Prompt: "a red fox", Width: 20000, Height: 63, Steps: 100000, CfgScale: 250,
 	}); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -117,6 +165,7 @@ func TestCLIBoundsTheCommandLineItRuns(t *testing.T) {
 		fmt.Sprintf("-W %d", MaxDimension),
 		fmt.Sprintf("-H %d", MinDimension),
 		fmt.Sprintf("--steps %d", MaxSteps),
+		fmt.Sprintf("--cfg-scale %v", MaxCfgScale),
 	} {
 		if !strings.Contains(line, want) {
 			t.Errorf("the command line is missing %q:\n%s", want, line)
@@ -135,5 +184,8 @@ func TestCLIBoundsTheCommandLineItRuns(t *testing.T) {
 	}
 	if line := strings.Join(argsOf(t, binary), " "); strings.Contains(line, "--steps") {
 		t.Errorf("a negative step count was passed to the binary:\n%s", line)
+	}
+	if line := strings.Join(argsOf(t, binary), " "); strings.Contains(line, "--cfg-scale") {
+		t.Errorf("a guidance scale nobody chose was passed to the binary:\n%s", line)
 	}
 }

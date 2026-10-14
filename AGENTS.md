@@ -17,7 +17,7 @@ points at one document per subsystem for the measured detail behind it:
 | `NVIDIA.md` | the build.nvidia.com backend: the four-field listing, the catalogue that lists models the account may not call (why the provider filters nothing, and the one-token availability check that filters on evidence instead), the reasoning field that arrives twice, refusals |
 | `LLAMACPP.md` | llama.cpp on both sides: the provider's `/props`-driven metadata (and why a missing claim is not `false`), and the managed runtime that installs and runs `llama-server` — two release sources including PrismML's fork, the update check, GPU offload, the ternary models |
 | `RESEARCH.md` | web search and scraping: the Brave and DuckDuckGo providers, the metered LLM-context route that search-first uses, what classifies a refusal, the scraper's SSRF and robots guards, the token budgets, and the search-first seeded turn |
-| `IMAGES.md` | image generation: two backends — the one `/sdapi/v1/txt2img` route that covers AUTOMATIC1111, Forge and stable-diffusion.cpp's `sd-server`, and the local `sd-cli` run once per picture through the binary's own flags (the published per-accelerator archives, and the folder KiChat finds the program in, with several builds in one folder reported rather than picked) — why an empty setting means "leave it to your server", the single place every request's size and step count are bounded, the `generate_image` tool, and how a picture becomes an ordinary image attachment — which is what lets a vision model see a *user's* attachment on the next turn, while the same thing for a picture KiChat drew is unverified (§9) |
+| `IMAGES.md` | image generation: three kinds of backend — the one `/sdapi/v1/txt2img` route that covers AUTOMATIC1111, Forge and stable-diffusion.cpp's `sd-server`, the local `sd-cli` run once per picture through the binary's own flags, and the *same* build run as a `sd-server` KiChat starts and stops itself (the port chosen free because 1234 is LM Studio's, `/sdapi/v1/sd-models` as the readiness route because sd-server serves no `/health`, start-with-app off by default, and a *reading* that asks for a restart instead of restarting on save) (the published per-accelerator archives, and the folder KiChat finds the program in, with several builds in one folder reported rather than picked) — how a generation parameter is decided (§3): the model chooses it per call through its `generate_image` arguments — including the guidance scale, the one that used to live in the extra command-line arguments — an empty field then falls through to the server's or the program's own default, and a value typed in Settings is *fixed* and overrides what the model asked for — the named profiles that save that configuration and switch a model in one pick (§3), the single place every request's size and step count are bounded, the `generate_image` tool, and how a picture becomes an ordinary image attachment — which is what lets a vision model see a *user's* attachment on the next turn, while the same thing for a picture KiChat drew is unverified (§9) |
 
 **A vendor fact belongs in one of those, not here.** If you measure something new about a
 backend, put it where a reader will look for it and leave this page a pointer — a fact that
@@ -150,6 +150,13 @@ KICHAT_LIVE=1 go test ./internal/runtime/ -run TestLivePrism -v
 KICHAT_LIVE=1 go test ./internal/images/ -run TestLiveSDWebUI -v
 #   optional: KICHAT_SD_URL (default 127.0.0.1:7860), KICHAT_SD_AUTH=user:pass
 #   for a WebUI started with --api-auth
+
+# A real sd-server: starts the program out of a stable-diffusion.cpp folder —
+# gigabytes and minutes — so the folder is required and there is no default.
+# Settles "is sd-server in the archive" and prints the load-once arithmetic.
+KICHAT_LIVE=1 KICHAT_SD_FOLDER=~/Downloads/sd go test ./internal/images/ -run TestLiveSDServer -v
+#   optional: KICHAT_SD_DIFFUSION_MODEL, KICHAT_SD_MODEL, KICHAT_SD_VAE, KICHAT_SD_LLM,
+#   KICHAT_SD_CLIP_L, KICHAT_SD_CLIP_G, KICHAT_SD_T5XXL — the model set to load
 ```
 
 What each one buys — every subsystem is documented in full in its own file, so this is the
@@ -181,9 +188,17 @@ short version:
   names — its release list, its tag scheme, its archive, its ternary kernels, and a real
   GGUF loaded on its `llama-server`.
 - `TestLiveSDWebUI` — IMAGES.md §8: the WebUI route answers, the sampler this client
-  sends is one the server recognises (it comes back in `info`), and the picture decodes
-  to real PNG bytes — a server answering with a URL, or with a `data:` prefix, produces
-  bytes that are not a picture, and only a real round trip tells the two apart.
+  sends is one the server recognises (it comes back in `info`), the guidance scale is echoed
+  there too — the only backend that can show one *honoured* rather than merely sent — and the
+  picture decodes to real PNG bytes: a server answering with a URL, or with a `data:` prefix,
+  produces bytes that are not a picture, and only a real round trip tells the two apart.
+- `TestLiveSDServer` — IMAGES.md §8: the folder really holds `sd-server` beside `sd-cli`,
+  the build's own `-h` lists the listener flag the app refuses it without, a loaded server
+  answers the readiness route the start hangs on, the built-in `cfg_scale` key is parsed
+  rather than refused, and the time to ready plus two draws are
+  printed — the numbers behind "the load is paid once", which are *reported* rather than
+  asserted because the ratio depends on the model and the accelerator. It starts a process
+  that loads gigabytes, so `KICHAT_SD_FOLDER` is required and there is no default.
 
 **Never put an API key in a tracked file.** Pass it in the environment; the app itself
 stores it through `internal/secret` (`~/.config/kichat/`). What the two search providers
@@ -226,6 +241,12 @@ a purple **MOCK BRIDGE** badge, so a harness page is never mistaken for the real
 - The **runtime and Backends fixtures** — the update row, the source picker, the placement
   reading and the cleanup list — are query flags with their own table in LLAMACPP.md §6.
   Every one of them installs a launcher first, so the rows that depend on one are there.
+- The **picture-server fixtures** — `?images=sdserver` with `?server=running|starting|failed|restart`
+  and `?startwithapp=1` — are query flags with their own rows in IMAGES.md §8. The mock models
+  `StartImageServer`/`StopImageServer` as the *transitions* they are, so a start really passes
+  through `starting` before it settles, and the restart reading is computed from the stored
+  command line rather than stored, which is what makes a save under a running server raise the
+  badge.
 - The **Backends fixture holds a key for an entry that is switched off**: the shipped
   Mistral row, which is how a user who pasted a key into it and pressed "Aktualisieren"
   ends up stored-but-never-asked. That state has its own row, its own badge and its own

@@ -40,6 +40,12 @@ func TestMain(m *testing.M) {
 		runFakeLlamaServer()
 		return
 	}
+	// The same trick for the other managed server: see image_server_test.go. One
+	// test binary plays both stand-ins, chosen by which variable is set.
+	if os.Getenv(fakeSDServerEnv) == "1" {
+		runFakeSDServer()
+		return
+	}
 	os.Exit(m.Run())
 }
 

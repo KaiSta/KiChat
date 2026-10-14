@@ -522,6 +522,7 @@ export function MessageImages({ attachments }: { attachments: storeTypes.Attachm
  */
 const MAX_IMAGE_DIMENSION = 2048
 const MAX_IMAGE_STEPS = 150
+const MAX_IMAGE_CFG = 30
 
 /** The recipe fields as the strings a form holds.
  *
@@ -534,6 +535,7 @@ type RecipeDraft = {
   width: string
   height: string
   steps: string
+  cfgScale: string
   seed: string
   sampler: string
   model: string
@@ -547,6 +549,7 @@ function draftFromRecipe(recipe: storeTypes.GenerationRecipe): RecipeDraft {
     width: num(recipe.width),
     height: num(recipe.height),
     steps: num(recipe.steps),
+    cfgScale: num(recipe.cfgScale),
     seed: num(recipe.seed),
     sampler: recipe.sampler ?? '',
     model: recipe.model ?? '',
@@ -563,12 +566,21 @@ function recipeFromDraft(draft: RecipeDraft): storeTypes.GenerationRecipe {
     if (!Number.isFinite(n) || n <= 0) return 0
     return max === undefined ? n : Math.min(n, max)
   }
+  // The guidance scale is the one fractional field: 7.5 is a scale a user may well want,
+  // so it is parsed as a float rather than through `num` above, which floors. Zero still
+  // means "nobody chose one" and is what an emptied box becomes.
+  const scale = (value: string) => {
+    const n = Number(value)
+    if (!Number.isFinite(n) || n <= 0) return 0
+    return Math.min(Math.max(n, 1), MAX_IMAGE_CFG)
+  }
   return {
     prompt: draft.prompt.trim(),
     negativePrompt: draft.negativePrompt.trim(),
     width: num(draft.width, MAX_IMAGE_DIMENSION),
     height: num(draft.height, MAX_IMAGE_DIMENSION),
     steps: num(draft.steps, MAX_IMAGE_STEPS),
+    cfgScale: scale(draft.cfgScale),
     seed: num(draft.seed),
     sampler: draft.sampler.trim(),
     model: draft.model.trim(),
@@ -919,7 +931,7 @@ function RecipeEditor({
           />
         </div>
       </label>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         <label className="text-[11px]">
           {t('settings.images.steps')}
           <input
@@ -929,6 +941,19 @@ function RecipeEditor({
             max={MAX_IMAGE_STEPS}
             value={draft.steps}
             onChange={(e) => set({ steps: e.target.value })}
+            placeholder={t('settings.images.auto')}
+          />
+        </label>
+        <label className="text-[11px]" title={t('settings.images.cfgHint')}>
+          {t('settings.images.cfgScale')}
+          <input
+            className="input mono mt-1"
+            type="number"
+            min={0}
+            max={MAX_IMAGE_CFG}
+            step={0.5}
+            value={draft.cfgScale}
+            onChange={(e) => set({ cfgScale: e.target.value })}
             placeholder={t('settings.images.auto')}
           />
         </label>

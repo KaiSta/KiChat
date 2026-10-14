@@ -93,7 +93,9 @@ func TestGenerateImageFilesThePictureOnTheCallingMessage(t *testing.T) {
 	if provider.calls != 1 {
 		t.Fatalf("provider calls = %d, want 1", provider.calls)
 	}
-	// The configured defaults fill in everything the model left out.
+	// A value fixed in Settings is what gets drawn, whether or not the model said anything
+	// about that field — there is no other source for these numbers here, since the call
+	// carried a prompt and nothing else.
 	if provider.got.Width != 768 || provider.got.Height != 512 || provider.got.Steps != 25 {
 		t.Errorf("settings were not applied: %+v", provider.got)
 	}
@@ -153,24 +155,81 @@ func TestGenerateImageFilesThePictureOnTheCallingMessage(t *testing.T) {
 	}
 }
 
-func TestGenerateImageArgumentBeatsTheSetting(t *testing.T) {
+// The rule this feature is built on, in the direction it is not obvious from: a value the user
+// fixed in Settings wins over the model's argument. A model deciding 8 steps for a sketch and
+// 40 for a portrait is the feature working; a model overruling the step count, size or sampler
+// someone typed in Settings is an instruction being ignored by something that cannot see the
+// machine, the model or the licence it was bought with.
+func TestASettingTheUserFixedBeatsTheModelsArgument(t *testing.T) {
 	provider := &fakeImageProvider{result: onePicture()}
 	service, _, chatID := newImageService(t, provider, config.ImageSettings{
-		Width: 768, Height: 512, Steps: 25, NegativePrompt: "blurry",
+		Width: 768, Height: 512, Steps: 25, Sampler: "Euler a", CfgScale: 4.5, NegativePrompt: "blurry, text",
 	})
 
 	if _, err := service.Execute(context.Background(), chatID, ToolGenerateImage,
-		`{"prompt":"a fox","width":1024,"negative_prompt":"extra fingers"}`); err != nil {
+		`{"prompt":"a fox","width":1024,"height":1024,"steps":8,"sampler":"DDIM","cfg_scale":12,"negative_prompt":"extra fingers"}`); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if provider.got.Width != 1024 {
-		t.Errorf("width = %d, want the model's 1024", provider.got.Width)
+	if provider.got.Width != 768 || provider.got.Height != 512 {
+		t.Errorf("size = %dx%d, want the fixed 768x512", provider.got.Width, provider.got.Height)
 	}
-	if provider.got.NegativePrompt != "extra fingers" {
-		t.Errorf("negative = %q, want the model's", provider.got.NegativePrompt)
+	if provider.got.Steps != 25 {
+		t.Errorf("steps = %d, want the fixed 25", provider.got.Steps)
 	}
-	if provider.got.Height != 512 {
-		t.Errorf("height = %d, want the configured 512", provider.got.Height)
+	if provider.got.Sampler != "Euler a" {
+		t.Errorf("sampler = %q, want the fixed one", provider.got.Sampler)
+	}
+	if provider.got.CfgScale != 4.5 {
+		t.Errorf("cfg scale = %v, want the fixed 4.5", provider.got.CfgScale)
+	}
+	if provider.got.NegativePrompt != "blurry, text" {
+		t.Errorf("negative = %q, want the fixed one", provider.got.NegativePrompt)
+	}
+}
+
+// And the other direction, which is the one a user meets by default: an empty field is the
+// model's to decide, so its numbers and its words are what reach the provider. A test of the
+// pinning half alone would also pass for a builder that dropped the model's arguments entirely.
+func TestTheModelDecidesEveryFieldTheUserLeftEmpty(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, _, chatID := newImageService(t, provider, config.ImageSettings{})
+
+	if _, err := service.Execute(context.Background(), chatID, ToolGenerateImage,
+		`{"prompt":"a fox","width":"640","height":384,"steps":12,"sampler":"euler_a","cfg_scale":7.5,"negative_prompt":"extra fingers"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if provider.got.Width != 640 || provider.got.Height != 384 || provider.got.Steps != 12 {
+		t.Errorf("the model's numbers were not used: %+v", provider.got)
+	}
+	// The guidance scale is the one number here that is *not* whole, and it is the reason
+	// the arguments are decoded loosely at all: `7.5` reaching the provider as `7` would
+	// draw a different picture than the one the model asked for and the recipe records.
+	if provider.got.CfgScale != 7.5 {
+		t.Errorf("cfg scale = %v, want the model's own 7.5", provider.got.CfgScale)
+	}
+	if provider.got.Sampler != "euler_a" || provider.got.NegativePrompt != "extra fingers" {
+		t.Errorf("the model's own arguments were not used: %+v", provider.got)
+	}
+}
+
+// A fixed field does not take the others with it. The two sides are per field rather than per
+// kind of value, which is what lets a user pin a size and leave the step count to the model.
+func TestAFixedFieldLeavesTheRestToTheModel(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, _, chatID := newImageService(t, provider, config.ImageSettings{Steps: 30})
+
+	if _, err := service.Execute(context.Background(), chatID, ToolGenerateImage,
+		`{"prompt":"a fox","width":640,"height":896,"steps":4,"sampler":"euler","cfg_scale":2,"negative_prompt":"blurry"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if provider.got.Steps != 30 {
+		t.Errorf("steps = %d, want the fixed 30", provider.got.Steps)
+	}
+	if provider.got.CfgScale != 2 {
+		t.Errorf("cfg scale = %v, want the model's own 2", provider.got.CfgScale)
+	}
+	if provider.got.Width != 640 || provider.got.Height != 896 || provider.got.Sampler != "euler" || provider.got.NegativePrompt != "blurry" {
+		t.Errorf("the fields the user left empty were not the model's: %+v", provider.got)
 	}
 }
 
@@ -181,11 +240,16 @@ func TestGenerateImageToleratesNumbersAsStrings(t *testing.T) {
 	service, _, chatID := newImageService(t, provider, config.ImageSettings{})
 
 	if _, err := service.Execute(context.Background(), chatID, ToolGenerateImage,
-		`{"prompt":"a fox","width":"640","steps":"30","seed":"7"}`); err != nil {
+		`{"prompt":"a fox","width":"640","steps":"30","cfg_scale":"5.5","seed":"7"}`); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if provider.got.Width != 640 || provider.got.Steps != 30 {
 		t.Errorf("string numbers were dropped: %+v", provider.got)
+	}
+	// A string that parses as a float rather than as an int: `Atoi` would return nothing for
+	// "5.5" and the scale would silently be the backend's own.
+	if provider.got.CfgScale != 5.5 {
+		t.Errorf("cfg scale = %v, want the string's own 5.5", provider.got.CfgScale)
 	}
 	if provider.got.Seed == nil || *provider.got.Seed != 7 {
 		t.Errorf("seed = %v, want 7", provider.got.Seed)
@@ -761,7 +825,7 @@ func TestGenerateImageBoundsTheModelsOwnNumbers(t *testing.T) {
 	ctx := WithCallingMessage(context.Background(), "msg-1")
 
 	out, err := service.Execute(ctx, chatID, ToolGenerateImage,
-		`{"prompt":"a red fox","width":20000,"height":63,"steps":100000}`)
+		`{"prompt":"a red fox","width":20000,"height":63,"steps":100000,"cfg_scale":250}`)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -771,6 +835,10 @@ func TestGenerateImageBoundsTheModelsOwnNumbers(t *testing.T) {
 	}
 	if provider.got.Steps != config.MaxImageSteps {
 		t.Errorf("the provider was asked for %d steps, want the bound %d", provider.got.Steps, config.MaxImageSteps)
+	}
+	if provider.got.CfgScale != config.MaxImageCfgScale {
+		t.Errorf("the provider was asked for cfg scale %v, want the bound %v",
+			provider.got.CfgScale, config.MaxImageCfgScale)
 	}
 
 	got := firstAttachment(t, st, chatID)
@@ -785,8 +853,29 @@ func TestGenerateImageBoundsTheModelsOwnNumbers(t *testing.T) {
 	}
 	// The reply the model reads repeats the numbers it asked for, so a bound applied
 	// behind its back would have it describe a picture nobody drew.
-	if strings.Contains(out, "100000") || strings.Contains(out, "20000") {
+	if strings.Contains(out, "100000") || strings.Contains(out, "20000") || strings.Contains(out, "250") {
 		t.Errorf("the summary quotes a number that was not used:\n%s", out)
+	}
+}
+
+// A guidance scale nobody can read — a string, a word, "nan" — is "nobody made a
+// decision" rather than a failed call, and the draw still happens. `strconv.ParseFloat`
+// accepts "nan", and a NaN that reached the payload would fail the marshalling of the whole
+// request: the one field a model garbled would cost the user their picture.
+func TestAGarbledGuidanceScaleLeavesTheChoiceToTheBackend(t *testing.T) {
+	for _, args := range []string{
+		`{"prompt":"a fox","cfg_scale":"nan"}`,
+		`{"prompt":"a fox","cfg_scale":"hoch"}`,
+		`{"prompt":"a fox","cfg_scale":null}`,
+	} {
+		provider := &fakeImageProvider{result: onePicture()}
+		service, _, chatID := newImageService(t, provider, config.ImageSettings{})
+		if _, err := service.Execute(context.Background(), chatID, ToolGenerateImage, args); err != nil {
+			t.Fatalf("Execute(%s): %v", args, err)
+		}
+		if provider.got.CfgScale != 0 {
+			t.Errorf("%s: cfg scale = %v, want 0 (the backend's own)", args, provider.got.CfgScale)
+		}
 	}
 }
 

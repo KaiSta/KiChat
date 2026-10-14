@@ -669,11 +669,40 @@ Verfügbare Tools: {{tool_list}}`,
   const imagesParam = new URLSearchParams(location.search).get('images')
   const imagesOff = imagesParam === 'off'
   const imagesCLI = imagesParam === 'cli' || imagesOff
+  // ?images=sdserver is the *third* kind, and the reason the two local kinds share this flag:
+  // sd-server is the same build, the same folder and the same model set as sd-cli, and what
+  // it adds is a process — a row with a Start, a Stop, an address and a log. So `imagesLocal`
+  // is what fills the folder and the model fields in (both lifetimes read them), and `imagesSD`
+  // is what switches the kind string and turns the process row on.
+  const imagesSD = imagesParam === 'sdserver'
+  const imagesLocal = imagesCLI || imagesSD
+  // The executable this kind runs. Both lifetimes come out of one archive, so the folder and
+  // the model set are shared and only the program's name differs.
+  const localProgram = imagesSD ? 'sd-server' : 'sd-cli'
+  // Which state that process row is in. `?server=running` is a loaded model with an address
+  // and a log to read, `?server=restart` is the running row that no longer matches the saved
+  // settings — sd-server loads one pipeline at a time and documents no way to replace it, so
+  // that badge is the whole reason saving must not restart anything — and `?server=failed` is
+  // a start that died, which is the only state in which the row's own log is shown.
+  const serverParam = new URLSearchParams(location.search).get('server')
+  const startWithApp =
+    imagesSD && new URLSearchParams(location.search).get('startwithapp') === '1'
+  if (imagesSD) {
+    console.warn(
+      `[harness] images=sdserver active: the local build runs as a managed server (${serverParam || 'stopped'})`,
+    )
+  }
   // A typed program path *beside* a resolving folder: the state a user reaches by pointing at
   // the file as well as the folder, and the one the panel has to show as unused rather than
   // as an equal. A flag of its own so that ruling stays renderable.
+  // The profile list's empty state: a fresh install, or one whose profiles were all
+  // deleted, where the dropdown, Apply and Delete are all inert.
+  const profilesOff = new URLSearchParams(location.search).get('profiles') === 'none'
+  if (profilesOff) {
+    console.warn('[harness] profiles=none active: the image section has no saved profiles')
+  }
   const typedBinary =
-    imagesCLI && new URLSearchParams(location.search).get('typedbinary') === '1'
+    imagesLocal && new URLSearchParams(location.search).get('typedbinary') === '1'
   if (imagesCLI) {
     console.warn(
       imagesOff
@@ -681,6 +710,26 @@ Verfügbare Tools: {{tool_list}}`,
         : '[harness] images=cli active: the picture backend is a local binary',
     )
   }
+  if (startWithApp) {
+    console.warn('[harness] startwithapp=1 active: KiChat starts the picture server with the app')
+  }
+  /**
+   * ?pinned=1 is the *filled* half of the shared generation fields: values the user fixed, which
+   * the backend then applies to every picture whether or not the model asked for something
+   * else. The default fixture leaves all five empty — the state every installation starts in,
+   * where the model decides — and a fixture that only ever held one of the two could not show
+   * that the panel words them differently.
+   */
+  const imagesPinned =
+    imagesLocal && new URLSearchParams(location.search).get('pinned') === '1'
+  if (imagesPinned) {
+    console.warn(
+      '[harness] pinned=1 active: size, steps, sampler, CFG scale and negative prompt are fixed values',
+    )
+  }
+  // The sampler has to be one the fixture's own listing offers, and those are per kind: the
+  // WebUI's own names against stable-diffusion.cpp's option table.
+  const pinnedSampler = imagesLocal ? 'euler' : 'DPM++ 2M Karras'
   if (typedBinary) {
     console.warn('[harness] typedbinary=1 active: a typed program path beside a resolving folder')
   }
@@ -743,9 +792,10 @@ Verfügbare Tools: {{tool_list}}`,
     // The picture server is on with a reachable fixture address, so the section
     // renders its populated state: the checkpoint and sampler pickers need a
     // non-empty model and sampler list to be exercised at all, and the "empty box
-    // means the server's own setting" rule is only visible beside real choices.
-    // `width`, `steps` and `sampler` stay empty on purpose — that is the shape a
-    // user who configured their WebUI ends up with.
+    // means the model decides" rule is only visible beside real choices.
+    // `width`, `steps`, `sampler`, `cfgScale` and `negativePrompt` stay empty on purpose —
+    // the shape every installation starts in — and `?pinned=1` fills all five, which is
+    // the other half of that rule: a value the user fixed.
     images: {
       // Switched off only by ?images=off, which is the state a fully filled-in row can be
       // in: the fields are all stored, and the model has no tool at all.
@@ -753,39 +803,136 @@ Verfügbare Tools: {{tool_list}}`,
       baseUrl: 'http://127.0.0.1:7860',
       apiKey: '',
       model: '',
-      sampler: '',
-      steps: 0,
-      width: 0,
-      height: 0,
-      negativePrompt: '',
+      sampler: imagesPinned ? pinnedSampler : '',
+      steps: imagesPinned ? 20 : 0,
+      width: imagesPinned ? 1024 : 0,
+      height: imagesPinned ? 1024 : 0,
+      // Fractional on purpose: the field is the one of these that is not a whole number, and
+      // a value the input could not hold would look empty without being empty.
+      cfgScale: imagesPinned ? 4.5 : 0,
+      negativePrompt: imagesPinned ? 'blurry, extra fingers, text' : '',
       saveFolder: '/home/user/Pictures',
       // The CLI kind's own fields. Empty here, because this fixture is the server
       // backend; `?images=cli` fills them in and switches the kind, which is what
       // makes the other half of the form renderable.
-      kind: imagesCLI ? 'cli' : '',
+      kind: imagesSD ? 'sdserver' : imagesCLI ? 'cli' : '',
+      // The switch the user asked for: off unless it is asked for, because a loaded model
+      // holds the memory it was loaded into until it is stopped. Off in every fixture but
+      // `?startwithapp=1`, which is what makes the unticked box the default state to render.
+      startWithApp,
       // The folder is the primary route and the fixture uses it, so the Program field is
       // left empty — which is what it looks like when KiChat finds sd-cli for the user. The
       // explicit path stays the fallback for a program the scan cannot reach, and
       // `?typedbinary=1` fills it with a *different* folder: the state in which the panel
       // has to mark the path as unused rather than present two fields as equals.
       cliBinary: typedBinary ? '/home/user/Downloads/sd-old/sd-cli' : '',
-      cliFolder: imagesCLI ? '/home/user/Downloads/sd' : '',
+      cliFolder: imagesLocal ? '/home/user/Downloads/sd' : '',
       cliModel: '',
-      cliDiffusionModel: imagesCLI ? '/home/user/models/qwen-image-2.1-Q5_K_M.gguf' : '',
-      cliVae: imagesCLI ? '/home/user/models/qwen_image_2.1_vae_bf16.safetensors' : '',
-      cliLlm: imagesCLI ? '/home/user/models/Qwen3-VL-8B-Instruct-Q5_K_M.gguf' : '',
+      cliDiffusionModel: imagesLocal ? '/home/user/models/qwen-image-2.1-Q5_K_M.gguf' : '',
+      cliVae: imagesLocal ? '/home/user/models/qwen_image_2.1_vae_bf16.safetensors' : '',
+      cliLlm: imagesLocal ? '/home/user/models/Qwen3-VL-8B-Instruct-Q5_K_M.gguf' : '',
       cliClipL: '',
       cliClipG: '',
       cliT5xxl: '',
       // The one mode the panel has a switch of its own for: Flux on a card too small to
       // hold it. On for the CLI fixture, because a checkbox that only ever renders
       // unchecked cannot show whether its `checked` binding is wired at all.
-      cliOffloadToCpu: imagesCLI,
+      cliOffloadToCpu: imagesLocal,
       // The two flags from the command line this fixture is modelled on, one of which
       // KiChat has no field for at all: `--sigmas` is the whole reason the extra list
       // exists, and `--diffusion-fa` reaches a turbo model's attention kernel.
-      cliExtraArgs: imagesCLI ? '--diffusion-fa --cfg-scale 1.0 --sigmas 1.0,0.5,0.0' : '',
+      cliExtraArgs: imagesLocal ? '--diffusion-fa --cfg-scale 1.0 --sigmas 1.0,0.5,0.0' : '',
     },
+    // Two saved configurations, one per backend, because the dropdown is a list of
+    // *models*: the point of it is that picking "Qwen Image (CLI)" switches the kind as
+    // well as the sampler and the step count, and a list of two server profiles would
+    // not render that. `?profiles=none` empties it for the state a fresh install is in,
+    // where the dropdown and both of its buttons have nothing to act on.
+    //
+    // `enabled`, `saveFolder` and `apiKey` are stored empty on purpose: that is what the
+    // panel writes (a profile is a drawing configuration, not the feature switch or the
+    // export folder), and a fixture that carried them would render an apply that moves
+    // a setting the real one leaves alone.
+    imageProfiles: profilesOff
+      ? []
+      : [
+          {
+            name: 'SDXL Turbo 768',
+            settings: {
+              enabled: false,
+              baseUrl: 'http://127.0.0.1:7860',
+              apiKey: '',
+              model: 'sdxl_turbo.safetensors',
+              sampler: 'DPM++ SDE Karras',
+              steps: 6,
+              width: 768,
+              height: 768,
+              negativePrompt: 'blurry, watermark',
+              saveFolder: '',
+              kind: '',
+            },
+          },
+          {
+            // The one profile that names the *managed* server, and it is here for a single
+            // reading: applying it under `?images=sdserver&server=running` is the only way
+            // the panel's "Apply & restart" label is reachable at all. The two others select
+            // the HTTP and the one-shot kind, so applying them leaves a running server alone
+            // — and a list of only those would make that branch unrenderable in the harness.
+            // Its model set differs from the live `?pinned`-era fixture on purpose: a profile
+            // that changed nothing would be a start that has nothing to reload.
+            name: 'SD Server (SDXL Turbo)',
+            settings: {
+              enabled: false,
+              baseUrl: '',
+              apiKey: '',
+              model: '',
+              sampler: 'euler',
+              steps: 6,
+              width: 768,
+              height: 768,
+              negativePrompt: '',
+              saveFolder: '',
+              kind: 'sdserver',
+              cliFolder: '/home/user/Downloads/sd',
+              cliBinary: '',
+              cliModel: '/home/user/models/sdxl_turbo-q5_k_m.gguf',
+              cliVae: '',
+              cliLlm: '',
+              cliClipL: '',
+              cliClipG: '',
+              cliT5xxl: '',
+              cliOffloadToCpu: false,
+              cliExtraArgs: '--cfg-scale 1.0 --steps 6',
+            },
+          },
+          {
+            name: 'Qwen Image (CLI)',
+            settings: {
+              enabled: false,
+              baseUrl: '',
+              apiKey: '',
+              model: '',
+              sampler: 'euler',
+              steps: 8,
+              width: 1024,
+              height: 1024,
+              negativePrompt: '',
+              saveFolder: '',
+              kind: 'cli',
+              cliFolder: '/home/user/Downloads/sd',
+              cliBinary: '',
+              cliModel: '',
+              cliDiffusionModel: '/home/user/models/qwen-image-2.1-Q5_K_M.gguf',
+              cliVae: '/home/user/models/qwen_image_2.1_vae_bf16.safetensors',
+              cliLlm: '/home/user/models/Qwen3-VL-8B-Instruct-Q5_K_M.gguf',
+              cliClipL: '',
+              cliClipG: '',
+              cliT5xxl: '',
+              cliOffloadToCpu: true,
+              cliExtraArgs: '--diffusion-fa --cfg-scale 1.0',
+            },
+          },
+        ],
     modelOverrides: {},
     search: {
       providerOrder: ['brave', 'duckduckgo'],
@@ -1005,6 +1152,9 @@ Verfügbare Tools: {{tool_list}}`,
       width: 768,
       height: 512,
       steps: 25,
+      // A fractional value, because the guidance scale is the one recipe field that is not
+      // a whole number: the editor's own parse is the thing a floored value would break.
+      cfgScale: 4.5,
       sampler: 'Euler a',
       seed: 4242,
       model: 'sdxl.safetensors [a1b2c3]',
@@ -1070,6 +1220,115 @@ Verfügbare Tools: {{tool_list}}`,
   // has no such promise and gets its record flipped to `cancelled` instead.
   let pendingDraw = null
   let drawToolStarted = false
+
+  /**
+   * The managed picture server, which is what `?images=sdserver` adds to the local kinds.
+   *
+   * It is a *process* fixture, and it is declared here rather than beside the other image
+   * flags because one of its readings is computed from the settings above: `restartNeeded`
+   * answers "was the running server started from the command line the settings now
+   * describe" (the backend compares exactly that — `images.ServerKey`), and a fixture that
+   * stored it as a constant could not show the one state the rule exists for, a save that
+   * changes the model under a server that is already loaded.
+   */
+  const serverStateFrom = (want) => {
+    // A server left up under *another* kind: `?server=running` without `?images=sdserver`.
+    // It is the state a save can leave behind — the kind is switched away and nothing stops
+    // the process, because a save never reloads a model that took minutes to load — and the
+    // row's Stop-only form exists for it. Without a fixture it would be the one shape of the
+    // row the harness never renders.
+    if (!imagesSD) return serverStray ? want : 'stopped'
+    if (want === 'failed' || want === 'starting' || want === 'stopped') return want
+    // `running`, `restart`, and anything else that names a live process.
+    return 'running'
+  }
+  const serverStray = !imagesSD && !!serverParam && serverParam !== 'stopped'
+  let serverState = serverStateFrom(serverParam || (startWithApp ? 'running' : 'stopped'))
+  const serverListening = () => serverState === 'running' || serverState === 'starting'
+  // The port a real start picks free, and the address the panel then names. Fixed here
+  // because the row has to render the *same* address the log's first line carries. A failed
+  // start keeps its port: the listener is chosen before the process is spawned, and only the
+  // pid goes away when it dies — which is the distinction the real row reports too.
+  let serverPort = serverState === 'stopped' ? 0 : 8912
+  let serverPid = serverListening() ? 4242 : 0
+  let serverTimer = null
+  // The two lines a start always writes, built from the settings rather than stored: the log
+  // is the panel's only view of what the process was *told*, and a fixed string would keep
+  // naming the model a restart had already moved away from — which is exactly the state the
+  // restart exists to leave behind.
+  const serverStartArgs = () => {
+    const im = settings.images || {}
+    const program = `${(im.cliFolder || '').replace(/\/$/, '')}/${localProgram}`
+    const parts = [program]
+    if (im.cliModel) parts.push('-m', im.cliModel)
+    if (im.cliDiffusionModel) parts.push('--diffusion-model', im.cliDiffusionModel)
+    if (im.cliVae) parts.push('--vae', im.cliVae)
+    if (im.cliLlm) parts.push('--llm', im.cliLlm)
+    parts.push('--listen-ip', '127.0.0.1', '--listen-port', String(serverPort))
+    return parts.join(' ')
+  }
+  const serverPrimaryModel = () => {
+    const im = settings.images || {}
+    return im.cliDiffusionModel || im.cliModel || 'the model'
+  }
+  const serverLogFor = (state) => {
+    if (state !== 'running' && state !== 'starting' && state !== 'failed') return []
+    const lines = [
+      `sd-server gestartet (PID 4242) auf http://127.0.0.1:${serverPort}`,
+      `Aufruf: ${serverStartArgs()}`,
+      `loading model from ${serverPrimaryModel()}`,
+    ]
+    if (state === 'running') lines.push('Modell geladen, Server bereit')
+    if (state === 'starting') lines.push('loading vae …')
+    if (state === 'failed') lines.push('error: failed to load diffusion model, unsupported GGUF version')
+    return lines
+  }
+  let serverLog = serverLogFor(serverState)
+  // The two ways a row can carry a reason: a start that died, and a running process that
+  // ended. Only the first one keeps its log on screen, which is what the panel does.
+  let serverError =
+    serverState === 'failed'
+      ? 'sd-server wurde beendet: exit status 1 — letzte Ausgabe:\nerror: failed to load diffusion model, unsupported GGUF version'
+      : ''
+  // The twelve fields a start reads, in the order the frontend's own `startupKey` lists
+  // them. Keeping the two in step is the point: the badge is a *reading*, and a fixture that
+  // compared a different set of fields would show it for edits the backend ignores.
+  const serverStartupKey = (im = {}) =>
+    JSON.stringify([
+      im.kind,
+      im.cliFolder,
+      im.cliBinary,
+      im.cliModel,
+      im.cliDiffusionModel,
+      im.cliVae,
+      im.cliLlm,
+      im.cliClipL,
+      im.cliClipG,
+      im.cliT5xxl,
+      im.cliOffloadToCpu,
+      im.cliExtraArgs,
+    ])
+  // A stray server is out of date by definition: the command line it was started from
+  // belongs to a kind the settings no longer select, which is the reading the backend
+  // answers with as well.
+  let serverRestart = serverParam === 'restart' || serverStray
+  let serverStartedFrom = serverState === 'running' ? serverStartupKey(settings.images) : null
+  // A start takes a moment even in the harness — that is the whole reason the row has a
+  // `starting` state and the panel polls while it is in one — so the state change is on a
+  // timer rather than immediate.
+  const START_SETTLE_MS = 900
+  const imageServerRow = () => ({
+    state: serverState,
+    url: serverPort ? `http://127.0.0.1:${serverPort}` : '',
+    port: serverPort,
+    pid: serverPid,
+    error: serverError,
+    log: serverLog,
+    // Only a running server can be out of date: one that is not running reads the settings
+    // when it starts, so there is nothing to ask the user to reload.
+    restartNeeded: serverState === 'running' && serverRestart,
+    startWithApp,
+  })
 
   // What KiChat's own store holds, as the panel reads it. Three pictures drawn, one of them
   // saved to a file — the state in which the clear button has something to refuse to touch
@@ -1943,6 +2202,17 @@ Verfügbare Tools: {{tool_list}}`,
           entry.enabled = true
         }
       }
+      // A save never restarts the managed picture server: a start may be minutes of model
+      // loading, so the row is *told* the loaded model is no longer the saved one instead.
+      // The comparison is the backend's own (`images.ServerKey` — the model half of the
+      // command line), and a server that is not running needs nothing: the next start reads
+      // these settings anyway.
+      if (imagesSD) {
+        serverRestart =
+          serverState === 'running' &&
+          serverStartedFrom !== null &&
+          serverStartupKey(settings.images) !== serverStartedFrom
+      }
       console.log('[harness] settings saved:', settings.language)
       return Promise.resolve(copy(settings))
     },
@@ -2305,7 +2575,7 @@ Verfügbare Tools: {{tool_list}}`,
     // different field for each.
     GetImageStatus: () =>
       Promise.resolve(
-        imagesCLI
+        imagesLocal
           ? {
               enabled: !imagesOff,
               baseURL: '',
@@ -2315,14 +2585,21 @@ Verfügbare Tools: {{tool_list}}`,
               models: [],
               samplers: cliSamplers,
               keySet: false,
-              kind: 'cli',
+              kind: imagesSD ? 'sdserver' : 'cli',
+              // Which of the archive's two programs this kind runs, so the row names the file
+              // it is really reporting about rather than the other one.
+              program: localProgram,
+              // The process row. It is always present, never null — a nil Go struct whose
+              // fields the panel reads is the shape mistake a fresh install would hit, and
+              // the mock keeps the same contract.
+              server: imageServerRow(),
               // The program was found in the folder rather than typed, and `build` is
               // what that folder turned out to be — a *reading*, which is why the
               // fixture has the folder set and the Vulkan backend libraries in it. It is
               // also what the panel prints as the found program, so it must be the path
               // the folder really holds; `?typedbinary=1` leaves this alone, which is the
               // point: the typed path is a second, different folder that nothing reads.
-              binary: '/home/user/Downloads/sd/sd-cli',
+              binary: `/home/user/Downloads/sd/${localProgram}`,
               folder: '/home/user/Downloads/sd',
               build: 'vulkan',
               builds: sdBuilds,
@@ -2347,6 +2624,9 @@ Verfügbare Tools: {{tool_list}}`,
               builds: sdBuilds,
               releasePage: sdReleasePage,
               files: [],
+              // A kind with no process of its own still reports the row, stopped and
+              // empty, because the panel renders it unconditionally.
+              server: imageServerRow(),
             },
       ),
     // A cancelled dialog answers with the empty string, which the panel must treat as
@@ -2373,6 +2653,52 @@ Verfügbare Tools: {{tool_list}}`,
       return Promise.resolve('/home/user/Downloads/sd-cuda')
     },
     TestImageBackend: () => Promise.resolve('1 Bild(er) erzeugt (Stable Diffusion WebUI)'),
+    // Starting the managed server is a *transition*, not a state: the backend spawns the
+    // process and returns immediately, the model then loads for minutes, and the row is what
+    // follows it. So this flips to `starting` and settles on a timer, which is what gives the
+    // panel's own polling interval something to poll — a binding that answered `running` at
+    // once would leave the loading state of this row unrenderable.
+    StartImageServer: () => {
+      console.log('[harness] StartImageServer')
+      if (!imagesSD) {
+        return Promise.reject(
+          new Error('die Bildgenerierung steht nicht auf dem lokalen Server'),
+        )
+      }
+      clearTimeout(serverTimer)
+      serverState = 'starting'
+      serverPort = 8912
+      serverPid = 4242
+      serverLog = serverLogFor('starting')
+      serverError = ''
+      // A start is what reads the settings again, so a row that was out of date is not any
+      // more — the badge belongs to the server, not to the field.
+      serverRestart = false
+      serverStartedFrom = serverStartupKey(settings.images)
+      serverTimer = setTimeout(() => {
+        if (serverState !== 'starting') return
+        serverState = 'running'
+        serverLog = serverLogFor('running')
+      }, START_SETTLE_MS)
+      return Promise.resolve(null)
+    },
+    // Stopping releases the model's memory and takes the tool away; both follow from the
+    // state, because `newImageProvider` builds no provider for a server that is not running.
+    StopImageServer: () => {
+      console.log('[harness] StopImageServer')
+      clearTimeout(serverTimer)
+      serverState = 'stopped'
+      // Two statements rather than one: `a, b = 0, 0` is a sequence expression in
+      // JavaScript, not a destructuring assignment — it assigns only the second name and
+      // leaves the first one holding the port of the server that just went away.
+      serverPort = 0
+      serverPid = 0
+      serverLog = []
+      serverError = ''
+      serverStartedFrom = null
+      serverRestart = false
+      return Promise.resolve(null)
+    },
     GetAttachmentImage: (id) => {
       if (id !== IMAGE_ATTACHMENT.id && id !== UPLOADED_ATTACHMENT.id && !drawnImageIds.has(id)) {
         return Promise.reject(new Error('kein gespeichertes Bild'))

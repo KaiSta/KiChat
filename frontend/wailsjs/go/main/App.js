@@ -238,6 +238,10 @@ export function Settings() {
   return window['go']['main']['App']['Settings']();
 }
 
+export function StartImageServer() {
+  return window['go']['main']['App']['StartImageServer']();
+}
+
 export function StartManagedModel(arg1) {
   return window['go']['main']['App']['StartManagedModel'](arg1);
 }
@@ -252,6 +256,10 @@ export function StopGeneration(arg1) {
 
 export function StopImageDraw(arg1) {
   return window['go']['main']['App']['StopImageDraw'](arg1);
+}
+
+export function StopImageServer() {
+  return window['go']['main']['App']['StopImageServer']();
 }
 
 export function StopManagedModel(arg1) {

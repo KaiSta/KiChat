@@ -5,6 +5,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -54,6 +55,31 @@ type Settings struct {
 	// server has no conversation, no context window and no token accounting, so
 	// almost nothing about a BackendConfig applies to it.
 	Images ImageSettings `json:"images"`
+	// ImageProfiles are the named picture configurations the Images tab offers as
+	// a dropdown, one per checkpoint or per pipeline a user switches between.
+	//
+	// They sit next to Images rather than inside it because a profile *is* an
+	// ImageSettings: nesting the type in itself would make the profile a user
+	// picks and the configuration it restores two shapes able to drift apart. The
+	// list is the same idea the system-prompt presets follow — a named set of saved
+	// configurations, stored whole, so a field added later needs no migration.
+	ImageProfiles []ImageProfile `json:"imageProfiles,omitempty"`
+}
+
+// ImageProfile is a named, saved picture configuration: what the Images tab
+// holds, under a name the user can pick again.
+//
+// The credential is deliberately *not* part of one. A profile describes how a
+// picture is drawn — a checkpoint or a pipeline's parts, a sampler, a step count,
+// a size, a negative prompt — while the address and its "user:pass" belong to the
+// server the user runs. That server is the thing every profile talks to, so a
+// per-profile secret would mean one keyring entry per profile for a field most
+// setups leave empty; the panel therefore keeps the credential with the feature
+// and every profile applies under it. settings.normalise() clears the field and
+// api.sanitize() blanks it again, so a hand-written blob cannot smuggle one in.
+type ImageProfile struct {
+	Name     string        `json:"name"`
+	Settings ImageSettings `json:"settings"`
 }
 
 // ImageSettings configures text-to-image generation.
@@ -91,16 +117,37 @@ type ImageSettings struct {
 	// matters: an empty string sent explicitly would replace a negative prompt the
 	// user configured in their WebUI, while omitting the field leaves it in force.
 	NegativePrompt string `json:"negativePrompt"`
+	// CfgScale is the guidance scale, 0 for the model's and the backend's own. It is a
+	// float because the scale is one: 7.0 is what A1111 and sd-cli are shipped with,
+	// and a distilled or flow-matching model is run at 1.0. Nothing here is "a default"
+	// in the sense the empty size and step count used to be — every shared generation
+	// field is the model's per picture, and one filled in here is a value the model
+	// cannot overrule (see internal/tools/image.go).
+	CfgScale float64 `json:"cfgScale"`
 	// SaveFolder is where "Save as…" starts. It is remembered after a successful
 	// save because a user who exports pictures to a folder wants the next one to
 	// offer the same place, and re-picking it every time is the sort of friction
 	// that makes a feature unused.
 	SaveFolder string `json:"saveFolder"`
 
-	// Kind is which of the two backends draws. Empty is the server kind, which is
-	// what every installation that predates this field is, so an old settings blob
-	// keeps working without a migration — the same rule the other fields follow.
+	// Kind is which backend draws. Empty is the server kind, which is what every
+	// installation that predates this field is, so an old settings blob keeps
+	// working without a migration — the same rule the other fields follow.
 	Kind string `json:"kind"`
+	// StartWithApp asks KiChat to start the managed server (ImageKindSD) whenever the
+	// app starts. It is off unless the user asks, and deliberately not implied by
+	// choosing the kind: a loaded model holds the VRAM it was loaded into for as long
+	// as it runs, so "KiChat can run this for me" and "KiChat starts this every time I
+	// open the window" are two statements, and only the second one costs memory on a
+	// machine whose user is about to do something else. Started by hand is the other
+	// way, and nothing else starts it: an app that brought a multi-gigabyte model up
+	// without being asked would be spending the user's memory on a choice they never
+	// made.
+	//
+	// It says nothing about *stopping*: a server that was started stays up until the
+	// user stops it or the app exits, because the point of it is that the model is
+	// already loaded when the next picture is asked for.
+	StartWithApp bool `json:"startWithApp"`
 
 	// The CLI kind's own fields. They are named after the flags they become, because
 	// that is the only thing a user can check them against: there is no server to ask
@@ -172,19 +219,31 @@ type ImageSettings struct {
 
 // Image backend kinds, as stored in ImageSettings.Kind.
 const (
-	// ImageKindServer is an HTTP server behind the /sdapi/v1/txt2img route:
-	// AUTOMATIC1111, its Forge fork, or stable-diffusion.cpp's sd-server.
+	// ImageKindServer is an HTTP server behind the /sdapi/v1/txt2img route that the
+	// user runs themselves: AUTOMATIC1111, its Forge fork, or a stable-diffusion.cpp
+	// server they started by hand.
 	ImageKindServer = "server"
 	// ImageKindCLI is a local binary run once per picture — stable-diffusion.cpp's
 	// `sd-cli` — which needs no daemon and reaches flags the compatibility route does
 	// not expose, at the cost of loading the model on every draw.
 	ImageKindCLI = "cli"
+	// ImageKindSD is the *same* local build, run as a server: stable-diffusion.cpp's
+	// `sd-server`, started and stopped by KiChat, from the folder and with the model
+	// flags the CLI kind already configures. It exists because the CLI kind pays a
+	// model load per picture — minutes on a CPU for a q5 diffusion model — while a
+	// server pays it once and then spends only the sampling per picture. The price is
+	// the opposite one: a process, a port, and the VRAM a loaded model holds until it
+	// is stopped.
+	ImageKindSD = "sdserver"
 )
 
-// IsImageCLI reports whether the CLI backend is selected. An empty or unrecognised
-// kind is the server backend, so a blob written by hand cannot leave the app with no
-// backend at all.
+// IsImageCLI reports whether the one-shot program is selected. An empty or
+// unrecognised kind is the server backend, so a blob written by hand cannot leave the
+// app with no backend at all.
 func IsImageCLI(kind string) bool { return kind == ImageKindCLI }
+
+// IsImageSD reports whether the build is run as a server KiChat starts and stops.
+func IsImageSD(kind string) bool { return kind == ImageKindSD }
 
 // DefaultImageBaseURL is AUTOMATIC1111's own default listen address, and is
 // also what Forge and stable-diffusion.cpp's sd-server use when left alone. It is
@@ -218,6 +277,10 @@ const (
 	MinImageDimension = images.MinDimension
 	// MaxImageSteps bounds the sampling step count.
 	MaxImageSteps = images.MaxSteps
+	// MinImageCfgScale and MaxImageCfgScale bound the guidance scale, which is a float
+	// and therefore has its own clamp below.
+	MinImageCfgScale = images.MinCfgScale
+	MaxImageCfgScale = images.MaxCfgScale
 )
 
 // NormaliseImageClamps repairs the numeric image fields in place, reporting
@@ -250,13 +313,38 @@ func NormaliseImageClamps(s *ImageSettings) bool {
 		s.Steps = next
 		changed = true
 	}
-	// Only the CLI kind is stored as itself: the server backend is spelled empty, which is
-	// what every installation predating the field already carries. So a typo in a
-	// hand-edited blob degrades to the backend that used to work rather than to no backend
-	// at all, `server` written out in full is folded to the same empty value instead of
-	// leaving two spellings of one thing, and the selector has one value per option.
+	// The guidance scale is the one float among these, and it is read the same way: zero is
+	// "the model decides", a negative or an unreadable number says the same thing as an
+	// emptied box, and only a scale somebody actually chose is clamped to the range — below
+	// the floor it is raised, above the ceiling capped. Not-a-number would pass every
+	// comparison untouched and reach a JSON payload that cannot marshal one, so it folds to
+	// zero here as well as in images.Request.Normalised, which is where a request that never
+	// came through this function is bounded.
+	cfg := s.CfgScale
+	switch {
+	case math.IsNaN(cfg) || cfg <= 0:
+		cfg = 0
+	case cfg < MinImageCfgScale:
+		cfg = MinImageCfgScale
+	case cfg > MaxImageCfgScale:
+		cfg = MaxImageCfgScale
+	}
+	if cfg != s.CfgScale {
+		s.CfgScale = cfg
+		changed = true
+	}
+	// Three kinds have a spelling. The HTTP server is the empty string, which is what
+	// every installation predating the field already carries; the two local lifetimes are
+	// stored under the names of the programs they run — `cli` for sd-cli and `sdserver`
+	// for sd-server. Everything else, `server` written out in full included, folds to the
+	// empty value, so a typo in a hand-edited blob degrades to the backend that used to
+	// work rather than to no backend at all, and the selector keeps one value per option.
+	//
+	// The managed server is *kept* rather than folded away: it is a process this app
+	// starts and stops, so losing the name on the next load would silently swap the user's
+	// own sd-server for whatever answers on the HTTP address.
 	kind := strings.TrimSpace(s.Kind)
-	if kind != ImageKindCLI {
+	if kind != ImageKindCLI && kind != ImageKindSD {
 		kind = ""
 	}
 	if kind != s.Kind {
@@ -734,6 +822,29 @@ func (s *Settings) normalise() {
 	// machine should be asked for; clamping here means the request builder never
 	// has to trust the stored number.
 	NormaliseImageClamps(&s.Images)
+	// Each profile goes through the same clamp, because applying one writes these
+	// numbers into the live fields: a profile that kept a 20000-pixel size would
+	// re-arm the request the clamp above exists to prevent, once per pick. An
+	// unnamed profile is dropped — the panel addresses one by its name, so nothing
+	// could ever select it — and so is a repeated name, which would leave an
+	// "update this profile" click with two candidates. The credential is cleared
+	// for the reason it is never stored: profiles are configurations.
+	profiles := make([]ImageProfile, 0, len(s.ImageProfiles))
+	seenProfiles := map[string]bool{}
+	for _, p := range s.ImageProfiles {
+		p.Name = strings.TrimSpace(p.Name)
+		if p.Name == "" || seenProfiles[p.Name] {
+			continue
+		}
+		seenProfiles[p.Name] = true
+		NormaliseImageClamps(&p.Settings)
+		p.Settings.APIKey = ""
+		profiles = append(profiles, p)
+	}
+	if len(profiles) == 0 {
+		profiles = nil
+	}
+	s.ImageProfiles = profiles
 	// Ensure the shipped backends always exist, even if the user removed them
 	// from an older settings blob. This is also how a backend shipped in a later
 	// release — DeepSeek, then Mistral, then NVIDIA — reaches an installation

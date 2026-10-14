@@ -94,6 +94,74 @@ func TestEveryPublishedBuildNamesAnArchiveToLookFor(t *testing.T) {
 // can be in, because getting this wrong is the whole feature failing: the archive
 // unpacks into one root directory, and "unpack here" leaves that root inside the
 // folder the user picked.
+// TestFindServerProgramUsesTheSameRules: every published archive carries both programs, so a
+// user who already pointed at the folder for the one-shot kind must not have to point at it
+// again for the server. The rules are the ones above — inside, under `bin`, one level down,
+// and several candidates reported rather than picked — because it is the same folder.
+func TestFindServerProgramUsesTheSameRules(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in is not an .exe")
+	}
+	name := ServerProgramName(runtime.GOOS)
+	write := func(t *testing.T, dir string) string {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("in the archive's own root", func(t *testing.T) {
+		dir := t.TempDir()
+		want := write(t, filepath.Join(dir, "sd-master-60423ab-bin-Linux-Ubuntu-24.04-x86_64-vulkan"))
+		got, err := FindServerProgram(dir)
+		if err != nil {
+			t.Fatalf("FindServerProgram: %v", err)
+		}
+		if got != want {
+			t.Errorf("found %q, want %q", got, want)
+		}
+	})
+
+	t.Run("beside the one-shot program", func(t *testing.T) {
+		// The shape of a real unpack: both programs in one directory. The server lookup has
+		// to pick the server out of it, not the program that happens to be there too.
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ProgramName(runtime.GOOS)), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		want := write(t, dir)
+		got, err := FindServerProgram(dir)
+		if err != nil {
+			t.Fatalf("FindServerProgram: %v", err)
+		}
+		if got != want {
+			t.Errorf("found %q, want the server beside the program (%q)", got, want)
+		}
+	})
+
+	t.Run("the server is missing", func(t *testing.T) {
+		// A partial or older unpack: the program is there and the server is not. The
+		// refusal names the file it looked for rather than falling back to the program,
+		// which would start a process that cannot serve anything.
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ProgramName(runtime.GOOS)), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := FindServerProgram(dir)
+		if err == nil {
+			t.Fatal("a folder with no server was accepted")
+		}
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("refusal = %q, want it to name %s", err, name)
+		}
+	})
+}
+
 func TestFindProgramLooksWhereAnArchiveUnpacksTo(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the stand-in is not an .exe")

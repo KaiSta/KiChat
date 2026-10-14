@@ -168,6 +168,18 @@ func (a *App) sanitize(s config.Settings) config.Settings {
 	// The image server's "user:pass" is a credential like the others, so it never
 	// reaches the settings blob or the bridge.
 	s.Images.APIKey = ""
+	// A profile carries a whole ImageSettings, so the same rule has to reach each
+	// one. The slice is copied before it is blanked, for the reason the backend
+	// slice above is: sanitize hands back a value the caller keeps as its snapshot,
+	// and blanking the elements in place would take the credential out of that copy
+	// too. The panel never fills a profile's key — the credential belongs to the
+	// feature — so this is the second line of defence behind normalise().
+	profiles := make([]config.ImageProfile, len(s.ImageProfiles))
+	copy(profiles, s.ImageProfiles)
+	for i := range profiles {
+		profiles[i].Settings.APIKey = ""
+	}
+	s.ImageProfiles = profiles
 	return s
 }
 
@@ -1193,6 +1205,22 @@ func (a *App) StartManagedModel(backendID string) error {
 	return a.startManagedModel(backendID)
 }
 
+// StartImageServer starts the managed picture server, or restarts it when it is already up.
+//
+// There is one call rather than a start and a restart because sd-server loads one pipeline at
+// startup and has no documented way to replace it: a different model is a different process,
+// so pressing start on a running server means "load this now" either way.
+func (a *App) StartImageServer() error {
+	return a.startImageServer()
+}
+
+// StopImageServer stops it. The model's memory is released here and nowhere else, which is
+// why the panel's row keeps a Stop button in front of the user rather than an idle timer
+// making that decision for them.
+func (a *App) StopImageServer() error {
+	return a.stopImageServer()
+}
+
 // StopManagedModel stops it.
 func (a *App) StopManagedModel(backendID string) error {
 	if err := a.ensure(); err != nil {
@@ -1934,10 +1962,50 @@ type ImageStatus struct {
 	// being written into the interface a second time: it is the project's address, and
 	// a copy of it in the frontend is a copy that goes stale on its own.
 	ReleasePage string `json:"releasePage"`
-	// Files are the CLI kind's model paths, in the order they reach the binary. Both
+	// Files are the local kinds' model paths, in the order they reach the binary. Both
 	// this and Samplers exist so the panel can show what will really be loaded
 	// without re-deriving it from the settings, and neither is ever nil.
 	Files []string `json:"files"`
+	// Program is the executable name the local kinds look for in the folder —
+	// `sd-cli` or `sd-server` — so the panel can name the file it is reporting about
+	// instead of hard-coding one of the two.
+	Program string `json:"program"`
+	// Server is the managed picture server's process row. It is always present and never
+	// null, for the reason Models is: the panel reads its fields, and a null on a fresh
+	// install would be a shape mistake in the one state every installation passes
+	// through. Its State is one of internal/runtime's own — `stopped` when nothing runs,
+	// which is what a kind with no process of its own has — and it is read for *every*
+	// kind, because a server left running under another selection still has to be
+	// stoppable.
+	Server ImageServerStatus `json:"server"`
+}
+
+// ImageServerStatus is the managed picture server as a row in Settings.
+//
+// It mirrors the managed chat model's row rather than reusing its type: those are keyed by
+// backend and carry llama.cpp's placement reading, which an image server does not report — a
+// shared type would have half its fields permanently empty on one side and a reader could
+// not tell "nothing to say" from "forgot to fill it in".
+type ImageServerStatus struct {
+	// State is one of internal/runtime's states, empty when the selected kind has no
+	// process of its own.
+	State string `json:"state"`
+	URL   string `json:"url"`
+	Port  int    `json:"port"`
+	PID   int    `json:"pid"`
+	// Error is why the last start or the running process failed, in the program's own
+	// words where it had any.
+	Error string `json:"error,omitempty"`
+	// Log is the tail of the server's own output, never nil.
+	Log []string `json:"log"`
+	// RestartNeeded reports that the running server was started from a different
+	// command line than the settings now describe. It is a reading rather than an
+	// action: the panel offers the restart, because saving settings must never reload a
+	// model that may have taken minutes to load.
+	RestartNeeded bool `json:"restartNeeded"`
+	// StartWithApp is the stored switch, reported so the row can show it without the
+	// panel having to find it in the draft.
+	StartWithApp bool `json:"startWithApp"`
 }
 
 // imageStatusFiles lists the model paths the CLI backend will pass, in argument order,
@@ -1983,17 +2051,29 @@ func (a *App) GetImageStatus() (ImageStatus, error) {
 		Folder:   settings.Images.CLIFolder,
 		Files:    imageStatusFiles(settings.Images),
 		Builds:   images.SDBuilds(goruntime.GOOS, goruntime.GOARCH),
+		Server:   ImageServerStatus{State: rt.StateStopped, Log: []string{}},
 
 		ReleasePage: images.ReleasePage,
 	}
-	// What the program folder really holds, when there is one to read. The program is
-	// resolved exactly as a draw resolves it, so the panel reports the build the next
-	// picture would use rather than the one the folder is named after; a folder that
-	// yields no program is left to Health, which is where the reason belongs.
-	if binary, err := images.ResolveProgram(settings.Images.CLIFolder, settings.Images.CLIBinary); err == nil {
+	// Which of the archive's two programs this kind runs, and what the folder really
+	// holds for it. A folder supplies one executable or the other: the one-shot kind
+	// runs sd-cli, the managed kind runs sd-server, and the resolved path is the one a
+	// start or a draw would really use rather than the one the folder is named after.
+	resolve, program := images.ResolveProgram, images.ProgramName(goruntime.GOOS)
+	if config.IsImageSD(settings.Images.Kind) {
+		resolve, program = images.ResolveServerProgram, images.ServerProgramName(goruntime.GOOS)
+	}
+	status.Program = program
+	if binary, err := resolve(settings.Images.CLIFolder, settings.Images.CLIBinary); err == nil {
 		status.Binary = binary
 		status.Build = images.AcceleratorOf(filepath.Dir(binary))
 	}
+	// Reported whatever the selected kind is, and that is load-bearing rather than uniform:
+	// switching the kind away from the managed server while one is running leaves the process
+	// up — a save never reloads a model that may have taken minutes to load — and a row that
+	// was only filled for `sdserver` would hide the one control that can stop it. A server
+	// with no row is several gigabytes of VRAM with nothing left to release it.
+	status.Server = a.imageServerStatus(settings)
 	_, status.KeySet = a.secrets.Get(config.ImageAPIKeyName)
 
 	provider := a.currentImageProvider()
@@ -2031,11 +2111,17 @@ func (a *App) TestImageBackend() (string, error) {
 	if err := a.ensure(); err != nil {
 		return "", err
 	}
+	settings := a.Settings()
 	provider := a.currentImageProvider()
 	if provider == nil {
+		// A managed server that is not running has no provider at all, and saying "no
+		// backend is configured" about a filled-in, saved configuration would send the
+		// user looking for a mistake that is not there.
+		if config.IsImageSD(settings.Images.Kind) {
+			return "", errors.New("der Bildserver läuft nicht — zuerst starten")
+		}
 		return "", images.ErrNotConfigured
 	}
-	settings := a.Settings()
 	ctx, cancel := context.WithTimeout(context.Background(), imageDrawTimeout(settings))
 	defer cancel()
 	// The size is the user's own when they chose one, and a small square otherwise:
@@ -2054,6 +2140,7 @@ func (a *App) TestImageBackend() (string, error) {
 		Height:         dimension(settings.Images.Height),
 		Steps:          settings.Images.Steps,
 		Sampler:        settings.Images.Sampler,
+		CfgScale:       settings.Images.CfgScale,
 		Model:          settings.Images.Model,
 	}.Normalised())
 	if err != nil {

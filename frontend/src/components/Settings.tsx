@@ -1660,10 +1660,26 @@ function ImagesTab({
   // user has just finished typing would be a reading of some other folder.
   const foundProgram =
     folderSet && status?.folder === images.cliFolder ? status.binary ?? '' : ''
-  // What an empty field means, said in the selected backend's own words. It reads a little
-  // differently for each kind — a server has its own default, a one-shot program has its
-  // own too — and the shared fields below belong to both, so one of them would be wrong.
-  const auto = isCLI ? t('settings.images.autoProgram') : t('settings.images.auto')
+  // The third kind: the *same* local build, run as a server KiChat starts and stops. It is
+  // not a variant of the one-shot kind in the UI either — the fields are shared because the
+  // flags are, but the process, the port and the lifetime are the server's own.
+  const isSD = images.kind === 'sdserver'
+  // Both local kinds are one build from one archive in two lifetimes, which is what makes the
+  // folder and the whole model set *shared* rather than duplicated per kind: the same fields
+  // feed `sd-cli -p …` and `sd-server --listen-port …`.
+  const isLocal = isCLI || isSD
+  // Which executable the folder is expected to hold. The backend reports it rather than the
+  // view hard-coding one of the two names, so a renamed row cannot describe the other
+  // program.
+  const program = status?.program || (isSD ? 'sd-server' : 'sd-cli')
+  const server = status?.server
+  const sdState = server?.state || 'stopped'
+  const sdRunning = isSD && sdState === 'running'
+  const sdFailed = isSD && sdState === 'failed'
+  // What an empty field means, for the one field where the backend decides: the checkpoint.
+  // An empty sampler, size, step count or negative prompt does *not* mean this — the model
+  // decides those, and the shared fields below say so themselves.
+  const auto = t('settings.images.auto')
 
   // The builds stable-diffusion.cpp publishes for this machine, and which one the panel
   // is pointing the user at. KiChat does not download the program, so these rows are the
@@ -1672,6 +1688,7 @@ function ImagesTab({
   // for Linux, and offering one would send them to a file that does not exist.
   const builds = status?.builds ?? []
   const [sdBuild, setSdBuild] = useState('')
+  const [serverBusy, setServerBusy] = useState(false)
   // What is already installed is the useful default — "you are on the Vulkan build, here
   // is the file it came from" — and the first published build otherwise, which is the
   // CPU one and runs anywhere.
@@ -1682,6 +1699,197 @@ function ImagesTab({
 
   const update = (changes: Partial<config.ImageSettings>) =>
     patch({ images: { ...images, ...changes } as config.ImageSettings })
+
+  // Read again without the mount's "checking" dance: the server row polls this while a
+  // model loads, and a spinner that reappears every 1.2 s would be noise rather than a
+  // reading.
+  const readStatus = async () => {
+    try {
+      setStatus(await App.GetImageStatus())
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    }
+  }
+
+  /*
+   * The managed server's two buttons. Both commit the draft first, for the reason the
+   * connection test does: the settings are what a start reads, so starting an unsaved
+   * configuration would load the previous model and report a failure about something the
+   * user already corrected.
+   *
+   * Start doubles as Restart — the backend has one call for both, because sd-server loads
+   * one pipeline at startup and has no way to be told about another. The label says which of
+   * the two the click will be, and both are the user's own click: nothing in this app
+   * reloads a model that may have taken minutes to load.
+   */
+  const startServer = async () => {
+    setServerBusy(true)
+    try {
+      await onApply({ ...draft, images })
+      await App.StartImageServer()
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    } finally {
+      setServerBusy(false)
+      await readStatus()
+    }
+  }
+
+  const stopServer = async () => {
+    setServerBusy(true)
+    try {
+      await App.StopImageServer()
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    } finally {
+      setServerBusy(false)
+      await readStatus()
+    }
+  }
+
+  // Only while something is moving. A server loading a model takes minutes and the row has to
+  // follow it, while an idle window must not ask for a status twice a second for the rest of
+  // the session.
+  useEffect(() => {
+    if (sdState !== 'starting') return
+    const id = window.setInterval(() => void readStatus(), 1200)
+    return () => window.clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sdState])
+
+  // A save can leave the running server loading a model the settings no longer describe, and
+  // "restart needed" is a *reading* the backend answers rather than a field the panel keeps —
+  // so the row has to ask again after one. Without this, the badge for the very edit that
+  // creates the condition would only appear once the section was left and re-entered.
+  //
+  // Keyed on the stored command line rather than on the draft (a keystroke is not a save), and
+  // only while a server is up: a stopped one reads these settings when it starts, so there is
+  // nothing to ask about and no reason to probe a backend the user may not be running.
+  const storedImages = useStore((s) => s.settings?.images)
+  const storedStartup = storedImages ? startupKey(storedImages) : ''
+  useEffect(() => {
+    if (sdState !== 'running') return
+    void readStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storedStartup])
+
+  /*
+   * Profiles: the saved configurations, one per checkpoint or per pipeline a user
+   * switches between. They are part of the settings blob, so every one of the three
+   * buttons below commits through onApply instead of only writing into the draft — a
+   * profile that disappeared on the way to another tab is the opposite of what a
+   * "save" button promises, and the point of the list is to make switching a single
+   * click.
+   */
+  const profiles = draft.imageProfiles ?? []
+  const [picked, setPicked] = useState('')
+  const [profileName, setProfileName] = useState('')
+  // Deleting a configuration is not undoable, so it asks twice, the way the picture
+  // store's clear button does.
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [profileBusy, setProfileBusy] = useState(false)
+  const trimmedName = profileName.trim()
+  // The button says which of the two it will do, because "save" and "update" are the
+  // same click on the same form and only the name decides which one the user gets.
+  const replacing = profiles.some((p) => p.name === trimmedName)
+  const selected = profiles.find((p) => p.name === picked)
+
+  /*
+   * What a profile holds, and what it deliberately leaves behind: the drawing
+   * configuration, not the feature switch (applying one must not be able to turn image
+   * generation off), not the export folder (that is where the user keeps pictures, not
+   * how they are made) and not the credential. The server's "user:pass" belongs to the
+   * server a profile is a way of using, so it stays with the feature as one keyring
+   * entry — which is also what keeps a secret out of the settings blob, where a copy of
+   * it would sit in plain text.
+   */
+  const profileSettings = (): config.ImageSettings =>
+    ({ ...images, enabled: false, saveFolder: '', apiKey: '' }) as config.ImageSettings
+
+  const upsertProfile = (name: string): config.ImageProfile[] => {
+    const at = profiles.findIndex((p) => p.name === name)
+    if (at < 0) return [...profiles, { name, settings: profileSettings() }]
+    const next = profiles.slice()
+    // Written back in place: a row that jumped to the end of the list on every update
+    // would be a dropdown reordering itself under the cursor.
+    next[at] = { ...next[at], settings: profileSettings() }
+    return next
+  }
+
+  const saveProfile = async () => {
+    if (!trimmedName) return
+    const next = upsertProfile(trimmedName)
+    setProfileBusy(true)
+    try {
+      patch({ imageProfiles: next })
+      // Handed in rather than read from state: setState has not landed yet, which is
+      // the same reason the connection test passes its payload along.
+      await onApply({ ...draft, images, imageProfiles: next })
+      setPicked(trimmedName)
+    } finally {
+      setProfileBusy(false)
+    }
+  }
+
+  /*
+   * Whether applying would have to reload the model: the managed server loads one pipeline when
+   * it starts and cannot be told about another, so a profile that names a different model set is
+   * a different *process*. The comparison is over the fields a start reads (startupKey) and the
+   * label of the button says so before the click, because a reload is minutes — and the click
+   * performs it, because picking a model is how a user asks to draw with it.
+   */
+  const applyRestarts =
+    sdRunning &&
+    !!selected &&
+    // The profile has to *be* the managed server as well. One that switches the kind away
+    // leaves the running process alone — it keeps the model it loaded, and the row above is
+    // still how it is stopped — so asking for a start here would only come back with "the
+    // picture generation is not set to the local server", about a choice the user just made.
+    selected.settings.kind === 'sdserver' &&
+    startupKey(selected.settings) !== startupKey(images)
+
+  const applyProfile = async () => {
+    if (!selected) return
+    setProfileBusy(true)
+    try {
+      // The three fields the profile does not describe come from the draft, so
+      // switching configurations never switches the feature off or moves the export
+      // folder.
+      const next = {
+        ...selected.settings,
+        enabled: images.enabled,
+        saveFolder: images.saveFolder,
+        apiKey: images.apiKey,
+      } as config.ImageSettings
+      patch({ images: next })
+      await onApply({ ...draft, images: next })
+      if (applyRestarts) {
+        // After the save: the settings are what a start reads, so restarting first would
+        // load the model the user just moved away from.
+        await App.StartImageServer()
+        await readStatus()
+      }
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    } finally {
+      setProfileBusy(false)
+    }
+  }
+
+  const deleteProfile = async () => {
+    const name = picked
+    const next = profiles.filter((p) => p.name !== name)
+    setProfileBusy(true)
+    try {
+      patch({ imageProfiles: next })
+      await onApply({ ...draft, images, imageProfiles: next })
+      setPicked('')
+      setProfileName('')
+    } finally {
+      setProfileBusy(false)
+      setConfirmDelete(false)
+    }
+  }
 
   // Read once on mount. The probe is a request to a server the user may not be
   // running, so re-asking on every keystroke in the draft would hammer a port that
@@ -1757,6 +1965,18 @@ function ImagesTab({
           <span className="badge badge-danger" title={status.error}>
             {t('settings.fail')}
           </span>
+        ) : isSD ? (
+          /* The managed server is not probed as an address: it may simply be stopped, which
+             is a state and not a failure, and the row below carries the same word plus the
+             button that changes it. */
+          <span
+            className={`badge ${sdRunning && status?.ok ? 'badge-ok' : sdFailed ? 'badge-danger' : ''}`}
+            title={server?.error || undefined}
+          >
+            {sdRunning && status?.ok
+              ? `${t('settings.images.ok')} · ${status.models.length} ${t('settings.images.models')}`
+              : t(`settings.managed.state.${sdState}`)}
+          </span>
         ) : status?.ok ? (
           // The CLI backend has no listing to count, so its badge counts the files it will
           // load instead. Reporting "0 models" on a configured backend would read as a
@@ -1781,6 +2001,101 @@ function ImagesTab({
         <p className="faint mb-2 text-[11px]">{t('settings.images.offHint')}</p>
       ) : null}
 
+      {/* Profiles come before the fields rather than after them: picking one is how a user
+          starts, and the row underneath is what the pick applies. Their own save commits
+          at once — see saveProfile — so the list is never only in the draft. */}
+      <div className="mb-3 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+        <div className="text-[12px]">{t('settings.images.profiles')}</div>
+        <p className="faint mb-2 text-[11px]">{t('settings.images.profilesHint')}</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            className="input"
+            aria-label={t('settings.images.profilePick')}
+            title={t('settings.images.profilePick')}
+            value={picked}
+            onChange={(e) => {
+              setPicked(e.target.value)
+              // Picking also fills the name box, so the same pick is how a stored
+              // configuration is corrected: pick it, change a field, press update.
+              setProfileName(e.target.value)
+              setConfirmDelete(false)
+            }}
+          >
+            <option value="">{t('settings.images.profileNone')}</option>
+            {profiles.map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={!selected || profileBusy}
+            onClick={() => void applyProfile()}
+          >
+            {profileBusy
+              ? t('settings.images.profileBusy')
+              : applyRestarts
+                ? t('settings.images.profileApplyRestart')
+                : t('settings.images.profileApply')}
+          </button>
+          {confirmDelete ? (
+            <>
+              <span className="text-[11px]" style={{ color: 'var(--danger)' }}>
+                {t('settings.images.profileDeleteConfirm', { name: picked })}
+              </span>
+              <button
+                type="button"
+                className="btn btn-sm btn-danger"
+                disabled={profileBusy}
+                onClick={() => void deleteProfile()}
+              >
+                {t('settings.images.profileDeleteYes')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={profileBusy}
+                onClick={() => setConfirmDelete(false)}
+              >
+                {t('common.cancel')}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={!selected || profileBusy}
+              onClick={() => setConfirmDelete(true)}
+            >
+              {t('settings.images.profileDelete')}
+            </button>
+          )}
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input
+            className="input"
+            value={profileName}
+            placeholder={t('settings.images.profileName')}
+            aria-label={t('settings.images.profileName')}
+            onChange={(e) => setProfileName(e.target.value)}
+          />
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={!trimmedName || profileBusy}
+            onClick={() => void saveProfile()}
+          >
+            {replacing ? t('settings.images.profileUpdate') : t('settings.images.profileSave')}
+          </button>
+          {/* Said rather than implied: the credential is not part of a profile, and a user
+              who filled the field in below and then stored a profile would otherwise have
+              to guess whether it travelled with it. */}
+          <span className="faint text-[11px]">{t('settings.images.profileKeyHint')}</span>
+        </div>
+      </div>
+
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <span className="text-[12px]">{t('settings.images.kind')}</span>
         <select
@@ -1791,14 +2106,33 @@ function ImagesTab({
         >
           <option value="">{t('settings.images.kindServer')}</option>
           <option value="cli">{t('settings.images.kindCLI')}</option>
+          <option value="sdserver">{t('settings.images.kindSD')}</option>
         </select>
         <span className="faint flex-1 text-[11px]">
-          {isCLI ? t('settings.images.kindCLIHint') : t('settings.images.kindServerHint')}
+          {isSD
+            ? t('settings.images.kindSDHint')
+            : isCLI
+              ? t('settings.images.kindCLIHint')
+              : t('settings.images.kindServerHint')}
         </span>
       </div>
 
+      {/* The process row: what is running right now, and the one control that starts or
+          stops it. It is rendered whenever the kind is the managed server *or* a process is
+          actually up, because switching the kind away must not hide a loaded model — a
+          server with no row is a multi-gigabyte process with nothing left to stop it. */}
+      <ImageServerRow
+        images={images}
+        server={server}
+        isSD={isSD}
+        busy={serverBusy}
+        onUpdate={update}
+        onStart={() => void startServer()}
+        onStop={() => void stopServer()}
+      />
+
       <div className="grid gap-2 sm:grid-cols-2">
-        {isCLI ? (
+        {isLocal ? (
           <>
             {/* How stable-diffusion.cpp gets here. KiChat does not download it: the
                 project publishes one archive per accelerator, so this panel's job is to
@@ -1806,7 +2140,7 @@ function ImagesTab({
                 whatever folder it was unpacked into. */}
             <PathField
               label={t('settings.images.cliFolder')}
-              hint={t('settings.images.cliFolderHint')}
+              hint={t('settings.images.cliFolderHint', { program })}
               value={images.cliFolder ?? ''}
               placeholder="/home/user/Downloads/sd"
               onChange={(v) => update({ cliFolder: v })}
@@ -1869,9 +2203,9 @@ function ImagesTab({
                 user who typed it has to be able to see it and clear it. */}
             <PathField
               label={t('settings.images.cliBinary')}
-              hint={t('settings.images.cliBinaryHint')}
+              hint={t('settings.images.cliBinaryHint', { program })}
               value={images.cliBinary ?? ''}
-              placeholder="sd-cli"
+              placeholder={program}
               disabled={folderSet}
               note={folderSet ? t('settings.images.cliBinaryIgnored') : undefined}
               onChange={(v) => update({ cliBinary: v })}
@@ -1883,6 +2217,15 @@ function ImagesTab({
             {foundProgram ? (
               <span className="faint mono text-[11px] sm:col-span-2">
                 {t('settings.images.cliFound')}: {foundProgram}
+              </span>
+            ) : null}
+            {isSD && !foundProgram ? (
+              /* The one setup the server kind needs and the one-shot kind does not: a folder
+                 that holds sd-cli but not sd-server is an *older or partial* unpack, and the
+                 sentence names the file to look for rather than silently falling back to
+                 the other program. */
+              <span className="faint text-[11px] sm:col-span-2">
+                {t('settings.images.sdProgramHint', { program })}
               </span>
             ) : null}
             {/* Named one per flag, because the flags are the only documentation there is: a
@@ -2010,14 +2353,18 @@ function ImagesTab({
             </label>
           </>
         )}
-        <label className="text-[12px]">
+        {/* The one sentence that says what this whole group does, where it can be read before
+            a field is filled in: empty means the model chooses it per picture, and a typed
+            value is fixed for every picture — including the ones the model did not ask for. */}
+        <p className="faint text-[11px] sm:col-span-2">{t('settings.images.pinHint')}</p>
+        <label className="text-[12px]" title={t('settings.images.pinHint')}>
           {t('settings.images.sampler')}
           <select
             className="input mt-1"
             value={images.sampler ?? ''}
             onChange={(e) => update({ sampler: e.target.value })}
           >
-            <option value="">{auto}</option>
+            <option value="">{t('settings.images.modelDecides')}</option>
             {(status?.samplers ?? []).map((s) => (
               <option key={s} value={s}>
                 {s}
@@ -2025,7 +2372,7 @@ function ImagesTab({
             ))}
           </select>
         </label>
-        <label className="text-[12px]">
+        <label className="text-[12px]" title={t('settings.images.pinHint')}>
           {t('settings.images.steps')}
           <input
             className="input mt-1"
@@ -2034,10 +2381,23 @@ function ImagesTab({
             max={150}
             value={images.steps || ''}
             onChange={(e) => update({ steps: Number(e.target.value) || 0 })}
-            placeholder={auto}
+            placeholder={t('settings.images.modelDecides')}
           />
         </label>
-        <label className="text-[12px]">
+        <label className="text-[12px]" title={t('settings.images.cfgHint')}>
+          {t('settings.images.cfgScale')}
+          <input
+            className="input mt-1"
+            type="number"
+            min={1}
+            max={30}
+            step={0.5}
+            value={images.cfgScale || ''}
+            onChange={(e) => update({ cfgScale: Number(e.target.value) || 0 })}
+            placeholder={t('settings.images.modelDecides')}
+          />
+        </label>
+        <label className="text-[12px]" title={t('settings.images.pinHint')}>
           {t('settings.images.size')}
           <div className="mt-1 flex items-center gap-2">
             <input
@@ -2080,13 +2440,13 @@ function ImagesTab({
             ))}
           </div>
         </label>
-        <label className="text-[12px] sm:col-span-2">
+        <label className="text-[12px] sm:col-span-2" title={t('settings.images.pinHint')}>
           {t('settings.images.negative')}
           <input
             className="input mt-1"
             value={images.negativePrompt ?? ''}
             onChange={(e) => update({ negativePrompt: e.target.value })}
-            placeholder={auto}
+            placeholder={t('settings.images.modelDecides')}
           />
         </label>
         <label className="text-[12px] sm:col-span-2">
@@ -2119,16 +2479,23 @@ function ImagesTab({
         <button
           type="button"
           className="btn btn-sm"
-          disabled={testing || !images.enabled}
+          disabled={testing || !images.enabled || (isSD && !sdRunning)}
           onClick={() => void test()}
         >
           {testing ? t('settings.images.testing') : t('settings.images.test')}
         </button>
-        {/* The CLI backend's test is not the same promise as the server's: it loads the
-            model from disk to draw one picture, which is minutes on a CPU. Saying which
-            one this is costs a sentence and saves the user thinking the app hung. */}
+        {/* What the test actually costs, which is different for all three kinds: a WebUI
+            answers in seconds, the one-shot program loads the model from disk first (minutes
+            on a CPU), and the managed server is already loaded — unless it is stopped, in
+            which case the test is disabled and the Start button next to it is the action. */}
         <span className="faint text-[11px]">
-          {isCLI ? t('settings.images.cliDefaults') : t('settings.images.defaults')}
+          {isSD
+            ? sdRunning
+              ? t('settings.images.sdTestHint')
+              : t('settings.images.sdStartFirst')
+            : isCLI
+              ? t('settings.images.cliDefaults')
+              : t('settings.images.defaults')}
         </span>
       </div>
 
@@ -2145,6 +2512,138 @@ function ImagesTab({
 
       <PictureStore />
     </Section>
+  )
+}
+
+/**
+ * The fields a start of the managed server reads: the model half of its command line.
+ *
+ * It mirrors `images.CLI.modelArgs` on the backend — the folder, the program, the model set,
+ * the offload switch and the user's own arguments — and nothing else. The listener is
+ * deliberately not part of it: a port is chosen when the process starts, so including one
+ * would make every running server look out of date the moment it came up. This is the only
+ * place the frontend knows which fields those are, and it knows them for one question: will
+ * applying this profile need a reload?
+ */
+function startupKey(s: config.ImageSettings): string {
+  return JSON.stringify([
+    s.kind,
+    s.cliFolder,
+    s.cliBinary,
+    s.cliModel,
+    s.cliDiffusionModel,
+    s.cliVae,
+    s.cliLlm,
+    s.cliClipL,
+    s.cliClipG,
+    s.cliT5xxl,
+    s.cliOffloadToCpu,
+    s.cliExtraArgs,
+  ])
+}
+
+/**
+ * The managed picture server's process row.
+ *
+ * It is rendered whenever the kind is the managed server, or when a process is really up —
+ * including the state a user reaches by switching the kind away while a model is loaded. That
+ * second case is the reason this is not simply part of the server half of the form: a running
+ * server with no row is a multi-gigabyte process with nothing left in the window that stops it,
+ * which is exactly the state the chat backends' own model switch refuses to leave behind.
+ */
+function ImageServerRow({
+  images,
+  server,
+  isSD,
+  busy,
+  onUpdate,
+  onStart,
+  onStop,
+}: {
+  images: config.ImageSettings
+  server?: main.ImageServerStatus
+  isSD: boolean
+  busy: boolean
+  onUpdate: (changes: Partial<config.ImageSettings>) => void
+  onStart: () => void
+  onStop: () => void
+}) {
+  const t = useStore((s) => s.t)
+  const state = server?.state || 'stopped'
+  const running = state === 'running' || state === 'starting'
+  if (!isSD && !running && state !== 'failed') return null
+
+  return (
+    <div className="mb-3 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+      <div className="mb-1 text-[12px]">{t('settings.images.sdTitle')}</div>
+      <p className="faint mb-2 text-[11px]">{t('settings.images.sdHint')}</p>
+      <div className="flex flex-wrap items-center gap-2">
+        {/* Start and Restart belong to the kind this section selects. A server left running
+            under another backend choice is a process the row can only *stop* — starting it
+            again is not something this form can ask for, because the command line a start
+            builds comes from the settings the other kind replaced. */}
+        {isSD ? (
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={busy}
+            title={t('settings.images.sdStartHint')}
+            onClick={onStart}
+          >
+            {state === 'stopped' || state === 'failed'
+              ? t('settings.managed.start')
+              : t('settings.images.sdRestart')}
+          </button>
+        ) : null}
+        <button type="button" className="btn btn-sm" disabled={busy || state === 'stopped'} onClick={onStop}>
+          {t('settings.managed.stop')}
+        </button>
+        <span className={`badge ${state === 'running' ? 'badge-ok' : state === 'failed' ? 'badge-danger' : ''}`}>
+          {t(`settings.managed.state.${state}`)}
+        </span>
+        {/* The address the process settled on, so a user who wants to look at the server's own
+            page, or point another tool at it, does not have to guess which port was free. */}
+        {server?.url ? <span className="mono min-w-0 flex-1 truncate text-[11px] faint">{server.url}</span> : null}
+        {server?.restartNeeded && isSD ? (
+          <span className="badge badge-warn" title={t('settings.images.sdRestartNeededHint')}>
+            {t('settings.images.sdRestartNeeded')}
+          </span>
+        ) : null}
+      </div>
+
+      {isSD ? (
+        <label className="mt-2 flex items-center gap-2 text-[11px]" title={t('settings.images.sdStartWithAppHint')}>
+          <input
+            type="checkbox"
+            checked={images.startWithApp ?? false}
+            aria-label={t('settings.images.sdStartWithApp')}
+            onChange={(e) => onUpdate({ startWithApp: e.target.checked })}
+          />
+          <span>{t('settings.images.sdStartWithApp')}</span>
+          <span className="faint flex-1">{t('settings.images.sdStartWithAppHint')}</span>
+        </label>
+      ) : null}
+
+      {/* Said where it can be acted on rather than left to be discovered: with the server down
+          the model has no generate_image tool at all, so a user who asks for a picture would
+          be told by the model that it cannot draw. */}
+      {isSD && !running && state !== 'failed' ? (
+        <p className="faint mt-1 text-[11px]">{t('settings.images.sdNoTool')}</p>
+      ) : null}
+      {!isSD && running ? (
+        <p className="faint mt-1 text-[11px]">{t('settings.images.sdOtherKind')}</p>
+      ) : null}
+      {server?.error ? (
+        <div className="mt-2 whitespace-pre-wrap text-[11px]" style={{ color: 'var(--danger)' }}>
+          {server.error}
+        </div>
+      ) : null}
+      {state === 'failed' && server?.log?.length ? (
+        <pre className="faint mono mt-2 max-h-32 overflow-y-auto scroll-thin whitespace-pre-wrap text-[10px]">
+          {server.log.join('\n')}
+        </pre>
+      ) : null}
+    </div>
   )
 }
 

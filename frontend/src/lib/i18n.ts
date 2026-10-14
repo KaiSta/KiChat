@@ -396,17 +396,43 @@ const de = {
   'settings.imagesHint':
     'KiChat zeichnet über Software, die du selbst betreibst: eine Stable-Diffusion-WebUI (AUTOMATIC1111, Forge oder stable-diffusion.cpp) an einer Adresse, oder ein lokales Programm wie sd-cli, das für jedes Bild einmal startet. Kontaktiert wird nichts, solange die Funktion aus ist, und das Modell sieht das Werkzeug nur, wenn sie eingeschaltet und ein Backend eingerichtet ist. Ein Server muss mit aktivierter API laufen — bei AUTOMATIC1111 und Forge der Startparameter --api — und ein Checkpoint installiert sein.',
   'settings.images.enabled': 'Bildgenerierung aktivieren',
+  'settings.images.profiles': 'Profile',
+  'settings.images.profilesHint':
+    'Eine gespeicherte Konfiguration pro Modell: Backend, Checkpoint bzw. Pipeline, Sampler, Schritte, Größe, CFG-Scale und Negativ-Prompt. Ein Profil speichern oder übernehmen wirkt sofort — es liegt in den Einstellungen und ist nach einem Neustart wieder da. Ein Name, den es schon gibt, überschreibt dieses Profil.',
+  'settings.images.profilePick': 'Profil auswählen',
+  'settings.images.profileNone': '— kein Profil —',
+  'settings.images.profileApply': 'Übernehmen',
+  'settings.images.profileBusy': '…',
+  'settings.images.profileDelete': 'Löschen',
+  'settings.images.profileDeleteConfirm': 'Profil „{{name}}“ wirklich löschen?',
+  'settings.images.profileDeleteYes': 'Ja, löschen',
+  'settings.images.profileName': 'Profilname',
+  'settings.images.profileSave': 'Als Profil speichern',
+  'settings.images.profileUpdate': 'Profil aktualisieren',
+  'settings.images.profileKeyHint':
+    'Zugangsdaten gehören nicht zum Profil — sie gelten für alle Profile, weil sie zum Server gehören und nicht zur Konfiguration.',
   'settings.images.baseUrl': 'Server-Adresse',
   'settings.images.key': 'Zugangsdaten (user:pass)',
   'settings.images.keyHint':
     'Nur nötig für eine WebUI, die mit --api-auth gestartet wurde. Wird im Schlüsselspeicher abgelegt, nie in den Einstellungen.',
   'settings.images.model': 'Checkpoint',
   'settings.images.auto': 'Server-Standard',
-  // The same meaning for the other kind: an empty field is the *program's* own default, and
-  // calling that a server default is simply wrong on a backend with no server in it.
-  'settings.images.autoProgram': 'Programm-Standard',
+  // The empty state of the *shared* generation fields, which is not a default at all: the
+  // model fills them in per picture through its generate_image arguments. A typed value is
+  // fixed and wins over it — see settings.images.pinHint.
+  'settings.images.modelDecides': 'Das Modell entscheidet',
+  'settings.images.pinHint':
+    'Leer entscheidet das Modell: Schritte, Größe, Sampler, CFG-Scale und Negativ-Prompt legt es bei jedem generate_image-Aufruf selbst fest. Ein eingetragener Wert ist fest — er gilt für jedes Bild und überschreibt, was das Modell verlangt.',
   'settings.images.sampler': 'Sampler',
   'settings.images.steps': 'Schritte',
+  // The guidance scale is the one of these that is not a whole number, and the one where
+  // the *value* needs explaining: 7 is what a WebUI and sd-cli are shipped with, and 1 is
+  // where a distilled or flow-matching model is run. That is the whole reason the field
+  // exists rather than living in the extra arguments — a number nobody can look up is a
+  // number nobody can set.
+  'settings.images.cfgScale': 'CFG-Scale',
+  'settings.images.cfgHint':
+    'Wie stark der Prompt das Bild bestimmt (1–30, üblich 7). Niedrig malt mehr aus dem Modell selbst, hoch hält sich streng an den Prompt; destillierte bzw. Turbo-/Flow-Modelle (Flux, Qwen-Image, SDXL-Turbo) laufen mit 1, wo es keine Führung gibt.',
   'settings.images.size': 'Größe',
   'settings.images.sizePreset': 'Quadratische Größe',
   'settings.images.negative': 'Negativ-Prompt',
@@ -445,18 +471,42 @@ const de = {
   'settings.images.kind': 'Backend',
   'settings.images.kindServer': 'Server (AUTOMATIC1111, Forge, sd-server)',
   'settings.images.kindCLI': 'Lokales Programm (sd-cli)',
+  'settings.images.kindSD': 'Lokaler Server (sd-server, von KiChat gestartet)',
   'settings.images.kindServerHint':
     'Der Server bleibt geladen — jedes weitere Bild kostet nur das Sampling.',
   'settings.images.kindCLIHint':
     'Startet das Programm für jedes Bild neu: kein Dienst, keine Adresse, und alles, was die Kommandozeile kennt. Dafür lädt jedes Bild das Modell erneut.',
+  'settings.images.kindSDHint':
+    'Dasselbe Programm als Dienst: das Modell wird einmal geladen, jedes weitere Bild kostet nur das Sampling. KiChat startet und beendet den Server; solange er läuft, belegt das Modell seinen Speicher.',
+  'settings.images.sdTitle': 'Lokaler Bildserver',
+  'settings.images.sdHint':
+    'KiChat startet sd-server aus demselben Ordner und mit demselben Modellsatz wie das lokale Programm. Der Port wird jedes Mal frei gewählt — sd-server würde sonst 1234 nehmen, dieselbe Adresse, auf der LM Studio hört — und nur an 127.0.0.1 gebunden.',
+  'settings.images.sdStartHint':
+    'Start lädt das Modell; das dauert Minuten. Läuft schon ein Server, wird er mit der aktuellen Konfiguration neu gestartet.',
+  'settings.images.sdRestart': 'Neu starten',
+  'settings.images.sdRestartNeeded': 'Neustart nötig',
+  'settings.images.sdRestartNeededHint':
+    'Die gespeicherten Einstellungen nennen ein anderes Modell als das laufende. Ein Speichern startet nichts neu — der Knopf daneben ist der Neustart.',
+  'settings.images.sdStartWithApp': 'Beim Start von KiChat mitstarten',
+  'settings.images.sdStartWithAppHint':
+    'Standardmäßig aus: ein geladenes Modell belegt Speicher, bis der Server beendet wird.',
+  'settings.images.sdNoTool':
+    'Solange der Server nicht läuft, hat das Modell kein generate_image-Werkzeug.',
+  'settings.images.sdOtherKind':
+    'Dieser sd-server gehört zu einer anderen Backend-Auswahl — hier nur noch zu beenden.',
+  'settings.images.sdTestHint': 'Der Server hält das Modell geladen — der Test zeichnet nur ein kleines Bild',
+  'settings.images.sdStartFirst': 'Zum Testen zuerst den Server starten',
+  'settings.images.sdProgramHint':
+    'KiChat sucht {{program}} in diesem Ordner. Jedes Release-Archiv enthält beide Programme (sd-cli und sd-server).',
+  'settings.images.profileApplyRestart': 'Übernehmen & neu starten',
   'settings.images.cliBinary': 'Programm',
   'settings.images.cliBinaryHint':
-    'Der Pfad zu sd-cli, absolut. Nur nötig, wenn oben kein Programmordner steht — ein Ordner hat Vorrang. Ein Skript geht auch, wenn es die Umgebung setzt, bevor es das Programm startet.',
+    'Der Pfad zu {{program}}, absolut. Nur nötig, wenn oben kein Programmordner steht — ein Ordner hat Vorrang. Ein Skript geht auch, wenn es die Umgebung setzt, bevor es das Programm startet.',
   'settings.images.cliBinaryIgnored':
     'Der Programmordner oben hat Vorrang: dieser Pfad wird erst gelesen, wenn der Ordner leer ist.',
   'settings.images.cliFolder': 'Programmordner',
   'settings.images.cliFolderHint':
-    'Der Ordner, in den du das stable-diffusion.cpp-Archiv entpackt hast. KiChat sucht sd-cli darin selbst — die Datei musst du nicht auswählen.',
+    'Der Ordner, in den du das stable-diffusion.cpp-Archiv entpackt hast. KiChat sucht {{program}} darin selbst — die Datei musst du nicht auswählen.',
   'settings.images.cliBuild': 'Build zum Herunterladen',
   'settings.images.cliBuildOpen': 'Release-Seite öffnen',
   'settings.images.cliBuildCpu': 'CPU',
@@ -481,7 +531,7 @@ const de = {
     'Rechnet auf der CPU statt auf der GPU — für Flux auf einer Karte, die zu klein dafür ist. Die Gewichte bleiben, wo sie geladen wurden.',
   'settings.images.cliExtra': 'Weitere Argumente',
   'settings.images.cliExtraHint':
-    'Alles, was KiChat nicht kennt — --diffusion-fa, --cfg-scale, --sigmas — so wie du es auf der Kommandozeile schreiben würdest. KiChat reicht es unverändert durch.',
+    'Alles, was KiChat nicht kennt — --diffusion-fa, --sigmas, --clip-skip — so wie du es auf der Kommandozeile schreiben würdest. KiChat reicht es unverändert durch, aber die eigenen Argumente kommen danach: ein --cfg-scale hier wird überstimmt, sobald das Modell einen Wert verlangt oder du oben einen festgelegt hast. Was gelten soll, gehört darum ins Feld CFG-Scale.',
   'settings.images.cliDefaults':
     'Der Test lädt das Modell und zeichnet ein kleines Bild — das dauert Minuten',
   'settings.images.browse': 'Wählen',
@@ -916,16 +966,36 @@ const en: Record<keyof typeof de, string> = {
   'settings.imagesHint':
     'KiChat draws through software you run yourself: a Stable Diffusion WebUI (AUTOMATIC1111, Forge or stable-diffusion.cpp) at an address, or a local program such as sd-cli that starts once per picture. Nothing is contacted while it is off, and the model only sees the tool while it is switched on and a backend is configured. A server has to be running with its API enabled — --api for AUTOMATIC1111 and Forge — and a checkpoint installed.',
   'settings.images.enabled': 'Enable image generation',
+  'settings.images.profiles': 'Profiles',
+  'settings.images.profilesHint':
+    'One saved configuration per model: backend, checkpoint or pipeline, sampler, steps, size, CFG scale and negative prompt. Saving or applying a profile takes effect at once — it lives in the settings and is there again after a restart. A name that already exists updates that profile.',
+  'settings.images.profilePick': 'Choose a profile',
+  'settings.images.profileNone': '— no profile —',
+  'settings.images.profileApply': 'Apply',
+  'settings.images.profileBusy': '…',
+  'settings.images.profileDelete': 'Delete',
+  'settings.images.profileDeleteConfirm': 'Really delete the profile “{{name}}”?',
+  'settings.images.profileDeleteYes': 'Yes, delete',
+  'settings.images.profileName': 'Profile name',
+  'settings.images.profileSave': 'Save as profile',
+  'settings.images.profileUpdate': 'Update profile',
+  'settings.images.profileKeyHint':
+    'Credentials are not part of a profile — they belong to the server, so every profile applies under the same ones.',
   'settings.images.baseUrl': 'Server address',
   'settings.images.key': 'Credentials (user:pass)',
   'settings.images.keyHint':
     'Only needed for a WebUI started with --api-auth. Stored in the secret store, never in the settings file.',
   'settings.images.model': 'Checkpoint',
   'settings.images.auto': 'Server default',
-  // The other kind's spelling of the same idea: an empty field is the program's own default.
-  'settings.images.autoProgram': 'Program default',
+  // The empty state of the shared generation fields: the model fills them in per picture.
+  'settings.images.modelDecides': 'The model decides',
+  'settings.images.pinHint':
+    'Empty means the model decides: it chooses steps, size, sampler, CFG scale and negative prompt itself on every generate_image call. A value you type here is fixed — it applies to every picture and overrides whatever the model asks for.',
   'settings.images.sampler': 'Sampler',
   'settings.images.steps': 'Steps',
+  'settings.images.cfgScale': 'CFG scale',
+  'settings.images.cfgHint':
+    'How hard the prompt drives the picture (1–30, usually 7). Low paints more out of the model itself, high holds closely to the prompt; a distilled or turbo/flow-matching model (Flux, Qwen-Image, SDXL-Turbo) runs at 1, where there is no guidance at all.',
   'settings.images.size': 'Size',
   'settings.images.sizePreset': 'Square size',
   'settings.images.negative': 'Negative prompt',
@@ -966,14 +1036,36 @@ const en: Record<keyof typeof de, string> = {
     'The server stays loaded — every further picture costs only the sampling.',
   'settings.images.kindCLIHint':
     'Starts the program again for every picture: no daemon, no address, and everything the command line knows. In exchange every picture reloads the model.',
+  'settings.images.kindSD': 'Local server (sd-server, started by KiChat)',
+  'settings.images.kindSDHint':
+    'The same program as a daemon: the model is loaded once and every further picture costs only the sampling. KiChat starts and stops it; while it runs, the model holds its memory.',
+  'settings.images.sdTitle': 'Local picture server',
+  'settings.images.sdHint':
+    'KiChat starts sd-server from the same folder and with the same model set as the local program. The port is chosen free every time — sd-server would otherwise take 1234, the address LM Studio listens on — and it is bound to 127.0.0.1 only.',
+  'settings.images.sdStartHint':
+    'Start loads the model, which takes minutes. If a server is already running it is restarted with the current configuration.',
+  'settings.images.sdRestart': 'Restart',
+  'settings.images.sdRestartNeeded': 'Restart needed',
+  'settings.images.sdRestartNeededHint':
+    'The saved settings name a different model than the running one. Saving never restarts anything — the button beside this is the restart.',
+  'settings.images.sdStartWithApp': 'Start it when KiChat starts',
+  'settings.images.sdStartWithAppHint':
+    'Off by default: a loaded model holds memory until the server is stopped.',
+  'settings.images.sdNoTool': 'While the server is not running the model has no generate_image tool at all.',
+  'settings.images.sdOtherKind': 'This sd-server belongs to another backend choice — it can only be stopped from here.',
+  'settings.images.sdTestHint': 'The server holds the model loaded — the test draws one small picture',
+  'settings.images.sdStartFirst': 'Start the server first to test it',
+  'settings.images.sdProgramHint':
+    'KiChat looks for {{program}} in this folder. Every release archive carries both programs (sd-cli and sd-server).',
+  'settings.images.profileApplyRestart': 'Apply & restart',
   'settings.images.cliBinary': 'Program',
   'settings.images.cliBinaryHint':
-    'The absolute path to sd-cli. Only needed when no program folder is set above — a folder wins. A wrapper script works too, if it sets up the environment before starting it.',
+    'The absolute path to {{program}}. Only needed when no program folder is set above — a folder wins. A wrapper script works too, if it sets up the environment before starting it.',
   'settings.images.cliBinaryIgnored':
     'The program folder above wins: this path is only read once that folder is empty.',
   'settings.images.cliFolder': 'Program folder',
   'settings.images.cliFolderHint':
-    'The folder you unpacked the stable-diffusion.cpp archive into. KiChat finds sd-cli inside it itself — you do not have to pick the file.',
+    'The folder you unpacked the stable-diffusion.cpp archive into. KiChat finds {{program}} inside it itself — you do not have to pick the file.',
   'settings.images.cliBuild': 'Build to download',
   'settings.images.cliBuildOpen': 'Open release page',
   'settings.images.cliBuildCpu': 'CPU',
@@ -998,7 +1090,7 @@ const en: Record<keyof typeof de, string> = {
     'Runs the sampling on the CPU instead of the GPU — for Flux on a card too small to hold it. The weights stay where they were loaded.',
   'settings.images.cliExtra': 'Extra arguments',
   'settings.images.cliExtraHint':
-    'Anything KiChat does not know — --diffusion-fa, --cfg-scale, --sigmas — written the way you would type it on a command line. KiChat passes it through unchanged.',
+    'Anything KiChat does not know — --diffusion-fa, --sigmas, --clip-skip — written the way you would type it on a command line. KiChat passes it through unchanged, but its own arguments come last: a --cfg-scale here is outvoted as soon as the model asks for one or you pinned one above, so a value that has to hold belongs in the CFG-scale field.',
   'settings.images.cliDefaults':
     'The test loads the model and draws one small picture — minutes, on a CPU',
   'settings.images.browse': 'Browse',
@@ -1420,14 +1512,33 @@ const zh: Record<keyof typeof de, string> = {
   'settings.imagesHint':
     'KiChat 通过你自己运行的软件绘图：某个地址上的 Stable Diffusion WebUI（AUTOMATIC1111、Forge 或 stable-diffusion.cpp），或像 sd-cli 这样每张图启动一次的本地程序。关闭时不会连接任何服务；只有开启并配置了后端，模型才会看到该工具。服务器必须以启用 API 的方式运行（AUTOMATIC1111 和 Forge 需要 --api 参数），并且已安装检查点。',
   'settings.images.enabled': '启用图像生成',
+  'settings.images.profiles': '配置档案',
+  'settings.images.profilesHint':
+    '每个模型保存一份配置：后端、检查点或管线、采样器、步数、尺寸、CFG-Scale 和负面提示词。保存或应用配置档案立即生效——它保存在设置中，重启后依然存在。名称已存在时则更新该配置档案。',
+  'settings.images.profilePick': '选择配置档案',
+  'settings.images.profileNone': '— 无配置档案 —',
+  'settings.images.profileApply': '应用',
+  'settings.images.profileBusy': '……',
+  'settings.images.profileDelete': '删除',
+  'settings.images.profileDeleteConfirm': '确实要删除配置档案“{{name}}”吗？',
+  'settings.images.profileDeleteYes': '是，删除',
+  'settings.images.profileName': '配置档案名称',
+  'settings.images.profileSave': '保存为配置档案',
+  'settings.images.profileUpdate': '更新配置档案',
+  'settings.images.profileKeyHint': '凭据不属于配置档案——它属于服务器，因此所有配置档案共用同一份。',
   'settings.images.baseUrl': '服务器地址',
   'settings.images.key': '凭据 (user:pass)',
   'settings.images.keyHint': '仅在使用 --api-auth 启动的 WebUI 时需要。保存在密钥存储中，绝不写入设置文件。',
   'settings.images.model': '检查点',
   'settings.images.auto': '服务器默认',
-  'settings.images.autoProgram': '程序默认',
+  'settings.images.modelDecides': '由模型决定',
+  'settings.images.pinHint':
+    '留空表示由模型决定：每次调用 generate_image 时，步数、尺寸、采样器、CFG-Scale 和负面提示词都由它自行选择。此处填入的值是固定的——适用于每张图片，并覆盖模型的要求。',
   'settings.images.sampler': '采样器',
   'settings.images.steps': '步数',
+  'settings.images.cfgScale': 'CFG-Scale',
+  'settings.images.cfgHint':
+    '提示词对画面的约束强度（1–30，通常为 7）。数值低更依赖模型自身的发挥，数值高则严格遵循提示词；蒸馏模型或 Turbo/Flow 模型（Flux、Qwen-Image、SDXL-Turbo）使用 1，此时不存在引导。',
   'settings.images.size': '尺寸',
   'settings.images.sizePreset': '正方形尺寸',
   'settings.images.negative': '负面提示词',
@@ -1463,13 +1574,33 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.kindServerHint': '服务器常驻内存——之后的每张图片只需采样时间。',
   'settings.images.kindCLIHint':
     '每张图片都重新启动程序：无需常驻服务，无需地址，命令行支持的一切都能用。代价是每张图片都要重新加载模型。',
+  'settings.images.kindSD': '本地服务器（sd-server，由 KiChat 启动）',
+  'settings.images.kindSDHint':
+    '同一个程序以常驻服务运行：模型只加载一次，之后每张图只花采样时间。KiChat 负责启动和停止；只要它在运行，模型就一直占用内存。',
+  'settings.images.sdTitle': '本地绘图服务器',
+  'settings.images.sdHint':
+    'KiChat 从同一个文件夹、用同一套模型启动 sd-server。端口每次都空闲选择——否则 sd-server 会占用 1234，也就是 LM Studio 监听的地址——并且只绑定到 127.0.0.1。',
+  'settings.images.sdStartHint': '启动会加载模型，需要几分钟。若已有服务器在运行，将按当前配置重新启动。',
+  'settings.images.sdRestart': '重新启动',
+  'settings.images.sdRestartNeeded': '需要重启',
+  'settings.images.sdRestartNeededHint':
+    '已保存的设置与正在运行的模型不同。保存不会自动重启——旁边的按钮才是重启。',
+  'settings.images.sdStartWithApp': '随 KiChat 启动',
+  'settings.images.sdStartWithAppHint': '默认关闭：已加载的模型会一直占用内存，直到停止服务器。',
+  'settings.images.sdNoTool': '服务器未运行时，模型完全没有 generate_image 工具。',
+  'settings.images.sdOtherKind': '这个 sd-server 属于另一种后端选择——在这里只能停止它。',
+  'settings.images.sdTestHint': '服务器已加载模型——测试只画一张小图',
+  'settings.images.sdStartFirst': '请先启动服务器再测试',
+  'settings.images.sdProgramHint':
+    'KiChat 会在该文件夹中查找 {{program}}。每个发布压缩包都包含两个程序（sd-cli 和 sd-server）。',
+  'settings.images.profileApplyRestart': '应用并重启',
   'settings.images.cliBinary': '程序',
   'settings.images.cliBinaryHint':
-    'sd-cli 的绝对路径。仅在上方未设置程序文件夹时需要——文件夹优先。包装脚本也可以，只要它在启动前设置好环境。',
+    '{{program}} 的绝对路径。仅在上方未设置程序文件夹时需要——文件夹优先。包装脚本也可以，只要它在启动前设置好环境。',
   'settings.images.cliBinaryIgnored': '上方的程序文件夹优先：只有该文件夹为空时才会读取此路径。',
   'settings.images.cliFolder': '程序文件夹',
   'settings.images.cliFolderHint':
-    '你解压 stable-diffusion.cpp 压缩包所在的文件夹。KiChat 会自行在其中找到 sd-cli，无需选择文件。',
+    '你解压 stable-diffusion.cpp 压缩包所在的文件夹。KiChat 会自行在其中找到 {{program}}，无需选择文件。',
   'settings.images.cliBuild': '要下载的构建',
   'settings.images.cliBuildOpen': '打开发布页面',
   'settings.images.cliBuildCpu': 'CPU',
@@ -1491,7 +1622,7 @@ const zh: Record<keyof typeof de, string> = {
     '改由 CPU 而非 GPU 采样——适合显存不足以容纳 Flux 的情况。权重仍留在原加载位置。',
   'settings.images.cliExtra': '额外参数',
   'settings.images.cliExtraHint':
-    'KiChat 不认识的参数——--diffusion-fa、--cfg-scale、--sigmas——按命令行写法直接填写，KiChat 原样传递。',
+    'KiChat 不认识的参数——--diffusion-fa、--sigmas、--clip-skip——按命令行写法直接填写，KiChat 原样传递；但 KiChat 自己的参数排在其后：这里的 --cfg-scale 一旦模型给出取值或你在上方固定了取值就会被覆盖，因此必须固定的取值请填在 CFG-Scale 字段。',
   'settings.images.cliDefaults': '测试会加载模型并绘制一张小图——在 CPU 上需要几分钟',
   'settings.images.browse': '浏览',
   'settings.images.files': '个文件',

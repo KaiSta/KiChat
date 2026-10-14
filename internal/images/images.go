@@ -26,6 +26,18 @@ type Request struct {
 	Height         int
 	Steps          int
 	Sampler        string
+	// CfgScale is the classifier-free guidance scale: how hard the prompt is pushed
+	// against the picture the model would otherwise draw. Zero means "nobody chose
+	// one" and the field is omitted, which is a reading rather than a value: the
+	// three backends here each have a default this app must not overwrite with a
+	// guess. A1111's own is 7.0 (`modules/processing.py`, `cfg_scale: float = 7.0`),
+	// sd-cli documents 7.0 for `--cfg-scale` (`examples/common/common.cpp`), and
+	// stable-diffusion.cpp's `sd-server` falls back to the *model's* own text-CFG
+	// (`txt_cfg`) when the key is absent — a number that lives in the GGUF rather
+	// than in any configuration file. The one value worth asking for below 7 is 1.0:
+	// a distilled or flow-matching model (a turbo, Qwen-Image, a Flux) is run there,
+	// and at 1.0 the guidance term is inert rather than wrong. See MinCfgScale.
+	CfgScale float64
 	// Seed is the seed to draw with. nil asks for a fresh random one, which the
 	// *provider* picks and reports back rather than leaving the choice to the
 	// server: only the seed that was used makes a picture reproducible, and a

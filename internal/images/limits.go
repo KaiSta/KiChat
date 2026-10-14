@@ -1,5 +1,7 @@
 package images
 
+import "math"
+
 // This file is the one place a request's numbers are bounded, and the bounds themselves.
 //
 // Three callers build a Request — the tool taking a model's arguments, the redraw taking a
@@ -39,6 +41,18 @@ const (
 	DimensionStep = 8
 	// MaxSteps bounds the sampling step count. More is slower, not automatically better.
 	MaxSteps = 150
+	// MinCfgScale and MaxCfgScale bound the guidance scale.
+	//
+	// The range is this app's own rather than a vendor's, and it brackets what the three
+	// backends actually document: 7.0 is the default A1111 and sd-cli both ship, and 1.0
+	// is where a distilled or flow-matching model is run — the repo's own working Flux
+	// line is `--cfg-scale 1.0 --steps 4`, and at 1.0 the guidance term is inert rather
+	// than wrong, which is why the floor is 1 and not 7. The top is the point past which
+	// a picture stops getting better and starts getting *harder*: saturated contrast,
+	// burnt highlights, and the same GPU seconds spent on it either way. A bound is what
+	// keeps a model that invented 250 from being believed.
+	MinCfgScale = 1.0
+	MaxCfgScale = 30.0
 )
 
 // Normalised returns the request with its numbers inside the bounds every backend here
@@ -53,6 +67,7 @@ func (r Request) Normalised() Request {
 	r.Width = normaliseDimension(r.Width)
 	r.Height = normaliseDimension(r.Height)
 	r.Steps = normaliseSteps(r.Steps)
+	r.CfgScale = normaliseCfgScale(r.CfgScale)
 	return r
 }
 
@@ -81,6 +96,32 @@ func normaliseSteps(value int) int {
 	}
 	if value > MaxSteps {
 		return MaxSteps
+	}
+	return value
+}
+
+// normaliseCfgScale bounds the guidance scale, reading a missing value the same way the two
+// above do — zero is "the server's own" and stays zero rather than being raised to the
+// minimum, which would turn an empty field into a number nobody chose.
+//
+// Not-a-number is read as "nobody made a decision" as well, and that is not paranoia:
+// `strconv.ParseFloat` accepts "nan" and "inf", so a model that sends `"cfg_scale": "nan"`
+// — small local models do emit numbers as strings, which is why the tool decodes loosely —
+// would otherwise put a NaN into a JSON payload, and `encoding/json` refuses to *marshal*
+// one at all. The whole request would fail on a field the user never filled in. Infinity
+// needs no special case: it is above the maximum, so it lands on it.
+func normaliseCfgScale(value float64) float64 {
+	if math.IsNaN(value) {
+		return 0
+	}
+	if value <= 0 {
+		return 0
+	}
+	if value < MinCfgScale {
+		return MinCfgScale
+	}
+	if value > MaxCfgScale {
+		return MaxCfgScale
 	}
 	return value
 }

@@ -114,7 +114,13 @@ type GenerationRecipe struct {
 	Height         int    `json:"height,omitempty"`
 	Steps          int    `json:"steps,omitempty"`
 	Sampler        string `json:"sampler,omitempty"`
-	Seed           int64  `json:"seed,omitempty"`
+	// CfgScale is the guidance scale the picture was drawn at, zero when nobody chose
+	// one. It belongs in the recipe for the same reason the size does: it is part of
+	// what makes a picture reproducible, and two pictures of one prompt that look
+	// different are most often a different scale. It lives in the recipe's own JSON, so
+	// an older row simply has no such key.
+	CfgScale float64 `json:"cfgScale,omitempty"`
+	Seed     int64   `json:"seed,omitempty"`
 	// Model is the checkpoint the server reported using, falling back to the one that
 	// was requested. Empty is "whatever is loaded", which is what a redraw asks for
 	// again rather than naming a checkpoint the server may no longer have.

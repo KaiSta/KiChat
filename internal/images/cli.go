@@ -491,22 +491,34 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	return result, nil
 }
 
-// cliArgs builds one draw's command line.
-//
-// The user's extra arguments come first so that this app's own values win any flag they both
-// set: the recipe records this app's values, and a panel that showed one step count while
-// the binary drew another would record a recipe describing a picture that does not exist.
-// A flag this app never sets — `--sigmas`, `--diffusion-fa`, `--cfg-scale`, `-v` — is
-// passed through untouched, which is the point of the extra list. The two the app does set
-// itself, because they are modes a user flips per model, are a bare `--offload-to-cpu` and
-// the `-s` seed below; both are placed after the user's own arguments, so the app's value is
-// the one that survives a flag written twice.
+// cliArgs builds one draw's command line: what is loaded, then what is asked for.
 //
 // `req.Model` is deliberately not among these. The files this backend loads are a property
 // of the configured set rather than of one request — a pipeline's VAE and text encoder
 // cannot be switched per draw by a name — so a per-request checkpoint change is not offered
 // here, and a recipe records the set's own label instead.
 func (c *CLI) cliArgs(req Request, prompt string, seed int64, output string) []string {
+	args := c.modelArgs()
+	return append(args, c.drawArgs(req, prompt, seed, output)...)
+}
+
+// modelArgs is the half of a command line that says *what* is loaded: the user's own
+// arguments, the offload switch, and the model set.
+//
+// It is one function rather than two copies because the same build takes the same flags in
+// both of its lifetimes — KiChat's one-shot `sd-cli` run and its `sd-server` daemon are one
+// executable from one archive, and the model options are the model options (see
+// sdserver.go, which appends a listener to exactly this list). Two lists kept in step by
+// hand is how the panel would come to name a model one of them did not load.
+//
+// The user's extra arguments come first so that this app's own values win any flag they
+// both set: the recipe records this app's values, and a panel that showed one step count
+// while the binary drew another would record a recipe describing a picture that does not
+// exist. A flag this app never sets — `--sigmas`, `--diffusion-fa`, `-v` — is passed
+// through untouched, which is the point of the extra list. `--cfg-scale` left that list
+// for `drawArgs` below once the model was given a say in it; the rest are still here
+// because none of them changes what the picture *is*.
+func (c *CLI) modelArgs() []string {
 	args := make([]string, 0, 25)
 	args = append(args, c.opts.Extra...)
 	// Bare, with no value: that is how a working command line spells it, and a value would
@@ -535,6 +547,18 @@ func (c *CLI) cliArgs(req Request, prompt string, seed int64, output string) []s
 			args = append(args, part.flag, v)
 		}
 	}
+	return args
+}
+
+// drawArgs is the half that describes *one picture*: the prompt, what to avoid, the
+// recipe's numbers, the seed and the file to write.
+//
+// Only the one-shot lifetime has this half. A server takes the prompt and the numbers in the
+// request body and answers with the bytes, so its command line stops after the model — which
+// is why the two halves are built separately rather than one list being assembled for two
+// callers who would then have to agree about which parts to drop.
+func (c *CLI) drawArgs(req Request, prompt string, seed int64, output string) []string {
+	args := make([]string, 0, 12)
 	args = append(args, "-p", prompt)
 	// An empty negative prompt is omitted, not sent as an empty string: the panel's empty
 	// field means "leave it to the model", and the app's rule for every askable field is the
@@ -553,6 +577,20 @@ func (c *CLI) cliArgs(req Request, prompt string, seed int64, output string) []s
 	}
 	if v := strings.TrimSpace(req.Sampler); v != "" {
 		args = append(args, "--sampling-method", v)
+	}
+	// `--cfg-scale`, spelled as `examples/common/common.cpp` declares it and typed as the
+	// float that option is. Omitted when nobody chose one, which leaves the flag's own
+	// documented 7.0 in force — sending this app's guess instead would be exactly the
+	// substitution the empty-field rule exists to avoid.
+	//
+	// This is also the one flag that moved *out* of the free-text Extra list, and the cost of
+	// that is worth naming: a user whose Flux line carries `--cfg-scale 1.0` has it in Extra,
+	// and Extra comes first, so a value KiChat now sets wins. That is deliberate — the model
+	// chose a value for *this* picture and the recipe records it, so an extra argument
+	// silently outvoting it would record a guidance scale that was never drawn with. Pin 1.0
+	// in Settings instead and it wins over the model as well.
+	if req.CfgScale > 0 {
+		args = append(args, "--cfg-scale", strconv.FormatFloat(req.CfgScale, 'f', -1, 64))
 	}
 	// Always sent, never omitted, and never -1. The flag's own default is 42 — not a random
 	// seed — so a draw that left it out would produce the same picture every time and read

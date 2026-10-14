@@ -126,6 +126,8 @@ export function SetModelOverride(arg1:string,arg2:string,arg3:llm.ModelOverride)
 
 export function Settings():Promise<config.Settings>;
 
+export function StartImageServer():Promise<void>;
+
 export function StartManagedModel(arg1:string):Promise<void>;
 
 export function StartModelCheck(arg1:string):Promise<main.ModelCheckStatus>;
@@ -133,6 +135,8 @@ export function StartModelCheck(arg1:string):Promise<main.ModelCheckStatus>;
 export function StopGeneration(arg1:string):Promise<boolean>;
 
 export function StopImageDraw(arg1:string):Promise<main.StopDrawResult>;
+
+export function StopImageServer():Promise<void>;
 
 export function StopManagedModel(arg1:string):Promise<void>;
 

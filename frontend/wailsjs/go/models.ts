@@ -173,8 +173,10 @@ export namespace config {
 	    width: number;
 	    height: number;
 	    negativePrompt: string;
+	    cfgScale: number;
 	    saveFolder: string;
 	    kind: string;
+	    startWithApp: boolean;
 	    cliBinary: string;
 	    cliFolder: string;
 	    cliModel: string;
@@ -202,8 +204,10 @@ export namespace config {
 	        this.width = source["width"];
 	        this.height = source["height"];
 	        this.negativePrompt = source["negativePrompt"];
+	        this.cfgScale = source["cfgScale"];
 	        this.saveFolder = source["saveFolder"];
 	        this.kind = source["kind"];
+	        this.startWithApp = source["startWithApp"];
 	        this.cliBinary = source["cliBinary"];
 	        this.cliFolder = source["cliFolder"];
 	        this.cliModel = source["cliModel"];
@@ -217,6 +221,39 @@ export namespace config {
 	        this.cliExtraArgs = source["cliExtraArgs"];
 	    }
 	}
+	export class ImageProfile {
+	    name: string;
+	    settings: ImageSettings;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImageProfile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.settings = this.convertValues(source["settings"], ImageSettings);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class ManagedModel {
 	    enabled: boolean;
 	    modelPath: string;
@@ -379,6 +416,7 @@ export namespace config {
 	    runtime: RuntimeSettings;
 	    hiddenModels?: string[];
 	    images: ImageSettings;
+	    imageProfiles?: ImageProfile[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -403,6 +441,7 @@ export namespace config {
 	        this.runtime = this.convertValues(source["runtime"], RuntimeSettings);
 	        this.hiddenModels = source["hiddenModels"];
 	        this.images = this.convertValues(source["images"], ImageSettings);
+	        this.imageProfiles = this.convertValues(source["imageProfiles"], ImageProfile);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -698,6 +737,32 @@ export namespace main {
 	        this.bytes = source["bytes"];
 	    }
 	}
+	export class ImageServerStatus {
+	    state: string;
+	    url: string;
+	    port: number;
+	    pid: number;
+	    error?: string;
+	    log: string[];
+	    restartNeeded: boolean;
+	    startWithApp: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImageServerStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.url = source["url"];
+	        this.port = source["port"];
+	        this.pid = source["pid"];
+	        this.error = source["error"];
+	        this.log = source["log"];
+	        this.restartNeeded = source["restartNeeded"];
+	        this.startWithApp = source["startWithApp"];
+	    }
+	}
 	export class ImageStatus {
 	    enabled: boolean;
 	    baseURL: string;
@@ -713,6 +778,8 @@ export namespace main {
 	    builds: images.SDBuild[];
 	    releasePage: string;
 	    files: string[];
+	    program: string;
+	    server: ImageServerStatus;
 	
 	    static createFrom(source: any = {}) {
 	        return new ImageStatus(source);
@@ -734,6 +801,8 @@ export namespace main {
 	        this.builds = this.convertValues(source["builds"], images.SDBuild);
 	        this.releasePage = source["releasePage"];
 	        this.files = source["files"];
+	        this.program = source["program"];
+	        this.server = this.convertValues(source["server"], ImageServerStatus);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1242,6 +1311,7 @@ export namespace store {
 	    height?: number;
 	    steps?: number;
 	    sampler?: string;
+	    cfgScale?: number;
 	    seed?: number;
 	    model?: string;
 	
@@ -1257,6 +1327,7 @@ export namespace store {
 	        this.height = source["height"];
 	        this.steps = source["steps"];
 	        this.sampler = source["sampler"];
+	        this.cfgScale = source["cfgScale"];
 	        this.seed = source["seed"];
 	        this.model = source["model"];
 	    }

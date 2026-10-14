@@ -39,6 +39,8 @@ export namespace config {
   export type ManagedModel = Plain<Gen.config.ManagedModel>
   /** The picture server generate_image draws through. */
   export type ImageSettings = Plain<Gen.config.ImageSettings>
+  /** A named, saved picture configuration: what the image section's dropdown applies. */
+  export type ImageProfile = Plain<Gen.config.ImageProfile>
 }
 
 export namespace llm {
@@ -96,6 +98,8 @@ export namespace main {
   export type ModelCheckStatus = Plain<Gen.main.ModelCheckStatus>
   /** The picture server's reachability and what it offers. */
   export type ImageStatus = Plain<Gen.main.ImageStatus>
+  /** The managed sd-server's process row, inside ImageStatus. */
+  export type ImageServerStatus = Plain<Gen.main.ImageServerStatus>
   /** How much of KiChat's own storage is pictures it drew, and what a clear would free. */
   export type ImageCache = Plain<Gen.main.ImageCache>
   /** What clearing the unsaved pictures removed. */

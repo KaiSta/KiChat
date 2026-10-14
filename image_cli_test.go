@@ -124,6 +124,20 @@ func cliValue(run []string, flag string) string {
 	return ""
 }
 
+// cliLastValue returns the *last* occurrence of a flag's value, which is the one that matters
+// where a flag appears twice. `--cfg-scale` is the only one that does: the user's extra
+// arguments carry it and the value KiChat sets follows, and the point of that order is that
+// the later value is the one a duplicate-flag parser keeps.
+func cliLastValue(run []string, flag string) string {
+	value := ""
+	for i, arg := range run {
+		if arg == flag && i+1 < len(run) {
+			value = run[i+1]
+		}
+	}
+	return value
+}
+
 // cliSettings is a configured CLI backend: the Qwen-Image shape from the command line this
 // feature was asked for, since that is the set a single-file checkpoint cannot express.
 func cliSettings(binary string) config.Settings {
@@ -141,6 +155,11 @@ func cliSettings(binary string) config.Settings {
 	settings.Images.CLIOffloadToCPU = true
 	settings.Images.Width, settings.Images.Height, settings.Images.Steps = 1024, 1024, 8
 	settings.Images.Sampler = "euler"
+	// A fixed guidance scale, which is the one shared generation field that is not a whole
+	// number. It is set here because this row is the *other* place the scale can come from:
+	// the extra arguments above also carry a `--cfg-scale`, and what this test can see is the
+	// order the app puts them in.
+	settings.Images.CfgScale = 2.5
 	return settings
 }
 
@@ -207,8 +226,11 @@ func TestCLIDrawRecordsTheRecipeAndTheFilesItLoaded(t *testing.T) {
 		t.Fatalf("create chat: %v", err)
 	}
 	ctx := tools.WithCallingMessage(t.Context(), "msg-1")
+	// The model asks for a guidance scale of its own, which the fixed one in the settings row
+	// above has to beat — the whole reason the pin exists is that a model cannot see which
+	// weights are installed, and 2.5 here stands in for a `txt_cfg` only the model file knows.
 	if _, err := a.currentToolService().Execute(ctx, chatID, tools.ToolGenerateImage,
-		`{"prompt":"a cartoon sloth mascot waving"}`); err != nil {
+		`{"prompt":"a cartoon sloth mascot waving","cfg_scale":9}`); err != nil {
 		t.Fatalf("generate_image: %v", err)
 	}
 
@@ -241,6 +263,9 @@ func TestCLIDrawRecordsTheRecipeAndTheFilesItLoaded(t *testing.T) {
 	if recipe.Width != 1024 || recipe.Height != 1024 || recipe.Steps != 8 || recipe.Sampler != "euler" {
 		t.Errorf("recipe = %dx%d @%d steps %q, want the picked 1024x1024 @8 euler",
 			recipe.Width, recipe.Height, recipe.Steps, recipe.Sampler)
+	}
+	if recipe.CfgScale != 2.5 {
+		t.Errorf("recipe cfg scale = %v, want the fixed 2.5 rather than the model's 9", recipe.CfgScale)
 	}
 
 	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(recipeData(t, a, attachment.DocumentID)))
@@ -285,6 +310,17 @@ func TestCLIDrawRecordsTheRecipeAndTheFilesItLoaded(t *testing.T) {
 		if !strings.Contains(strings.Join(run, " "), want) {
 			t.Errorf("the user's own %q was dropped:\n%s", want, strings.Join(run, " "))
 		}
+	}
+	// And the guidance scale is the one flag that therefore appears twice: the user's
+	// `--cfg-scale 1.0` is still there, and the value that was actually drawn with follows
+	// it, which is the order that makes the recipe honest. A user who wrote `--cfg-scale 1.0`
+	// for a Flux pipeline keeps it only while nobody asks for another — pin 1.0 in the field
+	// above and the model cannot outvote it either.
+	if got := cliValue(run, "--cfg-scale"); got != "1.0" {
+		t.Errorf("the user's own --cfg-scale = %q, want their 1.0 kept as written", got)
+	}
+	if got := cliLastValue(run, "--cfg-scale"); got != "2.5" {
+		t.Errorf("the last --cfg-scale = %q, want the fixed 2.5 last so that it wins", got)
 	}
 }
 
@@ -348,6 +384,13 @@ func TestCLIRedrawPinsTheSeedItRecorded(t *testing.T) {
 	}
 	if got := cliValue(runs[1], "-s"); got != strconv.FormatInt(original.Generation.Seed, 10) {
 		t.Errorf("the redraw asked for seed %s, want the recorded %d", got, original.Generation.Seed)
+	}
+	// The guidance scale comes back from the recipe rather than from the settings, which is
+	// the same rule the seed follows: a picture is reproduced from what it records. Here the
+	// two agree; the point of reading it off the recipe is that a picture drawn before the
+	// field was filled in still redraws at its own scale.
+	if got := cliLastValue(runs[1], "--cfg-scale"); got != "2.5" {
+		t.Errorf("the redraw asked for --cfg-scale %q, want the recorded 2.5", got)
 	}
 
 	// And the picture is beside the original: half the point of a repeat is being able to

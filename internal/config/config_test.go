@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -786,16 +787,31 @@ func TestNormaliseClampsImageFields(t *testing.T) {
 		steps         int
 		wantW, wantH  int
 		wantSteps     int
+		cfg           float64
+		wantCfg       float64
 	}{
-		{"unset stays unset", 0, 0, 0, 0, 0, 0},
-		{"a real size survives", 768, 512, 25, 768, 512, 25},
-		{"below the minimum is raised", 16, 16, 0, MinImageDimension, MinImageDimension, 0},
-		{"above the maximum is capped", 99999, 4096, 9999, MaxImageDimension, MaxImageDimension, MaxImageSteps},
-		{"a negative size is 'server default', not 'invalid'", -10, -10, -5, 0, 0, 0},
+		{"unset stays unset", 0, 0, 0, 0, 0, 0, 0, 0},
+		{"a real size survives", 768, 512, 25, 768, 512, 25, 0, 0},
+		{"below the minimum is raised", 16, 16, 0, MinImageDimension, MinImageDimension, 0, 0, 0},
+		{"above the maximum is capped", 99999, 4096, 9999, MaxImageDimension, MaxImageDimension, MaxImageSteps, 0, 0},
+		{"a negative size is 'server default', not 'invalid'", -10, -10, -5, 0, 0, 0, 0, 0},
+		// The guidance scale, the one float among these. 7.5 survives because a fractional
+		// scale is a real request; the floor and ceiling are the app's own range, and zero
+		// stays zero because that is the model's turn rather than the smallest scale.
+		{"a fractional guidance scale survives", 0, 0, 0, 0, 0, 0, 7.5, 7.5},
+		{"a guidance scale below the floor is raised", 0, 0, 0, 0, 0, 0, 0.2, MinImageCfgScale},
+		{"a guidance scale above the ceiling is capped", 0, 0, 0, 0, 0, 0, 250, MaxImageCfgScale},
+		{"an unset guidance scale is not a one", 0, 0, 0, 0, 0, 0, 0, 0},
+		{"a negative guidance scale is the same statement", 0, 0, 0, 0, 0, 0, -3, 0},
+		// Reachable rather than theoretical: the field arrives from a hand-edited blob as
+		// readily as from the panel, and a NaN that survived into a payload would fail the
+		// marshalling of the whole record.
+		{"not a number folds to unset", 0, 0, 0, 0, 0, 0, math.NaN(), 0},
 	}
 	for _, tc := range cases {
 		s := Default()
 		s.Images.Width, s.Images.Height, s.Images.Steps = tc.width, tc.height, tc.steps
+		s.Images.CfgScale = tc.cfg
 		s.normalise()
 		if s.Images.Width != tc.wantW || s.Images.Height != tc.wantH {
 			t.Errorf("%s: %dx%d normalised to %dx%d, want %dx%d",
@@ -804,6 +820,10 @@ func TestNormaliseClampsImageFields(t *testing.T) {
 		if s.Images.Steps != tc.wantSteps {
 			t.Errorf("%s: steps %d normalised to %d, want %d",
 				tc.name, tc.steps, s.Images.Steps, tc.wantSteps)
+		}
+		if s.Images.CfgScale != tc.wantCfg {
+			t.Errorf("%s: cfg scale %v normalised to %v, want %v",
+				tc.name, tc.cfg, s.Images.CfgScale, tc.wantCfg)
 		}
 	}
 }
@@ -852,12 +872,18 @@ func TestAnOlderSettingsBlobKeepsDrawingThroughTheServer(t *testing.T) {
 	}
 }
 
-// TestImageKindFoldsToTheTwoSpellingsItHas pins the normalisation rule, whose whole purpose
-// is that a hand-edited blob cannot leave the app with a backend it cannot use. Only the CLI
-// kind is stored as itself; everything else — including the server kind spelled out in full
-// — becomes the empty string that already means "the HTTP server", so there is one spelling
-// per option and a typo degrades to the backend that used to work.
-func TestImageKindFoldsToTheTwoSpellingsItHas(t *testing.T) {
+// TestImageKindKeepsTheSpellingsItHas pins the normalisation rule, whose whole purpose is that
+// a hand-edited blob cannot leave the app with a backend it cannot use. The two *local*
+// lifetimes are stored as themselves — `cli` for the program run once per picture and
+// `sdserver` for the same program run as a server KiChat starts and stops — and everything
+// else, including the HTTP server kind spelled out in full, becomes the empty string that
+// already means "the server you run yourself", so there is one spelling per option and a typo
+// degrades to the backend that used to work.
+//
+// The managed kind is the one that must not be folded away: it is a process this app owns, so
+// losing the name at load time would silently swap the user's sd-server for whatever answers
+// on the stored HTTP address — the exact confusion the third kind was added to end.
+func TestImageKindKeepsTheSpellingsItHas(t *testing.T) {
 	cases := []struct {
 		in   string
 		want string
@@ -865,9 +891,12 @@ func TestImageKindFoldsToTheTwoSpellingsItHas(t *testing.T) {
 	}{
 		{"", "", "an installation predating the field keeps the server backend"},
 		{"server", "", "the server kind is spelled empty, not \"server\""},
-		{"cli", "cli", "the CLI backend is the one kind stored as itself"},
+		{"cli", "cli", "the one-shot program is stored as itself"},
 		{"  cli  ", "cli", "a value typed with spaces is trimmed"},
+		{"sdserver", "sdserver", "the managed server is stored as itself, or a restart would lose it"},
+		{"  sdserver ", "sdserver", "the same trim applies to it"},
 		{"sdcli", "", "a typo degrades to the backend that used to work"},
+		{"sd-server", "", "the kind is a key, not the program's file name"},
 		{"CLI", "", "the value is a key, so case matters"},
 	}
 	for _, tc := range cases {
