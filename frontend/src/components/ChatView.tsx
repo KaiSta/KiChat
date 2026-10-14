@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
+import { Virtuoso } from 'react-virtuoso'
 import { OnFileDrop, OnFileDropOff } from '../../wailsjs/runtime/runtime'
 import { App, formatNumber, modelLabel, type store as storeTypes } from '../lib/api'
 import { messageText, pendingAttachments, useStore } from '../store'
@@ -33,8 +33,13 @@ export function ChatView() {
   const [input, setInput] = useState('')
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
-  const listRef = useRef<VirtuosoHandle>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // Whether the newest content should be followed, the element that shows it, and the
+  // furthest down the view has been. All three are refs: they belong to scroll and height
+  // callbacks, and none of that should cost a render of the transcript.
+  const following = useRef(true)
+  const scroller = useRef<HTMLElement | null>(null)
+  const lowestOffset = useRef(0)
   // Two things about this line are load-bearing:
   //  * It must stay above the conditional returns below. A hook that runs on
   //    some renders but not others changes the hook count and makes React throw
@@ -44,6 +49,77 @@ export function ChatView() {
   //    React spins in an infinite update loop (#185), which blanks the window
   //    the same way.
   const pending = useStore(useShallow(pendingAttachments))
+
+  /* Following the newest content.
+   *
+   * Virtuoso's `followOutput` is not enough for a streamed reply, and the shortfall is
+   * measurable: it reacts to *appended items* ("keep the list aligned when new items are
+   * appended"), while a reply arrives as one item whose text grows. The scroller then
+   * stays at the offset it had when that item was appended, which in the mock-bridge
+   * harness left the last ~740px of the answer below the fold — and still there once the
+   * turn had ended, so every reply had to be fetched with a scroll of its own.
+   *
+   * So the signal is the list's height, which changes for both events: an appended item
+   * and a growing one. Acting on it is a decision about the user, and the test is the
+   * direction of their scroll rather than the distance from the bottom. Growth pushes the
+   * bottom away without moving the scroll position at all, so a position that has moved
+   * *up* is a user reading history, and one that reaches the bottom again is a user who is
+   * done with it. That is also why Virtuoso's own
+   * `atBottomStateChange` is not the flag here: a single frame of growth between a follow
+   * and that callback's next test reads as "not at the bottom", and the harness run above
+   * showed one such frame stopping the follow for the rest of the turn.
+   */
+  const followNewest = useCallback(() => {
+    if (!following.current) return
+    const element = scroller.current
+    if (!element) return
+    // The live DOM height rather than an item index: the measured size of the item that
+    // is being written trails the text by a frame, and a scroll that lands short leaves
+    // the newest tokens out of view.
+    element.scrollTop = element.scrollHeight
+  }, [])
+
+  const watchScroll = useCallback(() => {
+    const element = scroller.current
+    if (!element) return
+    const bottom = element.scrollHeight - element.clientHeight
+    const offset = element.scrollTop
+    // The furthest down the view has been. Every follow writes the bottom, so this tracks
+    // it without an opinion of its own; clamping it to the current bottom drops the whole
+    // record when content is removed and the browser pulls the position up with it.
+    if (offset > lowestOffset.current) lowestOffset.current = offset
+    if (lowestOffset.current > bottom) lowestOffset.current = bottom
+    // Upward movement is a user reading, with one exception measured in the harness: the
+    // engine settled a follow of its own with a one-pixel move backwards, which under a
+    // strict comparison switched following off for the rest of the turn. Eight is under
+    // half a line of text, and a real gesture — a wheel notch, a trackpad slide, an arrow
+    // key — is past it in one event or two.
+    if (lowestOffset.current - offset > 8) {
+      following.current = false
+      return
+    }
+    // A downward move only ever turns the follow back on, and only at the bottom: one
+    // that stops short is a user who is still reading, not one who wants to be moved.
+    if (bottom - offset <= 4) following.current = true
+  }, [])
+
+  const trackScroller = useCallback(
+    (element: HTMLElement | null | Window) => {
+      const next = element instanceof HTMLElement ? element : null
+      if (next === scroller.current) return
+      scroller.current?.removeEventListener('scroll', watchScroll)
+      scroller.current = next
+      next?.addEventListener('scroll', watchScroll)
+    },
+    [watchScroll],
+  )
+
+  useEffect(
+    () => () => {
+      scroller.current?.removeEventListener('scroll', watchScroll)
+    },
+    [watchScroll],
+  )
 
   /* Files can be dropped anywhere on the window. Wails hands us real paths,
    * which is why the native drop handler is used instead of the HTML5 one. */
@@ -131,6 +207,10 @@ export function ChatView() {
     const text = input.trim()
     if (!text || running) return
     setInput('')
+    // Sending is a deliberate move to the newest content, so the list follows again even
+    // if the user had scrolled up to read: their own message and the reply to it belong
+    // in view without a scroll first.
+    following.current = true
     await send(text)
     // Keep the caret where the user is already looking.
     textareaRef.current?.focus()
@@ -194,11 +274,15 @@ export function ChatView() {
           </div>
         ) : (
           <Virtuoso
-            ref={listRef}
             data={items}
-            // followOutput keeps the newest tokens in view while streaming.
-            followOutput="auto"
-            initialTopMostItemIndex={Math.max(0, items.length - 1)}
+            scrollerRef={trackScroller}
+            // A new item and a growing item are both a height change, and that is the one
+            // signal that covers an appended message and a streamed reply alike.
+            totalListHeightChanged={followNewest}
+            // Opening a chat lands on the newest message, not on the start of the last
+            // item: a bare index aligns that item's top with the top of the viewport,
+            // which for a long reply is the middle of it.
+            initialTopMostItemIndex={{ index: 'LAST', align: 'end' }}
             increaseViewportBy={{ top: 400, bottom: 600 }}
             computeItemKey={(_i, item) => item.key}
             itemContent={(_index, item) =>
