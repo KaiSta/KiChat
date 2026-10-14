@@ -392,11 +392,17 @@ this, in this order. The number in the request is the number everywhere:
    `git tag -a x.y.z -F <(git log -1 --format=%B HEAD) x.y.z`. Annotated, because a
    lightweight tag carries no notes; on the bump commit, because a build from the tag
    otherwise reports the old number. `git describe --tags --exact-match HEAD` on it is the
-   check that it landed there. 0.4.0 was bumped without a tag at all, which is the mistake
-   this step exists for.
+   check that it landed there. 0.4.0 was bumped without a tag and only got one after the
+   fact, which is the mistake this step exists for.
 5. **The tag stays local until asked for.** `git push origin x.y.z` is a separate request,
    like any other push. A published tag is never moved or deleted: a mistake is the next
    patch number.
+
+**A tag that went missing is repaired rather than rewritten.** An annotated tag on the bump
+commit, whose message says it is late and why and summarises the changes from `git log` since
+the previous tag, closes the hole in `git describe` without moving anything — 0.4.0 is one.
+Only for a version that really was released, and never an invented note: say in the message
+that it was written after the fact.
 
 ## Git commits
 
