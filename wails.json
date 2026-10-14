@@ -9,5 +9,12 @@
   "author": {
     "name": "Kai Stadtmueller",
     "email": "kai.stadtmueller@live.de"
+  },
+  "info": {
+    "companyName": "Kai Stadtmueller",
+    "productName": "KiChat",
+    "productVersion": "0.4.0",
+    "copyright": "Copyright 2026 Kai Stadtmueller",
+    "comments": "KiChat 0.4.0 - local-first LLM research chat, all rights reserved"
   }
 }

@@ -2,8 +2,9 @@
 
 KiChat is a local-first desktop LLM research chat: `main.go` + `app.go` + `api.go` on
 top of Go packages in `internal/`, and a React 19 / TypeScript UI in `frontend/`.
-It is a **Wails v2** application (Go binary + webkit2gtk webview), talking to LM Studio
-(`:1234`) and Ollama (`:11434`), with Brave/DuckDuckGo web search and SQLite storage.
+It is a **Wails v2** application (Go binary + webkit2gtk on Linux, WebView2 on Windows),
+talking to LM Studio (`:1234`) and Ollama (`:11434`), with Brave/DuckDuckGo web search and
+SQLite storage.
 
 This page is the index. It carries what it takes to build, check and change the repo, and
 points at one document per subsystem for the measured detail behind it:
@@ -87,22 +88,69 @@ Two behaviours to expect:
   shebang reason in Trap 2. Exporting that directory, or installing Node system-wide, is what
   makes a machine work; the Makefile is unchanged for it.
 
+## Windows
+
+A Windows build is supported, and almost all of it is the same code: neither KiChat nor
+Wails v2 needs cgo, so the only platform-specific things are the webview (WebView2 there,
+webkit2gtk here), the executable's name and version resource, and how a child process is
+stopped. What a Windows machine needs:
+
+- **bash and make** — Git for Windows or MSYS2. Every recipe here is POSIX sh, and the
+  Makefile keeps `SHELL := /bin/bash` for that reason; from `cmd.exe` or PowerShell it is
+  not the right entry point.
+- **node on `PATH`** — the same requirement as Trap 2, without the trap: the Windows Node
+  installer is on `PATH` already.
+- **the WebView2 runtime** — present on Windows 11 and on 10 from 21H2 (Edge installs it),
+  and the thing the app needs to open a window at all. The `-webview2` flag of the Wails CLI
+  only decides what the *NSIS installer* does about a machine that lacks it.
+
+**What is not measured here, and what is.** There is no Windows machine behind this section:
+the three requirements above are the vendors' documented ones plus the direct consequence of
+this Makefile being POSIX sh. Everything below *was* measured — on Linux — and it is all the
+build, the executable and the compile gate; no runtime behaviour of Windows is claimed
+anywhere in this repo, because none was observed. A report that a KiChat-built picture or
+model misbehaves on Windows would be the first evidence of that kind.
+
+`make build` builds for the machine it runs on: the webkit2gtk tag and the Debian hardening
+flags are chosen by the target platform, not assumed (measured: `make -n windows` shows
+`-platform windows/amd64` with neither `-tags webkit2_41` nor `-ldflags … -z,now`).
+
+**`make windows` cross-builds from Linux or macOS, and needs no mingw.** Wails writes the
+executable's version resource, its manifest and its icon in pure Go and this app has no cgo,
+so `wails build -platform windows/amd64` links here: measured, it produces a 22 MB PE32+
+**GUI** executable (subsystem 2 — no console window) into `build/bin/kichat.exe`. Ordering
+matters and the target does it: the frontend is built first, because the Go build embeds
+`frontend/dist`. The platform is `windows/amd64` whatever the host's architecture is, so the
+artifact does not depend on whose laptop made it; `make windows TARGETARCH=arm64` overrides
+it. WebView2 is the one place the two webviews meet in the build: the link reports it is
+using Wails's Go WebView2Loader, which is the loader the exe carries — nothing here needs
+`-tags native_webview2loader`.
+
+`make check` includes a Windows compile of everything (`GOOS=windows go vet ./...`, 0.86 s),
+which is where a `//go:build windows` file and every Windows branch of a test are compiled —
+so that part of the port cannot rot on a machine with no Windows.
+
+`make install`, `make uninstall`, `make deb` and `make lint-deb` are Debian's and say so
+instead of failing part-way through an `install -D` Windows does not have.
+
 ## Checks that must pass
 
 ```bash
-make check                                  # the next four, in one step
+make check                                  # the next five, in one step
 make build                                  # the last one, into build/bin/kichat
 
 gofmt -l .                                  # must print nothing
 go vet ./...
-go test ./... -count=1
+GOOS=windows go vet ./...                   # the Windows half compiles
 cd frontend && npx tsc --noEmit             # or: npm run build (tsc && vite build)
 wails build -tags webkit2_41                # produces build/bin/kichat
+go test ./... -count=1
 ```
 
-Both targets add `-tags webkit2_41` and resolve the tools themselves, which is what makes
+Both targets add the Linux build tag and resolve the tools themselves, which is what makes
 them work from a shell where neither `node` nor `wails` is on `PATH`. The raw commands are
-the same gates, but `npx` and `npm` need Trap 2's `export PATH` first.
+the same gates, but `npx` and `npm` need Trap 2's `export PATH` first, and the raw `wails
+build` needs `-tags webkit2_41` on a machine whose only webkit2gtk is 4.1 (Trap 1).
 
 `wails build` regenerates `frontend/wailsjs/go/models.ts`, so after changing a Go
 struct that crosses the bridge, build (or `wails generate module`) before type-checking
@@ -317,7 +365,7 @@ name, `control` and `changelog`. Bumping a release is one line in `VERSION`;
 
 The commit and date linked in come from `git`, and the date is the *commit's* date,
 never the build clock — a wall-clock timestamp would break the byte-identical
-rebuilds `-trimpath` otherwise guarantees. Two traps:
+rebuilds `-trimpath` otherwise guarantees. Three traps:
 
 - **The linker path is the contract.** `-X kichat/internal/version.Version=…` in the
   Makefile stops matching the moment that package or a variable is renamed, and every
@@ -326,6 +374,21 @@ rebuilds `-trimpath` otherwise guarantees. Two traps:
   `0.2.0-beta.1`: `~` sorts *before* the release (`0.2.0~beta1 < 0.2.0`), while the
   dash form sorts *after* it, so `apt upgrade` would happily move a pre-release onto
   the older-looking final.
+- **The Windows version resource is rendered, not linked, and the Makefile is what keeps it
+  in step.** A file's Properties on Windows come from the version resource Wails generates
+  out of `build/windows/info.json`, whose values are the `info` block of `wails.json` — and
+  there is **no flag to override it** (checked: `wails build --help` has none). So the
+  release version is a second place to type it in, and a forgotten one is not a cosmetic
+  bug: the first cross-built `kichat.exe` measured here carried `ProductVersion 1.0.0`,
+  `LegalCopyright "Copyright........."` and a manifest `assemblyIdentity version="1.0.0.0"`
+  — the defaults — while `kichat --version` said `0.4.0`. `make version-info` (a prerequisite
+  of `build` and of `windows`) rewrites the two derived fields from `VERSION`: the numeric
+  part goes to `productVersion`, because a Windows version field is numbers with at most four
+  parts and `0.2.0~beta1` has no numeric spelling of the marker, and the full string goes to
+  `comments`, which is free text. Measured after the step: `ProductVersion 0.4.0`,
+  `CompanyName Kai Stadtmueller`, `LegalCopyright Copyright 2026 Kai Stadtmueller`, manifest
+  `version="0.4.0.0"`. Bumping a release therefore still starts with one line in `VERSION`,
+  and the build reports the sync it performed — commit the synced `wails.json` with it.
 
 ## Git commits
 

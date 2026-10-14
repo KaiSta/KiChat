@@ -197,10 +197,22 @@ to carry the number that reproduces the picture rather than the one that was ask
 deliberately does not implement `images.Interrupter`. The child is put into a process group of
 its own (`proc_unix.go`) and the kill is aimed at the group, because a configured "binary"
 may be a wrapper script that started `sd-cli` without `exec` and would otherwise survive the
-Stop and keep grinding. `cmd.WaitDelay` bounds the wait regardless: `Wait` returns only once
-the output pipes close, and a killed grandchild holding the write end open is exactly what a
-Stop that "did nothing" looks like from the window. That bound was found by a test, not by
-reading the docs.
+Stop and keep grinding. Windows has neither `Setpgid` nor a negative pid, so
+`proc_windows.go` asks `taskkill /T /F` for the same guarantee: `/T` walks the parent chain at
+the moment it runs and ends the children with the parent, and `/F` is not optional because
+without it the request is a close message that a console program like `sd-cli` never sees. A
+job object with `KILL_ON_JOB_CLOSE` is the mechanism that holds a tree from the start, and it
+is not used here because it has to be created before the process does and carried beside it,
+while this file's two entry points are one call before the start and one after. `cmd.WaitDelay`
+bounds the wait regardless: `Wait` returns only once the output pipes close, and a killed
+grandchild holding the write end open is exactly what a Stop that "did nothing" looks like
+from the window. That bound was found by a test, not by reading the docs.
+- **The two entry points are the platform seam** — `isolateProcess` before the start,
+`killProcess` after it — and `proc_other.go` now holds only what is left: the platforms that
+are neither Unix nor Windows, where killing exactly the process that was started is all that
+can be promised without measuring how that system names a tree. Both of the platforms this app
+is built for end what a wrapper started; Windows used to be in the weaker file, and the
+comment there said so.
 - **CPU offload is a switch, not text.** `--offload-to-cpu` gets a checkbox
 (`ImageSettings.CLIOffloadToCPU`) because it is a *mode* a user flips per model — Flux on a
 card too small to hold it is the case it was asked for — and it is passed **bare**, with no
@@ -955,6 +967,7 @@ what proves the press did anything.
 ```
 internal/images/        types + the two providers: the /sdapi/v1 client (sdwebui.go,
                         sdwebui_test.go) and the sd-cli one (cli.go, proc_unix.go,
+                        proc_windows.go,
                         proc_other.go), the optional Interrupter and Progressive,
                         Progress, ErrCancelled
 internal/tools/image.go the generate_image tool: arguments, storage, the model's reply,

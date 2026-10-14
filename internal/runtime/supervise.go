@@ -376,16 +376,19 @@ func (s *Server) Stop() error {
 	s.stopRequested = true
 	s.mu.Unlock()
 
-	// SIGTERM first: a server frees its context and exits cleanly, which is what keeps
-	// a large model's memory from being reclaimed by the OS only after the process is
-	// killed.
+	// The graceful request first: a server frees its context and exits cleanly, which is
+	// what keeps a large model's memory from being reclaimed by the OS only after the
+	// process is killed. What that request *is* differs per platform — a SIGTERM on Unix,
+	// TerminateProcess on Windows, where there is no graceful half at all — so the two
+	// lines below name it through stopRequestName rather than saying SIGTERM on a system
+	// that has no such thing. See proc_unix.go and proc_windows.go.
 	if err := terminate(cmd, false); err != nil {
-		s.log.addf("SIGTERM konnte nicht zugestellt werden: %v", err)
+		s.log.addf("%s konnte nicht zugestellt werden: %v", stopRequestName(), err)
 	}
 	select {
 	case <-waited:
 	case <-time.After(s.grace):
-		s.log.addf("keine Reaktion auf SIGTERM, Prozess wird beendet")
+		s.log.addf("keine Reaktion auf %s, Prozess wird beendet", stopRequestName())
 		if err := terminate(cmd, true); err != nil {
 			s.log.addf("erzwungenes Beenden fehlgeschlagen: %v", err)
 		}

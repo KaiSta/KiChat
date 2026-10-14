@@ -342,6 +342,18 @@ sorts below `b999` as text. And a lookup that failed reports the API's reason ra
   first (a build warning, the device list, a note about the missing API key), and it keeps
   the whole line rather than just the number, because the build and commit in it are exactly
   what makes two installations of "0.6.0-dev" distinguishable.
+- **Stopping is a tree kill on both platforms, and the graceful half exists only on Unix.**
+  `Server.Stop` calls `terminate(cmd, false)` first, which is a SIGTERM aimed at the process
+  group on Unix (`proc_unix.go`) and `taskkill /T /F` on Windows (`proc_windows.go`). The tree
+  is asked for because a child that outlived the server inherits its output pipes, and a pipe
+  still open is what keeps `exec.Cmd.Wait` from returning — reported in the log as "the output
+  channels of PID n are still open". That matters more now than when only llama.cpp ran under
+  this supervisor: the *picture* server it also starts may be a build the user pointed a
+  wrapper at. Windows has no SIGTERM and no supported signal delivery to a process, so there
+  is no graceful first attempt there — the first call already ends it and `force` decides
+  nothing — and the log line that reports a failed stop names the mechanism rather than
+  claiming a signal that platform does not have (`stopRequestName`: `SIGTERM` here,
+  `TerminateProcess` there).
 - **Probing one that hangs needs `exec.Cmd.WaitDelay`**: cancelling the context kills the
   launcher but not a child it forked, and that child inherits the pipe the output is
   collected through, so `Wait` would sit there until it exits. Measured with a launcher that
