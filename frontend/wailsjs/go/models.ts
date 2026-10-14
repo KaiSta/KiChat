@@ -305,6 +305,7 @@ export namespace config {
 	    accelerator: string;
 	    readySeconds: number;
 	    modelDir: string;
+	    modelDirs: string[];
 	    models: Record<string, ManagedModel>;
 	
 	    static createFrom(source: any = {}) {
@@ -319,6 +320,7 @@ export namespace config {
 	        this.accelerator = source["accelerator"];
 	        this.readySeconds = source["readySeconds"];
 	        this.modelDir = source["modelDir"];
+	        this.modelDirs = source["modelDirs"];
 	        this.models = this.convertValues(source["models"], ManagedModel, true);
 	    }
 	
@@ -868,6 +870,7 @@ export namespace main {
 	    backendId: string;
 	    enabled: boolean;
 	    modelPath: string;
+	    loadedModel?: string;
 	    ctxSize: number;
 	    extraArgs: string;
 	    state: string;
@@ -889,6 +892,7 @@ export namespace main {
 	        this.backendId = source["backendId"];
 	        this.enabled = source["enabled"];
 	        this.modelPath = source["modelPath"];
+	        this.loadedModel = source["loadedModel"];
 	        this.ctxSize = source["ctxSize"];
 	        this.extraArgs = source["extraArgs"];
 	        this.state = source["state"];

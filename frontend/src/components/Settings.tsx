@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   App,
+  folderName,
   formatBytes,
   formatNumber,
   modelLabel,
@@ -448,6 +449,11 @@ function LocalModelSection({
   const mine = (status?.models ?? []).find((m) => m.backendId === backend.id)
   const state = mine?.state ?? 'stopped'
   const working = !!status?.busy || state === 'starting'
+  // What the *running* server is serving, which is not the selection: picking another
+  // file moves `model.modelPath` at once, while the process in memory keeps the model
+  // it loaded until it is started again. The backend sends this only while a server is
+  // up, so empty means "nothing is loaded" rather than "nothing to say".
+  const loadedModel = mine?.loadedModel ?? ''
 
   // Only poll while something is actually moving: an idle window should not ask
   // the backend for status twice a second for the rest of the session.
@@ -581,10 +587,19 @@ function LocalModelSection({
   }
 
   // An empty folder is not "no folder": it asks the backend for the folder it
-  // would use, which is LM Studio's when the user never chose one. That is what
-  // makes the models a user already has show up without anyone configuring
-  // anything.
+  // would use, which is the first remembered folder that is there when the user
+  // picked one, and LM Studio's otherwise. That is what makes the models a user
+  // already has show up without anyone configuring anything.
   const modelDir = draft.runtime?.modelDir ?? ''
+  // The folders the user has picked, most recently first. The list is part of the
+  // draft and the Save above commits it, like every other field here; the folder in
+  // use heads it either way, because the backend adds it when a draft arrives without
+  // it — a path typed into the box, or a store written before this list existed.
+  const remembered = draft.runtime?.modelDirs ?? []
+  const rememberFolder = (dir: string) => [
+    dir,
+    ...remembered.filter((d) => d !== dir),
+  ]
 
   const rescan = async (dir: string) => {
     setScanning(true)
@@ -614,17 +629,61 @@ function LocalModelSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelDir])
 
+  // The chips: the folders the user has picked, in the order they picked them, then
+  // the places LM Studio keeps models, each path shown once. The picked ones come from
+  // the draft's list rather than from the backend's — forgetting one has to drop its
+  // chip on the spot, and a list the store has not seen yet (a pick made a moment ago)
+  // is already here, read as present because it came out of a folder dialog. Drawing
+  // them from the backend instead put a forgotten chip straight back, which reads as
+  // the button not working.
+  //
+  // A path the backend did answer for keeps its reading, which is how a folder on a
+  // drive that is not mounted loses its chip instead of offering a click that can only
+  // report an error.
+  const folderChips = (() => {
+    const readings = new Map(folders.map((f) => [f.path, f]))
+    const ordered = [...remembered]
+    // The folder in use is the one entry the row cannot do without: it is what the
+    // field shows and what the list above it scans. It can be missing from the list —
+    // a path typed straight into the box, or a store written before there was a list —
+    // and then it belongs at the head, where the backend would put it too.
+    const active = modelDir.trim()
+    if (active && !ordered.includes(active)) ordered.unshift(active)
+
+    const chips: runtime.ModelFolder[] = []
+    const seen = new Set<string>()
+    const push = (path: string, kind: string) => {
+      const dir = path.trim()
+      if (!dir || seen.has(dir)) return
+      seen.add(dir)
+      chips.push(readings.get(dir) ?? { path: dir, kind, exists: true })
+    }
+    for (const dir of ordered) push(dir, 'custom')
+    // LM Studio's own places are detected rather than remembered, so they are shown
+    // whether or not they are in anyone's list.
+    for (const f of folders) {
+      if (f.kind !== 'custom') push(f.path, f.kind)
+    }
+    return chips.filter((c) => c.exists)
+  })()
+
   const chooseFolder = async () => {
     try {
       const picked = await App.PickModelFolder(t('settings.managed.folderPickTitle'))
       if (!picked) return
-      patch({ runtime: { ...draft.runtime, modelDir: picked } })
+      patch({ runtime: { ...draft.runtime, modelDir: picked, modelDirs: rememberFolder(picked) } })
     } catch (e) {
       setError(String(e))
     }
   }
 
   const useFolder = (dir: string) => patch({ runtime: { ...draft.runtime, modelDir: dir } })
+
+  // Forgetting is not deleting: the folder stays on disk and only leaves this row.
+  // It needs to exist because the list is bounded — a path picked once by mistake
+  // would otherwise be a chip until eight more picks pushed it off the end.
+  const forgetFolder = (dir: string) =>
+    patch({ runtime: { ...draft.runtime, modelDirs: remembered.filter((d) => d !== dir) } })
 
   // The families this platform actually publishes, straight from the installer:
   // ROCm and SYCL are x64 only and macOS ships one Metal-enabled build, so a list
@@ -666,16 +725,18 @@ function LocalModelSection({
   const offloadLabel = (id: string) =>
     t(`settings.managed.offload${id.charAt(0).toUpperCase()}${id.slice(1)}`)
 
-  const folderLabel = (kind: string) =>
-    kind === 'lmstudio-configured'
-      ? t('settings.managed.folderLmStudioConfigured')
-      : kind === 'lmstudio'
-        ? t('settings.managed.folderLmStudio')
-        : kind === 'lmstudio-legacy'
-          ? t('settings.managed.folderLmStudioLegacy')
-          : kind === 'lmstudio-bundled'
-            ? t('settings.managed.folderLmStudioBundled')
-            : t('settings.managed.folderCustom')
+  const folderLabel = (kind: string, path: string) =>
+    kind === 'custom'
+      ? folderName(path)
+      : kind === 'lmstudio-configured'
+        ? t('settings.managed.folderLmStudioConfigured')
+        : kind === 'lmstudio'
+          ? t('settings.managed.folderLmStudio')
+          : kind === 'lmstudio-legacy'
+            ? t('settings.managed.folderLmStudioLegacy')
+            : kind === 'lmstudio-bundled'
+              ? t('settings.managed.folderLmStudioBundled')
+              : t('settings.managed.folderCustom')
 
   const start = async () => {
     // The fields are saved first: starting with a context size the panel does not
@@ -1067,21 +1128,34 @@ function LocalModelSection({
             {t('settings.managed.folderPick')}
           </button>
         </div>
-        {folders.filter((f) => f.exists).length > 0 && (
+        {folderChips.length > 0 && (
           <div className="mb-1 flex flex-wrap gap-1">
-            {folders
-              .filter((f) => f.exists)
-              .map((f) => (
+            {folderChips.map((f) => (
+              <span key={f.path} className="inline-flex items-center">
                 <button
-                  key={f.path}
                   type="button"
                   className={`btn btn-sm ${f.path === modelDir ? '' : 'btn-ghost'}`}
                   title={f.path}
                   onClick={() => useFolder(f.path)}
                 >
-                  {folderLabel(f.kind)}
+                  {folderLabel(f.kind, f.path)}
                 </button>
-              ))}
+                {/* Only the folders the user picked can be forgotten: LM Studio's
+                    own are detected, not stored, so dropping one would only make it
+                    come back on the next refresh. */}
+                {f.kind === 'custom' && (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    title={`${t('settings.managed.folderForget')}: ${f.path}`}
+                    aria-label={`${t('settings.managed.folderForget')}: ${f.path}`}
+                    onClick={() => forgetFolder(f.path)}
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
+            ))}
           </div>
         )}
         {scan && scan.files.length > 0 ? (
@@ -1117,6 +1191,20 @@ function LocalModelSection({
                   >
                     {file.name}
                   </span>
+                  {/* The mark is about the *server*, not the selection: this is the
+                      file a running llama-server has in memory, so the list answers
+                      "what is in use" beside "what is on disk". It appears while the
+                      model is still loading too, because that is the moment a user
+                      waiting on it looks here. */}
+                  {file.path === loadedModel && (
+                    <span className={`badge shrink-0 ${state === 'starting' ? '' : 'badge-ok'}`}>
+                      {t(
+                        state === 'starting'
+                          ? 'settings.managed.folderLoading'
+                          : 'settings.managed.folderLoaded',
+                      )}
+                    </span>
+                  )}
                   <span className="faint max-w-[40%] truncate">{file.model}</span>
                   <span className="mono faint shrink-0">{formatBytes(file.size)}</span>
                 </button>
@@ -1264,6 +1352,18 @@ function LocalModelSection({
         </span>
         {mine?.url && <span className="mono min-w-0 flex-1 truncate text-[11px] faint">{mine.url}</span>}
       </div>
+
+      {/* A running server is not reconfigured by a pick: the model in memory stays
+          loaded until the server is started again, which is why the listing above
+          marks the loaded file rather than the selected one. Naming that file is the
+          difference between a mark that looks wrong and one that reads as "this is
+          still what is answering" — the header line above it is already showing the
+          selection, so without this the two look like a contradiction. */}
+      {(state === 'running' || state === 'starting') && loadedModel && loadedModel !== model.modelPath && (
+        <div className="mt-1 text-[11px] faint">
+          {t('settings.managed.loadedOther', { model: folderName(loadedModel) })}
+        </div>
+      )}
 
       {/* What the server itself said about the placement, which is the only answer
           to "is this model actually running on the GPU?" — the free-memory warning

@@ -462,6 +462,54 @@ candidate that exists. `LMStudioFolders`
 and `ScanModelFolder` ([internal/runtime/discover.go:154](internal/runtime/discover.go#L154))
 reads one; the whole thing is unit-tested against temporary homes.
 
+**And one remembered folder is not enough to make the choice cheap.** A user with LM Studio's
+downloads on one drive and a library of their own on another — the ternary models the fork
+exists for, say — had to walk the folder dialog again to get back to the first one, so the row
+keeps the folders it was pointed at instead: `modelDirs` in the settings blob, most recently
+picked first, drawn as one chip per folder, with the folder in use always one of them (it is
+added at the head when a list arrives without it, which is what a blob written before the list
+existed carries). `NormaliseModelDirs`
+([internal/config/config.go:633](internal/config/config.go#L633)) trims, drops duplicates and
+bounds the list at eight, and is run both on load and in `SaveSettings` — a path typed straight
+into the text box never went through the picker, and the store the row reads back has to
+carry it. `ModelFolders` ([api.go:1114](api.go#L1114)) then answers with those folders first
+and LM Studio's after, one entry per path, and a fourth place models can come from is now
+reachable in one click rather than a dialog.
+
+Two smaller consequences of the same shape:
+
+- **An empty field falls back to the remembered library**, not to LM Studio's directory
+  (`defaultModelDir`, [api.go:1184](api.go#L1184)): the panel's placeholder names that same
+  folder, so scanning somewhere else would list one library under another one's path.
+- **A folder can be forgotten**, and forgetting means the *list*, not the disk. The chips are
+  drawn from the draft's list rather than from the backend's answer — a chip re-derived from
+  the store's copy came straight back the moment it was clicked away, which reads as the
+  button not working — while the place it came from, LM Studio's own folders, is detected
+  rather than stored and so has no chip to remove.
+
+**And the listing marks the file that is *in use*, not merely the one that is on disk.** A row
+carries an `in use` badge — `loading` while the model is still coming in — when the running
+`llama-server` was started with that file. The path is the one the supervisor keeps in
+`rt.Status.Model`, and it crosses the bridge as `ManagedStatus.LoadedModel`
+([api.go:290](api.go#L290)), filled only while that server is running or starting.
+
+It is deliberately **not** `ModelPath`, and the difference is the reason the field exists: a
+save does not restart anything — the rule `PLAN.md` states as *Saving a model does not start
+it* — so picking another model moves the stored path while the process keeps serving the file
+it loaded, and the two differ until a start. A listing that marked the selection as loaded would
+claim a switch that has not happened, which is why the row names the model the server *still*
+serves once the two part ways.
+`TestTheRowNamesTheFileTheRunningServerLoaded` ([loaded_model_test.go](loaded_model_test.go))
+drives a real managed start to pin all three states: nothing while idle, the started file while
+running, and that file still after a re-pick — then stops the server, because the supervisor
+keeps the model in its status once the process is gone and the state is what the field is
+gated on.
+
+A server nobody here started is not covered: an entry pointing at a `llama-server` the user
+runs themselves has no supervisor, so no loaded model is reported for it. The provider's own
+`/props` reading (§2) is what describes that case, and it is a different question — it is about
+the backend's listing, not about a file in the folder row.
+
 ### 3.11 A limitation, not a bug
 
 **A managed server has no API key and allows all origins**, which its own log points out. It
@@ -535,6 +583,10 @@ reports it in the panel — `On Vulkan0: 65 of 65 layers on the GPU`.
 | [internal/runtime/libs.go:69](internal/runtime/libs.go#L69) | `MissingLibraries` | the loader's answer for a build directory |
 | [internal/runtime/discover.go:79](internal/runtime/discover.go#L79) | `LMStudioFolders` | which folder to offer first |
 | [internal/runtime/discover.go:154](internal/runtime/discover.go#L154) | `ScanModelFolder` | the `.gguf` files in one |
+| [internal/config/config.go:633](internal/config/config.go#L633) | `NormaliseModelDirs` | the folders the row remembers: trimmed, deduped, bounded, and holding the folder in use |
+| [api.go:1114](api.go#L1114) | `ModelFolders` | the remembered folders first, then LM Studio's, one entry per path |
+| [api.go:290](api.go#L290) | `ManagedStatus.LoadedModel` | the file the running server was started with; empty unless one is running |
+| [api.go:1184](api.go#L1184) | `defaultModelDir` | which folder an empty field means |
 | [internal/runtime/version.go:26](internal/runtime/version.go#L26) | `BinaryVersion` | `--version`, with a deadline and `WaitDelay` |
 | [api.go:416](api.go#L416) | `CheckLlamaRuntimeUpdate` | one request, cached |
 | [api.go:761](api.go#L761) | `GetRuntimeStatus` | reports the cached copy; clears before start |
@@ -615,6 +667,14 @@ actually there:**
 
 The three placement shapes need the model started first: a stopped server reports no
 placement, the way the real row clears it.
+
+The model-folder row has no flag of its own, because it has no second state worth a flag:
+the fixture is pointed at LM Studio's downloads **and remembers one library of its own**, so
+the row opens with two custom chips beside LM Studio's two, and the folder picker answers with
+a third path (`/media/usb/models`) that holds models — a pick that landed on a folder already
+in the row would neither add a chip nor scan anything. `ModelFolders` in the mock is computed
+from `settings.runtime.modelDirs` the way the backend computes it from the blob, so picking,
+forgetting and saving all move the chips rather than only the draft.
 
 ---
 

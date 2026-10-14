@@ -787,6 +787,13 @@ Verfügbare Tools: {{tool_list}}`,
       binaryPath: '',
       accelerator: 'cpu',
       readySeconds: 180,
+      // The folder in use, and every folder the row remembers, most recent first.
+      // Two of them on purpose: the row is a row of chips, and one chip cannot show
+      // that switching between two libraries is a click rather than a dialog. LM
+      // Studio's own directory is the one in use because that is how it usually
+      // starts — a user points the row at the downloads they already have.
+      modelDir: '/mnt/models/lmstudio',
+      modelDirs: ['/mnt/models/lmstudio', '/mnt/models/ternary'],
       models: {},
     },
     // The picture server is on with a reachable fixture address, so the section
@@ -1788,6 +1795,13 @@ Verfügbare Tools: {{tool_list}}`,
     binary: '',
     state: 'stopped',
     port: 0,
+    // The file the running server was started with, which is not the stored
+    // `modelPath`: that one moves as soon as a row in the folder listing is clicked,
+    // while this one is only replaced by another start. The real supervisor keeps it
+    // in its status and the backend reports it only while a server is up, so a stop
+    // has to clear it here as well or the harness would show an "in use" mark on a
+    // server that is gone.
+    modelPath: '',
     error: '',
     log: [],
     // A build was downloaded while a model was running, so that model is still on
@@ -2116,6 +2130,10 @@ Verfügbare Tools: {{tool_list}}`,
           state: managed.state,
           port: managed.port,
           url: managed.port ? `http://127.0.0.1:${managed.port}` : '',
+          // Which file is answering, sent only while a server is up — the backend's
+          // rule, so the panel's "in use" mark cannot appear on a stopped row.
+          loadedModel:
+            managed.state === 'running' || managed.state === 'starting' ? managed.modelPath : '',
           error: managed.error,
           log: managed.log,
           // What a running server says about the placement, which is the panel's
@@ -2151,12 +2169,16 @@ Verfügbare Tools: {{tool_list}}`,
    * both. Files are named and sized like real ones so the list is readable at a
    * glance and a 5 GB row looks like a 5 GB row.
    */
-  const modelFolders = [
-    { path: '/mnt/models/lmstudio', kind: 'lmstudio-configured', exists: true },
-    { path: '/home/mock/.lmstudio/models', kind: 'lmstudio', exists: true },
-    { path: '/home/mock/.cache/lm-studio/models', kind: 'lmstudio-legacy', exists: false },
-    { path: '/home/mock/.lmstudio/.internal/bundled-models', kind: 'lmstudio-bundled', exists: true },
+  const lmStudioFolders = [
+    { path: '/mnt/models/lmstudio', kind: 'lmstudio-configured' },
+    { path: '/home/mock/.lmstudio/models', kind: 'lmstudio' },
+    { path: '/home/mock/.cache/lm-studio/models', kind: 'lmstudio-legacy' },
+    { path: '/home/mock/.lmstudio/.internal/bundled-models', kind: 'lmstudio-bundled' },
   ]
+  // The one place with no files at all: whether a folder is there is a separate
+  // question from whether it holds models.
+  const missingFolders = ['/home/mock/.cache/lm-studio/models']
+  const folderExists = (path) => !missingFolders.includes(path)
 
   const modelTree = {
     '/mnt/models/lmstudio': [
@@ -2164,15 +2186,47 @@ Verfügbare Tools: {{tool_list}}`,
       { model: 'lmstudio-community/LFM2.5-2.6B-GGUF', name: 'LFM2.5-2.6B-Q4_K_M.gguf', size: 1674454368 },
       { model: 'empero-ai/Qwen3.8-4B-Distill-GGUF', name: 'Qwen3.8-4B-Q4_K_M.gguf', size: 2783446304 },
     ],
+    // The second library, remembered from an earlier session: a model LM Studio
+    // would not run, which is the reason a user keeps a folder of their own.
+    '/mnt/models/ternary': [
+      { model: 'prism-ml/Ternary-Bonsai-2-27B-gguf', name: 'Ternary-Bonsai-2-27B-PQ2_0.gguf', size: 7204159488 },
+    ],
+    // What the folder picker answers with, so a pick visibly adds a chip rather than
+    // landing on a path the row already had.
+    '/media/usb/models': [
+      { model: 'unsloth/Qwen3-14B-GGUF', name: 'Qwen3-14B-Q4_K_M.gguf', size: 8988111360 },
+      { model: 'unsloth/Qwen3-14B-GGUF', name: 'Qwen3-14B-Q8_0.gguf', size: 15603171328 },
+    ],
     '/home/mock/.lmstudio/models': [],
     '/home/mock/.lmstudio/.internal/bundled-models': [
       { model: 'nomic-ai/nomic-embed-text-v1.5-GGUF', name: 'nomic-embed-text-v1.5.Q4_K_M.gguf', size: 84106624 },
     ],
   }
 
-  // The folder the backend would fall back to, which is the first one that is
-  // actually there.
-  const defaultModelFolder = () => (modelFolders.find((f) => f.exists) || {}).path || ''
+  // Mirrors the backend: the folders the user picked come first, in the order the
+  // settings carry them, then the places LM Studio keeps models — and a path that is
+  // both is one entry, under the user's own name for it. Computed rather than fixed
+  // so that saving, picking and forgetting are visible in the row.
+  const modelFolders = () => {
+    const picked = (settings.runtime && settings.runtime.modelDirs) || []
+    const rows = picked.map((path) => ({ path, kind: 'custom' }))
+    for (const f of lmStudioFolders) {
+      if (!rows.some((r) => r.path === f.path)) rows.push(f)
+    }
+    return rows.map((f) => ({ ...f, exists: folderExists(f.path) }))
+  }
+
+  // The folder the backend would fall back to: the first remembered folder that is
+  // actually there, and failing that the first place LM Studio keeps models. That is
+  // what an empty field means, and what the panel's placeholder names.
+  const defaultModelFolder = () => {
+    const picked = (settings.runtime && settings.runtime.modelDirs) || []
+    return (
+      picked.find(folderExists) ||
+      (lmStudioFolders.find((f) => folderExists(f.path)) || {}).path ||
+      ''
+    )
+  }
 
   const App = {
     GetSettings: () => Promise.resolve(copy(settings)),
@@ -2398,8 +2452,8 @@ Verfügbare Tools: {{tool_list}}`,
     PickManagedModelFile: () => Promise.resolve('/models/Qwen3-4B-Q4_K_M.gguf'),
     // Empty means "the folder the backend would use", which is what the panel
     // asks for when it opens, before the user has chosen anything.
-    ModelFolders: () => Promise.resolve(copy(modelFolders)),
-    PickModelFolder: () => Promise.resolve('/mnt/models/lmstudio'),
+    ModelFolders: () => Promise.resolve(copy(modelFolders())),
+    PickModelFolder: () => Promise.resolve('/media/usb/models'),
     ScanModelFolder: (dir) => {
       const root = dir || defaultModelFolder()
       const files = (modelTree[root] || []).map((f) => ({

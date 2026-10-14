@@ -390,6 +390,13 @@ type RuntimeSettings struct {
 	// find the folder again in every session; detection fills it when nothing was
 	// chosen, and it is never used to start anything on its own.
 	ModelDir string `json:"modelDir"`
+	// ModelDirs is every folder the user has picked, most recently first, and
+	// ModelDir is always one of them. One remembered folder is not enough to make
+	// the choice cheap: the folder LM Studio downloads into and a library of the
+	// user's own on another drive are two places, and reaching the second one out of
+	// the first is the walk through the dialog this row exists to save. Bounded by
+	// MaxRememberedModelDirs, the oldest falling off the end.
+	ModelDirs []string `json:"modelDirs"`
 	// Models is one entry per backend KiChat starts itself.
 	Models map[string]ManagedModel `json:"models"`
 }
@@ -603,7 +610,53 @@ const (
 	// MinCtxSize is the smallest window worth starting a model with: below it a
 	// chat with a system prompt and a scraped page cannot fit.
 	MinCtxSize = 2048
+	// MaxRememberedModelDirs bounds the folders the model row remembers. Eight is
+	// more than anybody switches between — two or three libraries and a drive that
+	// has moved since — and it is a bound at all because the list otherwise grows
+	// once per folder ever picked, for a history nothing reads past the first few.
+	MaxRememberedModelDirs = 8
 )
+
+// NormaliseModelDirs thins the list of folders the model row remembers: blanks go,
+// duplicates go, the list is bounded, and the folder in use is in it.
+//
+// The folder in use is added rather than trusted to be in the list — a settings blob
+// written before this list existed carries `modelDir` and nothing else, and a path
+// typed into the text box never went through the picker at all — and it is added at
+// the head, where a folder that was just named belongs. A list already at the limit
+// makes room for it by dropping its last entry rather than leaving the folder in use
+// out: which folder is being used is the one thing a history of them cannot lose.
+//
+// The rest of the order is left exactly as stored. The list is a record of what was
+// picked, and reordering it on save would move a chip out from under the pointer that
+// is about to click it.
+func NormaliseModelDirs(dirs []string, active string) []string {
+	active = strings.TrimSpace(active)
+	out := make([]string, 0, len(dirs)+1)
+	seen := make(map[string]bool, len(dirs)+1)
+	for _, dir := range dirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		out = append(out, dir)
+	}
+	if len(out) > MaxRememberedModelDirs {
+		out = out[:MaxRememberedModelDirs]
+	}
+	inList := false
+	for _, dir := range out {
+		inList = inList || dir == active
+	}
+	if active != "" && !inList {
+		if len(out) == MaxRememberedModelDirs {
+			out = out[:MaxRememberedModelDirs-1]
+		}
+		out = append([]string{active}, out...)
+	}
+	return out
+}
 
 // SearchSettings configures web search and scraping.
 type SearchSettings struct {
@@ -933,6 +986,7 @@ func (s *Settings) normalise() {
 	// not mounted during one session is still the folder the user means, and
 	// clearing it would quietly undo their choice.
 	s.Runtime.ModelDir = strings.TrimSpace(s.Runtime.ModelDir)
+	s.Runtime.ModelDirs = NormaliseModelDirs(s.Runtime.ModelDirs, s.Runtime.ModelDir)
 	if s.Runtime.Models == nil {
 		s.Runtime.Models = map[string]ManagedModel{}
 	}

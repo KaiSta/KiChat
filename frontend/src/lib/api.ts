@@ -297,6 +297,17 @@ export function modelFolder(id: string | undefined | null): string {
   return parts.length > 1 ? parts[parts.length - 2] : ''
 }
 
+/**
+ * The last segment of a path, which is what names a folder on its own: a chip or a row
+ * reading "Chosen folder" says nothing about which folder it is, and the full path is in
+ * the tooltip beside it.
+ */
+export function folderName(path: string | undefined | null): string {
+  if (!path) return ''
+  const segments = path.replace(/[/\\]+$/, '').split(/[/\\]/)
+  return segments[segments.length - 1] || path
+}
+
 export function formatSpeed(tokensPerSecond: number | undefined | null): string {
   if (!tokensPerSecond || tokensPerSecond <= 0) return '–'
   if (tokensPerSecond >= 100) return `${Math.round(tokensPerSecond)}`

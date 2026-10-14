@@ -684,6 +684,76 @@ func TestRuntimeSettingsAreUsableAsStored(t *testing.T) {
 	}
 }
 
+// The folders the model row remembers are thinned rather than trusted: a blob can
+// carry a duplicate — the same folder picked twice — a blank, or a list that grew
+// once per folder ever picked, and the row draws one chip per entry.
+//
+// The order is part of the answer, because the chips *are* the list: what is pinned
+// here is that a stored list comes back in the order it was stored, and that the
+// folder in use joins it at the head when it is missing. Reordering instead would
+// move a chip the user is about to click, and dropping the folder in use would lose
+// the one thing the row had before there were several.
+func TestRememberedModelFoldersAreThinnedAndBounded(t *testing.T) {
+	joined := func(dirs []string) string { return strings.Join(dirs, "|") }
+
+	// Blanks and duplicates go, and the rest keeps the order it arrived in.
+	s := Default()
+	s.Runtime = RuntimeSettings{ModelDir: "/mnt/b", ModelDirs: []string{" /mnt/a ", "/mnt/b", "/mnt/a", "", "/mnt/c"}}
+	s.normalise()
+	if got := joined(s.Runtime.ModelDirs); got != "/mnt/a|/mnt/b|/mnt/c" {
+		t.Errorf("remembered folders = %q, want the trimmed list without duplicates and in order", got)
+	}
+
+	// A folder the list does not have — a path typed into the text box, or a blob
+	// written before this list existed — is added at the head, where the folder just
+	// named belongs.
+	s = Default()
+	s.Runtime = RuntimeSettings{ModelDir: "/mnt/b", ModelDirs: []string{"/mnt/a"}}
+	s.normalise()
+	if got := joined(s.Runtime.ModelDirs); got != "/mnt/b|/mnt/a" {
+		t.Errorf("remembered folders = %q, want the folder in use first", got)
+	}
+
+	// A folder that is already remembered does not move: picking the one at the end
+	// of the row must not shuffle the row.
+	s = Default()
+	s.Runtime = RuntimeSettings{ModelDir: "/mnt/c", ModelDirs: []string{"/mnt/a", "/mnt/b", "/mnt/c"}}
+	s.normalise()
+	if got := joined(s.Runtime.ModelDirs); got != "/mnt/a|/mnt/b|/mnt/c" {
+		t.Errorf("remembered folders = %q, want the stored order kept", got)
+	}
+
+	// The list is bounded, and it is the oldest that falls off the end.
+	s = Default()
+	if len(s.Runtime.ModelDirs) != 0 {
+		t.Fatalf("a default blob carries %d remembered folders, want none", len(s.Runtime.ModelDirs))
+	}
+	dirs := make([]string, 0, MaxRememberedModelDirs+3)
+	for i := 0; i < MaxRememberedModelDirs+3; i++ {
+		dirs = append(dirs, "/mnt/"+string(rune('a'+i)))
+	}
+	s = Default()
+	s.Runtime = RuntimeSettings{ModelDir: dirs[0], ModelDirs: dirs}
+	s.normalise()
+	if got, want := joined(s.Runtime.ModelDirs), joined(dirs[:MaxRememberedModelDirs]); got != want {
+		t.Errorf("remembered folders = %q, want %q", got, want)
+	}
+
+	// A folder in use that sits past the limit is kept anyway, at the head, because
+	// the panel reads it back: a row that forgot which folder it is listing would
+	// fall back to LM Studio's directory and show the wrong models under the right
+	// name.
+	s = Default()
+	s.Runtime = RuntimeSettings{ModelDir: dirs[len(dirs)-1], ModelDirs: dirs}
+	s.normalise()
+	if len(s.Runtime.ModelDirs) != MaxRememberedModelDirs {
+		t.Fatalf("remembered folders = %d, want the list bounded to %d", len(s.Runtime.ModelDirs), MaxRememberedModelDirs)
+	}
+	if s.Runtime.ModelDirs[0] != dirs[len(dirs)-1] {
+		t.Errorf("first remembered folder = %q, want the folder in use", s.Runtime.ModelDirs[0])
+	}
+}
+
 // Flash attention and the KV cache type are optional additions to a managed
 // model, so a settings blob written before they existed carries neither. An empty
 // field has to mean the server's own default rather than a flag, and a value this

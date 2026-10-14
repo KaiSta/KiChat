@@ -92,6 +92,12 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 		s.Runtime.Accelerator = recorded.Runtime.Accelerator
 	}
 	s.Runtime.Tag = recorded.Runtime.Tag
+	// The folders the model row remembers are repaired here as well as on the next
+	// load, because this save is what the row reads back: a draft that arrived with a
+	// duplicate or an over-long list would otherwise be shown exactly as it came in,
+	// and the folder this very save is switching to has to be in it — that is the whole
+	// of what makes returning to the previous library one click.
+	s.Runtime.ModelDirs = config.NormaliseModelDirs(s.Runtime.ModelDirs, s.Runtime.ModelDir)
 	// The availability blacklist is written by the model check, not by any control
 	// in the panel, so no draft ever carries it. A draft the view read before the
 	// last sweep would otherwise put every hidden model back into the picker on the
@@ -282,16 +288,25 @@ func (a *App) SetBackendAPIKey(backendID, apiKey string) error {
 
 // ManagedStatus is one model KiChat runs itself, as the UI reads it.
 type ManagedStatus struct {
-	BackendID string   `json:"backendId"`
-	Enabled   bool     `json:"enabled"`
-	ModelPath string   `json:"modelPath"`
-	CtxSize   int      `json:"ctxSize"`
-	ExtraArgs string   `json:"extraArgs"`
-	State     string   `json:"state"`
-	Port      int      `json:"port"`
-	URL       string   `json:"url"`
-	Error     string   `json:"error,omitempty"`
-	Log       []string `json:"log,omitempty"`
+	BackendID string `json:"backendId"`
+	Enabled   bool   `json:"enabled"`
+	ModelPath string `json:"modelPath"`
+	// LoadedModel is the GGUF the running server was started with — what is
+	// answering, as opposed to what is selected — and it is empty when nothing is
+	// running. The two are deliberately separate fields: picking another file in the
+	// folder listing moves ModelPath at once, while the process in memory keeps
+	// serving the model it loaded until it is started again, and a listing that
+	// marked the selection as "in use" would be claiming a switch that has not
+	// happened. A stopped server and a failed start both report nothing here, even
+	// though the supervisor still has the path in its status.
+	LoadedModel string   `json:"loadedModel,omitempty"`
+	CtxSize     int      `json:"ctxSize"`
+	ExtraArgs   string   `json:"extraArgs"`
+	State       string   `json:"state"`
+	Port        int      `json:"port"`
+	URL         string   `json:"url"`
+	Error       string   `json:"error,omitempty"`
+	Log         []string `json:"log,omitempty"`
 	// ModelBytes is the size of the GGUF on disk, 0 when it cannot be read. The
 	// panel measures it against DeviceFreeBytes, because it is the one part of a
 	// model's memory use this app can know without loading it — the weights have to
@@ -872,6 +887,14 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 		status.Models[i].URL = st.URL
 		status.Models[i].Error = st.Error
 		status.Models[i].Log = st.Log
+		// Which file the running process is serving. The state is part of the answer
+		// rather than an extra field for the panel to combine: the supervisor keeps the
+		// model in its status after the process is gone — a stop and a failed start
+		// both leave it there — so passing the path on regardless would put an "in use"
+		// mark on a server that is not answering at all.
+		if st.State == rt.StateRunning || st.State == rt.StateStarting {
+			status.Models[i].LoadedModel = st.Model
+		}
 		// Only a reading that exists is passed on, and the device only when layers
 		// really are on it — both decided by the runtime, not by the panel. A CPU-only
 		// build reports every layer offloaded while naming no device at all, and a
@@ -1097,16 +1120,46 @@ func (a *App) PickImageFolder(title string) (string, error) {
 // each saying whether it is there. A user who already has LM Studio has models on
 // disk, and re-downloading a 5 GB file to run it in KiChat instead would be an
 // absurd answer to that.
+//
+// The folders the user has picked come first, in the order they were picked: they
+// are the ones asked for by name, whatever LM Studio does with its own, and there is
+// more than one of them because one drive rarely holds everything. A folder that is
+// only in `modelDir` — a blob written before this list existed, or a path typed
+// straight into the text box — is offered too, so no stored settings loses the folder
+// it names. A folder the user picked that is also one of LM Studio's stays one entry,
+// under the name the user gave it.
 func (a *App) ModelFolders() []rt.ModelFolder {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = ""
 	}
-	folders := rt.LMStudioFolders(home)
-	if chosen := strings.TrimSpace(a.Settings().Runtime.ModelDir); chosen != "" {
-		// The folder the user picked is offered first: it is the one they asked
-		// for, whatever LM Studio does with its own.
-		folders = append([]rt.ModelFolder{{Path: chosen, Kind: rt.FolderCustom, Exists: rt.IsDir(chosen)}}, folders...)
+	settings := a.Settings()
+	dirs := append([]string{}, settings.Runtime.ModelDirs...)
+	if chosen := strings.TrimSpace(settings.Runtime.ModelDir); chosen != "" {
+		seen := false
+		for _, dir := range dirs {
+			seen = seen || strings.TrimSpace(dir) == chosen
+		}
+		if !seen {
+			dirs = append([]string{chosen}, dirs...)
+		}
+	}
+	folders := make([]rt.ModelFolder, 0, len(dirs)+4)
+	listed := make(map[string]bool, len(dirs)+4)
+	for _, dir := range dirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" || listed[dir] {
+			continue
+		}
+		listed[dir] = true
+		folders = append(folders, rt.ModelFolder{Path: dir, Kind: rt.FolderCustom, Exists: rt.IsDir(dir)})
+	}
+	for _, folder := range rt.LMStudioFolders(home) {
+		if listed[folder.Path] {
+			continue
+		}
+		listed[folder.Path] = true
+		folders = append(folders, folder)
 	}
 	return folders
 }
@@ -1138,8 +1191,20 @@ func (a *App) PickModelFolder(title string) (string, error) {
 }
 
 // defaultModelDir is the folder to look in when nothing was chosen: the first
-// place LM Studio keeps models that is actually there.
+// remembered folder that is actually there, and failing that the first place LM
+// Studio keeps models.
+//
+// A remembered folder wins because the row offers it: it is the head of the chips,
+// and it is what the empty field's placeholder names. Falling back to LM Studio's
+// directory instead would make the panel say one folder and scan another, which is
+// the one way an empty field can lie about which models are being listed.
 func (a *App) defaultModelDir() string {
+	settings := a.Settings()
+	for _, dir := range settings.Runtime.ModelDirs {
+		if rt.IsDir(dir) {
+			return dir
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
