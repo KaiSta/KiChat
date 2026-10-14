@@ -1249,6 +1249,13 @@ Verfügbare Tools: {{tool_list}}`,
   // the only place a Stop can live is the call's own row — and it is a flag rather than the
   // default because the default chat has to stay the ordinary one, a picture that arrived.
   const drawTool = query.get('drawtool') === '1'
+  // ?throttle=1 pauses a streamed reply the way a backend's rate limit does: the app emits
+  // the phase and the wait while the retry sleeps, and nothing arrives on the wire until it
+  // is over. It is a flag because the ordinary fixture has to keep streaming without a pause.
+  const throttleFixture = query.get('throttle') === '1'
+  // The wait the pretend refusal names, held for real rather than shown and skipped: a number
+  // on screen that does not match the pause the viewer sits through is worse than no number.
+  const THROTTLE_WAIT_MS = 6000
   // How often a pretending draw reports. Slower than the real single-second poll would be a
   // boring wait; faster would spend the run repainting. It is chosen to make the counter and
   // the thumbnail visibly move, which is the only thing this fixture exists to show.
@@ -1686,6 +1693,20 @@ Verfügbare Tools: {{tool_list}}`,
       emit('chat:delta', { chatId, messageId, text: chunk })
       emit('chat:reasoning', { chatId, messageId, text: i <= 8 ? REASONING.slice(0, 20) : '' })
       timers.set(chatId, setTimeout(step, 40))
+    }
+    if (throttleFixture) {
+      // The sequence the real app produces around a retry: the phase with the wait, then a
+      // retraction, then a reply that streams as usual. It is emitted here rather than at the
+      // top of the turn because the wait sits between the request and its first token.
+      emit('chat:status', { chatId, phase: 'throttled', waitMs: THROTTLE_WAIT_MS })
+      timers.set(
+        chatId,
+        setTimeout(() => {
+          emit('chat:status', { chatId, phase: 'idle' })
+          timers.set(chatId, setTimeout(step, 60))
+        }, THROTTLE_WAIT_MS),
+      )
+      return
     }
     timers.set(chatId, setTimeout(step, 60))
   }

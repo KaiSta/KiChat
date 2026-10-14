@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -388,5 +389,164 @@ func TestRetryableClassification(t *testing.T) {
 		if got := retryable(tc.err); got != tc.want {
 			t.Errorf("retryable(%s) = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// recordingWatcher keeps what a request told it about its waits, in order.
+//
+// The calls arrive on the goroutine doing the request, so a mutex is not needed to
+// avoid a data race with itself — it is here because the streaming path fires a
+// watcher from the goroutine that reads the body while a test reads the record from
+// its own, and one guarded type covers both.
+type recordingWatcher struct {
+	mu     sync.Mutex
+	waits  []time.Duration
+	errs   []error
+	waited int
+	onWait func()
+}
+
+func (w *recordingWatcher) Waiting(wait time.Duration, err error) {
+	w.mu.Lock()
+	w.waits = append(w.waits, wait)
+	w.errs = append(w.errs, err)
+	fire := w.onWait
+	w.mu.Unlock()
+	if fire != nil {
+		fire()
+	}
+}
+
+func (w *recordingWatcher) Waited() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.waited++
+}
+
+func (w *recordingWatcher) seen() ([]time.Duration, []error, int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]time.Duration(nil), w.waits...), append([]error(nil), w.errs...), w.waited
+}
+
+// TestARetryReportsItsWaitToTheWatcher: a caller that has a window to paint is told
+// how long the request is about to sleep and what it is sleeping for, so a wait a
+// backend named can be shown as itself instead of as a turn that looks hung.
+func TestARetryReportsItsWaitToTheWatcher(t *testing.T) {
+	var attempts int32
+	srv := countingServer(t, &attempts, func(n int32, w http.ResponseWriter) bool {
+		if n == 1 {
+			w.Header().Set("Retry-After", "0.2")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"Rate limit reached. Please try again in 0.2s."}}`))
+			return true
+		}
+		return false
+	})
+
+	watcher := &recordingWatcher{}
+	ctx := WithRetryWatcher(context.Background(), watcher)
+
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	if err := doJSON(ctx, &http.Client{Timeout: 5 * time.Second},
+		http.MethodGet, srv.URL, nil, nil, &out); err != nil {
+		t.Fatalf("doJSON: %v", err)
+	}
+	if !out.OK {
+		t.Error("the request was not retried successfully after the reported wait")
+	}
+
+	waits, errs, waited := watcher.seen()
+	if len(waits) != 1 {
+		t.Fatalf("the watcher was told about %d waits, want 1: %v", len(waits), waits)
+	}
+	// The hint, not the 250 ms backoff: the point of the report is that it carries
+	// the number the backend committed to.
+	if waits[0] < 150*time.Millisecond || waits[0] > 400*time.Millisecond {
+		t.Errorf("the reported wait was %v, want about 200ms", waits[0])
+	}
+	var httpErr *HTTPError
+	if len(errs) != 1 || !errors.As(errs[0], &httpErr) || httpErr.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("the reported cause was %v, want the 429 that caused the wait", errs)
+	}
+	// Retraction, so a caller that shows the wait is told to stop showing it: the
+	// phase would otherwise stand for the rest of the turn.
+	if waited != 1 {
+		t.Errorf("the watcher was told the wait was over %d times, want 1", waited)
+	}
+}
+
+// TestAWaitCutShortByAStopIsStillRetracted: the wait also ends when the context
+// does — a Stop — and a caller must be told then too, or the phase it set says a
+// throttle is still being waited out after the turn is over.
+func TestAWaitCutShortByAStopIsStillRetracted(t *testing.T) {
+	var attempts int32
+	srv := countingServer(t, &attempts, func(_ int32, w http.ResponseWriter) bool {
+		// Long enough that sleeping it would be obvious, and reported so the wait is
+		// the backend's own number rather than the backoff.
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"Rate limit reached. Please try again in 30s."}}`))
+		return true
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher := &recordingWatcher{onWait: cancel}
+	ctx = WithRetryWatcher(ctx, watcher)
+
+	started := time.Now()
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	err := doJSON(ctx, &http.Client{Timeout: 30 * time.Second},
+		http.MethodGet, srv.URL, nil, nil, &out)
+	if err == nil {
+		t.Fatal("doJSON returned no error after the wait was cancelled")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("the cancelled wait took %v — it was waited out rather than cut short", elapsed)
+	}
+	waits, _, waited := watcher.seen()
+	if len(waits) != 1 {
+		t.Fatalf("the watcher was told about %d waits, want 1", len(waits))
+	}
+	if waited != 1 {
+		t.Errorf("the watcher was told the wait was over %d times, want 1 — it is left showing a wait that ended", waited)
+	}
+}
+
+// TestAPlainBackoffIsNotReportedToTheWatcher: a 5xx with no retry hint is retried
+// after the client's own 250 ms, and the caller is told nothing about it. A line of
+// status text that appears and vanishes inside a blink is a glitch on screen, and
+// the first attempt is the one that would produce it.
+func TestAPlainBackoffIsNotReportedToTheWatcher(t *testing.T) {
+	var attempts int32
+	srv := countingServer(t, &attempts, func(n int32, w http.ResponseWriter) bool {
+		if n == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"model is loading"}`))
+			return true
+		}
+		return false
+	})
+
+	watcher := &recordingWatcher{}
+	ctx := WithRetryWatcher(context.Background(), watcher)
+
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	if err := doJSON(ctx, &http.Client{Timeout: 5 * time.Second},
+		http.MethodGet, srv.URL, nil, nil, &out); err != nil {
+		t.Fatalf("doJSON: %v", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Errorf("attempts = %d, want 2 — the 503 should still be retried", got)
+	}
+	if waits, _, waited := watcher.seen(); len(waits) != 0 || waited != 0 {
+		t.Errorf("the watcher was told about %v (%d retractions), want silence for a guessed backoff", waits, waited)
 	}
 }

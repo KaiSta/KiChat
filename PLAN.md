@@ -128,6 +128,13 @@ in `store.ts`, so there is a single place to reason about event handling. Two te
 that package read the frontend's map and scan the emit sites, because a wrong name does
 not break the build — it just quietly leaves a listener that never fires.
 
+Phases ride on `chat:status`, which is what the panel shows beside the composer:
+`searching`, `compacting`, `tool`, `stopping`, and `throttled` — a retry sleeping out a
+backend's own rate limit, which is the one phase whose payload carries more than its name
+(`waitMs`, how long the backend asked for) because "waiting" alone does not say whether
+that is a second or a minute. It was added because a silent wait is indistinguishable from
+a hang: see `internal/chat/throttle.go` and `RetryWatcher` in `internal/llm`.
+
 ### Storage
 
 SQLite at `~/.config/kichat/kichat.db`:

@@ -274,6 +274,10 @@ a purple **MOCK BRIDGE** badge, so a harness page is never mistaken for the real
   streaming replies driven by real `chat:*` events over a simulated 40 ms cadence. The
   mock is `go:embed`ed, so a running harness picks up an edit to it only after a restart
   — use `go run`, or rebuild before restarting.
+- `?throttle=1` pauses a streamed reply the way a backend's rate limit does: the phase
+  and the seconds it names appear while the retry sleeps, and nothing arrives until the
+  wait it names is over. It is a flag because the ordinary fixture has to keep streaming
+  without a pause.
 - Unmodelled bindings resolve **and log a warning** — if the console shows
   `unmodelled binding called: X`, the mock needs X when you exercise that path.
 - `?crash=render` injects an unrenderable message to prove the error boundary still

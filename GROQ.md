@@ -249,6 +249,24 @@ Two exceptions are worth knowing about because the app maps them:
   minute, which is the window these limits are defined over. The fixed 250 ms/500 ms backoff
   this replaced spent every attempt inside the minute that had just been refused, so a request
   the vendor had said to retry in ten seconds arrived at the user as a failure.
+
+**And the wait is shown, because a silent one is indistinguishable from a hang.** A ten-second
+wait while nothing arrives on the wire looks exactly like a turn that has stalled, so the retry
+reports itself: `waitBeforeRetry`
+([internal/llm/httpclient.go:154](internal/llm/httpclient.go#L154)) tells a `RetryWatcher`
+([internal/llm/httpclient.go:180](internal/llm/httpclient.go#L180)) carried on the request's
+context how long it is about to sleep and what it is sleeping for. The engine puts one on the
+turn's own request — `watchingRetries`
+([internal/chat/throttle.go:22](internal/chat/throttle.go#L22)) — and it publishes a
+`chat:status` event carrying `phase: "throttled"` with `waitMs`, then retracts it to `idle` when
+the wait ends, including when a Stop cuts it short. The panel renders that plus the number of
+seconds beside the composer, in all three languages. Only the turn's request is watched: the
+search seeding and the compaction already have phases of their own (`searching`, `compacting`),
+and a listing, a health probe or the availability check explains no turn to anyone. And only a
+wait the backend **named** is shown (`namedWait`): a plain backoff is 250 ms and then 500 ms, so
+reporting it would put a line of status text on screen for a quarter of a second — a glitch
+rather than an explanation — while an explicit `Retry-After` is both longer and the vendor's own
+number.
 - **HTTP 400** from the listing's own claims — a model that cannot chat, an oversized image —
   is the model's or the request's fault, and it is surfaced as sent.
 
@@ -266,6 +284,9 @@ Two exceptions are worth knowing about because the app maps them:
 | [internal/llm/openai.go:280](internal/llm/openai.go#L280) | `flavourGroq` — the branch that picks the mapper |
 | [internal/llm/httpclient.go:94](internal/llm/httpclient.go#L94) | `retryHint` — the `Retry-After` header, and the wait a refusal writes in prose |
 | [internal/llm/httpclient.go:133](internal/llm/httpclient.go#L133) | `retryWait` — the hint obeyed up to one minute, the doubling backoff otherwise |
+| [internal/llm/httpclient.go:180](internal/llm/httpclient.go#L180) | `RetryWatcher`, `WithRetryWatcher`/`RetryWatcherOf` — how a wait is reported to whoever is painting a window |
+| [internal/chat/throttle.go:14](internal/chat/throttle.go#L14) | `throttledPhase`, `watchingRetries`, `emitWaiting` — the wait as a `chat:status` phase, with its length |
+| [frontend/src/components/ChatView.tsx:353](frontend/src/components/ChatView.tsx#L353) | the line that renders the phase and the seconds it named |
 | [internal/llm/registry.go:117](internal/llm/registry.go#L117) | the `case "groq"` that builds the provider |
 | [internal/llm/registry.go:427](internal/llm/registry.go#L427) | the shipped-but-disabled entry |
 | [internal/config/config.go:934](internal/config/config.go#L934) | the address repair in `normalise()` |
@@ -310,6 +331,27 @@ app's own sweep is driven against a Groq-shaped fixture:
   that answered stays, the speech entry is never even asked, and clearing the blacklist brings
   it back. A probe that started reading 400 as inconclusive would leave a user two rows that
   can only fail with no way to clear them, and that is what this test exists to catch.
+
+### Offline — the retry itself, and what the panel is shown
+
+The wait is arithmetic and one phase, so it is pinned in two packages rather than against the
+live budget (`internal/llm/retry_test.go`, `internal/chat/throttle_test.go`):
+
+- `TestARetryReportsItsWaitToTheWatcher` — a 429 with `Retry-After: 0.2` against a real test
+  server reports **one** wait of about 200 ms, carrying the 429 that caused it, and then reports
+  it over. The hint rather than the 250 ms backoff, which is the whole point of the report.
+- `TestAWaitCutShortByAStopIsStillRetracted` — the same request with a 30 s hint, cancelled from
+  inside the report: the call returns in well under a second and the wait is still retracted,
+  which is what keeps a Stop from leaving "waiting for the rate limit" on screen afterwards.
+- `TestAPlainBackoffIsNotReportedToTheWatcher` — a 503 with no hint is still retried after the
+  client's own 250 ms and the caller is told **nothing**: no line, and no retraction either. The
+  negative half of the policy, which is the half a flicker of text would come from.
+- `TestAThrottledWaitIsShownAsAPhaseOnTheChat` — the engine's half, which is the half a UI bug
+  would live in: the turn's request carries a watcher at all, the wait becomes a `chat:status`
+  event on **that** chat with `waitMs` **9123** in it, the next status event is `idle`, the turn
+  does not end in a phase, and the reply still arrives after the wait. The provider is a fake
+  rather than a server because the client's half is the two tests above; what this one pins is
+  the wiring between them.
 
 ### Live — `internal/llm/live_groq_test.go`
 
@@ -361,6 +403,8 @@ one, and the numbers in §4.
 4. **The rate-limit headers are read as a fact, not enforced.** The app does not pace requests
    against the per-minute token budget, and it does not reserve budget for the turn being typed;
    a burst that exhausts it comes back as a 429, whose own retry hint the shared client waits out
-   (§6) before it is reported.
+   *and shows* (§6) before the refusal is reported. That the wait is now visible changes nothing
+   about the budget itself: a conversation whose context is 6248 input tokens against a 7000/min
+   per-model ceiling is still about one such turn a minute, as slower turns rather than failures.
 5. **`reasoning_effort` is never sent.** The app sends the field only to switch thinking *off*,
    which this API does not support, so its `low`/`medium`/`high` levels are unused.

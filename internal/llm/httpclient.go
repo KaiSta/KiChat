@@ -131,12 +131,8 @@ func retryHint(header http.Header, body string) time.Duration {
 // the whole attempt budget inside one window, so the throttle is reported as a
 // failure. The case this was written for asked for 9.93 seconds.
 func retryWait(err error, attemptNo int) time.Duration {
-	var httpErr *HTTPError
-	if errors.As(err, &httpErr) && httpErr.RetryAfter > 0 {
-		if httpErr.RetryAfter > retryHintCeiling {
-			return retryHintCeiling
-		}
-		return httpErr.RetryAfter
+	if named := namedWait(err); named > 0 {
+		return named
 	}
 	wait := retryBaseWait << attemptNo
 	if wait > retryMaxWait {
@@ -145,17 +141,93 @@ func retryWait(err error, attemptNo int) time.Duration {
 	return wait
 }
 
+// namedWait is the wait a backend asked for itself, capped, or 0 when it named none.
+//
+// It is separate from retryWait because "the backend said so" is the distinction a
+// caller with a window to paint cares about: see waitBeforeRetry.
+func namedWait(err error) time.Duration {
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.RetryAfter <= 0 {
+		return 0
+	}
+	if httpErr.RetryAfter > retryHintCeiling {
+		return retryHintCeiling
+	}
+	return httpErr.RetryAfter
+}
+
 // waitBeforeRetry sleeps that long, and returns false when the context ended
 // first, so a Stop does not have to wait it out.
+//
+// A watcher on the context — see RetryWatcher — is told about the wait, because a
+// retry that obeys a backend's own hint can sleep for most of a minute and a caller
+// with a window to paint cannot tell that from a hang. A wait the client guessed at
+// is not reported, so nothing is shown for a hiccup that resolves in a quarter of a
+// second.
 func waitBeforeRetry(ctx context.Context, err error, attemptNo int) bool {
-	timer := time.NewTimer(retryWait(err, attemptNo))
+	// Only a wait the backend named is reported. A plain backoff is 250 ms and then
+	// 500 ms, and a line of status text that appears and disappears inside a blink
+	// reads as a glitch rather than as an explanation — so a transient hiccup stays
+	// silent, and what is shown is always the backend's own number.
+	reportWait := namedWait(err) > 0
+	wait := retryWait(err, attemptNo)
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
+	if w := RetryWatcherOf(ctx); w != nil && reportWait {
+		w.Waiting(wait, err)
+		// Deferred rather than called on the timer path, because the wait also ends
+		// when a Stop cancels it — and a phase left standing would say a throttle is
+		// still being waited out after the turn is over.
+		defer w.Waited()
+	}
 	select {
 	case <-timer.C:
 		return true
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// RetryWatcher is told when a request is about to wait out a retry, and when it has
+// stopped waiting.
+//
+// Both calls happen on the goroutine doing the waiting, which is the one that will
+// read the response, so a caller that shows something in between is showing it for
+// exactly the interval in which nothing else is happening: no tokens arrive during
+// it, by definition, and the phase cannot outlive it.
+type RetryWatcher interface {
+	// Waiting reports the wait about to be taken, and the failure that caused it.
+	Waiting(wait time.Duration, err error)
+	// Waited reports the end of that wait, whether the timer woke the request or
+	// the context ended during it. Implementations retract whatever Waiting said.
+	Waited()
+}
+
+// retryWatcherKey carries a RetryWatcher through a request's context.
+type retryWatcherKey struct{}
+
+// WithRetryWatcher returns a context that reports every retry made with it to w.
+//
+// The watcher travels in the context rather than being configured on the provider
+// because the retry belongs to the shared client, one layer below the provider,
+// which has no idea which chat — or which window — asked. A context without one is
+// silent, which is what a metadata call wants: a listing, a health probe or a model
+// check has no turn to explain.
+func WithRetryWatcher(ctx context.Context, w RetryWatcher) context.Context {
+	if w == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, retryWatcherKey{}, w)
+}
+
+// RetryWatcherOf returns the watcher ctx carries, or nil.
+//
+// It is exported for the callers that have to behave like the client does: a test
+// doubling for a throttling provider fires the watcher exactly where the real
+// request would, so what the UI is shown is pinned without an HTTP server.
+func RetryWatcherOf(ctx context.Context) RetryWatcher {
+	w, _ := ctx.Value(retryWatcherKey{}).(RetryWatcher)
+	return w
 }
 
 // withRetry runs attempt until it succeeds, fails unrecoverably, or runs out of

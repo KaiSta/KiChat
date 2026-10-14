@@ -26,6 +26,7 @@ export function ChatView() {
   const chatLoading = useStore((s) => s.chatLoading)
   const running = useStore((s) => (s.activeChatId ? !!s.running[s.activeChatId] : false))
   const phase = useStore((s) => (s.activeChatId ? s.phase[s.activeChatId] : undefined))
+  const phaseWaitMs = useStore((s) => (s.activeChatId ? (s.phaseWaitMs[s.activeChatId] ?? 0) : 0))
   const send = useStore((s) => s.send)
   const stop = useStore((s) => s.stop)
   const toast = useStore((s) => s.toast)
@@ -344,7 +345,14 @@ export function ChatView() {
                 ? t('chat.toolCalls')
                 : phase === 'stopping'
                   ? t('chat.stopping')
-                  : phase}
+                  : phase === 'throttled'
+                    ? t('chat.throttled', {
+                        // Seconds, and never zero: a wait that rounds down to "0 s"
+                        // would read as no wait at all, which is the impression this
+                        // line exists to remove.
+                        seconds: formatNumber(Math.max(1, Math.round(phaseWaitMs / 1000))),
+                      })
+                    : phase}
           </div>
         )}
 

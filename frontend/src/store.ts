@@ -108,6 +108,11 @@ interface State {
   running: Record<string, boolean>
   /** chatId -> phase such as "tool" or "compacting". */
   phase: Record<string, string>
+  /**
+   * chatId -> how long the current phase is waiting, in ms, for the phases that carry
+   * a duration. Zero for every other phase, including the ones that are merely set.
+   */
+  phaseWaitMs: Record<string, number>
   toasts: Toast[]
 
   /**
@@ -203,6 +208,7 @@ export const useStore = create<State>((set, get) => {
     draws: {},
     running: {},
     phase: {},
+    phaseWaitMs: {},
     toasts: [],
     nextModel: null,
 
@@ -522,9 +528,14 @@ function wireEvents(
     set({ chatState: { ...state.chatState, messages } })
   })
 
-  on<{ chatId: string; phase: string }>(EV.status, (p) => {
+  on<{ chatId: string; phase: string; waitMs?: number }>(EV.status, (p) => {
     if (p.chatId !== active()) return
-    set((s) => ({ phase: { ...s.phase, [p.chatId]: p.phase } }))
+    set((s) => ({
+      phase: { ...s.phase, [p.chatId]: p.phase },
+      // The wait belongs to the phase it arrived with: a later phase that names
+      // none must not keep showing a stale number beside different words.
+      phaseWaitMs: { ...s.phaseWaitMs, [p.chatId]: p.waitMs ?? 0 },
+    }))
   })
 
   on<{ chatId: string; budget: chat.ContextBudget }>(EV.budget, (p) => {

@@ -119,7 +119,9 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			req.Tools = toolDefs
 		}
 
-		events, err := in.Provider.Chat(ctx, req)
+		// The request carries a watcher, so a retry that has to wait out a backend's
+		// own rate limit shows up as a phase instead of a turn that looks hung.
+		events, err := in.Provider.Chat(e.watchingRetries(ctx, in.Chat.ID), req)
 		if err != nil {
 			// The request never produced a byte, so there is no partial answer to
 			// keep: the row is a failure. It used to be stored as "cancelled",
