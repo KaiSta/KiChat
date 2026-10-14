@@ -534,9 +534,9 @@ func TestServerRefusesWhatItCannotStart(t *testing.T) {
 // TestFreePortHandsOutSomethingBindable: the port is released before llama-server
 // takes it, so it has to at least be a usable number.
 func TestFreePortHandsOutSomethingBindable(t *testing.T) {
-	port, err := freePort()
+	port, err := FreePort()
 	if err != nil {
-		t.Fatalf("freePort: %v", err)
+		t.Fatalf("FreePort: %v", err)
 	}
 	if port < 1024 || port > 65535 {
 		t.Errorf("port = %d, want a usable one", port)

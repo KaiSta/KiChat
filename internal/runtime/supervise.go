@@ -38,10 +38,27 @@ const (
 
 // Options describe one server to start.
 type Options struct {
-	// Binary is the llama-server launcher, absolute.
+	// Binary is the launcher, absolute.
 	Binary string
-	// Model is the GGUF file to load.
+	// Model is the file to load. For llama.cpp it is the GGUF itself; for another
+	// program it is the primary file of the set the command line names, because this
+	// is what a start checks for and what the row shows.
 	Model string
+	// Args, when set, is the whole command line after the binary, built by the caller.
+	// It replaces the llama.cpp argument list this package builds, which is how a
+	// second program is supervised by the same code: everything else a start does —
+	// the free port, the readiness poll, the log ring, the shutdown — is the same work
+	// whatever the flags are called. Empty means the llama.cpp list below.
+	Args []string
+	// ReadyPath is the route the readiness probe asks for, "/health" when empty. It is
+	// a field because the answer is the program's own: llama-server serves /health and
+	// says 503 while it loads, while an image server has no such route and has to be
+	// asked the question the app will really ask it.
+	ReadyPath string
+	// Label names the program in messages and in the log the panel shows, llama-server
+	// when empty. A row that said "llama-server wurde beendet" about sd-server would be
+	// wrong in the one place a user looks for a reason.
+	Label string
 	// Ctx is the context window to load it with; 0 lets the server choose.
 	Ctx int
 	// FlashAttention is `--flash-attn`: "on", "off", or empty/"auto" for the
@@ -98,6 +115,11 @@ type Server struct {
 	// running server keeps the build it started with, so this is what tells the
 	// cleanup list which build must not be deleted while it answers.
 	binary string
+	// label is what the last start called the program, for the messages about it. It
+	// is remembered per server because the process outlives the Options it was started
+	// from, and "llama-server wurde beendet" about an image server is wrong in the one
+	// place a user looks for a reason.
+	label string
 	// stopRequested separates "the user stopped it" from "it died", which is the
 	// difference between a clean stop and a failure worth reporting.
 	stopRequested bool
@@ -165,8 +187,9 @@ func probeHealth(ctx context.Context, url string) error {
 // is reported through Status: the caller gets a "starting" server immediately
 // rather than a bound method that blocks for minutes.
 func (s *Server) Start(opts Options) error {
+	label := opts.label()
 	if opts.Binary == "" {
-		return errors.New("kein llama-server installiert")
+		return fmt.Errorf("kein %s installiert", label)
 	}
 	if opts.Model == "" {
 		return errors.New("kein Modell ausgewählt")
@@ -174,7 +197,7 @@ func (s *Server) Start(opts Options) error {
 	// Checked here rather than left to exec, so the user is told which of the two
 	// paths is wrong while the server is not yet involved.
 	if _, err := os.Stat(opts.Binary); err != nil {
-		return fmt.Errorf("llama-server nicht gefunden: %w", err)
+		return fmt.Errorf("%s nicht gefunden: %w", label, err)
 	}
 	model, err := os.Stat(opts.Model)
 	if err != nil {
@@ -194,14 +217,18 @@ func (s *Server) Start(opts Options) error {
 	}
 	port := opts.Port
 	if port == 0 {
-		port, err = freePort()
+		port, err = FreePort()
 		if err != nil {
 			return fmt.Errorf("freien Port finden: %w", err)
 		}
 	}
 	opts.Port = port
 
-	args := opts.args()
+	args := opts.commandArgs()
+	readyPath := opts.ReadyPath
+	if readyPath == "" {
+		readyPath = "/health"
+	}
 	cmd := exec.Command(opts.Binary, args...)
 	// The build is started from its own directory and with the library path that
 	// directory needs; see serverEnv, which is where the CUDA runtime bundle and
@@ -231,13 +258,14 @@ func (s *Server) Start(opts Options) error {
 		// a status saying "starting" would have the panel poll for a model load that
 		// no process is performing, forever.
 		s.markStopped()
-		return fmt.Errorf("llama-server starten: %w", err)
+		return fmt.Errorf("%s starten: %w", label, err)
 	}
 
 	url := fmt.Sprintf("http://%s:%d", host, port)
 	s.mu.Lock()
 	s.cmd = cmd
 	s.binary = opts.Binary
+	s.label = label
 	s.waited = make(chan struct{})
 	s.stopRequested = false
 	s.status.PID, s.status.URL = cmd.Process.Pid, url
@@ -245,14 +273,14 @@ func (s *Server) Start(opts Options) error {
 	s.mu.Unlock()
 	s.publish()
 
-	s.log.addf("llama-server gestartet (PID %d) auf %s", cmd.Process.Pid, url)
+	s.log.addf("%s gestartet (PID %d) auf %s", label, cmd.Process.Pid, url)
 	s.log.addf("Aufruf: %s %s", opts.Binary, strings.Join(args, " "))
-	go s.monitor(cmd, url, waited)
+	go s.monitor(cmd, url, readyPath, waited)
 	return nil
 }
 
 // monitor waits for the process to become ready, then for it to exit.
-func (s *Server) monitor(cmd *exec.Cmd, url string, waited chan struct{}) {
+func (s *Server) monitor(cmd *exec.Cmd, url, readyPath string, waited chan struct{}) {
 	exit := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
@@ -273,13 +301,14 @@ func (s *Server) monitor(cmd *exec.Cmd, url string, waited chan struct{}) {
 			return
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				s.log.addf("Zeitüberschreitung: llama-server war nach %s nicht bereit", s.readyTimeout)
-				s.fail(fmt.Sprintf("llama-server war nach %s nicht bereit", s.readyTimeout))
+				label := s.program()
+				s.log.addf("Zeitüberschreitung: %s war nach %s nicht bereit", label, s.readyTimeout)
+				s.fail(fmt.Sprintf("%s war nach %s nicht bereit", label, s.readyTimeout))
 				_ = s.Stop()
 				return
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			err := s.probe(ctx, url+"/health")
+			err := s.probe(ctx, url+readyPath)
 			cancel()
 			if err == nil {
 				s.setState(StateRunning)
@@ -293,8 +322,21 @@ func (s *Server) monitor(cmd *exec.Cmd, url string, waited chan struct{}) {
 	}
 }
 
+// program is what the last start called the program, llama-server when nothing was
+// started yet. Messages about a process that has already exited are built from this
+// rather than from the Options of the call that started it, which is long gone.
+func (s *Server) program() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.label == "" {
+		return "llama-server"
+	}
+	return s.label
+}
+
 // finished records the exit of a process that is no longer running.
 func (s *Server) finished(err error) {
+	label := s.program()
 	s.mu.Lock()
 	requested := s.stopRequested
 	s.cmd = nil
@@ -314,11 +356,11 @@ func (s *Server) finished(err error) {
 		}
 	case err != nil:
 		tail := s.log.tail(6)
-		s.log.addf("llama-server beendet: %v", err)
-		s.fail(fmt.Sprintf("llama-server wurde beendet: %v%s", err, formatTail(tail)))
+		s.log.addf("%s beendet: %v", label, err)
+		s.fail(fmt.Sprintf("%s wurde beendet: %v%s", label, err, formatTail(tail)))
 	default:
-		s.log.addf("llama-server beendet")
-		s.fail("llama-server hat sich beendet")
+		s.log.addf("%s beendet", label)
+		s.fail(fmt.Sprintf("%s hat sich beendet", label))
 	}
 }
 
@@ -334,9 +376,9 @@ func (s *Server) Stop() error {
 	s.stopRequested = true
 	s.mu.Unlock()
 
-	// SIGTERM first: llama-server frees its context and exits cleanly, which is
-	// what keeps a large model's memory from being reclaimed by the OS only
-	// after the process is killed.
+	// SIGTERM first: a server frees its context and exits cleanly, which is what keeps
+	// a large model's memory from being reclaimed by the OS only after the process is
+	// killed.
 	if err := terminate(cmd, false); err != nil {
 		s.log.addf("SIGTERM konnte nicht zugestellt werden: %v", err)
 	}
@@ -366,6 +408,11 @@ func (s *Server) Stop() error {
 	s.markStopped()
 	return nil
 }
+
+// Program is what the last start called the program, so a caller that stops several
+// servers can say which one it was talking about rather than naming llama.cpp in a
+// message about a picture server.
+func (s *Server) Program() string { return s.program() }
 
 // markStopped records that nothing is running any more.
 //
@@ -457,6 +504,23 @@ func (s *Server) publish() {
 	}
 }
 
+// label is what the messages call this program.
+func (o Options) label() string {
+	if l := strings.TrimSpace(o.Label); l != "" {
+		return l
+	}
+	return "llama-server"
+}
+
+// commandArgs is the command line to run: the caller's own when it built one, the
+// llama.cpp list below otherwise.
+func (o Options) commandArgs() []string {
+	if len(o.Args) > 0 {
+		return o.Args
+	}
+	return o.args()
+}
+
 // args builds the command line. Only flags llama-server documents are used, and
 // the user's own arguments come last so they can override one of ours.
 func (o Options) args() []string {
@@ -501,13 +565,18 @@ func (o Options) args() []string {
 	return append(args, o.Extra...)
 }
 
-// freePort asks the kernel for an unused port.
+// FreePort asks the kernel for an unused port.
 //
-// It is released again before llama-server binds it, so another process could in
-// theory take it first. The alternative — handing llama-server a socket that is
-// already open — is not something it accepts, and the readiness probe turns the
-// rare loss into a reported failure instead of a silent one.
-func freePort() (int, error) {
+// It is released again before the server binds it, so another process could in
+// theory take it first. The alternative — handing the server a socket that is
+// already open — is not something either of them accepts, and the readiness probe
+// turns the rare loss into a reported failure instead of a silent one.
+//
+// It is exported for the callers that build their own command line and therefore
+// have to put the port *in* it (sdserver.go): the supervisor's Start still allocates
+// one when Port is 0, but a caller that needs the number before Start cannot wait for
+// that.
+func FreePort() (int, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, err
