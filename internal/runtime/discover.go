@@ -246,8 +246,15 @@ var fileTypeToken = regexp.MustCompile(`^(mmproj|f\d+|bf\d+|fp\d+|i?q\d+.*)$`)
 
 // modelTokens is the set of tokens in a GGUF file name that identify the model,
 // lowercased and with the file-type tokens above removed.
+//
+// The extension is dropped after lowercasing, not before. The two halves of a vision
+// model are not always published by the same hand — `Qwen3-VL-8B-Instruct-Q4_K_M.gguf`
+// from one upload and `mmproj-Qwen3-VL-8B-Instruct-F16.GGUF` from another — and an
+// extension left in place enters as the token `gguf`, which the other name does not
+// have, so the containment rule below would reject the model's own projector and leave
+// a vision model that silently cannot see.
 func modelTokens(name string) map[string]bool {
-	lower := strings.ToLower(strings.TrimSuffix(name, ".gguf"))
+	lower := strings.TrimSuffix(strings.ToLower(name), ".gguf")
 	tokens := map[string]bool{}
 	for _, token := range strings.FieldsFunc(lower, func(r rune) bool {
 		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
@@ -267,8 +274,15 @@ func modelTokens(name string) map[string]bool {
 // beside each model, Hugging Face beside each quant — and a walk of the whole tree
 // would pair a model with a projector belonging to a different model three levels
 // away.
+//
+// A path that names no folder is answered with nothing rather than read: a bare file
+// name resolves against the *process's* working directory, which is wherever the app
+// happened to be started from and has nothing to do with where the model is. Every
+// other path this app handles is absolute — the file dialog and the folder scan both
+// produce ones that are — so nothing that can actually be loaded is given up by it.
 func ProjectorsBeside(modelPath string) []string {
-	if strings.TrimSpace(modelPath) == "" {
+	modelPath = strings.TrimSpace(modelPath)
+	if modelPath == "" || !filepath.IsAbs(modelPath) {
 		return []string{}
 	}
 	dir := filepath.Dir(modelPath)
@@ -306,6 +320,10 @@ func ProjectorsBeside(modelPath string) []string {
 // fit one model equally well are two quants of one file, and a silent pick from an
 // arbitrary sort is how a model ends up loading a vision tower nobody chose — which is a
 // 500 on the next image rather than an error anyone can read.
+//
+// The comparison is case-insensitive throughout, which is why the file names are folded
+// before their tokens are taken: `.GGUF` is a spelling of the extension and not part of
+// any model's name.
 func MatchProjector(modelPath string) string {
 	candidates := ProjectorsBeside(modelPath)
 	if len(candidates) == 0 {

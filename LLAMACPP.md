@@ -614,9 +614,11 @@ HTTP 500 {"error":{"code":500,"message":"image input is not supported - hint: if
 unexpected, you may need to provide the mmproj","type":"server_error"}}
 ```
 
-Measured on this machine's own Qwen3-VL-8B through the app's supervisor
-(`prism-b10777-e3de715-rocm-7.2`, the `Q4_K_M` weights with the `F16` projector beside them),
-same build, same 64×64 PNG, one flag apart:
+Measured on this machine's own Qwen3-VL-8B through the app's supervisor (the `Q4_K_M` weights
+with the `F16` projector beside them), same build, same 64×64 PNG, one flag apart — first by
+hand on `prism-b10777-e3de715-rocm-7.2`, and since then by
+[`TestLiveProjectorIsWhatMakesAVisionModelSee`](projector_live_test.go), which re-runs the whole
+table on demand:
 
 | start | `/props` `modalities` | image request |
 | --- | --- | --- |
@@ -628,12 +630,13 @@ arguments. `ManagedModel.MMProj` is the override: empty means "whatever sits bes
 which is where every download puts the pair, and a path pins it to that file instead — the two
 halves are not always downloaded together. A named file that is not there is refused **before**
 the model loads, because llama.cpp would otherwise read five gigabytes of weights first and only
-then fail to open the projector. A detected file is never written back into the settings: an
-empty field has to keep meaning "the one beside the model" or a replaced quant would need the
-field cleared by hand.
+then fail to open the projector. A path that is there but is a *folder* is refused with that
+word instead, because "not there" about a directory sends the reader looking for a file they can
+see. A detected file is never written back into the settings: an empty field has to keep meaning
+"the one beside the model" or a replaced quant would need the field cleared by hand.
 
 The folder is read, not guessed, and `MatchProjector`
-([internal/runtime/discover.go:309](internal/runtime/discover.go#L309)) answers `""` rather than
+([internal/runtime/discover.go:327](internal/runtime/discover.go#L327)) answers `""` rather than
 picking:
 
 | folder | answer, and why |
@@ -645,7 +648,13 @@ picking:
 | nothing | **none**, which is what the panel warns about: this model cannot read an image |
 
 `mmproj`, `f16`, `bf16`, `q4`/`iq4`-style tokens are dropped before two names are compared, so
-the `Q4_K_M` weights and the `F16` projector of one model still look like the same model.
+the `Q4_K_M` weights and the `F16` projector of one model still look like the same model. Case
+is folded away before that, and the extension is stripped: the two halves are not always
+published by the same hand (`.GGUF` on one upload, `.gguf` on the other), and an extension that
+survived into the tokens would be a token the other name does not have — the containment rule
+would then reject the model's own projector. Only a *folder* is read: a bare file name resolves
+against the process's working directory, wherever the app was started from, and has nothing to do
+with where the model is, so a path with no folder is answered with nothing rather than looked up.
 
 **The consequence upstream of this: the model reports itself as text-only, and the app believed
 it.** `/props` `modalities.vision` is read by the provider
@@ -734,9 +743,9 @@ reports it in the panel — `On Vulkan0: 65 of 65 layers on the GPU`.
 | [api.go:302](api.go#L302) | `ManagedStatus.LoadedModel` | the file the running server was started with; empty unless one is running |
 | [api.go:1210](api.go#L1210) | `defaultModelDir` | which folder an empty field means |
 | [api.go:1303](api.go#L1303) | `StartManagedModelWith` | the chat picker's start: the stored entry with another file, checked, then started |
-| [internal/runtime/discover.go:270](internal/runtime/discover.go#L270) | `ProjectorsBeside` | the projector GGUFs sitting in the model's own folder |
-| [internal/runtime/discover.go:309](internal/runtime/discover.go#L309) | `MatchProjector` | which of them belongs to that model, or none when the folder does not answer |
-| [app.go:350](app.go#L350) | `managedProjector` | the typed projector, else the detected one; a typed file that is gone refuses the start |
+| [internal/runtime/discover.go:283](internal/runtime/discover.go#L283) | `ProjectorsBeside` | the projector GGUFs sitting in the model's own folder |
+| [internal/runtime/discover.go:327](internal/runtime/discover.go#L327) | `MatchProjector` | which of them belongs to that model, or none when the folder does not answer |
+| [app.go:350](app.go#L350) | `managedProjector` | the typed projector, else the detected one; a typed file that is gone — or that is a folder — refuses the start |
 | [internal/runtime/version.go:26](internal/runtime/version.go#L26) | `BinaryVersion` | `--version`, with a deadline and `WaitDelay` |
 | [api.go:473](api.go#L473) | `CheckLlamaRuntimeUpdate` | one request, cached |
 | [api.go:820](api.go#L820) | `GetRuntimeStatus` | reports the cached copy; clears before start |
@@ -783,6 +792,25 @@ from the folder above) started under `b11535`, `/health` went 200, the provider 
 `source llamacpp`). Models llama.cpp cannot load at all are a different matter: the bundled
 `nomic-embed-text-v1.5` starts and answers `/health` but refuses `/v1/chat/completions` with
 "the current context does not support logits computation".
+
+**The projector's two rows are a test, not a memory.**
+
+```
+KICHAT_LIVE=1 KICHAT_VISION_MODEL=~/…/Qwen3-VL-8B-Instruct-Q4_K_M.gguf \
+    go test ./ -run TestLiveProjectorIsWhatMakesAVisionModelSee -v
+```
+
+It starts *both* rows of the table in §3.12 through the app's own supervisor — the app pairs
+the file beside the model for the first, and an otherwise empty folder holding a symlink to the
+same weights gives the second — and asserts the four things that make the feature real:
+`--mmproj` in the running process's argument list, `/props` reporting a vision modality, the
+image turn answered, and the app's own `ListModels` offering the model with the `vision`
+capability. On this machine (`b11620-21a19cd3b`, ROCm, `OffloadAuto`) both loads took **2 s**
+(4.7 GB of weights, 37/37 layers on `ROCm0`), `/props` read
+`{vision: true, video: true, audio: false}` with the projector against `{vision: false, …}`
+without it, and a 64×64 PNG came back **HTTP 200 in 155 ms** with the model answering
+`gradient` — against **500 in 2 ms** without the file. That is `image input is not supported`
+as the server's own words, the one failure this feature exists to prevent.
 
 ### A test can start a server without llama.cpp installed
 

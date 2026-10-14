@@ -337,6 +337,29 @@ func TestMatchProjectorPairsAModelWithItsOwnProjector(t *testing.T) {
 			want:   "",
 			reason: "`mmproject` is not `mmproj`, the same rule the model list uses",
 		},
+		{
+			name:   "the extension in capitals, on the projector",
+			files:  []string{"mmproj-Qwen3-VL-8B-Instruct-F16.GGUF"},
+			model:  "Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+			want:   "mmproj-Qwen3-VL-8B-Instruct-F16.GGUF",
+			reason: "the two halves are not always published by the same hand, and `.GGUF` is not a model token",
+		},
+		{
+			name:   "the extension in capitals, on the model",
+			files:  []string{"mmproj-Qwen3-VL-8B-Instruct-F16.gguf"},
+			model:  "Qwen3-VL-8B-Instruct-Q4_K_M.GGUF",
+			want:   "mmproj-Qwen3-VL-8B-Instruct-F16.gguf",
+			reason: "the same asymmetry is harmless in this direction, and has to stay that way",
+		},
+		{
+			name: "the model's name written with dots",
+			files: []string{
+				"mmproj-Qwen3-VL-8B-Instruct-F16.gguf",
+			},
+			model:  "Qwen3-VL-8B-Instruct.Q4_K_M.gguf",
+			want:   "mmproj-Qwen3-VL-8B-Instruct-F16.gguf",
+			reason: "the separators differ between two spellings of one name, and neither separator is a token",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -365,6 +388,35 @@ func TestMatchProjectorPairsAModelWithItsOwnProjector(t *testing.T) {
 	}
 	if got := MatchProjector(filepath.Join(t.TempDir(), "nope", "a.gguf")); got != "" {
 		t.Errorf("MatchProjector of an absent folder = %q, want empty", got)
+	}
+}
+
+// TestProjectorsBesideNeedsAFolderOfItsOwn: the search is "the folder this model is
+// in", so a path that names no folder has to be answered with nothing rather than read.
+// A bare file name resolves against the process's own working directory — wherever the
+// app happened to be started from — which is not the model's folder and can hold a
+// projector of something else entirely. The working directory is moved to a folder that
+// *does* hold a matching projector, so a version that read it would be caught pairing a
+// file that has nothing to do with the model named.
+func TestProjectorsBesideNeedsAFolderOfItsOwn(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"mmproj-Some-Model-F16.gguf", "Some-Model-Q4_K_M.gguf"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("GGUF"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(dir)
+
+	if got := MatchProjector("Some-Model-Q4_K_M.gguf"); got != "" {
+		t.Errorf("a bare file name was paired with %q out of the working directory", got)
+	}
+	if got := ProjectorsBeside("Some-Model-Q4_K_M.gguf"); len(got) != 0 {
+		t.Errorf("ProjectorsBeside listed %q for a path with no folder", got)
+	}
+	// The same file, named by its folder, is paired — the guard is about the shape of
+	// the path and not about refusing to answer.
+	if got := MatchProjector(filepath.Join(dir, "Some-Model-Q4_K_M.gguf")); got != filepath.Join(dir, "mmproj-Some-Model-F16.gguf") {
+		t.Errorf("MatchProjector of the same file by absolute path = %q, want the projector beside it", got)
 	}
 }
 

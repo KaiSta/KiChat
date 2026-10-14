@@ -349,11 +349,17 @@ func (a *App) startManagedModel(backendID string) error {
 // without anyone clearing a stale path first.
 func managedProjector(mm config.ManagedModel) (string, error) {
 	if named := strings.TrimSpace(mm.MMProj); named != "" {
-		if info, statErr := os.Stat(named); statErr != nil || info.IsDir() {
-			// Named but not there. llama-server would load the whole language model first
-			// and only then fail to open the projector, so the answer belongs here, where
-			// the sentence can name the file the user typed.
+		// Named but unusable. llama-server would load the whole language model first and
+		// only then fail to open the projector, so the answer belongs here, where the
+		// sentence can name what the user typed — and say which of the two things is
+		// wrong with it, since a path that is there but is a folder sends the reader
+		// looking for a file they can see.
+		info, statErr := os.Stat(named)
+		if statErr != nil {
 			return "", fmt.Errorf("die mmproj-Datei %s ist nicht vorhanden", named)
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("%s ist ein Ordner, keine mmproj-Datei", named)
 		}
 		return named, nil
 	}

@@ -568,10 +568,17 @@ wails build                    # when webkit2gtk-4.0 is available
   logits computation"); the token rule replaced a prefix test that offered the Hugging
   Face spelling, which is what the PrismML ternary model's own folder holds. The
   projector is now found and passed by the app instead (LLAMACPP.md §3.12), in the
-  model's own folder only. So a projector kept somewhere else, with the two halves of
+  model's own folder only — and only for a path that names a folder at all, since a bare
+  file name would be looked for in the directory KiChat happened to be started from. The
+  two names are compared with the case folded away and the extension stripped, because the
+  halves are routinely uploaded by different hands; both rules came out of a review of the
+  matcher, not out of taste. So a projector kept somewhere else, with the two halves of
   the model downloaded apart, has to be named in the field that exists for it, and two
   projectors that fit one model equally well leave the row warning rather than picking
   one — the app will not guess at a vision tower, and a wrong one is worse than none.
+  Both rows of the measurement behind this are a live test
+  (`TestLiveProjectorIsWhatMakesAVisionModelSee`), so the table cannot drift from what a
+  start really does.
 - **A model that cannot see is still offered images.** `--mmproj` and the projector
   field decide whether the server has a vision tower, and the provider reads the answer
   its own way: `/props` `modalities.vision` types a projector-less start as text-only

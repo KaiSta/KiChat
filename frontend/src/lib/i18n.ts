@@ -292,7 +292,7 @@ const de = {
   'settings.managed.mmprojPickTitle': 'mmproj-Projektor auswählen',
   'settings.managed.mmprojTyped':
     'Diese Datei wird geladen. Leer lassen, um die neben dem Modell zu verwenden.',
-  'settings.managed.mmprojPaired': 'Vision aktiv: {{name}} neben dem Modell gefunden',
+  'settings.managed.mmprojPaired': 'Projektor zugeordnet: {{name}} neben dem Modell gefunden',
   'settings.managed.mmprojMissing':
     'Kein mmproj gefunden — dieses Modell kann keine Bilder lesen. Ohne die Datei antwortet llama-server auf ein Bild mit einem Serverfehler.',
   'settings.managed.folder': 'Modellordner',
@@ -885,7 +885,7 @@ const en: Record<keyof typeof de, string> = {
   'settings.managed.mmprojPickTitle': 'Choose an mmproj projector',
   'settings.managed.mmprojTyped':
     'This file is loaded. Clear the field to use the one beside the model.',
-  'settings.managed.mmprojPaired': 'Vision on: {{name}} found beside the model',
+  'settings.managed.mmprojPaired': 'Projector paired: {{name}} found beside the model',
   'settings.managed.mmprojMissing':
     'No mmproj found — this model cannot read images. Without the file llama-server answers an image with a server error.',
   'settings.managed.folder': 'Model folder',
@@ -1454,7 +1454,7 @@ const zh: Record<keyof typeof de, string> = {
   'settings.managed.mmprojPlaceholder': 'mmproj（自动使用模型旁边的文件）',
   'settings.managed.mmprojPickTitle': '选择 mmproj 投影器',
   'settings.managed.mmprojTyped': '将加载此文件。留空则使用模型旁边的文件。',
-  'settings.managed.mmprojPaired': '视觉已启用：在模型旁找到 {{name}}',
+  'settings.managed.mmprojPaired': '已配对投影器：在模型旁找到 {{name}}',
   'settings.managed.mmprojMissing':
     '未找到 mmproj —— 该模型无法读取图片。缺少该文件时，llama-server 会对图片请求返回服务器错误。',
   'settings.managed.folder': '模型文件夹',

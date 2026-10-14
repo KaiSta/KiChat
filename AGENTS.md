@@ -150,6 +150,14 @@ KICHAT_LIVE=1 KICHAT_GROQ_KEY=<key> go test ./internal/llm/ -run TestLiveGroq -v
 #   the unanchored pattern also picks up TestLiveGroqShippedEntryReachesTheAPI,
 #   which drives the entry DefaultBackendConfigs ships through NewRegistry.
 
+# The projector, both rows at once: a real multimodal model with a projector beside it,
+# started through the app's own supervisor — once pairing that file, once from an empty
+# folder holding a symlink to the same weights. Two model loads, seconds each.
+KICHAT_LIVE=1 KICHAT_VISION_MODEL=~/…/Qwen3-VL-8B-Instruct-Q4_K_M.gguf \
+  go test ./ -run TestLiveProjectorIsWhatMakesAVisionModelSee -v
+#   optional: KICHAT_VISION_TAG pins the installed build to start,
+#   KICHAT_RUNTIME_DIR the folder the builds are installed in
+
 # PrismML's fork: one release lookup, a 17 MB download and a real model load
 KICHAT_LIVE=1 go test ./internal/runtime/ -run TestLivePrism -v
 #   optional: KICHAT_PRISM_MODEL=<path.gguf>, otherwise the smallest model in
@@ -211,6 +219,11 @@ short version:
   request at `temperature: 1.8`, above the schema's published `[0, 1.5]` and inside what
   Settings offers, reporting whether the service enforces the bound. It asserts nothing:
   either answer is a fact, and one of them means the UI maximum has to come down.
+- `TestLiveProjectorIsWhatMakesAVisionModelSee` — LLAMACPP.md §3.12 and §6: the projector end
+  to end through the app's supervisor, both rows of the measured table — `--mmproj` in the
+  running process's argv, `/props` reporting a vision modality, an image turn answered 200
+  where the same weights without the file are refused with the server's own "image input is not
+  supported", and the app's own listing offering the `vision` capability the chat badges.
 - `TestLivePrismForkRunsAModel` — LLAMACPP.md §6: the fork as a runtime, not a table of
   names — its release list, its tag scheme, its archive, its ternary kernels, and a real
   GGUF loaded on its `llama-server`.

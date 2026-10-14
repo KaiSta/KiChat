@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -72,15 +71,7 @@ func startManagedForArgv(t *testing.T, mm config.ManagedModel) (ManagedStatus, [
 	if srv == nil {
 		t.Fatal("the started model has no supervisor")
 	}
-	pid := srv.Status().PID
-	if pid == 0 {
-		t.Fatalf("the running server reports no pid: %+v", srv.Status())
-	}
-	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
-		t.Fatalf("read the command line of pid %d: %v", pid, err)
-	}
-	return status.Models[0], strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+	return status.Models[0], cmdlineOf(t, srv.Status().PID)
 }
 
 // TestAManagedStartLoadsTheProjectorBesideTheModel is the whole feature end to end: the
@@ -175,6 +166,39 @@ func TestAMissingProjectorIsRefusedBeforeTheModelLoads(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), missing) {
 		t.Errorf("the error is %q, want it to name %s", err, missing)
+	}
+	status, statusErr := a.GetRuntimeStatus()
+	if statusErr != nil {
+		t.Fatalf("GetRuntimeStatus: %v", statusErr)
+	}
+	if state := status.Models[0].State; state != rt.StateStopped {
+		t.Errorf("the model is %q after a refused start, want it stopped", state)
+	}
+}
+
+// TestAProjectorThatIsAFolderIsNamedAsOne: the sentence has to say which of the two things
+// is wrong with the path. "not there" about a directory is the answer that sends the
+// reader looking for a file they can see in their own file manager.
+func TestAProjectorThatIsAFolderIsNamedAsOne(t *testing.T) {
+	models := t.TempDir()
+	model := writeModelFile(t, models)
+	// The shape a user reaches by picking a folder where the field wants a file: a path
+	// that exists, is named `mmproj...`, and cannot be loaded.
+	dir := filepath.Join(models, "mmproj-not-a-file")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := managedTestApp(t, config.ManagedModel{ModelPath: model, MMProj: dir})
+
+	err := a.StartManagedModel("llamacpp")
+	if err == nil {
+		t.Fatal("a start with a folder where the projector goes was allowed")
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Errorf("the error is %q, want it to name %s", err, dir)
+	}
+	if strings.Contains(err.Error(), "nicht vorhanden") {
+		t.Errorf("the error is %q, want it to say the path is a folder rather than missing", err)
 	}
 	status, statusErr := a.GetRuntimeStatus()
 	if statusErr != nil {
