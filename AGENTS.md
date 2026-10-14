@@ -103,6 +103,8 @@ stopped. What a Windows machine needs:
 - **the WebView2 runtime** — present on Windows 11 and on 10 from 21H2 (Edge installs it),
   and the thing the app needs to open a window at all. The `-webview2` flag of the Wails CLI
   only decides what the *NSIS installer* does about a machine that lacks it.
+- **`makensis` (NSIS) on `PATH`** — only for `make nsis`. It is in no platform's default
+  toolchain and Wails neither ships nor fetches it.
 
 **What is not measured here, and what is.** There is no Windows machine behind this section:
 the three requirements above are the vendors' documented ones plus the direct consequence of
@@ -125,6 +127,46 @@ artifact does not depend on whose laptop made it; `make windows TARGETARCH=arm64
 it. WebView2 is the one place the two webviews meet in the build: the link reports it is
 using Wails's Go WebView2Loader, which is the loader the exe carries — nothing here needs
 `-tags native_webview2loader`.
+
+**`make nsis` wraps that in a Setup.exe**, and its one new requirement is `makensis` on
+`PATH`. Wails is not merely unable to find NSIS by itself: with no `makensis` it prints
+`Cannot create installer: makensis not found` and exits **0**, so a release pipeline keyed
+on the exit status ships a bare exe and never notices. The target checks for the tool up
+front and fails with the package to install on each platform, before the 30 s cross-build
+rather than after it. Measured here (makensis 3.09, taken out of unpacked `nsis` and
+`nsis-common` debs with `NSISDIR` pointed at them — no root needed, the same trick works on
+any Debian-ish host without the package): the run writes an **11.2 MB**
+`build/bin/kichat-amd64-installer.exe` whose payload `makensis -V4` reports as
+`File: "kichat.exe"->"kichat.exe" [compress] 9250948/22315008 bytes` plus
+`File: "MicrosoftEdgeWebview2Setup.exe" [compress] 1694774/1793816 bytes`, and whose own
+Properties read `ProductVersion 0.4.0`. That version is not a fourth place to type it in:
+the script renders it from the same `wails.json` info block the exe's resource comes from,
+which is also why `version-info` has to keep `productVersion` numeric — the script's
+`VIProductVersion "${INFO_PRODUCTVERSION}.0"` will not compile a pre-release string. Two
+knobs describe what Windows does rather than cosmetics: `WEBVIEW2=download|embed|browser|error`
+is what the *app* does on a machine with no runtime (Wails passes the word through as a
+build tag, so it is the app that acts; the installer always embeds the bootstrapper and runs
+it silently), and `INSTALL_SCOPE=machine|user` is Program Files with elevation or
+`%LOCALAPPDATA%\Programs` without it.
+
+**The installer is not byte-reproducible, and the reason is worth knowing.** NSIS records
+each embedded file's timestamp, and `wails build -nsis` rewrites `build/bin/kichat.exe` (and
+the bootstrapper) immediately before it runs `makensis` — so the installer's bytes follow the
+build clock even though the executable they carry does not. Measured: with the exe's bytes
+*and* mtime held fixed, two `makensis` runs produce the same installer (`38a2e412…` both
+times); touching only the mtime, bytes still hashing `e7bcfab7…`, changes it (`878cc8b9…`);
+pinning the mtime makes it stable again (`9211497e…` twice). So every `make nsis` yields a
+different installer for one commit, and the byte-identical rebuild this repo promises stays
+where it was — the .deb's. Making the installer reproducible would mean calling `makensis`
+ourselves after the build, which means maintaining the script rendering the `-nsis` path
+does for us.
+
+**`build/windows/installer/wails_tools.nsh` is generated, not source.** Wails rewrites it on
+every `-nsis` run from the template inside the tool, resolving `{{.Info.*}}` against
+`wails.json` in place — the tracked form was a template `makensis` could not use, and every
+run left it dirty. It is gitignored now (verified: delete it, run `make nsis`, and it comes
+back). `project.nsi` beside it *is* source — defines put there win over the generated ones —
+and the bootstrapper Wails stages into `build/windows/installer/tmp/` is gitignored too.
 
 `make check` includes a Windows compile of everything (`GOOS=windows go vet ./...`, 0.86 s),
 which is where a `//go:build windows` file and every Windows branch of a test are compiled —

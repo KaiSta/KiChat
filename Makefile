@@ -12,6 +12,7 @@
 #
 #	make            build the app for this machine, into build/bin/$(APP)
 #	make windows    cross-build build/bin/kichat.exe (works from Linux and macOS)
+#	make nsis       the same again, wrapped in a Windows Setup.exe (needs makensis)
 #	make check      gofmt, vet, go test, the TypeScript check, and a
 #	                GOOS=windows compile of everything
 #	make run        start the built app, detached, logging to a file
@@ -67,6 +68,27 @@ BUILD_TAGS = $(if $(filter linux,$(TARGETOS)),-tags $(WEBKIT_TAG),)
 # a machine asked for a Windows one, and the difference between the two is the
 # platform an archive name, a loader path and a process-stop are all keyed to.
 WAILS_PLATFORM = $(TARGETOS)/$(TARGETARCH)
+
+# --- the Windows installer --------------------------------------------------
+#
+# `make nsis` wraps the Windows build in a Setup.exe, and it uses Wails' own NSIS
+# script rather than a handwritten one, because the script Wails renders already does
+# the thing a Windows KiChat needs and a bare exe cannot: it reads the WebView2
+# runtime's own registry key and, when it is absent, runs the bootstrapper Wails
+# embeds into the installer.
+#
+# Two knobs, and both describe what Windows shows or does rather than cosmetics:
+#   WEBVIEW2=download|embed|browser|error  what the *app* does about a machine with no
+#       runtime. Wails passes the word through as a build tag, so it is the app that
+#       acts on it (fetch a runtime, open the download page, refuse to start); the
+#       installer itself always embeds the bootstrapper and runs it silently.
+#   INSTALL_SCOPE=machine|user  per-machine (Program Files, needs elevation, with the
+#       WebView2 data dir under the app) or per-user (%LOCALAPPDATA%\Programs, no
+#       elevation, a private WebView2 data dir).
+INSTALLER_FLAGS ?=
+NSIS          ?= $(shell command -v makensis 2>/dev/null || true)
+WEBVIEW2      ?= download
+INSTALL_SCOPE ?= machine
 
 # Debian's hardening flags for the link step, on by default because leaving them
 # off is the difference between a package that merely installs and one lintian
@@ -174,8 +196,9 @@ INSTALL_FILES = install -D -m 0755 $(BIN) $(1)$(PREFIX)/bin/$(APP) && \
 	install -D -m 0644 build/appicon.svg $(1)$(PREFIX)/share/icons/hicolor/scalable/apps/$(APP).svg && \
 	install -D -m 0644 build/appicon.png $(1)$(PREFIX)/share/pixmaps/$(APP).png
 
-.PHONY: all help deps frontend bindings icon build windows check fmt vet vet-windows test \
-        typecheck run install uninstall deb lint-deb version-info clean distclean
+.PHONY: all help deps frontend bindings icon build windows nsis check-makensis check fmt vet \
+        vet-windows test typecheck run install uninstall deb lint-deb version-info clean \
+        distclean
 
 all: build
 
@@ -183,6 +206,9 @@ help:
 	@echo "KiChat $(VERSION) — make targets ($(HOSTOS)/$(HOSTARCH) host, $(TARGETOS)/$(TARGETARCH) target):"
 	@echo "  build       frontend + wails build $(BUILD_TAGS) -> $(BIN)"
 	@echo "  windows     the same for windows/$(WINDOWS_ARCH) -> build/bin/$(APP).exe (cross-builds)"
+	@echo "  nsis        the same + a Windows Setup.exe -> build/bin/$(APP)-$(WINDOWS_ARCH)-installer.exe"
+	@echo "  WEBVIEW2=x  installer/app WebView2 strategy (download|embed|browser|error)"
+	@echo "  INSTALL_SCOPE=x  installer scope, machine (elevated) or user (no elevation)"
 	@echo "  check       gofmt, go vet, go test ./..., tsc --noEmit, GOOS=windows compile"
 	@echo "  run         start $(BIN) detached (log: $(RUNLOG))"
 	@echo "  deb         build $(DEB_FILE) from a staged tree (Debian hosts)"
@@ -281,7 +307,7 @@ version-info:
 # builder's home directory is not better for the difference.
 build: frontend version-info
 	GOFLAGS="$${GOFLAGS} $(HARDEN_GOFLAGS)" \
-	$(WAILS) build -platform $(WAILS_PLATFORM) $(BUILD_TAGS) -trimpath -ldflags '$(VERSION_LDFLAGS) $(HARDEN_LDFLAGS)'
+	$(WAILS) build -platform $(WAILS_PLATFORM) $(BUILD_TAGS) $(INSTALLER_FLAGS) -trimpath -ldflags '$(VERSION_LDFLAGS) $(HARDEN_LDFLAGS)'
 	@# wails rewrites the generated bindings and the runtime files with the
 	@# executable bit set; the repo tracks them 644, so without this every build
 	@# leaves mode churn in `git status` that is not a change.
@@ -297,6 +323,48 @@ windows: TARGETOS := windows
 windows: TARGETARCH := $(WINDOWS_ARCH)
 windows: build
 
+# makensis is in no platform's default toolchain, and Wails neither ships nor fetches
+# it. Worse, it does not treat its absence as a failure: with no makensis `wails build
+# -nsis` prints "Cannot create installer: makensis not found" and exits **0** — a green
+# build with no installer in it, which is the shape of bug that reaches a release. This
+# check is what turns that silence into a failure. It is a prerequisite rather than a
+# step at the end of the recipe so it runs before a 30 s cross-build rather than after
+# it, and it is deliberately not part of `make check`: NSIS is a packaging tool, and a
+# contributor without it should still be able to run the tests.
+check-makensis:
+	@if [ -z "$(NSIS)" ]; then \
+		echo "makensis (NSIS) is required to build the Windows installer and is not on PATH:" >&2; \
+		echo "  Debian/Ubuntu/Mint:  apt install nsis" >&2; \
+		echo "  macOS:               brew install makensis" >&2; \
+		echo "  Windows:             the NSIS installer, which puts makensis on PATH" >&2; \
+		echo "  no root:             unpack nsis and nsis-common, export NSISDIR=<share/nsis>" >&2; \
+		echo "Without it 'wails build -nsis' reports success and writes no installer at all." >&2; \
+		exit 1; \
+	fi
+
+# The Setup.exe: the same cross-build, packaged. Wails renders
+# build/windows/installer/*.nsi with wails.json's info block resolved into it — which
+# is why the version this target ships is not a third place to type it in, and why
+# `version-info` maintains `productVersion` as the *numeric* part: the script's
+# VIProductVersion is "${INFO_PRODUCTVERSION}.0" and a Debian pre-release string would
+# not compile. The bootstrapper lands in build/windows/installer/tmp/ (gitignored).
+#
+# The check below is not paranoia about makensis (check-makensis covers that): it is
+# the artifact itself. A build that reported success and left no installer is the
+# failure this whole section exists to make impossible.
+nsis: INSTALLER_FLAGS := -nsis -webview2 $(WEBVIEW2) -installscope $(INSTALL_SCOPE)
+nsis: check-makensis windows
+	@set -e; found=0; \
+	for f in build/bin/$(APP)-*-installer.exe; do \
+		[ -f "$$f" ] || continue; \
+		found=1; \
+		[ "$$(head -c2 "$$f")" = "MZ" ] || { echo "$$f is not a Windows executable" >&2; exit 1; }; \
+		echo "installer: $$f ($$(wc -c < "$$f") bytes)"; \
+	done; \
+	if [ "$$found" = "0" ]; then \
+		echo "makensis ran but left no build/bin/$(APP)-*-installer.exe" >&2; \
+		exit 1; \
+	fi
 # --- checks -----------------------------------------------------------------
 
 check: fmt vet vet-windows test typecheck
