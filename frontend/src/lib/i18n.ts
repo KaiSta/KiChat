@@ -148,6 +148,15 @@ const de = {
   'model.hiddenTitle':
     'Modelle, die die Verfügbarkeitsprüfung als nicht erreichbar gemeldet hat. Sie bleiben aus der Liste, bis du sie wieder einblendest; ein Chat mit einem davon läuft weiter.',
   'model.unhide': 'wieder einblenden',
+  'model.local': 'Lokales Modell starten',
+  'model.localHint':
+    'Die GGUF-Dateien im Modellordner. Ein Klick lädt die Datei in llama-server und schaltet den Chat darauf um — dasselbe, was der Start-Knopf in den Einstellungen tut, nur ohne den Weg dorthin.',
+  'model.localRowHint': 'Diese Datei in llama-server laden und den Chat darauf umschalten',
+  'model.localLoading': 'Wird geladen — das Modell ist bereit, sobald der Server antwortet.',
+  'model.localNoFolder': 'Noch kein Modellordner — in „Einstellungen → Backends“ einen wählen.',
+  'model.localFailed': 'Der Start ist fehlgeschlagen.',
+  'model.localStopHint':
+    'Server beenden und das Modell aus dem Speicher freigeben. Der Chat zeigt weiterhin auf dieses Modell — ein Start holt es zurück.',
 
   'compact.title': 'Kompaktierung',
   'compact.auto': 'automatisch',
@@ -724,6 +733,15 @@ const en: Record<keyof typeof de, string> = {
   'model.hiddenTitle':
     'Models the availability check reported as unreachable. They stay out of the list until you show them again; a chat already using one keeps working.',
   'model.unhide': 'show again',
+  'model.local': 'Start a local model',
+  'model.localHint':
+    'The GGUF files in the model folder. A click loads the file into llama-server and switches the chat to it — the same thing the Start button in Settings does, without the trip there.',
+  'model.localRowHint': 'Load this file into llama-server and switch the chat to it',
+  'model.localLoading': 'Loading — the model is ready once the server answers.',
+  'model.localNoFolder': 'No model folder yet — choose one in Settings → Backends.',
+  'model.localFailed': 'The start failed.',
+  'model.localStopHint':
+    'Stop the server and free the model from memory. The chat still points at this model — a start brings it back.',
 
   'compact.title': 'Compaction',
   'compact.auto': 'automatic',
@@ -1284,6 +1302,14 @@ const zh: Record<keyof typeof de, string> = {
   'model.hiddenTitle':
     '可用性检查报告为无法访问的模型。在你重新显示之前它们不会出现在列表中；已使用其中某个模型的对话仍然可用。',
   'model.unhide': '重新显示',
+  'model.local': '启动本地模型',
+  'model.localHint':
+    '模型文件夹中的 GGUF 文件。点击后会将该文件加载到 llama-server，并把当前对话切换到它——与“设置”里的启动按钮相同，只是不必再过去。',
+  'model.localRowHint': '将此文件加载到 llama-server，并把当前对话切换到它',
+  'model.localLoading': '正在加载——服务器开始应答后模型即可使用。',
+  'model.localNoFolder': '还没有模型文件夹——请在“设置 → 后端”中选择一个。',
+  'model.localFailed': '启动失败。',
+  'model.localStopHint': '停止服务器并释放内存中的模型。当前对话仍指向该模型——重新启动即可恢复。',
 
   'compact.title': '压缩',
   'compact.auto': '自动',

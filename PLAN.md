@@ -278,6 +278,20 @@ when it did, because a folder can be a drive root or a network share; it descend
 hidden directory (LM Studio's housekeeping lives in `.internal`), and it skips `mmproj-*`
 files, which carry the same extension as a model and which llama-server refuses to load.
 
+*A model that is on disk is one click from the conversation.* The chat's picker carries the
+managed server's own files, because a stopped server answers with nothing and the catalogue it
+lists from therefore has no row for it: without this, starting a local model meant Settings →
+Backends, naming the file, waiting out the load, and coming back to pick the model. The click
+loads that file and moves the chat onto it *after* the server is ready, and it stores the file
+on the entry as well — the chat and the panel must not end up naming different models, and the
+next launch has to start what was picked. What it does not do is flip the entry on: whether
+KiChat starts a model by itself at launch stays a setting, so a pick from the chat starts it
+now and promises nothing about the next launch. The same section gives the memory back: the
+state line that says a server is up carries the button that ends it, because the panel whose
+click took the memory is where releasing it belongs, and because a load begun by mistake — a
+27B file is minutes of it — has to be callable off from where it was started. A stop writes
+nothing, so the file the entry was given is one click from running again.
+
 *Saving a model does not start it.* It used to, and that turned every edited field — the
 context size, the extra arguments — into a restart of a model that may have taken minutes
 to load. Starting and stopping are their own calls, and switching a model off stops it,

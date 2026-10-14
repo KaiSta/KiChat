@@ -246,6 +246,10 @@ export function StartManagedModel(arg1) {
   return window['go']['main']['App']['StartManagedModel'](arg1);
 }
 
+export function StartManagedModelWith(arg1, arg2) {
+  return window['go']['main']['App']['StartManagedModelWith'](arg1, arg2);
+}
+
 export function StartModelCheck(arg1) {
   return window['go']['main']['App']['StartModelCheck'](arg1);
 }

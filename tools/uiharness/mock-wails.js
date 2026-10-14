@@ -1824,7 +1824,12 @@ Verfügbare Tools: {{tool_list}}`,
   function followManagedServer(url) {
     const entry = settings.backends.find((b) => b.id === MANAGED_BACKEND)
     if (entry) {
-      entry.baseUrl = url
+      // Written only on the way up. The backend acts on a running server alone —
+      // `onManagedState` returns early for anything else — so a stop or a switched-off
+      // entry leaves the address as the last one and the health probe is what reports
+      // it refused. Blanking it here would show a row with no address at all, which is
+      // not a state the app reaches.
+      if (url) entry.baseUrl = url
       entry.enabled = Boolean(url) || entry.enabled
     }
     // The probe result, not the row: rows are derived from the probes plus the
@@ -1854,6 +1859,61 @@ Verfügbare Tools: {{tool_list}}`,
         maxContextLimit: mm.ctxSize || 8192,
         capabilities: [],
       })
+    }
+  }
+
+  /*
+   * A managed start. Both bindings the UI starts a model through land here — the entry's
+   * own start, and the chat picker's, which writes the file it was given onto the entry
+   * first. One body, because the backend has one too: StartManagedModelWith stores the
+   * entry and then calls the same start, so a fixture that grew a second start would let
+   * the two drift.
+   */
+  let startTimer = null
+
+  function startManagedServer(backendId) {
+    const mm = ((settings.runtime || {}).models || {})[backendId] || {}
+    if (!managed.installed) {
+      managed.state = 'failed'
+      managed.error = 'llama-server ist noch nicht installiert'
+      return
+    }
+    if (!mm.modelPath) {
+      managed.state = 'failed'
+      managed.error = 'kein Modell ausgewählt'
+      return
+    }
+    cancelManagedStart()
+    managed.error = ''
+    managed.state = 'starting'
+    // What this start loads, recorded here rather than read from the settings: the row
+    // may be pointed at another model while this one is loading, and the two files have
+    // to be tellable apart in the listing.
+    managed.modelPath = mm.modelPath
+    managed.log = ['llama-server gestartet', 'loading model …']
+    managed.port = 0
+    startTimer = setTimeout(() => {
+      startTimer = null
+      managed.state = 'running'
+      managed.port = 38121
+      // The server that comes up runs the launcher on disk now.
+      managed.restartPending = false
+      managed.log = ['loading model …', 'Modell geladen, Server bereit']
+      followManagedServer(`http://127.0.0.1:${managed.port}`)
+    }, 800)
+  }
+
+  /*
+   * The pending load, so a stop can cancel it. A stopped server's process is killed and
+   * its ready timer never fires, so a fixture that let the timer run would report a
+   * server coming up about a second after it was stopped — a state the backend cannot
+   * produce, and one that would make the picker's Stop look like it did nothing while
+   * the model was still loading.
+   */
+  function cancelManagedStart() {
+    if (startTimer) {
+      clearTimeout(startTimer)
+      startTimer = null
     }
   }
 
@@ -2471,8 +2531,10 @@ Verfügbare Tools: {{tool_list}}`,
         models: { ...(runtime.models || {}), [backendId]: copy(mm) },
       }
       if (!mm.enabled && managed.state !== 'stopped') {
+        cancelManagedStart()
         managed.state = 'stopped'
         managed.port = 0
+        managed.modelPath = ''
         // Switching a model off stops it, and a stopped server is not reachable
         // any more — the address stays as the last one, which is what the row
         // then reports as refused.
@@ -2481,34 +2543,41 @@ Verfügbare Tools: {{tool_list}}`,
       return Promise.resolve(null)
     },
     StartManagedModel: (backendId) => {
-      const mm = ((settings.runtime || {}).models || {})[backendId] || {}
-      if (!managed.installed) {
-        managed.state = 'failed'
-        managed.error = 'llama-server ist noch nicht installiert'
-        return Promise.resolve(null)
+      startManagedServer(backendId)
+      return Promise.resolve(null)
+    },
+    // The chat picker's start. The entry is written first — the file the click named, with
+    // everything else the entry already had, because a context size or an offload choice
+    // made in Settings is not something a pick in the chat says anything about. An entry
+    // that does not exist yet arrives with the panel's own defaults, which is what makes a
+    // first start from the chat reachable at all.
+    StartManagedModelWith: (backendId, mm) => {
+      const runtime = settings.runtime || {}
+      const stored = ((runtime.models || {})[backendId] || {})
+      settings.runtime = {
+        ...runtime,
+        models: { ...(runtime.models || {}), [backendId]: { ...copy(stored), ...copy(mm) } },
       }
-      if (!mm.modelPath) {
-        managed.state = 'failed'
-        managed.error = 'kein Modell ausgewählt'
-        return Promise.resolve(null)
+      // Switching the entry off stops a server that was up, the way SetManagedModel does;
+      // a start on a switched-on entry only replaces the file. The picker keeps whatever
+      // `enabled` the entry had, so this is the same rule the Settings row follows.
+      if (!mm.enabled && managed.state !== 'stopped') {
+        cancelManagedStart()
+        managed.state = 'stopped'
+        managed.modelPath = ''
+        managed.port = 0
+        followManagedServer('')
       }
-      managed.error = ''
-      managed.state = 'starting'
-      managed.log = ['llama-server gestartet', 'loading model …']
-      managed.port = 0
-      setTimeout(() => {
-        managed.state = 'running'
-        managed.port = 38121
-        // The server that comes up runs the launcher on disk now.
-        managed.restartPending = false
-        managed.log = ['loading model …', 'Modell geladen, Server bereit']
-        followManagedServer(`http://127.0.0.1:${managed.port}`)
-      }, 800)
+      startManagedServer(backendId)
       return Promise.resolve(null)
     },
     StopManagedModel: () => {
+      // A load that is still coming in is called off with the process, not left to
+      // report a server ready after the stop.
+      cancelManagedStart()
       managed.state = 'stopped'
       managed.port = 0
+      managed.modelPath = ''
       managed.log = []
       followManagedServer('')
       return Promise.resolve(null)

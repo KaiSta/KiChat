@@ -510,7 +510,101 @@ runs themselves has no supervisor, so no loaded model is reported for it. The pr
 `/props` reading (§2) is what describes that case, and it is a different question — it is about
 the backend's listing, not about a file in the folder row.
 
-### 3.11 A limitation, not a bug
+### 3.11 Starting a model from the chat
+
+**A stopped managed server answers with nothing.** That is not a fault — `/v1/models` of a
+process that is not running is empty — but it had a consequence the chat had no answer for:
+the model picker lists what the backends report, so with no server up the row is simply
+absent, and the only way to a local model was Settings → Backends, naming the file there,
+waiting out the load, and coming back to pick the model. Three screens for one intention, in
+the panel whose whole job is picking a model.
+
+The picker carries that intention itself now, as a collapsed section at the head of its list
+(`LocalModelStart`, [frontend/src/components/ModelSwitcher.tsx:908](frontend/src/components/ModelSwitcher.tsx#L908)):
+the entry KiChat runs (`kind == "llamacpp"`, the one kind whose server this app starts and
+stops), the folder it would read — `ScanModelFolder("")`, so the same folder §3.10 describes,
+loaded when the section is opened rather than when the panel is — and, on a click, the GGUFs
+in it with their sizes. The state rides in the header while a load runs, because a load is
+minutes long and a header that said nothing would read as a click that did nothing.
+
+**The two clicks are not the same click.** A file that is not loaded goes through
+`StartManagedModelWith` ([api.go:1293](api.go#L1293)): the stored entry with another
+`modelPath` and never a fresh entry, so a context size, a KV cache type or an offload choice
+made in Settings survives a pick in the chat. The chat is then re-pointed at it **after** the
+server reports `running` — a switch made while the weights are still coming in fails the next
+request — and through the same path a click on a model in the list takes, including the
+"next message only" checkbox, which is a choice the user already made about how a switch is
+to be applied. A file that *is* already loaded is a selection, not a start: `Server.Start`
+calls `Stop()` first (§3.5), so starting the file in memory would be minutes of loading for
+the file the server is already serving. Measured in the harness: clicking the loaded row
+called no start binding at all and the port stayed what it was.
+
+**The start writes the entry, and that is the point.** Starting a file without storing it
+would leave the chat on a model the panel does not name and the next launch on another one,
+so a pick is a selection with a side effect: the entry KiChat would start at launch becomes
+the file that was picked. `enabled` is left as it is — which is why a first pick from the
+chat, an entry that does not exist yet, sends the panel's own defaults with `enabled: false`
+(`defaultManagedModel`, [frontend/src/lib/api.ts:151](frontend/src/lib/api.ts#L151)) and so
+starts the model *now* without promising to start it on every launch. That switch stays a
+Settings decision, and the entry's row there shows it.
+
+The write is the reason a start from the chat re-reads the settings rather than only the
+model list (`refreshSettings`, once when the file is stored and once when the server comes
+up): the Settings panel renders the store's copy of the blob, and its Save writes that copy
+back, so a stale one would put the previous file — and the previous server address, which
+`onManagedState` rewrites on every start — back over what the pick had stored. Measured in
+the harness: after starting Qwen3.8 from the picker, the panel's **Selected model** row names
+that file, with `in use` on its row in the folder listing.
+
+**The window is checked exactly as a click checks it** — the same `GetBudget` comparison the
+picker makes — with one difference: a start that fits commits at once, because the user has
+already named the file, while one that does not stops at the `Switch and compact` panel with
+the numbers in front of it rather than failing on the next request.
+
+A refusal is reported where it happened: the section keeps the backend's own message under
+the list, and the rows come back enabled, so the file is one click away. Nothing is stored
+by a start that failed, because a stored path that is not there fails every later start
+too — including the automatic one at launch. `TestStartingFromThePickerNamesTheFileWithoutEnablingIt`,
+`TestASecondPickRestartsOntoTheOtherFile` and `TestOnlyTheEntryKiChatRunsCanBeStartedThisWay`
+([start_with_model_test.go](start_with_model_test.go)) pin the three
+that matter: the file is stored and `enabled` is not touched, a second pick restarts onto the
+other file rather than storing a path the process is not serving, and an entry KiChat only
+talks to — LM Studio — is refused with its name in the message rather than silently started.
+
+**And the same section gives the memory back.** A managed server holds the whole file in
+memory, and the panel whose click put it there is where releasing that belongs: the state
+line at the top of the expanded section carries the state word, the file the process is
+serving, and a **Stop** — `StopManagedModel` ([api.go:1348](api.go#L1348)), the binding
+Settings' own Stop button calls, so there is no second way to end a process. It is offered
+whenever the state is not `stopped`, which is what makes it the way out of a load begun by
+mistake as well: an abort is the same stop, and a 27B file takes minutes to come in.
+
+**A stop writes nothing.** The entry keeps its file and its `enabled` flag, which is what
+makes a stopped model one click from running again; `enabled` stays a Settings decision
+about the next launch, and stopping a model is not that decision. What changes is the state
+line's own reading: the mark, the port and the address go with the process, and the
+"in use" badge in the file list goes with them. `TestStoppingFromThePickerKeepsTheEntryStartable`
+([stop_model_test.go](stop_model_test.go)) drives a real picker start and then a stop on the
+stand-in launcher: the entry still names the file with `enabled` untouched, the loaded model
+and the port are gone, a second stop answers nil — the stale reading a button can be offered
+on — and the panel's own start works on what survived.
+`TestStoppingSomethingThatIsNotRunningIsNotAnError` covers the never-started entry and an
+unknown backend id, both of which have to answer without an error and without touching
+anything.
+
+The chat does not move. The conversation keeps naming the model it was using and its dot
+reads as *not loaded*, exactly as after a stop in Settings — the stop is about the server's
+memory, not about which model the chat is set to.
+
+**The section polls while anything is loading, not only while its own click is.** The state
+line is drawn from `GetRuntimeStatus`, and a load started in Settings — or one whose panel
+was closed and opened again — reaches `running` in the picker rather than freezing at the
+reading it opened with. Measured in the harness: a click on a file puts `loading …` on the
+row and in the header within 300 ms, **Stop** beside them; pressing it mid-load leaves the
+fixture `stopped` with every row enabled again, which is the pending ready timer being
+cancelled the way a killed process cancels it.
+
+### 3.12 A limitation, not a bug
 
 **A managed server has no API key and allows all origins**, which its own log points out. It
 binds to `127.0.0.1` only, so this is a local-origin exposure rather than a network one; it is
@@ -587,6 +681,7 @@ reports it in the panel — `On Vulkan0: 65 of 65 layers on the GPU`.
 | [api.go:1114](api.go#L1114) | `ModelFolders` | the remembered folders first, then LM Studio's, one entry per path |
 | [api.go:290](api.go#L290) | `ManagedStatus.LoadedModel` | the file the running server was started with; empty unless one is running |
 | [api.go:1184](api.go#L1184) | `defaultModelDir` | which folder an empty field means |
+| [api.go:1293](api.go#L1293) | `StartManagedModelWith` | the chat picker's start: the stored entry with another file, checked, then started |
 | [internal/runtime/version.go:26](internal/runtime/version.go#L26) | `BinaryVersion` | `--version`, with a deadline and `WaitDelay` |
 | [api.go:416](api.go#L416) | `CheckLlamaRuntimeUpdate` | one request, cached |
 | [api.go:761](api.go#L761) | `GetRuntimeStatus` | reports the cached copy; clears before start |
@@ -648,6 +743,14 @@ from testable: the process and the readiness poll are real, and no python, netca
 downloaded archive is needed. Nothing takes that path unless the variable is set, and a test
 that skips on Windows (the launcher is a shell script) is the only user of it.
 
+The same stand-in is what lets the picker's start
+([start_with_model_test.go](start_with_model_test.go)) and the loaded mark
+([loaded_model_test.go](loaded_model_test.go)) be asserted on a server that is really running
+rather than on a stub: the file is written to a temporary directory, the start goes through
+`Server.Start`, and what is checked is the *status* — the stored path, `enabled` untouched, the
+`LoadedModel` of a running entry, the second pick that replaces it, and the refusal of an entry
+KiChat only talks to.
+
 ### The harness fixtures
 
 The mock-bridge harness (`AGENTS.md` explains what it is) carries the runtime's states as
@@ -675,6 +778,36 @@ a third path (`/media/usb/models`) that holds models — a pick that landed on a
 in the row would neither add a chip nor scan anything. `ModelFolders` in the mock is computed
 from `settings.runtime.modelDirs` the way the backend computes it from the blob, so picking,
 forgetting and saving all move the chips rather than only the draft.
+
+The loaded mark needs one flag and one click: `?fit=fits` installs a build and selects the
+Ministral file, and pressing **Start** then loads it — so the listing carries the mark while
+the row is `starting` and again once it is `running`. Clicking another file in the listing
+produces the state the mark exists for, since a pick does not restart anything: the checkmark
+and the header move to the new file, the mark stays on the loaded one, and the line under the
+state badge names it.
+
+The chat's picker is a second screen over the same two states, and `?fit=fits` is the flag for
+it as well: the local section at the head of the picker lists the three GGUFs of the folder in
+use, a click puts `loading …` on the row and the state in the section header, and once the mock
+finishes its 800 ms start the file carries `in use` — while the panel closes, the chat's own
+button moves to that file, and the Settings row's **Selected model** names it (the app re-reads
+the settings the start wrote, so a Save there cannot put the old file back). Reopening the
+panel shows the state in the collapsed header (`running`) and, expanded, the state line with
+its **Stop**: pressing it clears the badge, the state line and the `in use` mark, leaves the
+entry naming the file, and drops the catalogue row the running server had — while the chat's
+own button keeps naming the model, without a window number. Pressing **Stop** while the
+fixture's 800 ms load is still running is the abort path: the mock cancels the pending ready
+timer the way a killed process does (`cancelManagedStart`), because a fixture that let it fire
+would report a server coming up a second after it was stopped, which is a state the backend
+cannot produce. The mock also writes the backend's address only on the way up, matching
+`onManagedState`, which returns early for anything but a running server — so a stopped row keeps
+the last address and reads as refused rather than blank. With no flag at all the launcher is missing and the section says so
+(`No llama-server yet — download one, or name a path.`) instead of offering files, which is the
+state a fresh install is in. The mock's `StartManagedModelWith` stores the entry and then calls
+the same `startManagedServer` the Settings row's start calls, so a picker pick cannot land in a
+state the backend would not produce. One caveat when reading that page: the catalogue's
+`LLAMACPP` group carries a permanently `loaded` `Qwen3-8B-Q4_K_M` row, a label fixture for
+"an id is a path", so it is not the managed server's state and does not move with it.
 
 ---
 

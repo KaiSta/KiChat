@@ -130,6 +130,8 @@ export function StartImageServer():Promise<void>;
 
 export function StartManagedModel(arg1:string):Promise<void>;
 
+export function StartManagedModelWith(arg1:string,arg2:config.ManagedModel):Promise<void>;
+
 export function StartModelCheck(arg1:string):Promise<main.ModelCheckStatus>;
 
 export function StopGeneration(arg1:string):Promise<boolean>;

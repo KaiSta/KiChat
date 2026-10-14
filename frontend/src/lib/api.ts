@@ -125,16 +125,40 @@ export namespace store {
 }
 
 /**
- * The bound backend API. Raw bindings are used as-is, except for the two calls
- * that take a whole settings or chat object: those are converted back into the
- * generated class instances, whose `convertValues` helper does the nested
- * conversion on the way in.
+ * The bound backend API. Raw bindings are used as-is, except for the calls that take
+ * a whole settings, chat or managed-model object: those are converted back into the
+ * generated class instances, whose `convertValues` helper does the nested conversion
+ * on the way in.
  */
 export const App = {
   ...WailsApp,
   SaveSettings: (settings: config.Settings) =>
     WailsApp.SaveSettings(Gen.config.Settings.createFrom(settings)),
   UpdateChat: (c: store.Chat) => WailsApp.UpdateChat(Gen.store.Chat.createFrom(c)),
+  StartManagedModelWith: (backendID: string, mm: config.ManagedModel) =>
+    WailsApp.StartManagedModelWith(backendID, Gen.config.ManagedModel.createFrom(mm)),
+}
+
+/**
+ * What a managed model entry starts as, for a backend that has none yet.
+ *
+ * One function rather than a literal in each place, because the two places have to
+ * agree: the Settings panel shows these values for an entry that does not exist, and
+ * the chat's picker sends them when it starts a local model for the first time. Two
+ * copies would drift, and the drift would show up as a model that runs with one
+ * context size and reports another the moment the panel is opened.
+ */
+export function defaultManagedModel(): config.ManagedModel {
+  return {
+    enabled: false,
+    modelPath: '',
+    ctxSize: 8192,
+    flashAttention: 'auto',
+    cacheTypeK: 'f16',
+    cacheTypeV: 'f16',
+    offload: 'auto',
+    extraArgs: '',
+  }
 }
 
 /* --------------------------------------------------------------------------

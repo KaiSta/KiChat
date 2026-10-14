@@ -1270,6 +1270,64 @@ func (a *App) StartManagedModel(backendID string) error {
 	return a.startManagedModel(backendID)
 }
 
+// StartManagedModelWith starts the managed server of one backend on the entry it is
+// given, which is how the chat's model picker starts a local model: a GGUF that is
+// already on disk should be one click from the conversation, and walking to
+// Settings → Backends to name the file there and then coming back to choose the model
+// is the walk this exists to save.
+//
+// The entry is the stored one with another `modelPath` — the context size, the flash
+// attention, the KV cache types, the offload mode and the extra arguments are the
+// user's configuration of that entry and a pick made elsewhere says nothing about them
+// — or, for an entry that does not exist yet, the defaults the panel shows for a new
+// one, so a first start from the picker lands in the state a first start from Settings
+// does. `enabled` is taken as given, and the picker passes what is stored: an enabled
+// entry is loaded on every app start, which is a decision the checkbox makes, not one a
+// start should make on the user's behalf.
+//
+// Two things are checked before anything is written, because both are cheap here and
+// expensive later: the entry must be of the kind KiChat runs itself — any other kind is
+// addressed over HTTP and has no command line to build — and the file must exist, since
+// a stored path that is not there fails every start after this one, including the
+// automatic one at launch.
+func (a *App) StartManagedModelWith(backendID string, mm config.ManagedModel) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	backendID = strings.TrimSpace(backendID)
+	mm.ModelPath = strings.TrimSpace(mm.ModelPath)
+	if backendID == "" || mm.ModelPath == "" {
+		return errors.New("kein Modell ausgewählt")
+	}
+	var entry llm.BackendConfig
+	found := false
+	for _, b := range a.Settings().Backends {
+		if b.ID == backendID {
+			entry, found = b, true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("unbekanntes Backend: %s", backendID)
+	}
+	// The kind `internal/llm`'s registry builds a llama.cpp provider for: the one kind
+	// whose server this app starts, stops and configures itself.
+	if entry.Kind != "llamacpp" {
+		return fmt.Errorf("%s wird nicht von KiChat gestartet", entry.Name)
+	}
+	if info, err := os.Stat(mm.ModelPath); err != nil || info.IsDir() {
+		return fmt.Errorf("Modell nicht gefunden: %s", mm.ModelPath)
+	}
+
+	// Through SetManagedModel rather than around it, so the one place that writes a
+	// managed entry — its clamps, its sanitising save, the service rebuild that gives
+	// the entry its supervisor — stays one place.
+	if err := a.SetManagedModel(backendID, mm); err != nil {
+		return err
+	}
+	return a.startManagedModel(backendID)
+}
+
 // StartImageServer starts the managed picture server, or restarts it when it is already up.
 //
 // There is one call rather than a start and a restart because sd-server loads one pipeline at

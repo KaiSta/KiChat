@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   App,
+  defaultManagedModel,
+  folderName,
+  formatBytes,
   formatNumber,
   formatPercentSafe,
   modelFolder,
@@ -9,6 +12,7 @@ import {
   type chat,
   type llm,
   type main,
+  type runtime,
 } from '../lib/api'
 import { useStore } from '../store'
 
@@ -315,6 +319,7 @@ export function ModelSwitcher() {
   const updateChat = useStore((s) => s.updateChat)
   const refreshHealth = useStore((s) => s.refreshHealth)
   const setNextModel = useStore((s) => s.setNextModel)
+  const settings = useStore((s) => s.settings)
 
   const [open, setOpen] = useState(false)
   const [filter, setFilter] = useState('')
@@ -326,6 +331,21 @@ export function ModelSwitcher() {
   // pushed, because a sweep of eighty models outlives any call it could be
   // attached to — the same reason the runtime panel polls a download.
   const [check, setCheck] = useState<main.ModelCheckStatus | null>(null)
+  // The managed server's own status, read while the panel is open. It is what says
+  // which file a *running* llama-server loaded and whether a launcher is installed —
+  // the catalogue this panel lists cannot answer either question, because a stopped
+  // managed server answers with nothing at all. That is the whole reason the local
+  // section below starts a model rather than only offering one.
+  const [runtimeStatus, setRuntimeStatus] = useState<main.RuntimeStatus | null>(null)
+  const [statusError, setStatusError] = useState('')
+  // The start that is being waited for, and the failure of one that is over. Per
+  // backend, because more than one managed entry can be configured.
+  const [localStart, setLocalStart] = useState<{ backend: string; path: string } | null>(null)
+  // The stop that is in flight, by backend id: the button that asked for it says so and
+  // cannot be pressed twice, because a second stop of a server that is on its way down
+  // is a click with nothing left to do.
+  const [localStop, setLocalStop] = useState('')
+  const [localErrors, setLocalErrors] = useState<Record<string, string>>({})
   const boxRef = useRef<HTMLDivElement>(null)
 
   const current = useMemo(
@@ -521,6 +541,215 @@ export function ModelSwitcher() {
     }
   }
 
+  /* -----------------------------------------------------------------------
+   * Starting a local model from here
+   * -------------------------------------------------------------------------
+   *
+   * The managed llama.cpp server is reached through the same registry as every other
+   * backend, and while it is stopped it answers with nothing: the list above has no row
+   * for it. Starting one therefore used to mean leaving the conversation for Settings →
+   * Backends, naming the file there, waiting for the load, and coming back to pick the
+   * model — three screens for one intention, in the panel whose whole job is picking a
+   * model. The section below is that intention, in the place it belongs.
+   */
+
+  /**
+   * The entries KiChat runs itself, which are the only ones a model can be started on.
+   * Every other kind is addressed over HTTP: there is no server to start and no folder
+   * to list.
+   */
+  const localBackends = (settings?.backends ?? []).filter((b) => b.kind === 'llamacpp')
+
+  /** The runtime's row for one entry, or undefined while the status has not answered. */
+  const localStatus = (backendID: string) =>
+    (runtimeStatus?.models ?? []).find((m) => m.backendId === backendID)
+
+  // A row that is still loading, whoever started it. The poll below follows the status
+  // rather than only the click this panel made: a load begun in Settings, or one that
+  // was abandoned and picked back up, has to move here too — the state line it feeds is
+  // what carries the button that can call it off, and a reading frozen at "loading …"
+  // would offer to stop a server that came up minutes ago.
+  const localStarting = (runtimeStatus?.models ?? []).some((m) => m.state === 'starting')
+
+  useEffect(() => {
+    if (!open) return
+    let live = true
+    const read = () =>
+      App.GetRuntimeStatus()
+        .then((st) => {
+          if (!live) return
+          setRuntimeStatus(st)
+          setStatusError('')
+        })
+        .catch((err) => {
+          // Said on the section instead of swallowed. Without an answer the rows would
+          // read as "nothing is loaded", which is a statement about a server this app
+          // could not see — and the start button they carry would be a guess.
+          if (live) setStatusError(String(err))
+        })
+    void read()
+    // Polled only while a load is being waited for. A load is minutes long and has no
+    // event of its own to arrive on, while an idle picker asking twice a second for the
+    // rest of the session would be a request per second to learn something that changed
+    // when the user pressed a button.
+    if (!localStart?.backend && !localStarting) return
+    const id = window.setInterval(() => void read(), 1200)
+    return () => {
+      live = false
+      window.clearInterval(id)
+    }
+  }, [open, localStart?.backend, localStarting])
+
+  /**
+   * Switches the chat to a model that has come up.
+   *
+   * It goes through the same path a click on a model in the list takes, including the
+   * "next message only" checkbox: that is a choice the user already made about how a
+   * switch is to be applied, and a start is not the moment to overrule it. The window
+   * check is the same one as well — a switch into a smaller window than the conversation
+   * uses fails on the next request rather than here — but a start that fits is committed
+   * straight away (the user has already said which file they want by clicking it), and
+   * one that does not is left as a decision with the numbers in front of it.
+   */
+  const finishLocalStart = async (backendID: string, path: string) => {
+    try {
+      await refreshModels(true)
+      await refreshHealth()
+      // Re-read the settings a second time, because the backend has by now written more
+      // than the entry: when a managed server comes up, its address goes into that
+      // backend's row and the row is switched on (onManagedState), so the store's copy
+      // is stale again. Pressing Save in Settings from a stale copy would put the old
+      // address back on a server that is answering at the new one.
+      await useStore.getState().refreshSettings()
+      const model = { backend: backendID, id: path } as llm.ModelInfo
+      const chatId = chatState?.chat.id
+      let budget: chat.ContextBudget | null = null
+      if (chatId) {
+        budget = await App.GetBudget(chatId, backendID, path).catch(() => null)
+      }
+      if (budget && budget.limit > 0 && budget.projected > budget.limit) {
+        setCandidate(model)
+        setPreview(budget)
+        return
+      }
+      await commit(model, false)
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    }
+  }
+
+  /**
+   * What a start becomes.
+   *
+   * The chat is pointed at the model only once the server says it is up. A switch made
+   * while the weights are still coming in would fail the next request, and a load takes
+   * long enough that a silent switch would look like nothing happened. A failure lands
+   * on the section that asked for it, where the file is still one click away.
+   */
+  useEffect(() => {
+    if (!localStart) return
+    const row = localStatus(localStart.backend)
+    if (!row) return
+    if (row.state === 'running') {
+      const started = localStart
+      setLocalStart(null)
+      void finishLocalStart(started.backend, started.path)
+      return
+    }
+    if (row.state === 'failed') {
+      const failed = localStart
+      setLocalStart(null)
+      setLocalErrors((prev) => ({
+        ...prev,
+        [failed.backend]: row.error || t('model.localFailed'),
+      }))
+    }
+  }, [runtimeStatus, localStart])
+
+  /**
+   * Loads one file into the managed server and remembers it as the entry's model.
+   *
+   * The entry is written through the same call Settings uses, so the picker's choice is
+   * the stored choice: the panel and the chat cannot end up naming different files, and
+   * an entry that is switched on starts this model on the next launch too.
+   */
+  const startLocal = async (backendID: string, path: string) => {
+    setLocalErrors((prev) => ({ ...prev, [backendID]: '' }))
+    const row = localStatus(backendID)
+    if (row?.state === 'running' && row.loadedModel === path) {
+      // Already in memory: this is a selection, not a start. Reloading a model that is
+      // up would be minutes of loading for a file the server is already serving.
+      await finishLocalStart(backendID, path)
+      return
+    }
+    try {
+      const stored = settings?.runtime?.models?.[backendID]
+      // The entry's own values are kept and only the file moves: a start from the picker
+      // must not quietly reset a context size or an offload choice made in Settings.
+      // Defaults come from the one place that defines them for an entry that has none.
+      await App.StartManagedModelWith(backendID, {
+        ...defaultManagedModel(),
+        ...stored,
+        modelPath: path,
+      })
+      // The backend wrote the entry, so the store's copy of the settings is stale by
+      // definition — and the Settings panel reads that copy, where its Save would write
+      // the previous file back and undo the pick. The same reason the installer re-reads
+      // when its download finishes behind a call that has already returned.
+      await useStore.getState().refreshSettings()
+      // Read once right away so the row says "loading" rather than keeping the file
+      // looking idle until the first poll comes back.
+      setRuntimeStatus(await App.GetRuntimeStatus())
+      setLocalStart({ backend: backendID, path })
+    } catch (err) {
+      setLocalErrors((prev) => ({ ...prev, [backendID]: String(err) }))
+    }
+  }
+
+  /**
+   * Releases a model that is up, and calls off one that is still coming in.
+   *
+   * The mirror of `startLocal`, and it rests on the same argument: a managed server holds
+   * the whole file in memory, and the panel that put it there by a click is the panel
+   * where giving that memory back belongs — walking to Settings → Backends to stop what
+   * the chat just started would be the same walk the start exists to save. It is also the
+   * only way out of a load begun by mistake: a 27B file takes minutes to come in, and the
+   * section that waits for it is the one that has to be able to call it off.
+   *
+   * Nothing is written. The entry keeps its file, so a model that was stopped is one
+   * click from running again — the difference from `SetManagedModel`, where switching an
+   * entry off is a decision about the next launch. What does change is the address
+   * `onManagedState` wrote when the server came up: the store's copy of it is stale
+   * either way, and a health probe now reports that row refused, which is what a stopped
+   * server is.
+   */
+  const stopLocal = async (backendID: string) => {
+    setLocalErrors((prev) => ({ ...prev, [backendID]: '' }))
+    setLocalStop(backendID)
+    try {
+      await App.StopManagedModel(backendID)
+      // A start this panel was waiting for is over and produced no server: leaving it
+      // set would keep every row disabled and the header busy for a load that is gone.
+      setLocalStart((prev) => (prev?.backend === backendID ? null : prev))
+      // Read rather than assume. A failed start keeps saying "failed" — `markStopped`
+      // does not downgrade it — and that is a fact the state line has to carry.
+      try {
+        setRuntimeStatus(await App.GetRuntimeStatus())
+      } catch {
+        // The section keeps the reading it has; opening it again reads a fresh one.
+      }
+      // The catalogue loses the row it had, because a stopped server answers with
+      // nothing, and the health probe has to stop reporting the port it was on.
+      void refreshModels(true)
+      void refreshHealth()
+      void useStore.getState().refreshSettings()
+    } catch (err) {
+      setLocalErrors((prev) => ({ ...prev, [backendID]: String(err) }))
+    } finally {
+      setLocalStop('')
+    }
+  }
+
   // The id is what the app stores and what the tooltip shows; the button reads as
   // the model's name, because that is what the conversation is with.
   const fullId = current?.id ?? chatState?.chat.model ?? ''
@@ -606,6 +835,24 @@ export function ModelSwitcher() {
           </label>
 
           <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+            {/* Before the catalogue, because it is the section that *has* something to
+                offer when the catalogue is empty: a stopped managed server answers with
+                no models at all, and "No models found. Is LM Studio or Ollama running?"
+                was the whole answer on a machine with a folder full of GGUFs. */}
+            {localBackends.map((b) => (
+              <LocalModelStart
+                key={b.id}
+                backend={b}
+                status={localStatus(b.id)}
+                installed={!!runtimeStatus?.installed}
+                statusError={statusError}
+                busyPath={localStart?.backend === b.id ? localStart.path : ''}
+                stopping={localStop === b.id}
+                error={localErrors[b.id] ?? ''}
+                onStart={(path) => void startLocal(b.id, path)}
+                onStop={() => void stopLocal(b.id)}
+              />
+            ))}
             {grouped.length === 0 && <div className="p-3 text-center faint">{t('model.noModels')}</div>}
             {grouped.map(([backend, list]) => (
               <div key={backend} className="mb-2">
@@ -709,6 +956,211 @@ export function ModelSwitcher() {
                   {t('common.cancel')}
                 </button>
               </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The managed server's own models, startable from the picker.
+ *
+ * Collapsed until it is wanted: the list above is what a chat is chosen from, and a folder
+ * of dozens of GGUFs shown open would bury it. The header carries the two facts that
+ * decide whether the click is worth making — which folder is in use and how many files are
+ * in it — plus the current state while a load runs, so a user looking at this panel is not
+ * left wondering whether their last click did anything.
+ */
+function LocalModelStart({
+  backend,
+  status,
+  installed,
+  statusError,
+  busyPath,
+  stopping,
+  error,
+  onStart,
+  onStop,
+}: {
+  backend: llm.BackendConfig
+  /** The runtime's row for this entry; undefined while the status has not answered. */
+  status: main.ManagedStatus | undefined
+  installed: boolean
+  /** Why the runtime status could not be read, empty when there is no such failure. */
+  statusError: string
+  /** The file whose load is being waited for, empty when none is. */
+  busyPath: string
+  /** A stop of this entry is in flight. */
+  stopping: boolean
+  /** The last failed start on this entry, empty when there is none. */
+  error: string
+  onStart: (path: string) => void
+  onStop: () => void
+}) {
+  const t = useStore((s) => s.t)
+  const [open, setOpen] = useState(false)
+  const [scan, setScan] = useState<runtime.ModelFolderScan | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const [scanError, setScanError] = useState('')
+
+  // Read when it is opened rather than when the panel is: a folder with hundreds of GGUFs
+  // in it is a walk of the disk, and most visits to this panel are about choosing between
+  // models that are already reachable. The empty folder asks the backend for the one
+  // KiChat would use — the same folder Settings lists, and the one a start from here keeps
+  // using.
+  useEffect(() => {
+    if (!open) return
+    let live = true
+    setScanning(true)
+    App.ScanModelFolder('')
+      .then((found) => {
+        if (!live) return
+        // `files` is read as an array the moment it arrives: a null one would blank the
+        // view instead of reporting "no models here".
+        setScan({ ...found, files: found?.files ?? [] })
+        setScanError('')
+      })
+      .catch(() => {
+        // "That folder is not there" is the useful half of this failure; which syscall
+        // said so is not, and the Go error for it is not a sentence in three languages.
+        if (!live) return
+        setScan(null)
+        setScanError(t('settings.managed.folderMissing'))
+      })
+      .finally(() => {
+        if (live) setScanning(false)
+      })
+    return () => {
+      live = false
+    }
+  }, [open])
+
+  const files = scan?.files ?? []
+  const loaded = status?.loadedModel ?? ''
+  /** The three states the header and the state line share a word for. */
+  const state = status?.state ?? 'stopped'
+
+  return (
+    <div className="mb-2">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] hover:bg-[var(--surface-2)]"
+        title={t('model.localHint')}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="faint shrink-0">{open ? '▾' : '▸'}</span>
+        <span className="shrink-0">{t('model.local')}</span>
+        {/* The entry the files would be started on, since more than one managed entry
+            can be configured and they need not share a build or a port. */}
+        <span className="min-w-0 flex-1 truncate faint">{backend.name}</span>
+        {scan?.dir && (
+          <span className="faint shrink-0" title={scan.dir}>
+            {folderName(scan.dir)}
+          </span>
+        )}
+        {files.length > 0 && (
+          <span className="faint shrink-0">
+            {formatNumber(files.length)}{' '}
+            {t(files.length === 1 ? 'settings.managed.folderModel' : 'settings.managed.folderModels')}
+          </span>
+        )}
+        {/* Collapsed or open, the section says whether the server is up: a file list
+            alone would read the same whether the model is in memory or not, and this
+            row is the only place outside Settings that knows about the process at all. */}
+        {state !== 'stopped' && (
+          <span
+            className={`badge shrink-0 ${state === 'running' ? 'badge-ok' : state === 'failed' ? 'badge-danger' : ''}`}
+            title={status?.error || undefined}
+          >
+            {t(`settings.managed.state.${state}`)}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="rounded p-1" style={{ background: 'var(--surface-2)' }}>
+          {/* The state line, and the one button that changes it. A load can be called
+              off and a model can be released without leaving the picker — the same
+              argument the start above rests on: the section that began it is where it
+              has to be undoable. `stopped` offers nothing here, because there is
+              nothing left to stop. */}
+          {state !== 'stopped' && (
+            <div className="mb-1 flex items-center gap-2 px-2 py-1.5">
+              <span
+                className={`badge shrink-0 ${state === 'running' ? 'badge-ok' : state === 'failed' ? 'badge-danger' : ''}`}
+                title={status?.error || undefined}
+              >
+                {t(`settings.managed.state.${state}`)}
+              </span>
+              <span className="mono min-w-0 flex-1 truncate text-[11px] faint" title={loaded || undefined}>
+                {loaded ? folderName(loaded) : ''}
+              </span>
+              <button
+                type="button"
+                className="btn btn-sm shrink-0"
+                disabled={stopping}
+                title={t('model.localStopHint')}
+                onClick={onStop}
+              >
+                {stopping ? '…' : t('settings.managed.stop')}
+              </button>
+            </div>
+          )}
+          {statusError ? (
+            <div className="px-1 py-1 text-[11px]" style={{ color: 'var(--danger)' }}>
+              {statusError}
+            </div>
+          ) : !installed ? (
+            <div className="px-1 py-1 text-[11px] faint">{t('settings.managed.noBinary')}</div>
+          ) : scanning ? (
+            <div className="px-1 py-1 text-[11px] faint">{t('settings.managed.folderScanning')}</div>
+          ) : scanError ? (
+            <div className="px-1 py-1 text-[11px] faint">{scanError}</div>
+          ) : files.length === 0 ? (
+            <div className="px-1 py-1 text-[11px] faint">
+              {/* A folder that is known and empty and one that was never chosen are
+                  different answers, and the first one is the common case on a machine
+                  whose models live somewhere KiChat does not know about. */}
+              {scan?.dir ? t('settings.managed.folderEmpty') : t('model.localNoFolder')}
+            </div>
+          ) : (
+            <>
+              {busyPath && <div className="px-1 py-1 text-[11px] faint">{t('model.localLoading')}</div>}
+              {files.map((f) => (
+                <button
+                  key={f.path}
+                  type="button"
+                  // One at a time: a second start would stop the first load and begin
+                  // another, which is minutes of the user's time spent twice.
+                  disabled={!!busyPath}
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] hover:bg-[var(--surface-3)] disabled:opacity-60"
+                  title={t('model.localRowHint')}
+                  onClick={() => onStart(f.path)}
+                >
+                  <span className="min-w-0 flex-1 truncate mono" title={f.path}>
+                    {f.name}
+                  </span>
+                  {busyPath === f.path && (
+                    <span className="badge shrink-0">{t('settings.managed.state.starting')}</span>
+                  )}
+                  {busyPath !== f.path && f.path === loaded && (
+                    <span className="badge badge-ok shrink-0">{t('settings.managed.folderLoaded')}</span>
+                  )}
+                  <span className="faint shrink-0">{formatBytes(f.size)}</span>
+                </button>
+              ))}
+              {scan?.truncated && (
+                <div className="px-1 py-1 text-[11px] faint">
+                  {t('settings.managed.folderTruncated')}
+                </div>
+              )}
+            </>
+          )}
+          {error && (
+            <div className="px-1 py-1 text-[11px]" style={{ color: 'var(--danger)' }}>
+              {error}
             </div>
           )}
         </div>

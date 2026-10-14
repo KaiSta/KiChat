@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   App,
+  defaultManagedModel,
   folderName,
   formatBytes,
   formatNumber,
@@ -386,15 +387,12 @@ function LocalModelSection({
   // poll that found the same thing again.
   const lastState = useRef<string | null>(null)
   const saved = draft.runtime?.models?.[backend.id]
+  // The stored entry, or what a new one starts as — the same defaults the chat's
+  // picker sends when it starts a local model for the first time (see
+  // defaultManagedModel), so a model started from either screen is configured alike.
   const [model, setModel] = useState<config.ManagedModel>(() => ({
-    enabled: saved?.enabled ?? false,
-    modelPath: saved?.modelPath ?? '',
-    ctxSize: saved?.ctxSize ?? 8192,
-    flashAttention: saved?.flashAttention ?? 'auto',
-    cacheTypeK: saved?.cacheTypeK ?? 'f16',
-    cacheTypeV: saved?.cacheTypeV ?? 'f16',
-    offload: saved?.offload ?? 'auto',
-    extraArgs: saved?.extraArgs ?? '',
+    ...defaultManagedModel(),
+    ...saved,
   }))
 
   const refresh = async () => {
