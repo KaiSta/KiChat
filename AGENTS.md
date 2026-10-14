@@ -368,6 +368,36 @@ rebuilds `-trimpath` otherwise guarantees. Two traps:
   dash form sorts *after* it, so `apt upgrade` would happily move a pre-release onto
   the older-looking final.
 
+### Cutting a release
+
+A request like "cut 0.4.2", "make the release 0.4.2" or "release 0.4.2" means exactly
+this, in this order. The number in the request is the number everywhere:
+
+1. **Bump the one file.** `printf 'x.y.z\n' > VERSION` — one line and a newline, and a
+   pre-release written with `~` (above).
+2. **One commit, `build: release x.y.z`, carrying `VERSION` and nothing else.** Its body
+   is the release note: what changed *since the previous bump commit*, written as prose
+   from `git log <previous bump>..HEAD` with the measured numbers in it, not a list of
+   files. Open it with the standing paragraph the 0.3.x releases and 0.4.1 use — `VERSION`
+   is the one authored number, so a release is this line and nothing else, and the tag has
+   to sit on the commit that carries it — then the changes themselves. Not
+   `release: bump version to …`: 0.4.0 is the outlier that did that.
+3. **Verify before publishing anything.** `make check` and `make build` green;
+   `build/bin/kichat --version` printing `x.y.z (<that commit's sha>)`; `make deb`
+   producing `build/deb/kichat_x.y.z_<arch>.deb` whose `control` reads `Version: x.y.z`
+   and whose generated `changelog.gz` names it. (`make lint-deb` needs `lintian`, which
+   may not be installed — say so rather than skipping it silently.)
+4. **Tag that commit, annotated, with the same notes as its message** — the shape 0.3.x
+   used, so `git show x.y.z` *is* the release:
+   `git tag -a x.y.z -F <(git log -1 --format=%B HEAD) x.y.z`. Annotated, because a
+   lightweight tag carries no notes; on the bump commit, because a build from the tag
+   otherwise reports the old number. `git describe --tags --exact-match HEAD` on it is the
+   check that it landed there. 0.4.0 was bumped without a tag at all, which is the mistake
+   this step exists for.
+5. **The tag stays local until asked for.** `git push origin x.y.z` is a separate request,
+   like any other push. A published tag is never moved or deleted: a mistake is the next
+   patch number.
+
 ## Git commits
 
 The subject is `area: description` — lowercase, imperative, and it describes
