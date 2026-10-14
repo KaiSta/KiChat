@@ -217,18 +217,38 @@ vendor's body is the same either way and says nothing about where a key belongs,
 in the message the user sees. A wrong key is a key rather than a throttle, which is the
 distinction `RESEARCH.md` §5 makes for Brave's rejected token.
 
-**The budget is the tight resource here, and it is per minute.** Every response carries
-`x-ratelimit-limit-requests`, `-limit-tokens`, `-remaining-*` and `-reset-*`; the account
-measured allows **1000 requests** but only **8000 tokens per minute**. A 128×128 PNG costs
-about **1300 prompt tokens** on its own, so an image turn is a sixth of a minute's budget —
-which is why the live test keeps every request short and makes the image check opt-in
-(`KICHAT_GROQ_VISION_MODEL`).
+**The budget is the tight resource here, and it is per minute — and per model.** Every
+response carries `x-ratelimit-limit-requests`, `-limit-tokens`, `-remaining-*` and
+`-reset-*`; the account measured allows **1000 requests** but only **8000 tokens per minute**
+across it, while a single model on the `on_demand` tier publishes a ceiling of its own. A real
+turn against `qwen/qwen3.8-27b` was refused with this, which is the shape every fact below is
+read from — the model's own limit **7000**, the 1911 already spent, the 6248 this request was
+counted at, and the wait in prose:
+
+```json
+{"error":{"message":"Rate limit reached for model `qwen/qwen3.8-27b` in organization
+`org_01kz7a9rsze9da1b4q1yv7w8bx` service tier `on_demand` on input tokens per minute (ITPM):
+Limit 7000, Used 1911, Requested 6248. Please try again in 9.934285714s. Need more tokens?
+Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"tokens",
+"code":"rate_limit_exceeded"}}
+```
+
+A 128×128 PNG costs about **1300 prompt tokens** on its own, so an image turn is a sixth of a
+minute's budget of that size — which is why the live test keeps every request short and makes
+the image check opt-in (`KICHAT_GROQ_VISION_MODEL`).
 
 Two exceptions are worth knowing about because the app maps them:
 
-- **HTTP 429** is a throttle, not a verdict: `HTTPError.Retryable` reports it, the shared
-  client retries, and the availability check deliberately does **not** blacklist a model over
-  it (see `internal/llm/probe.go`).
+- **HTTP 429** is a throttle, not a verdict: `HTTPError.Retryable` reports it, the availability
+  check deliberately does **not** blacklist a model over it (see `internal/llm/probe.go`), and
+  the wait it names is *obeyed* rather than guessed at. `retryHint`
+  ([internal/llm/httpclient.go:94](internal/llm/httpclient.go#L94)) reads `Retry-After` and, when
+  that is missing or unparseable, the refusal's own sentence — the envelope above is why, since
+  the number the vendor commits to is the one in prose — and `retryWait`
+  ([internal/llm/httpclient.go:133](internal/llm/httpclient.go#L133)) waits it out, up to one
+  minute, which is the window these limits are defined over. The fixed 250 ms/500 ms backoff
+  this replaced spent every attempt inside the minute that had just been refused, so a request
+  the vendor had said to retry in ten seconds arrived at the user as a failure.
 - **HTTP 400** from the listing's own claims — a model that cannot chat, an oversized image —
   is the model's or the request's fault, and it is surfaced as sent.
 
@@ -244,6 +264,8 @@ Two exceptions are worth knowing about because the app maps them:
 | [internal/llm/groq.go:148](internal/llm/groq.go#L148) | `fromGroqEntry` — the mapping, the two drop rules, the capability claims |
 | [internal/llm/groq.go:205](internal/llm/groq.go#L205) | `mapGroqEntries` — entry by entry, keeping the vendor's order |
 | [internal/llm/openai.go:280](internal/llm/openai.go#L280) | `flavourGroq` — the branch that picks the mapper |
+| [internal/llm/httpclient.go:94](internal/llm/httpclient.go#L94) | `retryHint` — the `Retry-After` header, and the wait a refusal writes in prose |
+| [internal/llm/httpclient.go:133](internal/llm/httpclient.go#L133) | `retryWait` — the hint obeyed up to one minute, the doubling backoff otherwise |
 | [internal/llm/registry.go:117](internal/llm/registry.go#L117) | the `case "groq"` that builds the provider |
 | [internal/llm/registry.go:427](internal/llm/registry.go#L427) | the shipped-but-disabled entry |
 | [internal/config/config.go:934](internal/config/config.go#L934) | the address repair in `normalise()` |
@@ -337,7 +359,8 @@ one, and the numbers in §4.
    Whisper's transcription and the Orpheus voices are dropped rather than exposed as some other
    kind of model.
 4. **The rate-limit headers are read as a fact, not enforced.** The app does not pace requests
-   against the per-minute token budget; a burst that exhausts it comes back as a 429, which the
-   shared client retries.
+   against the per-minute token budget, and it does not reserve budget for the turn being typed;
+   a burst that exhausts it comes back as a 429, whose own retry hint the shared client waits out
+   (§6) before it is reported.
 5. **`reasoning_effort` is never sent.** The app sends the field only to switch thinking *off*,
    which this API does not support, so its `low`/`medium`/`high` levels are unused.

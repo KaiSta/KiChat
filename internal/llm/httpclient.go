@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -42,6 +44,14 @@ const (
 	maxAttempts   = 3
 	retryBaseWait = 250 * time.Millisecond
 	retryMaxWait  = 2 * time.Second
+	// retryHintCeiling is the longest wait a backend's own hint is obeyed for.
+	//
+	// The budgets that throttle this way are defined per *minute* — Groq's
+	// input-token limit is the one this exists for — so a hint up to one window is
+	// the vendor stating the truth and is waited out. Longer than that the request
+	// would be parked for more time than a turn can justify, and the refusal that
+	// follows states the wait in its own words anyway.
+	retryHintCeiling = time.Minute
 )
 
 // retryable reports whether err is worth another attempt.
@@ -63,14 +73,82 @@ func retryable(err error) bool {
 	return errors.As(err, &netErr)
 }
 
-// sleepBackoff waits before the next attempt, doubling each time. It returns
-// false when the context ended first, so a Stop does not have to wait it out.
-func sleepBackoff(ctx context.Context, attemptNo int) bool {
+// retryAfterInBody reads the wait a refusal writes into its own sentence.
+//
+// Groq's rate-limit envelope is the reason it is read at all: the account's
+// per-minute input-token limit answers HTTP 429 with `type: "tokens"`,
+// `code: "rate_limit_exceeded"`, and the wait in prose —
+//
+//	Rate limit reached for model `qwen/qwen3.8-27b` in organization `org_…` service
+//	tier `on_demand` on input tokens per minute (ITPM): Limit 7000, Used 1911,
+//	Requested 6248. Please try again in 9.934285714s.
+//
+// The header is sent alongside it, but not by every backend that throttles this
+// way, and the sentence is the number the vendor is willing to commit to.
+var retryAfterInBody = regexp.MustCompile(`(?i)\b(?:try again|retry|available) in ([0-9]+(?:\.[0-9]+)?)\s*(ms|milliseconds?|s|sec|seconds?|m|min|minutes?)\b`)
+
+// retryHint is how long a backend asked to be left alone, or 0 when it said
+// nothing. Both spellings of `Retry-After` are accepted — delta-seconds, which is
+// what these APIs send, and the HTTP date the RFC also allows — and the body is
+// read as well rather than instead of the header.
+func retryHint(header http.Header, body string) time.Duration {
+	if raw := strings.TrimSpace(header.Get("Retry-After")); raw != "" {
+		// Delta-seconds is the documented form, and these APIs send it
+		// fractionally, so it is parsed as a float rather than as an int.
+		if seconds, err := strconv.ParseFloat(raw, 64); err == nil {
+			if seconds > 0 {
+				return time.Duration(seconds * float64(time.Second))
+			}
+		} else if when, err := http.ParseTime(raw); err == nil {
+			if wait := time.Until(when); wait > 0 {
+				return wait
+			}
+		}
+	}
+	m := retryAfterInBody.FindStringSubmatch(body)
+	if m == nil {
+		return 0
+	}
+	value, err := strconv.ParseFloat(m[1], 64)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	unit := time.Second
+	switch lower := strings.ToLower(m[2]); {
+	case strings.HasPrefix(lower, "ms"), strings.HasPrefix(lower, "milli"):
+		unit = time.Millisecond
+	case strings.HasPrefix(lower, "m"):
+		unit = time.Minute
+	}
+	return time.Duration(value * float64(unit))
+}
+
+// retryWait is how long to wait before the next attempt: what the backend asked
+// for when it said so, and a doubling backoff when it did not.
+//
+// The hint is obeyed because not obeying it is what this used to do, and it does
+// not work: two retries inside a second against a limit defined per minute spend
+// the whole attempt budget inside one window, so the throttle is reported as a
+// failure. The case this was written for asked for 9.93 seconds.
+func retryWait(err error, attemptNo int) time.Duration {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.RetryAfter > 0 {
+		if httpErr.RetryAfter > retryHintCeiling {
+			return retryHintCeiling
+		}
+		return httpErr.RetryAfter
+	}
 	wait := retryBaseWait << attemptNo
 	if wait > retryMaxWait {
 		wait = retryMaxWait
 	}
-	timer := time.NewTimer(wait)
+	return wait
+}
+
+// waitBeforeRetry sleeps that long, and returns false when the context ended
+// first, so a Stop does not have to wait it out.
+func waitBeforeRetry(ctx context.Context, err error, attemptNo int) bool {
+	timer := time.NewTimer(retryWait(err, attemptNo))
 	defer timer.Stop()
 	select {
 	case <-timer.C:
@@ -103,7 +181,7 @@ func withRetry[T any](ctx context.Context, attempt func() (T, error)) (T, error)
 		if !retryable(err) || i == maxAttempts-1 {
 			break
 		}
-		if !sleepBackoff(ctx, i) {
+		if !waitBeforeRetry(ctx, err, i) {
 			break
 		}
 	}
@@ -182,11 +260,13 @@ func doJSONOnce(ctx context.Context, client *http.Client, method, url string, he
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		body := strings.TrimSpace(string(raw))
 		return redactHeaders(&HTTPError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
-			Body:       strings.TrimSpace(string(raw)),
+			Body:       body,
 			URL:        url,
+			RetryAfter: retryHint(resp.Header, body),
 		}, headers)
 	}
 	if out == nil {
@@ -230,11 +310,13 @@ func postStreamOnce(ctx context.Context, url string, headers map[string]string, 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		resp.Body.Close()
+		body := strings.TrimSpace(string(raw))
 		return nil, redactHeaders(&HTTPError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
-			Body:       strings.TrimSpace(string(raw)),
+			Body:       body,
 			URL:        url,
+			RetryAfter: retryHint(resp.Header, body),
 		}, headers)
 	}
 	return resp.Body, nil

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Role identifies who authored a message.
@@ -235,6 +236,13 @@ type HTTPError struct {
 	Status     string
 	Body       string
 	URL        string
+	// RetryAfter is how long the backend asked to be left alone before the next
+	// attempt, and 0 when it asked for nothing. Both places it is said are read,
+	// because a throttled request is told in either: the `Retry-After` header, and
+	// the refusal's own message — Groq's per-minute input-token limit answers with
+	// `type: "tokens"`, `code: "rate_limit_exceeded"` and the wait written into the
+	// sentence: "Please try again in 9.934285714s."
+	RetryAfter time.Duration
 }
 
 func (e *HTTPError) Error() string {
