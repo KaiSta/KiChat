@@ -30,29 +30,23 @@ import (
 //     over-long chat continues instead of aborting, and the user is told why in one
 //     sentence naming the limit the backend named;
 //   - once a ceiling is known, the next request is planned against it before it goes
-//     out (foldForCeiling), so the refusal is paid once per model per session rather
-//     than once per turn.
+//     out (the planner's own ceiling bound, beside the user's threshold), so the refusal
+//     is paid once per model per session rather than once per turn.
 //
 // Everything here is gated on a refusal or on the backend's own published number.
 // No threshold is invented for a backend that reports none: a chat is never folded
 // because the app guessed that a request was too big, only because the backend said
 // so or because it published a limit the request would cross.
 
-// ceilingFoldRatio is how close to a published ceiling a request may come before the
-// history is folded. It is below 1 because the meter's number is partly an estimate
-// (the token counter is a heuristic, deliberately — see llm.EstimateTokens) while the
-// ceiling is exact, and undershooting the fold point costs one summarisation while
-// overshooting it costs a refused turn.
-const ceilingFoldRatio = 0.9
-
-// sizeTarget is the fraction of the chat's own window that a folded prompt should
-// fit, which is how a ceiling that is not the window is handed to the planner: the
-// plan prices the kept turns against Budget.Limit, so aiming at ceiling/window aims
-// the folded request at the ceiling itself.
+// sizeTarget is the fraction of the chat's own window that a folded prompt should fit,
+// which is how a ceiling that is not the window is handed to the planner: the plan prices
+// the kept turns against Budget.Limit, so aiming at ceiling/window aims the folded request
+// at the ceiling itself. It is the planner's own aim for the same case (ceilingTarget),
+// not a second way of computing it — the fold that answers a refusal and the fold that
+// prevents one have to land on the same request size.
 //
-// With no ceiling the request was over the model's *window*, so the aim is the same
-// ratio the automatic threshold uses — the user's setting, and 0.8 when they have
-// not touched it.
+// With no ceiling the request was over the model's *window*, so the aim is the same ratio
+// the automatic threshold uses — the user's setting, and 0.8 when they have not touched it.
 func sizeTarget(chat store.Chat, settings config.Settings, modelInfo llm.ModelInfo, ceiling int) float64 {
 	limit, _ := limitFor(chat, modelInfo)
 	if limit <= 0 {
@@ -63,28 +57,7 @@ func sizeTarget(chat store.Chat, settings config.Settings, modelInfo llm.ModelIn
 	if ceiling <= 0 {
 		return effectiveThreshold(chat, settings)
 	}
-	return clampRatio(float64(ceiling) / float64(limit))
-}
-
-// clampRatio keeps a target inside the band the planner can act on.
-//
-// The floor is tiny and still necessary, and the reason is the planner's own
-// convention: `Target: 0` means "fold as much as your cut allows" and *skips* the
-// target walk entirely, so a ceiling so small that the ratio rounded to zero would
-// silently fold only to the keep-turns boundary — the one thing a size fold exists to
-// go past when the limit demands it. Above that, the walk's own limits are the bound:
-// it never folds the turn that started the request, however small the target is. The
-// cap keeps a ceiling larger than the window from asking the planner for no reduction
-// at all.
-func clampRatio(ratio float64) float64 {
-	switch {
-	case ratio < 0.001:
-		return 0.001
-	case ratio > 0.95:
-		return 0.95
-	default:
-		return ratio
-	}
+	return ceilingTarget(ceiling, limit)
 }
 
 // ceilingNote names the limit the refusal stated, for the sentence the user reads.
@@ -179,67 +152,6 @@ func (e *Engine) foldForSize(ctx context.Context, chat *store.Chat, provider llm
 		return foldFailed
 	}
 	return foldNothing
-}
-
-// foldForCeiling folds the history *before* the request goes out, when the backend
-// has published a ceiling for this model and the next request would run into it.
-//
-// It is the same fold as foldForSize, moved earlier: once the ceiling is known
-// (llm.RequestCeiling), every request after that is planned against the real limit
-// instead of being refused against it. Only a backend that publishes one is affected
-// — Groq — so nothing here changes for a backend that reports only a window.
-//
-// What the ceiling is learned from is the difference between the first oversized
-// request of a session being sent and being prevented, and there are two sources: the
-// budget header of any response (an ordinary answer is enough — see
-// openAICompatProvider.Chat) and a refusal's own sentence, which is what a session
-// whose very first request is oversized still pays once.
-func (e *Engine) foldForCeiling(ctx context.Context, chat *store.Chat, provider llm.Provider,
-	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings) (bool, error) {
-
-	ceiler, ok := provider.(llm.RequestCeiling)
-	if !ok {
-		return false, nil
-	}
-	ceiling := ceiler.RequestCeiling(modelID).Tokens
-	if ceiling <= 0 {
-		return false, nil
-	}
-	// A window nobody reports cannot be folded *against*: the planner prices the turns
-	// it keeps as a ratio of it, and compactWith refuses the run for the same reason.
-	// Returning before it does is not just an optimisation — that refusal would
-	// otherwise be reported on every turn, and a standing fact about a model is not an
-	// incident in a turn (the same reasoning maybeAutoCompact carries).
-	if limit, _ := limitFor(*chat, modelInfo); limit <= 0 {
-		return false, nil
-	}
-	assembly, _, err := e.buildAssembly(ctx, chat, backendID, modelID, settings, modelInfo, "")
-	if err != nil {
-		return false, err
-	}
-	// Projected rather than Used, because the reserve for the answer is part of what
-	// goes out with the request and the ceiling governs the whole request.
-	projected := assembly.Budget.Projected
-	if projected <= 0 {
-		projected = assembly.Budget.Used
-	}
-	if float64(projected) < float64(ceiling)*ceilingFoldRatio {
-		return false, nil
-	}
-	// The trigger stays "auto": a threshold was crossed and nobody pressed
-	// anything, which is exactly what that name means. What it was measured against
-	// is this backend's published ceiling rather than its window.
-	compaction, err := e.compactWith(ctx, chat, provider, backendID, modelID, modelInfo, settings,
-		CompactOptions{
-			Force:             true,
-			Target:            sizeTarget(*chat, settings, modelInfo, ceiling),
-			Trigger:           triggerAuto,
-			ProtectNewestTurn: true,
-		})
-	if err != nil {
-		return false, err
-	}
-	return compaction != nil, nil
 }
 
 // turnFailureText is what the user is shown for a failed turn.

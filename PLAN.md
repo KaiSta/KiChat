@@ -86,14 +86,18 @@ internal/
     context.go       Prompt assembly and ContextBudget with measured-vs-estimated
                      accounting, measured against the effective per-request
                      limit (window or a backend's own ceiling, GROQ.md §6)
-    compact.go       Compaction (summary generation, never destructive)
+    compact.go       Compaction: the cut, the summary, and the one decision both
+                     automatic folds come from — the user's threshold and a
+                     backend's per-request ceiling compared together (GROQ.md §6)
     prompt.go        Templating including tool-list substitution
     preview.go       Token prediction before sending
-    maintenance.go   Auto-title, background upkeep
+    maintenance.go   Auto-title, background upkeep, and the automatic fold that
+                     resolves the two bounds above and hands them to compact.go
     oversize.go      A request the backend refuses for its own size: fold the
-                     history, retry once, remember the ceiling — which the
-                     backend's own budget header states before anything is
-                     refused, so the next turn is folded instead (GROQ.md §6)
+                     history, retry once, and report what the fold did — the
+                     ceiling the backend's budget header states before anything is
+                     refused folds the next turn through compact.go instead
+                     (GROQ.md §6)
     searchfirst.go   Search-before-answer seeding
   research/        search.go, chain.go (Brave -> DuckDuckGo), brave.go, duckduckgo.go,
                    scrape.go (SSRF + robots guards), util.go

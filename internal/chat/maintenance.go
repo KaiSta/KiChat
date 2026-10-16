@@ -20,8 +20,15 @@ func newID() string { return uuid.NewString() }
 
 // CompactOptions controls a compaction run.
 type CompactOptions struct {
-	// Force runs even when the threshold has not been reached (manual compaction).
+	// Force runs even when no threshold has been reached (manual compaction).
 	Force bool
+	// Threshold and Ceiling are the two bounds an automatic fold is decided by, resolved
+	// by the caller because they are the caller's facts — this chat's own settings and
+	// the provider's published number — and left to the planner to compare
+	// (PlanCompaction). Both are 0 for a run somebody asked for: Force runs the fold
+	// whatever they say.
+	Threshold float64
+	Ceiling   int
 	// Focus is an optional instruction about what to preserve.
 	Focus string
 	// Target is a desired usage ratio afterwards, 0 for "as much as possible".
@@ -103,40 +110,70 @@ func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions
 	return CompactResult{Created: true, Compaction: *created}, nil
 }
 
-// maybeAutoCompact compacts when the projected next request would cross the
-// configured threshold. It runs before sending, never mid-stream.
-func (e *Engine) maybeAutoCompact(ctx context.Context, chat *store.Chat, provider llm.Provider,
-	modelID string, settings config.Settings) error {
+// autoFold folds a chat's history *before* the request goes out, which is the one place a
+// turn decides to fold without anybody pressing anything. Both of the reasons that can
+// happen are the planner's, not this function's: the user's threshold and a backend's
+// published per-request ceiling are two bounds of one decision (PlanCompaction, through
+// automaticBound), compared once instead of by two calls that each folded on their own.
+//
+// The two calls are what this replaces, and the cost they had was not only duplicated
+// code: a chat that had crossed both folded twice in the same turn — the threshold run
+// keeping its keep-turns boundary and the ceiling run then folding further for its target —
+// so it paid for two summaries back to back to arrive where one fold reaches.
+//
+// What is left here is resolving the two facts the decision needs and leaving early where
+// there is nothing to decide. Every send runs this, so the early return is also what keeps a
+// chat with no bound at all from being assembled for an answer that cannot change.
+func (e *Engine) autoFold(ctx context.Context, chat *store.Chat, provider llm.Provider,
+	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings) error {
 
-	if !settings.Compact.Enabled || !chat.AutoCompact {
+	// The user's bound exists only while they have automatic compaction switched on, and 0
+	// is how its absence reaches the planner — which is why nothing defaults it here: the
+	// planner's default belongs to the user's setting, not to a caller that switched the
+	// feature off (effectiveThreshold is where it lives).
+	threshold := 0.0
+	if settings.Compact.Enabled && chat.AutoCompact {
+		threshold = effectiveThreshold(*chat, settings)
+	}
+	// The backend's bound is a number it published, and it is not the window: Groq's
+	// per-minute token allowance is also the largest single request the account may send.
+	// Only a backend that publishes one has it (llm.RequestCeiling), learned from a
+	// refusal's own sentence or from the budget header of an ordinary answer — which is
+	// why it is read here rather than deduced from the model.
+	ceiling := 0
+	if ceiler, ok := provider.(llm.RequestCeiling); ok {
+		ceiling = ceiler.RequestCeiling(modelID).Tokens
+	}
+	if threshold <= 0 && ceiling <= 0 {
 		return nil
 	}
-	modelInfo := e.resolveModel(ctx, chat.Backend, modelID, settings)
-	// A model whose window nobody reports cannot be compacted *against*: the
-	// threshold is a ratio of that window, so it cannot be evaluated at all —
-	// compactWith refuses it. That refusal is not forwarded here, and the reason is
-	// this function's own contract: it runs before *every* send and an automatic run
-	// has nobody to report back to, so forwarding it put the same warning in front
-	// of the user once per message for as long as the model stayed undescribed.
-	// Measured: that is the default state of the NVIDIA backend, whose listing
-	// reports no context window for any of its models, so a backend that was
-	// working looked broken on every turn.
+	// A window nobody reports cannot be folded *against*: the planner prices the kept
+	// turns as a ratio of it, so it cannot be evaluated at all — compactWith refuses the
+	// run for the same reason. That refusal is not forwarded here, and the reason is this
+	// function's own contract: it runs before *every* send and an automatic run has nobody
+	// to report back to, so forwarding it put the same warning in front of the user once
+	// per message for as long as the model stayed undescribed. Measured: that is the
+	// default state of the NVIDIA backend, whose listing reports no context window for any
+	// of its models, so a backend that was working looked broken on every turn.
 	//
-	// The condition is a standing fact about the model, not an incident, and it is
-	// already visible where it belongs: the context meter reads "unknown" and the
-	// inspector names the source of the number. The manual path keeps the refusal
-	// with its reason, because there the user asked and there is somebody to
-	// answer — pinned by TestManualCompactStillRefusesAnUnknownWindow.
+	// The condition is a standing fact about the model, not an incident, and it is already
+	// visible where it belongs: the context meter reads "unknown" and the inspector names
+	// the source of the number. The manual path keeps the refusal with its reason, because
+	// there the user asked and there is somebody to answer — pinned by
+	// TestManualCompactStillRefusesAnUnknownWindow.
 	//
-	// limitFor is used rather than modelInfo.ContextLimit directly so the guard
-	// cannot drift from the number compactWith will see: a per-chat NumCtx makes an
-	// otherwise unknown window usable, and compacting against it must still work.
+	// limitFor is used rather than modelInfo.ContextLimit directly so the guard cannot
+	// drift from the number compactWith will see: a per-chat NumCtx makes an otherwise
+	// unknown window usable, and compacting against it must still work.
 	if limit, _ := limitFor(*chat, modelInfo); limit <= 0 {
 		return nil
 	}
-	// The created compaction is irrelevant here: an automatic run has nobody to
-	// report back to, and "nothing to fold" is already the silent outcome.
-	_, err := e.compactWith(ctx, chat, provider, chat.Backend, modelID, modelInfo, settings, CompactOptions{})
+	// One call, and the planner decides: both numbers are handed over rather than acted
+	// on, so the fold that happens and the bound it was decided by cannot disagree. The
+	// created compaction is irrelevant here — an automatic run has nobody to report back
+	// to, and "nothing to fold" is already the silent outcome.
+	_, err := e.compactWith(ctx, chat, provider, backendID, modelID, modelInfo, settings,
+		CompactOptions{Threshold: threshold, Ceiling: ceiling})
 	return err
 }
 
@@ -168,7 +205,8 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		Messages:          messages,
 		Compactions:       compactions,
 		Budget:            assembly.Budget,
-		Threshold:         effectiveThreshold(*chat, settings),
+		Threshold:         opts.Threshold,
+		Ceiling:           opts.Ceiling,
 		KeepRecentTurns:   effectiveKeepTurns(*chat, settings),
 		Reserve:           settings.Compact.ReserveForResponse,
 		MaxSummaryTokens:  settings.Compact.MaxSummaryTokens,

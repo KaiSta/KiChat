@@ -466,6 +466,74 @@ func TestAKnownCeilingFoldsTheHistoryBeforeTheRequestGoesOut(t *testing.T) {
 	}
 }
 
+// TestBothBoundsCrossedCostsOneFold is the regression the merge is for. While the two
+// bounds were two calls in the send pipeline, a chat that had crossed *both* folded twice
+// in one turn: the threshold run folded to its keep-turns boundary, and the ceiling run
+// then folded further for its target — two summaries, one request, twice the wait. The
+// planner holds both bounds now, so the decision is one fold and the turn pays for one.
+func TestBothBoundsCrossedCostsOneFold(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	// The user's bound is switched on for this chat, which is the state the app creates
+	// (app.go) and the shipped settings enable.
+	chat.AutoCompact = true
+	if err := st.UpdateChat(chat); err != nil {
+		t.Fatalf("enable auto-compaction: %v", err)
+	}
+	// More turns than KeepRecentTurns on purpose: with fewer, the threshold fold has
+	// nothing to cut and only the ceiling would fold, so the count below could not tell the
+	// two implementations apart.
+	const turns = 8
+	seedLongHistory(t, st, turns)
+
+	provider := &fakeProvider{
+		model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		ceiling: 2000,
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}},
+			{{Type: llm.EventDelta, Text: "Antwort"}, {Type: llm.EventDone}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+	// Without both bounds live the count below would say nothing about the merge: the
+	// per-chat flag is set above, and the setting is the shipped one.
+	if !engine.Settings().Compact.Enabled {
+		t.Fatal("this test needs the shipped automatic-compaction setting to be enabled")
+	}
+	if keep := effectiveKeepTurns(chat, engine.Settings()); keep >= turns {
+		t.Fatalf("this test needs more turns (%d) than the %d it keeps verbatim", turns, keep)
+	}
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Eine neue Frage"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the turn did not finish")
+	}
+
+	if got := len(summariesOf(t, st)); got != 1 {
+		t.Errorf("compactions = %d, want 1: the two bounds are one decision, not two folds", got)
+	}
+	// The summary and the answer. A second fold would show up here as a third call — and
+	// as a second memory in the transcript, which is what the count above reads.
+	if n := provider.requestCount(); n != 2 {
+		t.Errorf("backend calls = %d, want the one summary and the answer", n)
+	}
+	// One fold has to reach as far as the two did, or the saving would be bought with a
+	// request that is still too large: the oldest turn is gone from the request that went
+	// out, and the message the user just wrote is still in it.
+	answer := provider.requestAt(1)
+	var carried bool
+	for _, m := range answer.Messages {
+		if strings.Contains(m.Content, "Frage 0:") {
+			carried = true
+		}
+	}
+	if carried {
+		t.Errorf("the answer still carried the oldest turn verbatim: %+v", answer.Messages)
+	}
+}
+
 // TestGroqLearnsTheBudgetFromAnAnswerAndFoldsTheNextTurn is the path the budget header
 // unlocks, driven through the provider that ships: the ceiling is learned from an
 // ordinary answer instead of from a refusal, and the next turn is planned against it.

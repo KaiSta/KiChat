@@ -275,6 +275,99 @@ func TestPlanCompactionForcedTargetFoldsMore(t *testing.T) {
 	}
 }
 
+// TestTheTwoAutomaticBoundsAreOneDecision pins the shape the merge bought: one planner
+// call decides from two bounds, and the bound that fired is also what the aim comes from.
+//
+// A backend that publishes a per-request ceiling well below the model's window folds at
+// that ceiling even with the user's own automatic compaction switched off (Threshold 0),
+// and it aims at the ceiling rather than stopping at the keep-turns boundary — which is
+// what keeps the next request from being refused for its own size.
+func TestTheTwoAutomaticBoundsAreOneDecision(t *testing.T) {
+	const window = 20000
+	// The backend's ceiling is the limit that binds (EffectiveLimit), and the projection is
+	// at its fold point. Ten turns of ~1000 tokens each, so the keep-turns boundary alone
+	// would keep ~12000 tokens of history against a 4000-token limit.
+	messages := bigConversation(10, 4000)
+	budget := ContextBudget{
+		Limit: window, EffectiveLimit: 4000, Projected: 3800, ProjectedRatio: 0.95,
+	}
+
+	byCeiling := PlanCompaction(PlanInput{
+		Messages: messages, Budget: budget,
+		Threshold: 0, Ceiling: 4000, KeepRecentTurns: 6,
+	})
+	if !byCeiling.Needed {
+		t.Fatalf("a request at 95%% of a published ceiling must fold with the user's switch off: %+v", byCeiling)
+	}
+	if !strings.Contains(byCeiling.Reason, "4000") {
+		t.Errorf("reason = %q, want the per-request limit the fold was decided by", byCeiling.Reason)
+	}
+
+	// The same projection with only the user's threshold over it: no ceiling, so no aim —
+	// the fold stops at the keep-turns boundary.
+	byThreshold := PlanCompaction(PlanInput{
+		Messages: messages, Budget: budget,
+		Threshold: 0.95, KeepRecentTurns: 6,
+	})
+	if !byThreshold.Needed {
+		t.Fatalf("the threshold bound must still fold on its own: %+v", byThreshold)
+	}
+	if byCeiling.KeepFromSeq <= byThreshold.KeepFromSeq {
+		t.Errorf("the ceiling fold kept from %d, the threshold fold from %d — a request that "+
+			"would be refused has to be folded further than one that is merely fuller than usual",
+			byCeiling.KeepFromSeq, byThreshold.KeepFromSeq)
+	}
+}
+
+// TestACeilingAboveTheWindowIsNotAbound covers the other side of the same arithmetic: a
+// ceiling nobody can reach before the window is no earlier bound than the window, so the
+// merge must not let it fold a chat early. Its own fold point sits above the window when the
+// ceiling does, and only a projection up there (which is already over the window) folds.
+func TestACeilingAboveTheWindowIsNotABound(t *testing.T) {
+	const window = 20000
+	messages := bigConversation(10, 4000)
+
+	for _, tc := range []struct {
+		ratio float64
+		want  bool
+	}{
+		// 0.95 of the window against a ceiling of 1.1 windows: the ceiling's fold point is
+		// 99 % of the window, so nothing folds yet.
+		{0.95, false},
+		// At 99.5 % the ceiling is still the binding limit and the fold happens.
+		{0.995, true},
+	} {
+		plan := PlanCompaction(PlanInput{
+			Messages: messages,
+			Budget: ContextBudget{
+				Limit: window, EffectiveLimit: window,
+				Projected: int(tc.ratio * window), ProjectedRatio: tc.ratio,
+			},
+			Threshold: 0, Ceiling: 22000, KeepRecentTurns: 6,
+		})
+		if plan.Needed != tc.want {
+			t.Errorf("at %.1f%% of the window the fold was %v, want %v: %+v",
+				tc.ratio*100, plan.Needed, tc.want, plan)
+		}
+	}
+}
+
+// TestAChatWithNoBoundAtAllFoldsNothing: the two bounds are the whole of the automatic
+// decision, so a chat whose automatic compaction is off (Threshold 0) on a backend that
+// publishes no ceiling never folds, however full the context reads.
+func TestAChatWithNoBoundAtAllFoldsNothing(t *testing.T) {
+	plan := PlanCompaction(PlanInput{
+		Messages: conversation(10),
+		Budget: ContextBudget{
+			Limit: 10000, EffectiveLimit: 10000, Projected: 9900, ProjectedRatio: 0.99,
+		},
+		Threshold: 0, KeepRecentTurns: 3, Reserve: 1024,
+	})
+	if plan.Needed {
+		t.Fatalf("nothing folds without a bound, but the plan folded: %+v", plan)
+	}
+}
+
 // bigConversation builds turns big enough for the arithmetic of a target walk to
 // be visible: a 40-character turn never makes two candidate cuts differ, so a
 // walk that prices the wrong one still lands on the right answer by luck.

@@ -367,11 +367,11 @@ discovering refusals, and the subset a given key can reach is not a fact about t
    | the model picker | the row simply shows no window next to the model name |
 
    The automatic row is the one that needed work, and finding it is what this backend
-   contributed back to the app. `maybeAutoCompact` runs before *every* send, and it used to
+   contributed back to the app. `autoFold` runs before *every* send, and it used to
    forward the refusal it got from `compactWith`, which emits an `events.Warning` the UI turns
    into a toast — so a working NVIDIA chat showed *"Kontextfenster des Modells ist unbekannt"*
    on every single message, for as long as no override was set. The fix is in
-   [internal/chat/maintenance.go:124](internal/chat/maintenance.go#L124): an unknown window is a
+   [internal/chat/maintenance.go:168](internal/chat/maintenance.go#L168): an unknown window is a
    standing fact about the model, not an incident, so the automatic path returns before
    `compactWith` and leaves the condition to the meter and the inspector, while the manual path
    keeps the explicit refusal because there the user asked. `COMPACT.md` §4 and §13 record the

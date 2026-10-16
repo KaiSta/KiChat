@@ -237,20 +237,23 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		})
 	}
 
-	if err := e.maybeAutoCompact(ctx, &chat, provider, modelID, settings); err != nil {
+	// A fold before the request goes out is one decision with two bounds — the user's
+	// threshold and a backend's published per-request ceiling — and the planner holds
+	// both (PlanCompaction), so the turn asks once. While these were two calls the two
+	// bounds could both fire in one turn: the threshold run folded to its keep-turns
+	// boundary and the ceiling run then folded further for its target, two summaries for
+	// one request.
+	//
+	// The ceiling is not the window, which is the case this exists for: Groq's
+	// per-minute token allowance is also the largest single request the account may send,
+	// so a chat planned against the 131k window its listing advertises is refused within
+	// the first few thousand tokens. It is learned from one refusal and from the budget
+	// header of any response (llm.RequestCeiling), and from then on the request is planned
+	// against the number the meter shows rather than the window.
+	if err := e.autoFold(ctx, &chat, provider, backendID, modelID, modelInfo, settings); err != nil {
 		// A failed compaction is reported but does not abort the turn: the user
 		// still deserves an answer, and an over-long context will surface as a
 		// backend error which is easier to understand.
-		e.emit(events.Warning, map[string]any{"chatId": req.ChatID, "warning": err.Error()})
-	}
-
-	// A backend that has published a ceiling for this model gets the fold *before*
-	// the request rather than after being refused. The window is not that ceiling:
-	// Groq's per-minute token allowance is also the largest single request the
-	// account may send, so a chat planned against a 131k window is refused within
-	// the first few thousand tokens. The ceiling is learned from one refusal, and
-	// this is what stops the second turn from paying for it again.
-	if _, err := e.foldForCeiling(ctx, &chat, provider, backendID, modelID, modelInfo, settings); err != nil {
 		e.emit(events.Warning, map[string]any{"chatId": req.ChatID, "warning": err.Error()})
 	}
 

@@ -12,7 +12,7 @@ points at one document per subsystem for the measured detail behind it:
 | document | what it holds |
 | --- | --- |
 | `PLAN.md` | the architecture, and the reasoning behind it |
-| `COMPACT.md` | context compaction: strategy, arithmetic, failure modes, where the code is |
+| `COMPACT.md` | context compaction: strategy, arithmetic, failure modes, where the code is — including the single decision both of its automatic bounds (the user's threshold and a backend's per-request ceiling) come from |
 | `MISTRAL.md` | the Mistral backend: the measured listing and stream shapes, the alias collapse, the typed content chunks, the bugs review found |
 | `DEEPSEEK.md` | the DeepSeek backend: the listing that reports a window, `reasoning_content`, the `/v1` alias, refusals |
 | `NVIDIA.md` | the build.nvidia.com backend: the four-field listing, the catalogue that lists models the account may not call (why the provider filters nothing, and the one-token availability check that filters on evidence instead), the reasoning field that arrives twice, refusals |

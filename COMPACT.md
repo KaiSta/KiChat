@@ -106,20 +106,38 @@ Per-chat compaction settings live on the `chats` row (`models.go:32–34`):
 
 ## 4. The two entry points
 
-Both go through **one function**, `Engine.Compact` (`maintenance.go:54`) → `compactWith`
-(`maintenance.go:102`). Only `Force`, `Target` and `Focus` differ.
+Both go through **one function**, `Engine.Compact` (`maintenance.go:71`) → `compactWith`
+(`maintenance.go:183`). Only `Force`, `Target`, the two automatic bounds and `Focus` differ.
 
 ### Automatic
 
-`maybeAutoCompact` (`maintenance.go:86`) runs in the send pipeline, after search seeding
-and **before** the turn is generated (`PLAN.md:85`), never mid-stream. It is gated by
-`settings.Compact.Enabled` **and** the per-chat `AutoCompact` (`maintenance.go:89`). It passes
-an empty `CompactOptions`, so `Force` is false — the planner's threshold decides — and
-`Target` is 0. The created compaction is discarded: an automatic run has nobody to report back to,
+`autoFold` (`maintenance.go:127`) runs in the send pipeline, after search seeding and **before**
+the turn is generated (`PLAN.md:85`), never mid-stream. It resolves the **two bounds** an automatic
+fold can be decided by and hands both to the planner in one call
+(`CompactOptions{Threshold, Ceiling}`), because they are one decision rather than two:
+
+- the **user's threshold**, read from `settings.Compact.Enabled` **and** the per-chat
+  `AutoCompact`, and passed as **0 when either of them is off** — 0 meaning *no bound at all*
+  rather than *a default*, which is why nothing defaults it on the way in. `Force` stays false,
+  so `Target` is 0 unless the ceiling below supplies one.
+- the **backend's per-request ceiling** (`llm.RequestCeiling` — Groq, GROQ.md §6). It is a number
+  the vendor published rather than a preference, so it folds whether or not the user asked for
+  automatic compaction; it is 0 for a backend that publishes none, which is why this function
+  takes the provider as well as the settings.
+
+With both 0 there is nothing to decide, and the function returns before anything is assembled or
+summarised. The created compaction is discarded: an automatic run has nobody to report back to,
 and "nothing to fold" is already its silent outcome.
 
+The two bounds used to be **two calls** — `maybeAutoCompact` for the threshold and
+`foldForCeiling` for the ceiling — and the cost was not only duplicated code: a chat that had
+crossed both folded twice in the same turn, the threshold run stopping at its keep-turns boundary
+and the ceiling run then folding further for its target, so it paid for two summaries to arrive
+where one fold reaches. Pinned at that seam by `TestBothBoundsCrossedCostsOneFold` (2 compactions
+and 3 backend calls before the merge, 1 and 2 after).
+
 **Silence extends to the window nobody reports.** A model whose context window is unknown cannot be
-compacted against at all — the threshold is a ratio of that window — but that is a standing fact
+compacted against at all — both bounds are ratios of it — but that is a standing fact
 about the model rather than an incident, and this function runs before *every* send. So it returns
 before calling `compactWith` when the limit resolves to zero, rather than forwarding the refusal:
 forwarding it put the same warning in front of the user once per message for as long as the model
@@ -140,7 +158,7 @@ and therefore on every turn of every one of its chats. The condition stays visib
   so this is a backstop against a stuck backend, not a budget the work has to fit in.
 - a `Focus` string and a `Target` ratio (0 = "as much as possible", 0.6 from the
   "→ 60 %" and "Compact to fit" buttons, 0.4 from "→ 40 %").
-- optional `FromSeq`/`ToSeq` to pin the range explicitly (`maintenance.go:139`).
+- optional `FromSeq`/`ToSeq` to pin the range explicitly (`maintenance.go:221`).
 
 It emits `events.ChatsChanged` only when `Created` is true.
 
@@ -157,13 +175,13 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   nothing is sent and the user gets the limit and the fix rather than the vendor's envelope,
   while a fold whose summariser *broke* is reported as the failure it is — the sentence the turn
   ends with does not blame an empty history (GROQ.md §6.2).
-- **`foldForCeiling`** runs *before* the request, where the send pipeline meets
-  `maybeAutoCompact`, and only for a backend that publishes a per-request ceiling
-  (`llm.RequestCeiling` — Groq, whose per-minute token allowance is also the largest single
-  request the account may send). The gate is `0.9 × ceiling` against the *projected* prompt, and
-  the fold aims at the ceiling through `Target`, because the planner prices against the model's
-  window: `sizeTarget` hands it `ceiling / limit`. Its card says `auto`, which is exactly what a
-  threshold nobody pressed means.
+- **the ceiling bound inside the planner** is the preventive fold, and it is not a second entry
+  point any more: whether the next request would run into a published ceiling is the planner's own
+  question, compared in one place with the user's threshold (`automaticBound`, §5.1) and answered
+  with a `Target` when the ceiling is what binds (`ceilingTarget`). Only a backend that publishes a
+  ceiling has it at all (`llm.RequestCeiling` — Groq, whose per-minute token allowance is also the
+  largest single request the account may send), and its gate is `0.9 × ceiling` against the
+  *projected* prompt. Its card says `auto`, which is exactly what a threshold nobody pressed means.
 
   Where that ceiling comes from is what decides which turn it can save. It is the vendor's own
   number, read from **the budget header of any response** — `x-ratelimit-limit-tokens`, which
@@ -185,10 +203,12 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   nothing can show is not taken — so a compaction that runs into a spent minute is still answered
   with the vendor's own 429 and waited out by the shared client.
 
-Neither is gated by `settings.Compact.Enabled` or a chat's `AutoCompact`. Those decide whether
-compaction happens *quietly*; by the time either of these runs, something has already refused the
-request or is about to be refused, which puts both beside the Compact button rather than beside the
-silent threshold.
+The ceiling is deliberately **not** gated by `settings.Compact.Enabled` or a chat's `AutoCompact`.
+Those decide whether compaction happens *quietly*; a request at a published ceiling is about to be
+refused, which puts that bound beside the Compact button rather than beside the silent threshold.
+It therefore reaches the planner through the automatic entry point with the user's own bound
+switched off (`Threshold: 0`), the state `TestAKnownCeilingFoldsTheHistoryBeforeTheRequestGoesOut`
+and `TestBothBoundsCrossedCostsOneFold` both drive.
 
 ### Refusals, before any token is spent
 
@@ -208,26 +228,48 @@ letting the click be the thing that discovers the refusal.
 
 ## 5. Planning: what gets folded, and where the cut lands
 
-`PlanCompaction` (`compact.go:110`) is pure: messages + compactions + budget in, a
+`PlanCompaction` (`compact.go:270`) is pure: messages + compactions + budget in, a
 `CompactPlan` out. It decides the range, the cut point, the counts and the reason string.
 
 ### 5.1 The gate
 
-Without `Force`, the plan is empty unless `Budget.ProjectedRatio ≥ Threshold`. The reason
-string records the decision, e.g. `Kontext bei 83% (Schwelle 80%)`, or
-`manuell ausgelöst` for a forced run. The threshold is measured against the **projected**
-next request (which includes the response reserve), not the last one — it must fire
-before the request that would overflow, not after it.
+Without `Force`, the plan is empty unless `Budget.ProjectedRatio` has reached **the tighter of two
+bounds**, and that comparison is one function (`automaticBound`) because the two are one decision
+rather than two that have to be reasoned about together:
+
+| bound | where it comes from | expressed as | folds at |
+| --- | --- | --- | --- |
+| `Threshold` | the user's setting (per chat, else global, else 0.80) | already a ratio | its own value |
+| `Ceiling` | the backend's published per-request limit, in tokens | `0.9 × ceiling / effective limit` | 0.9 of the ceiling |
+
+Both are measured against the **projected** next request (which includes the response reserve), not
+the last one — the fold has to fire before the request that would overflow, not after it. The reason
+string records which bound fired: `Kontext bei 83% (Schwelle 80%)`, `Anfrage bei 3800 von 4000 Token
+des Anfrage-Limits`, or `manuell ausgelöst` for a forced run.
+
+The two differ in what crossing them *means*, and that is the whole of the rest of the difference. A
+threshold reached folds as far as its cut allows — the context is fuller than the user wants — while
+a request that has reached a ceiling's fold point is one the backend would **refuse**, so it folds
+further: to the ceiling itself, through the same target walk a manual "→ 60 %" uses (§5.4). The aim
+is decided by the ceiling's own fold point rather than by which bound fired, because a fold
+triggered by a *lower* threshold on a chat that is already at the ceiling has to reach it as well.
+
+A ceiling that cannot bind cannot fold early either: it is expressed against the limit the planner
+measures with, so a ceiling above the window becomes a bound above the window's own (1.1 windows is
+0.99 of it), and one more than `1/0.9` windows away is no bound at all — at any projection that
+reached it the window is already over its limit, and the user's threshold is the earlier of the two.
+Pinned by `TestTheTwoAutomaticBoundsAreOneDecision`, `TestACeilingAboveTheWindowIsNotABound` and
+`TestAChatWithNoBoundAtAllFoldsNothing`.
 
 **The ratio is taken against the limit the next request has to fit, which is not always the
 window.** `ContextBudget.EffectiveLimit` is the smaller of the model's window and the backend's
 own per-request ceiling (Groq's per-minute token allowance, GROQ.md §6), and `Percent`,
 `ProjectedRatio` and `OverLimit` are all computed from it. So on a backend that publishes such a
-ceiling, this gate and the automatic threshold above it are the same question as the switch, and
-the percentage the user reads in the meter is the percentage the planner acts on — a chat at 7 %
-of a 131k window but 108 % of an 8k ceiling is already over the line, and reads that way.
+ceiling, both automatic bounds are ratios of the same limit, and the percentage the user reads in
+the meter is the percentage the planner acts on — a chat at 7 % of a 131k window but 108 % of an 8k
+ceiling is already over the line, and reads that way.
 
-Effective values, most specific first (`maintenance.go:354`, `:364`):
+Effective values, most specific first (`maintenance.go:463`, `:473`):
 
 | setting | per-chat field | global field | fallback |
 | --- | --- | --- | --- |
@@ -252,15 +294,18 @@ Two rules make this well-behaved:
 
 ### 5.3 The forced-short-chat rule
 
-When the cut lands before `fromSeq` (the chat holds fewer turns than `keepTurns`), three
-outcomes exist — they fire in this order (`compact.go:167–183`, then `:223–232`):
+When the cut lands before `fromSeq` (the chat holds fewer turns than `keepTurns`), three outcomes
+exist — they fire in this order (the `toSeq < fromSeq` branch, then the escape hatch):
 
-- **automatic**: `Needed: false` with reason `nichts zu komprimieren` (or the existing reason
-  plus `— aber kein Verlauf zum Komprimieren`). Nothing is worth doing.
-- **manual, first fallback**: fold up to the **newest user turn** (`compact.go:177–183`) —
-  the last turn that could contain a tool exchange that must not be split. The comment names
-  the motive: *"A manual compaction is a promise that the context gets compacted, so it must
-  never end as a silent no-op while foldable history exists."*
+- **automatic, no target**: `Needed: false` with reason `nichts zu komprimieren` (or the existing
+  reason plus `— aber kein Verlauf zum Komprimieren`). Nothing is worth doing, and nothing may be:
+  an automatic fold has nobody to promise anything to.
+- **any run with a target, and every manual one**: fold up to the **newest user turn** — the last
+  turn that could contain a tool exchange that must not be split. For a manual run the comment
+  names the motive: *"A manual compaction is a promise that the context gets compacted, so it must
+  never end as a silent no-op while foldable history exists."* For the ceiling bound it is the
+  point of the run: refusing here would leave exactly the oversized request the fold exists to
+  prevent, and it is what makes that bound work on a chat with fewer turns than `keepTurns`.
 - **manual, last resort**: if even that produces no cut, extend the cut to the **end of the
   chat** (`compact.go:223–232`). This is the state right after a previous compaction plus one
   new turn: every older turn is already folded and only the newest is kept verbatim, so the
@@ -271,19 +316,22 @@ outcomes exist — they fire in this order (`compact.go:167–183`, then `:223�
   `TestManualCompactionOnSingleTurnFoldsIt`,
   `TestManualCompactionOnlyNoopsWhenEverythingIsAlreadyFolded`.
 
-The last resort above is a **manual** run's privilege. `PlanInput.ProtectNewestTurn`
-(`CompactOptions.ProtectNewestTurn`) turns it off, and every fold that exists to make a request
-smaller sets it: the message the user just sent is what the next request has to carry, and folding
-it would answer the question with a summary of itself while leaving the request exactly as large —
-the summary is written from the same text. With the escape off, a chat whose only foldable content
-is the current turn folds nothing and says so, which is the honest answer a size fold needs:  `foldForSize` then skips its retry, and the user is told the limit rather than handed a body that
-would be refused identically.
-
-### 5.4 Manual targets: "→ 60 %" means 60 %
+The last resort above is a **forced** run's privilege: an automatic fold never takes it, because an
+automatic run has nobody to promise anything to and folding the message it is about would leave the
+request exactly as large. `PlanInput.ProtectNewestTurn` (`CompactOptions.ProtectNewestTurn`) turns
+it off even for a forced run, and the size fold sets it: the message the user just sent is what the
+next request has to carry, and folding it would answer the question with a summary of itself while
+leaving the request exactly as large — the summary is written from the same text. With the escape
+off, a chat whose only foldable content is the current turn folds nothing and says so, which is the
+honest answer a size fold needs: `foldForSize` then skips its retry, and the user is told the limit
+rather than handed a body that would be refused identically.### 5.4 Targets: "→ 60 %" and a ceiling mean what they say
 
 With `Target > 0` the cut is **walked outwards from the keep-turns boundary** — folding one
 turn per step, from the oldest kept turn towards the newest — until the estimate fits
-`Target × Limit` (`compact.go:191–221`). The walk has to price the cut it is about to
+`Target × Limit`. One walk serves every caller that has a target: a manual "→ 60 %", the fold that
+answers a refusal (`foldForSize`) and the automatic fold aimed at a published ceiling
+(`ceilingTarget`, which is `ceiling / window` because the walk prices against the window).
+ The walk has to price the cut it is about to
 install: the loop this replaced counted `i` backwards from the newest turn while folding
 forwards with the same `i`, so its figure and its cut described two different states. The
 cut could then be missed by a whole window in either direction — a 30 % target landing at
@@ -294,7 +342,7 @@ seven kept turns instead of the newest one. Three details make the promise hones
   and the auto threshold reads that projected ratio — so pricing the manual target without
   the reserve would make the same percentage mean two different window states.
 - **Each candidate cut point is priced as a whole turn span** — the user message, its
-  answer and the tool traffic up to the next user turn (`turnTokenSpans`, `compact.go:327`).
+  answer and the tool traffic up to the next user turn (`turnTokenSpans`, `compact.go:511`).
   Counting only the user message makes the estimate believe it has folded less than it
   has, and it then folds turns it did not need to.
 - **Attachments count towards the target** (`in.Budget.Attachments`). Inlined file text and
@@ -728,8 +776,8 @@ approximate. Two things happen with it:
 
 | setting | default | effect |
 | --- | --- | --- |
-| `Enabled` | `true` | master switch for automatic compaction (manual still works) |
-| `Threshold` | `0.80` | projected ratio at which automatic compaction fires |
+| `Enabled` | `true` | master switch for the automatic **threshold** (manual still works, and a backend's published ceiling folds regardless — §4) |
+| `Threshold` | `0.80` | projected ratio at which the threshold bound fires |
 | `KeepRecentTurns` | `6` | turns kept verbatim; also the floor for the forced-short-chat rule |
 | `ReserveForResponse` | `1024` | headroom the budget keeps for the answer |
 | `SummaryTemperature` | `0.2` | near-deterministic extraction rather than creative rewriting |
@@ -748,9 +796,9 @@ populated default, so no migration is needed for these.
 | --- | --- | --- |
 | a turn is running | button disabled + `compact.busy` (`ModelSwitcher.tsx:216`, `:223`); the engine refuses too | `maintenance.go:55` |
 | nothing to fold (manual) | `Created: false`, toast `compact.noNeed` (`ModelSwitcher.tsx:141`), **no model call** | `maintenance.go:134` |
-| nothing to fold (auto) | silent, the turn proceeds | `maybeAutoCompact` |
+| nothing to fold (auto) | silent, the turn proceeds | `autoFold` |
 | no model / backend unconfigured / unknown window, **manual** | explicit error before any tokens are spent | `maintenance.go:54–72`, `:110` |
-| unknown window, **automatic** | silent, the turn proceeds; the meter already says the limit is unknown | `maybeAutoCompact` |
+| unknown window, **automatic** | silent, the turn proceeds; the meter already says the limit is unknown | `autoFold` |
 | summary model on a missing backend | error naming model *and* backend | `maintenance.go:310` |
 | summary model's window unknown | `events.Warning`, chat window used, memory still written | `maintenance.go:186` |
 | reasoning model eats the budget | up to 3 attempts with a growing budget, then the "spent its budget on reasoning" error naming `MaxSummaryTokens` | `compact.go:520` |
@@ -759,8 +807,10 @@ populated default, so no migration is needed for these.
 | backend slower than 15 minutes | `context deadline exceeded` (the API backstop) | `api.go:344` |
 | LM Studio without `/api/v1/models` | native route retired, OpenAI-compatible path + `/no_think` | `retireReasoning` |
 | backend rejects the `reasoning` field | that model is retired from the native route, not the namespace | `retireReasoning` |
-| chat shorter than `keepTurns`, automatic | no compaction, reason `nichts zu komprimieren` | `compact.go:167` |
-| chat shorter than `keepTurns`, manual | first fold up to the newest user turn, then (if that is still empty) to the end of the chat | `compact.go:177`, `:223` |
+| chat shorter than `keepTurns`, automatic with no bound crossed | no compaction, reason `nichts zu komprimieren` | `compact.go:340` |
+| chat shorter than `keepTurns`, a target (manual, or the ceiling bound) | folds up to the newest user turn | `compact.go:340` |
+| manual with nothing older at all | extends the cut to the end of the chat | `compact.go:414` |
+| both automatic bounds crossed in one turn | **one** fold and one summary — the planner holds both bounds | `autoFold`, `automaticBound` |
 
 ---
 
@@ -769,8 +819,13 @@ populated default, so no migration is needed for these.
 **Unit tests** (`go test ./... -count=1`) pin the behaviour:
 
 - *planning*: cut points on user boundaries, below-threshold no-op, resume after a previous
-  compaction, too-few-turns, never fold a streaming message, forced target folds more
+  compaction, too-few-turns, never fold a streaming message, forced target folds more, the two
+  automatic bounds decided together (the ceiling folding with the user's switch off and aiming at
+  itself, a ceiling above the window not folding early, no bound at all never folding)
   (`internal/chat/chat_test.go`);
+- *the seam*: both bounds crossed in one turn costs one summary and two backend calls rather than
+  two folds and three (`oversize_test.go`, `TestBothBoundsCrossedCostsOneFold` — it was written
+  against the pre-merge code, where it fails with exactly those numbers);
 - *manual semantics*: short chat folds what exists, single turn folds itself, only no-ops
   when everything is already folded, no history is not a failure (`chat_test.go`); always
   folds when only the newest turn is left, an older compaction is never reported as new
@@ -823,16 +878,18 @@ assume are covered.
 - **`CompactOptions.FromSeq`/`ToSeq` are plumbed end-to-end but no UI sends them.** The
   bound RPC accepts a pinned range; every caller currently passes 0/0
   (`ModelSwitcher.tsx:136`, `:394`), so the planner always decides.
-- **`Target` is ignored on the automatic path**, which is correct but easy to misread: auto
-  compaction fires at the threshold and folds the keep-turns cut, without aiming at a ratio.
-- **The automatic path cannot rescue a chat the keep-turns cut leaves over the window.** The
-  cut is the floor, so a chat whose last `KeepRecentTurns` turns alone exceed the limit is
-  compacted *and stays over it*: measured with 1 910-token turns in an 8 192-token window,
-  auto folded to 179 % of the window and reported the chat as still over limit (576-token
-  turns land at 82 %, which is the case the threshold was designed for). The walk of §5.4
-  could be run with a target of 1.0 to fold past the floor, but that trades the keep-turns
-  guarantee for the window — a policy decision, not an arithmetic one, so it is recorded
-  rather than decided here.
+- **A target on the automatic path comes from the ceiling, and only from there.** A threshold
+  crossing folds the keep-turns cut without aiming at a ratio; `Target > 0` on an automatic run
+  means the ceiling bound decided it (§5.1, §5.4). Easy to misread from the two callers that were
+  separate before the merge, one of which always passed a target.
+- **The threshold's fold cannot rescue a chat the keep-turns cut leaves over the window.** The cut
+  is the floor for that bound, so a chat whose last `KeepRecentTurns` turns alone exceed the limit
+  is compacted *and stays over it*: measured with 1 910-token turns in an 8 192-token window, auto
+  folded to 179 % of the window and reported the chat as still over limit (576-token turns land at
+  82 %, which is the case the threshold was designed for). A published **ceiling** does fold past
+  the floor, because a request at one would be refused rather than merely be full — but for the
+  window alone the walk of §5.4 is still not run with a target of 1.0, since that trades the
+  keep-turns guarantee for the window: a policy decision, not an arithmetic one.
 - **The meter's attachment figure is the stored count, not a re-derivation.** A document's
   `TokenCount` is what ingestion measured, and it is charged to `budget.Attachments`
   (`context.go:255`) on the way to `Estimated`; the `<document …>` wrapper and the base64
