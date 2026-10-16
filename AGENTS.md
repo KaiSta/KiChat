@@ -607,7 +607,10 @@ this, in this order. The number in the request is the number everywhere:
    may not be installed — say so rather than skipping it silently.)
 4. **Tag that commit, annotated, with the same notes as its message** — the shape 0.3.x
    used, so `git show x.y.z` *is* the release:
-   `git tag -a x.y.z -F <(git log -1 --format=%B HEAD) x.y.z`. Annotated, because a
+   `git tag -a x.y.z -F <(git log -1 --format=%B HEAD) HEAD`. That trailing argument is the
+   *object to tag*, not the name to create, so repeating the version there fails with
+   `fatal: Failed to resolve 'x.y.z' as a valid ref` — the tag does not exist yet when the
+   command runs; `HEAD` is step 2's bump commit, made moments before. Annotated, because a
    lightweight tag carries no notes; on the bump commit, because a build from the tag
    otherwise reports the old number. `git describe --tags --exact-match HEAD` on it is the
    check that it landed there. 0.4.0 was bumped without a tag and only got one after the
