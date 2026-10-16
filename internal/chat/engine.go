@@ -244,6 +244,16 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		e.emit(events.Warning, map[string]any{"chatId": req.ChatID, "warning": err.Error()})
 	}
 
+	// A backend that has published a ceiling for this model gets the fold *before*
+	// the request rather than after being refused. The window is not that ceiling:
+	// Groq's per-minute token allowance is also the largest single request the
+	// account may send, so a chat planned against a 131k window is refused within
+	// the first few thousand tokens. The ceiling is learned from one refusal, and
+	// this is what stops the second turn from paying for it again.
+	if _, err := e.foldForCeiling(ctx, &chat, provider, backendID, modelID, modelInfo, settings); err != nil {
+		e.emit(events.Warning, map[string]any{"chatId": req.ChatID, "warning": err.Error()})
+	}
+
 	// Assistant rows are created by generate as each model reply begins, so a
 	// tool round produces a faithful sequence of messages.
 	//
@@ -254,7 +264,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	// rather than enabling tools, and the fallback is what makes that safe.
 	useNativeTools := settings.NativeTools && modelInfo.Has(llm.CapTools)
 
-	result, genErr := e.generate(ctx, generateInput{
+	in := generateInput{
 		Chat:        chat,
 		Provider:    provider,
 		BackendID:   backendID,
@@ -263,7 +273,23 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		Settings:    settings,
 		UseNative:   useNativeTools,
 		MaxToolIter: settings.ToolIterations,
-	})
+	}
+	result, genErr := e.generate(ctx, in)
+
+	// A request the backend refused for its own size is a verdict rather than a
+	// hiccup — the same body produces the same answer — so the history is folded and
+	// the turn is sent once more. This is what keeps a long chat from becoming an
+	// unusable one, and it is the only retry here: a second refusal is reported with
+	// the limit the vendor named instead of its envelope (turnFailureText).
+	folded := false
+	if genErr != nil && ctx.Err() == nil {
+		if too, ok := llm.RequestTooLarge(genErr); ok {
+			folded = e.foldForSize(ctx, &chat, provider, backendID, modelID, modelInfo, settings, too)
+			if folded {
+				result, genErr = e.generate(ctx, in)
+			}
+		}
+	}
 
 	// The reply's own status is the honest one to publish: generate already
 	// distinguished an interrupted answer from one the backend stopped delivering
@@ -283,7 +309,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		e.emit(events.Error, map[string]any{
 			"chatId":    req.ChatID,
 			"messageId": result.PrimaryMessageID,
-			"error":     genErr.Error(),
+			"error":     turnFailureText(provider.Name(), genErr, folded),
 		})
 	}
 
@@ -432,6 +458,7 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 		Limit:         limit,
 		LimitSource:   limitSource,
 		Reserve:       reserve,
+		Ceiling:       e.ceilingFor(backendID, modelID),
 		MeasuredValid: measuredValid,
 	}
 	if measuredValid {
@@ -439,6 +466,29 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 		in.MeasuredSeq = measurement.Seq
 	}
 	return Assemble(in), toolDefs, nil
+}
+
+// ceilingFor is what the backend has published about the largest single request it
+// accepts for this model, or the zero value when it has published nothing.
+//
+// It is read from the provider the registry holds rather than passed in by each
+// caller, because it is one fact about one backend and model: the turn's budget, the
+// preview the model switcher shows and the summarisation budget all have to see the
+// same number, or the meter would tell the truth on one screen and not on another.
+// The answer is a number the provider already holds — no request is made to ask.
+func (e *Engine) ceilingFor(backendID, modelID string) llm.Ceiling {
+	if e.Registry == nil || backendID == "" || modelID == "" {
+		return llm.Ceiling{}
+	}
+	provider, ok := e.Registry.Provider(backendID)
+	if !ok {
+		return llm.Ceiling{}
+	}
+	ceiler, ok := provider.(llm.RequestCeiling)
+	if !ok {
+		return llm.Ceiling{}
+	}
+	return ceiler.RequestCeiling(modelID)
 }
 
 // toolDefinitions decides which tools to advertise for this model and chat.

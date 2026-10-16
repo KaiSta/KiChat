@@ -82,6 +82,13 @@ type PlanInput struct {
 	Force  bool
 	Target float64
 
+	// ProtectNewestTurn refuses the escape hatch below, which folds the newest user
+	// turn when there is nothing older to fold. A size fold must never take it: the
+	// message the user just sent is what the next request has to carry, and folding
+	// it would answer the question with a summary of itself while leaving the request
+	// exactly as large.
+	ProtectNewestTurn bool
+
 	// MeasuredTokens is the authoritative used-token figure, used for the
 	// before/after reporting.
 	MeasuredTokens int
@@ -227,7 +234,7 @@ func PlanCompaction(in PlanInput) CompactPlan {
 	// keeps verbatim. Extending the cut to the end of the chat folds that turn
 	// too, and the end of the chat is always a valid cut point — nothing follows
 	// it, so no tool call is separated from its result.
-	if in.Force && toSeq < fromSeq {
+	if in.Force && toSeq < fromSeq && !in.ProtectNewestTurn {
 		if last := lastMessageSeq(in.Messages); last >= fromSeq {
 			toSeq = last
 			keepFrom = last + 1

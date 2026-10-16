@@ -16,7 +16,7 @@ points at one document per subsystem for the measured detail behind it:
 | `MISTRAL.md` | the Mistral backend: the measured listing and stream shapes, the alias collapse, the typed content chunks, the bugs review found |
 | `DEEPSEEK.md` | the DeepSeek backend: the listing that reports a window, `reasoning_content`, the `/v1` alias, refusals |
 | `NVIDIA.md` | the build.nvidia.com backend: the four-field listing, the catalogue that lists models the account may not call (why the provider filters nothing, and the one-token availability check that filters on evidence instead), the reasoning field that arrives twice, refusals |
-| `GROQ.md` | the Groq backend: the listing that publishes each model's window, modalities and features (so the capability claims are the vendor's own, and the four entries that cannot chat are dropped on the vendor's 400), the two classification entries that can be called but not streamed and why they are kept anyway, the `reasoning` field beside its `channel` marker, the `reasoning_effort` that has no off value, refusals |
+| `GROQ.md` | the Groq backend: the listing that publishes each model's window, modalities and features (so the capability claims are the vendor's own, and the four entries that cannot chat are dropped on the vendor's 400), the two classification entries that can be called but not streamed and why they are kept anyway, the `reasoning` field beside its `channel` marker, the  `reasoning_effort` that has no off value, refusals, and the refusal that means the request itself is too big — the same `rate_limit_exceeded` envelope a throttle uses, told apart by its own words, the fold it triggers instead of failing the turn, the per-request ceiling it teaches the app from the budget header on an ordinary answer as much as from the refusal itself (read for this vendor alone, and only ever tightened), the effective per-request budget the context meter measures against, and the minute a turn is paced against — the remainder and the reset read from the same family of headers, and the wait shown as its own phase rather than the throttle's |
 | `LLAMACPP.md` | llama.cpp on both sides: the provider's `/props`-driven metadata (and why a missing claim is not `false`), and the managed runtime that installs and runs `llama-server` — two release sources including PrismML's fork, the update check, GPU offload, the ternary models |
 | `RESEARCH.md` | web search and scraping: the Brave and DuckDuckGo providers, the metered LLM-context route that search-first uses, what classifies a refusal, the scraper's SSRF and robots guards, the token budgets, and the search-first seeded turn |
 | `IMAGES.md` | image generation: three kinds of backend — the one `/sdapi/v1/txt2img` route that covers AUTOMATIC1111, Forge and stable-diffusion.cpp's `sd-server`, the local `sd-cli` run once per picture through the binary's own flags, and the *same* build run as a `sd-server` KiChat starts and stops itself (the port chosen free because 1234 is LM Studio's, `/sdapi/v1/sd-models` as the readiness route because sd-server serves no `/health`, start-with-app off by default, and a *reading* that asks for a restart instead of restarting on save) (the published per-accelerator archives, and the folder KiChat finds the program in, with several builds in one folder reported rather than picked) — how a generation parameter is decided (§3): the model chooses it per call through its `generate_image` arguments — including the guidance scale, the one that used to live in the extra command-line arguments — an empty field then falls through to the server's or the program's own default, and a value typed in Settings is *fixed* and overrides what the model asked for — the named profiles that save that configuration and switch a model in one pick (§3), the single place every request's size and step count are bounded, the `generate_image` tool, and how a picture becomes an ordinary image attachment — which is what lets a vision model see a *user's* attachment on the next turn, while the same thing for a picture KiChat drew is unverified (§9) |
@@ -405,10 +405,24 @@ short version:
   chat completions" rather than a rule about the ids. Measured against the live account:
   its catalogue of 11 entries maps to 7 chat models, `include_usage` is honoured, a tool call
   streams, and a fake key is refused with `invalid_api_key` rather than a throttle. It also
+  asserts the reading §6's preventive fold rests on: an ordinary answer leaves a per-request
+  ceiling behind, its source `header` rather than `refusal`, and a number of its own rather than
+  the window the listing publishes — the run logs it. It also asserts the reading §6.4's pacing
+  rests on, from the same response: the remainder and the reset duration are readable, and the
+  limit they are read against is the same number the ceiling came from (one header, one
+  allowance). It also
   pins the row the filter deliberately keeps and cannot use: the two prompt-guard classifiers
   answer a call *without* `stream` and refuse the streaming one with HTTP 400 "do not support
   streaming", so those two rows can only fail in a client that always streams — asserted, so
   the gap is a measurement rather than a memory.
+- `TestLiveGroqOversizedRequestIsRecognised` — GROQ.md §6 and §8: the one measurement the
+  offline fixture cannot make. It sends a deliberately oversized request (~38k tokens against
+  a free-tier allowance of 8k) and asserts what comes back is an oversized *request* rather
+  than a throttle: the classified verdict, the limit and the requested figure read out of the
+  vendor's own sentence, the ceiling kept for the next turn, and that nothing retries it. One
+  request, no retry — but whether a refused request is charged against the budget is not
+  documented, so treat it as up to a minute's allowance. An account with a larger allowance
+  skips itself rather than failing. Picked up by the unanchored `-run TestLiveGroq` pattern.
 - `TestLiveGroqShippedEntryReachesTheAPI` — GROQ.md §8: the wiring rather than the mapper.
   It takes the entry `DefaultBackendConfigs` ships, switches it on and gives it the key
   exactly as the settings panel leaves it, builds it through `NewRegistry`, and makes it list
@@ -476,7 +490,11 @@ a purple **MOCK BRIDGE** badge, so a harness page is never mistaken for the real
 - `?throttle=1` pauses a streamed reply the way a backend's rate limit does: the phase
   and the seconds it names appear while the retry sleeps, and nothing arrives until the
   wait it names is over. It is a flag because the ordinary fixture has to keep streaming
-  without a pause.
+  without a pause. `?pace=1` is the same pause for the other wait — a turn held back
+  because the backend's minute has no room for it yet, which reads differently on purpose
+  (nothing was refused) and would otherwise never be rendered. Its pause is the longer of
+  the two, because a spent minute stays spent until its window turns over rather than for
+  the seconds a retry names.
 - Unmodelled bindings resolve **and log a warning** — if the console shows
   `unmodelled binding called: X`, the mock needs X when you exercise that path.
 - `?crash=render` injects an unrenderable message to prove the error boundary still
@@ -491,6 +509,17 @@ a purple **MOCK BRIDGE** badge, so a harness page is never mistaken for the real
   through `starting` before it settles, and the restart reading is computed from the stored
   command line rather than stored, which is what makes a save under a running server raise the
   badge.
+- The **per-request budget fixture** is `?ceiling=<tokens>`, with no default: a backend that
+  caps one request below the model's window (Groq) is the case the meter has to read as *room
+  that does not exist*, and the flag is what renders it. `?ceiling=8000` against the fixture's
+  128k model is the ceiling merely binding — the meter reads `used / 8000` with the note in its
+  tooltip and the inspector naming the source — and a smaller one, `?ceiling=1200`, is the
+  projected request already over it, where the red row and the danger badge appear.
+  `?ceilingsource=refusal` is the other row of the inspector's ceiling line — *from a refused
+  request* rather than *from the backend's own response* — because the label is the whole point
+  of showing where the number came from and one of the two would otherwise never be rendered. The
+  mock computes `effectiveLimit` and the percentages from the ceiling the way `context.go` does,
+  so its percentage cannot disagree with the app's.
 - The **Backends fixture holds a key for an entry that is switched off**: the shipped
   Mistral row, which is how a user who pasted a key into it and pressed "Aktualisieren"
   ends up stored-but-never-asked. That state has its own row, its own badge and its own

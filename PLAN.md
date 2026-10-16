@@ -48,7 +48,13 @@ internal/
   llm/             Provider abstraction over the wire formats
     types.go         Message, ModelInfo, Usage, GenerationStats, StreamEvent, Provider
     tokens.go        Heuristic estimator (pre-send prediction only)
-    httpclient.go    Shared client, retries, timeouts
+    httpclient.go    Shared client, retries, timeouts; every response's headers
+                     handed to a watcher on the context
+    limits.go        An over-size refusal told apart from a throttle, and the
+                     per-request ceiling it states (GROQ.md §6)
+    pace.go          The minute a turn is paced against: what is left of a
+                     backend's token allowance and when it resets, and the wait
+                     before a request they cannot pay for (GROQ.md §6.4)
     openai.go        LM Studio / OpenAI-compatible SSE streaming
     ollama.go        Ollama NDJSON streaming
     deepseek.go      DeepSeek over the OpenAI wire format, with its own error envelope
@@ -75,11 +81,17 @@ internal/
   chat/            The engine
     engine.go        Send/Stop/turn serialisation, Measurement registry
     generate.go      One turn: model resolution, streaming, tool loop, stats
-    context.go       Prompt assembly and ContextBudget with measured-vs-estimated accounting
+    context.go       Prompt assembly and ContextBudget with measured-vs-estimated
+                     accounting, measured against the effective per-request
+                     limit (window or a backend's own ceiling, GROQ.md §6)
     compact.go       Compaction (summary generation, never destructive)
     prompt.go        Templating including tool-list substitution
     preview.go       Token prediction before sending
     maintenance.go   Auto-title, background upkeep
+    oversize.go      A request the backend refuses for its own size: fold the
+                     history, retry once, remember the ceiling — which the
+                     backend's own budget header states before anything is
+                     refused, so the next turn is folded instead (GROQ.md §6)
     searchfirst.go   Search-before-answer seeding
   research/        search.go, chain.go (Brave -> DuckDuckGo), brave.go, duckduckgo.go,
                    scrape.go (SSRF + robots guards), util.go

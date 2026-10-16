@@ -358,7 +358,14 @@ export function CompactionCard({
     >
       <div className="flex flex-wrap items-center gap-2">
         <span className="badge badge-accent">
-          {compaction.trigger === 'auto' ? t('compact.auto') : t('compact.manual')}
+          {/* `too_large` is the fold nobody asked for: the backend refused the request
+              for its own size and the history had to be folded to answer at all. It
+              gets its own word rather than reading as a button somebody pressed. */}
+          {compaction.trigger === 'auto'
+            ? t('compact.auto')
+            : compaction.trigger === 'too_large'
+              ? t('compact.tooLarge')
+              : t('compact.manual')}
         </span>
         <strong style={{ color: 'var(--text)' }}>{t('compact.title')}</strong>
         <span className="faint">

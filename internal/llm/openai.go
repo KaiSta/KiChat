@@ -113,6 +113,21 @@ type openAICompatProvider struct {
 	// InvalidateCache is where it is dropped.
 	props       *llamaCppProps
 	propsLoaded bool
+
+	// requestCeilings remembers, per model, the largest single request the account
+	// may send and where that number came from. Groq's per-minute token allowance is
+	// that number, and its listing reports windows rather than budgets, so the number
+	// is read from the vendor's own statements: a refusal's sentence, or the budget
+	// header every response carries.
+	ceilingMu       sync.Mutex
+	requestCeilings map[string]Ceiling
+
+	// requestBudgets remembers, per model, the last thing a response said about the
+	// minute's token allowance: what was left of it and how long that lasts. It is
+	// what a turn is paced against, so a chat that would otherwise spend the minute
+	// in three turns waits by seconds instead of being refused (internal/llm/pace.go).
+	budgetMu       sync.Mutex
+	requestBudgets map[string]modelBudget
 }
 
 // modelListFlavour names the shape of a model listing. The zero value is LM
@@ -137,6 +152,67 @@ const (
 	reasoningEffortField = "reasoning_effort"
 	reasoningEffortNone  = "none"
 )
+
+// noteRequestCeiling remembers a ceiling the vendor stated, so the next request for
+// that model can be planned against the real limit instead of spending another
+// refusal to rediscover it.
+//
+// The tighter of the number already known and the new one is kept, and that choice is
+// deliberate. Both sources describe one limit read at two moments, and a plan that
+// fits the smaller of two statements about it fits both: keeping the tighter can cost
+// one fold that was not needed, while keeping the looser can cost a refused turn. It
+// also makes the two writers order-independent — a budget header that arrives after a
+// refusal cannot loosen the ceiling a refusal proved.
+func (p *openAICompatProvider) noteRequestCeiling(model string, c Ceiling) {
+	if model == "" || c.Tokens <= 0 || c.Source == "" {
+		return
+	}
+	p.ceilingMu.Lock()
+	defer p.ceilingMu.Unlock()
+	if p.requestCeilings == nil {
+		p.requestCeilings = map[string]Ceiling{}
+	}
+	if known, ok := p.requestCeilings[model]; ok && known.Tokens > 0 && known.Tokens < c.Tokens {
+		return
+	}
+	p.requestCeilings[model] = c
+}
+
+// RequestCeiling implements llm.RequestCeiling: the largest single request this
+// provider knows the account may send for a model, and where the number came from.
+//
+// The zero value means it has never been told, which is the state of a session before
+// its first answer: no route of Groq's API publishes a budget without being asked a
+// question, so the number arrives on the first response — the answer or the refusal —
+// and every request after it is planned against the real limit.
+func (p *openAICompatProvider) RequestCeiling(model string) Ceiling {
+	p.ceilingMu.Lock()
+	defer p.ceilingMu.Unlock()
+	return p.requestCeilings[model]
+}
+
+// requestBudget learns a model's per-request ceiling from the budget a response
+// carries. It is attached to a Groq chat request's context, where the model being
+// planned for is known and a budget exists.
+type requestBudget struct {
+	provider *openAICompatProvider
+	model    string
+}
+
+// ResponseHeaders reads the ceiling out of one response. The vendor's own refusal is
+// not the only place it states the limit: every response, the answer as much as the
+// failure, carries the tokens-per-minute allowance of the model that produced it,
+// which is why the first oversized request of a session can be folded instead of
+// sent.
+func (b requestBudget) ResponseHeaders(h http.Header) {
+	if tokens := ceilingFromHeaders(h); tokens > 0 {
+		b.provider.noteRequestCeiling(b.model, Ceiling{Tokens: tokens, Source: CeilingFromHeader})
+	}
+	// And the remainder, which is the same header family read for a different
+	// question: the ceiling says whether one request fits at all, the remainder says
+	// whether there is anything left of the minute to spend on it (pace.go).
+	b.provider.noteRequestBudget(b.model, h)
+}
 
 // keyCheck reports a backend that needs a credential and has none.
 func (p *openAICompatProvider) keyCheck() error {
@@ -934,6 +1010,21 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 	if err := p.keyCheck(); err != nil {
 		return nil, err
 	}
+	// Groq's per-request token budget is published on its responses and nowhere
+	// else — its listing reports windows. Watching them is what turns the ceiling
+	// from something a refusal teaches into something the first ordinary answer
+	// does, so the second oversized request of a session is folded before it is sent.
+	// Another backend's headers are not read: what this header means here is a
+	// measurement of this vendor, and a guess about a different service's would fold
+	// chats that need no folding.
+	if p.modelsFlavour == flavourGroq {
+		ctx = withResponseWatcher(ctx, requestBudget{provider: p, model: req.Model})
+		// And, before the request goes out, the wait that keeps a long chat inside the
+		// minute it is spending: the allowance this model has left, against what this
+		// request is about to cost. It is reported on the same watcher a retry uses, so
+		// it appears as a phase with the seconds the vendor's own header named.
+		p.paceRequest(ctx, req)
+	}
 	// A request that explicitly asks not to think goes to LM Studio's native
 	// route when the model publishes a reasoning setting: that route is the only
 	// place the setting exists, and it is the difference between a summary and a
@@ -1037,6 +1128,16 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 			rc, err = postStream(ctx, p.currentChatPath(), p.authHeaders(), body)
 		}
 		if err != nil {
+			// A refusal states the ceiling that produced it, per model, where a
+			// listing reports windows and not budgets. Keeping it is what lets the
+			// next turn fold the history *before* it is refused instead of paying
+			// for the same refusal again. The response's own header has already
+			// been read above when it carried one, and noteRequestCeiling keeps the
+			// tighter of the two, so the two routes cannot disagree about the
+			// limit they are describing.
+			if too, ok := RequestTooLarge(err); ok {
+				p.noteRequestCeiling(req.Model, Ceiling{Tokens: too.Limit, Source: CeilingFromRefusal})
+			}
 			return nil, err
 		}
 	}

@@ -29,6 +29,16 @@ type CompactOptions struct {
 	// FromSeq/ToSeq narrow the range to fold. Zero means "let the planner decide".
 	FromSeq int
 	ToSeq   int
+	// Trigger overrides the name the transcript's card shows for this run. It
+	// exists because two folds are forced without being the user's: the one that
+	// answers a backend refusing the request for its own size, which has to be
+	// explained rather than look like a button somebody pressed.
+	Trigger string
+	// ProtectNewestTurn keeps the fold off the message that started the turn, so a
+	// run that has nothing older to fold folds nothing. Every fold that exists to
+	// make a request smaller sets it; a manual run does not, because there the
+	// alternative to folding the newest turn is folding nothing at all.
+	ProtectNewestTurn bool
 }
 
 // CompactResult reports what a compaction run actually did. A run that finds
@@ -155,15 +165,16 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	}
 
 	plan := PlanCompaction(PlanInput{
-		Messages:         messages,
-		Compactions:      compactions,
-		Budget:           assembly.Budget,
-		Threshold:        effectiveThreshold(*chat, settings),
-		KeepRecentTurns:  effectiveKeepTurns(*chat, settings),
-		Reserve:          settings.Compact.ReserveForResponse,
-		MaxSummaryTokens: settings.Compact.MaxSummaryTokens,
-		Force:            opts.Force,
-		Target:           opts.Target,
+		Messages:          messages,
+		Compactions:       compactions,
+		Budget:            assembly.Budget,
+		Threshold:         effectiveThreshold(*chat, settings),
+		KeepRecentTurns:   effectiveKeepTurns(*chat, settings),
+		Reserve:           settings.Compact.ReserveForResponse,
+		MaxSummaryTokens:  settings.Compact.MaxSummaryTokens,
+		Force:             opts.Force,
+		Target:            opts.Target,
+		ProtectNewestTurn: opts.ProtectNewestTurn,
 	})
 	if !plan.Needed {
 		return nil, nil
@@ -222,6 +233,17 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 				"warning": fmt.Sprintf("das Kontextfenster des Zusammenfassungs-Modells %q ist unbekannt — "+
 					"verwendet wird das Fenster des Chat-Modells", target.Model),
 			})
+		}
+	}
+	// A ceiling the summariser publishes is smaller than its window, and a request
+	// sized to the window would be refused for its own size: Groq's per-minute token
+	// allowance is that ceiling, so a transcript budgeted against a 131k window is
+	// one more oversized request — which is how a compaction that exists to make a
+	// chat fit ends up failing on the same refusal. The summary call is budgeted
+	// against the ceiling instead, and the ceiling is the backend's own number.
+	if ceiler, ok := target.Provider.(llm.RequestCeiling); ok {
+		if ceiling := ceiler.RequestCeiling(target.Model).Tokens; ceiling > 0 && ceiling < limit {
+			limit = ceiling
 		}
 	}
 
@@ -289,10 +311,14 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		return nil, err
 	}
 
+	trigger := triggerName(opts.Force)
+	if opts.Trigger != "" {
+		trigger = opts.Trigger
+	}
 	compaction := store.Compaction{
 		ID:           newID(),
 		ChatID:       chat.ID,
-		Trigger:      triggerName(opts.Force),
+		Trigger:      trigger,
 		FromSeq:      plan.FromSeq,
 		ToSeq:        plan.ToSeq,
 		Summary:      summary,
@@ -377,11 +403,22 @@ func (e *Engine) summariser(ctx context.Context, provider llm.Provider, backendI
 	}, nil
 }
 
+// The names a compaction's card can carry. `auto` and `manual` are how the memory
+// came to exist — a threshold nobody watched, or a button somebody pressed — and
+// `too_large` is neither: the backend refused the request for its own size, so the
+// history was folded because there was no other way to answer. A card that said
+// "manual" there would credit the user with a fold they never asked for.
+const (
+	triggerAuto     = "auto"
+	triggerManual   = "manual"
+	triggerTooLarge = "too_large"
+)
+
 func triggerName(force bool) string {
 	if force {
-		return "manual"
+		return triggerManual
 	}
-	return "auto"
+	return triggerAuto
 }
 
 // effectiveThreshold prefers the per-chat value over the global one.

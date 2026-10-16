@@ -63,6 +63,14 @@ func retryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	// A refusal caused by the request's own size is a verdict, not a hiccup: the
+	// same body produces the same answer, so there is nothing to wait for. Groq's
+	// oversized request arrives as a 413 (never retryable anyway), but a vendor that
+	// spells the same verdict with a 429 would otherwise spend all three attempts
+	// against a budget the request itself exceeds.
+	if _, tooLarge := RequestTooLarge(err); tooLarge {
+		return false
+	}
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr.Retryable()
@@ -196,7 +204,12 @@ func waitBeforeRetry(ctx context.Context, err error, attemptNo int) bool {
 // exactly the interval in which nothing else is happening: no tokens arrive during
 // it, by definition, and the phase cannot outlive it.
 type RetryWatcher interface {
-	// Waiting reports the wait about to be taken, and the failure that caused it.
+	// Waiting reports the wait about to be taken, and the failure that caused it — or
+	// nil when there was no failure behind it, which is a wait taken *before* a
+	// request rather than after one: a backend's token allowance paced rather than a
+	// throttle obeyed (internal/llm/pace.go). The two are worth telling apart, and
+	// the distinction is exactly this: a refusal leaves an error, and a request that
+	// has not been sent yet cannot have one.
 	Waiting(wait time.Duration, err error)
 	// Waited reports the end of that wait, whether the timer woke the request or
 	// the context ended during it. Implementations retract whatever Waiting said.
@@ -228,6 +241,43 @@ func WithRetryWatcher(ctx context.Context, w RetryWatcher) context.Context {
 func RetryWatcherOf(ctx context.Context) RetryWatcher {
 	w, _ := ctx.Value(retryWatcherKey{}).(RetryWatcher)
 	return w
+}
+
+// responseWatcher is told the headers of every response a request receives, before
+// its body is read — a successful one and a refusal alike.
+//
+// It exists for the numbers a backend publishes nowhere else. Groq's per-request
+// token budget arrives this way: every response states the tokens-per-minute
+// allowance that applies to the model that answered, and the vendor's listing
+// reports windows instead, so the response is the only place the number a request
+// has to fit under can be learned without first being refused.
+//
+// It travels in the request context rather than being configured on the provider for
+// the same reason RetryWatcher does: the response is produced by the shared client,
+// one layer below the provider. A context without one is silent, which is what a
+// listing, a health probe or a model check wants — none of them is planning a
+// request against a budget.
+type responseWatcher interface {
+	// ResponseHeaders reports the headers a backend sent with one response.
+	ResponseHeaders(h http.Header)
+}
+
+// responseWatcherKey carries a responseWatcher through a request's context.
+type responseWatcherKey struct{}
+
+// withResponseWatcher returns a context that reports every response made with it to w.
+func withResponseWatcher(ctx context.Context, w responseWatcher) context.Context {
+	if w == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, responseWatcherKey{}, w)
+}
+
+// observeResponse hands a response's headers to the watcher ctx carries, if any.
+func observeResponse(ctx context.Context, h http.Header) {
+	if w, _ := ctx.Value(responseWatcherKey{}).(responseWatcher); w != nil {
+		w.ResponseHeaders(h)
+	}
 }
 
 // withRetry runs attempt until it succeeds, fails unrecoverably, or runs out of
@@ -330,16 +380,19 @@ func doJSONOnce(ctx context.Context, client *http.Client, method, url string, he
 		return err
 	}
 	defer resp.Body.Close()
+	// Before the status is judged, because a refusal publishes the same budget a
+	// success does, and it is the refusal that needs the number most.
+	observeResponse(ctx, resp.Header)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		body := strings.TrimSpace(string(raw))
-		return redactHeaders(&HTTPError{
+		return classifyRequestTooLarge(redactHeaders(&HTTPError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
 			Body:       body,
 			URL:        url,
 			RetryAfter: retryHint(resp.Header, body),
-		}, headers)
+		}, headers))
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -379,17 +432,20 @@ func postStreamOnce(ctx context.Context, url string, headers map[string]string, 
 	if err != nil {
 		return nil, err
 	}
+	// The headers are read before anything is decided about the status: Groq's
+	// budget travels on the answer and on the refusal alike.
+	observeResponse(ctx, resp.Header)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		resp.Body.Close()
 		body := strings.TrimSpace(string(raw))
-		return nil, redactHeaders(&HTTPError{
+		return nil, classifyRequestTooLarge(redactHeaders(&HTTPError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
 			Body:       body,
 			URL:        url,
 			RetryAfter: retryHint(resp.Header, body),
-		}, headers)
+		}, headers))
 	}
 	return resp.Body, nil
 }

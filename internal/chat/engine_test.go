@@ -34,6 +34,17 @@ type fakeProvider struct {
 
 	replies [][]llm.StreamEvent
 	model   llm.ModelInfo
+	// refusals, indexed by call number, fails a generation before a single byte
+	// streams — that is what a backend refusing the request looks like from the
+	// engine's side, and what an oversized request arrives as. A nil entry answers
+	// normally.
+	refusals []error
+	// ceiling, when > 0, publishes a per-request ceiling (llm.RequestCeiling).
+	// Groq's is its per-minute token allowance: much smaller than the model's
+	// window, and the largest request the account may send.
+	ceiling int
+	// ceilingSource is where that ceiling came from, defaulting to a refusal.
+	ceilingSource string
 	// blockAfter, when > 0, makes a generation stall after that many events until
 	// the context is cancelled. That is how a Stop button feels to the engine.
 	blockAfter int
@@ -65,6 +76,22 @@ func (f *fakeProvider) Name() string {
 // CanToggleThinking implements llm.ThinkingToggle.
 func (f *fakeProvider) CanToggleThinking() bool { return f.toggleThinking }
 
+// RequestCeiling implements llm.RequestCeiling. It answers the zero value unless a
+// test published a ceiling, which is the shape of a backend that reports a window and
+// no budget. The source is a parameter rather than a constant so a test can pin that
+// the two routes to a ceiling — the vendor's refusal and the budget header of an
+// ordinary answer — are reported as what they are.
+func (f *fakeProvider) RequestCeiling(string) llm.Ceiling {
+	if f.ceiling <= 0 {
+		return llm.Ceiling{}
+	}
+	source := f.ceilingSource
+	if source == "" {
+		source = llm.CeilingFromRefusal
+	}
+	return llm.Ceiling{Tokens: f.ceiling, Source: source}
+}
+
 func (f *fakeProvider) Health(context.Context) error { return nil }
 func (f *fakeProvider) ListModels(context.Context) ([]llm.ModelInfo, error) {
 	return []llm.ModelInfo{f.model}, nil
@@ -79,11 +106,19 @@ func (f *fakeProvider) Chat(ctx context.Context, req llm.ChatRequest) (<-chan ll
 	if idx < len(f.replies) {
 		events = f.replies[idx]
 	}
+	var refusal error
+	if idx < len(f.refusals) {
+		refusal = f.refusals[idx]
+	}
 	block := f.blockAfter
 	if f.started != nil && idx == 0 {
 		close(f.started)
 	}
 	f.mu.Unlock()
+
+	if refusal != nil {
+		return nil, refusal
+	}
 
 	// The channel is buffered for every scripted event, so delivery never blocks.
 	// A select against ctx.Done() would instead drop an already-scripted event

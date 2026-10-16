@@ -2,6 +2,7 @@ package chat
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -1005,6 +1006,55 @@ func TestAssembleSendsExactlyOneSystemMessage(t *testing.T) {
 	last := assembly.Messages[len(assembly.Messages)-1]
 	if last.Role != llm.RoleUser || !strings.Contains(last.Content, "Vorab-Recherche") {
 		t.Errorf("the seeded search should travel as a user turn: %+v", last)
+	}
+}
+
+// TestAssembleReadsTheMeterAgainstThePerRequestCeiling is the visible half of the
+// per-request ceiling, and it is a correctness fix rather than a decoration: against a
+// backend whose own limit on one request is smaller than its window, a percentage of
+// the window answers a question nobody asked. Groq's shape is a 8000-token allowance
+// under a 131k window, so a chat that cannot be sent reads as 2 % full.
+//
+// Both numbers are reported and neither is invented: the window as the window, the
+// ceiling as the backend's own statement about one request, and the effective limit as
+// the smaller of the two, which is what Percent, ProjectedRatio and OverLimit are
+// computed against — and what the automatic threshold reads too, so the quiet fold and
+// the meter cannot disagree about how full the request is.
+func TestAssembleReadsTheMeterAgainstThePerRequestCeiling(t *testing.T) {
+	ceiling := llm.Ceiling{Tokens: 8000, Source: llm.CeilingFromHeader}
+	assembly := Assemble(AssemblyInput{
+		Chat:     asmChat("System."),
+		Messages: conversation(40),
+		Limit:    131072, Reserve: 1024,
+		Ceiling: ceiling,
+	})
+	b := assembly.Budget
+	if b.Ceiling != 8000 || b.CeilingSource != llm.CeilingFromHeader {
+		t.Errorf("budget ceiling = %d/%q, want 8000/%q", b.Ceiling, b.CeilingSource, llm.CeilingFromHeader)
+	}
+	if b.Limit != 131072 || b.EffectiveLimit != 8000 {
+		t.Errorf("window/effective = %d/%d, want 131072/8000", b.Limit, b.EffectiveLimit)
+	}
+	if want := float64(b.Used) / 8000 * 100; math.Abs(b.Percent-want) > 0.001 {
+		t.Errorf("Percent = %.3f, want %.3f — read against the ceiling, not the window", b.Percent, want)
+	}
+	if b.OverLimit != (b.Projected > 8000) {
+		t.Errorf("OverLimit = %v for Projected = %d against an 8000-token ceiling", b.OverLimit, b.Projected)
+	}
+
+	// A ceiling larger than the window is not a limit: the window binds, and the meter
+	// reads exactly as it did before there was a ceiling to read.
+	big := Assemble(AssemblyInput{
+		Chat:     asmChat("System."),
+		Messages: conversation(40),
+		Limit:    131072, Reserve: 1024,
+		Ceiling: llm.Ceiling{Tokens: 1_000_000, Source: llm.CeilingFromHeader},
+	})
+	if big.Budget.EffectiveLimit != 131072 {
+		t.Errorf("effective limit with a ceiling above the window = %d, want the window", big.Budget.EffectiveLimit)
+	}
+	if big.Budget.Percent == 0 {
+		t.Error("the meter stopped reporting a percentage for a window-only budget")
 	}
 }
 

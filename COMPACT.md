@@ -87,7 +87,7 @@ One row per fold, in `compactions` (`internal/store/models.go:127`):
 | field | meaning | written by |
 | --- | --- | --- |
 | `ID`, `ChatID` | identity, cascade-deleted with the chat | `compactWith` |
-| `Trigger` | `auto` \| `manual` — how the memory came to exist | `triggerName(opts.Force)` |
+| `Trigger` | `auto` \| `manual` \| `too_large` — how the memory came to exist | `triggerName(opts.Force)`, or `CompactOptions.Trigger` |
 | `FromSeq`, `ToSeq` | the folded range; `ToSeq` is the fold boundary the transcript renders at | planner |
 | `Summary` | the memory text itself | summariser |
 | `Focus` | the user's optional preservation instruction, kept so the card can show it | `CompactOptions.Focus` |
@@ -144,6 +144,47 @@ and therefore on every turn of every one of its chats. The condition stays visib
 
 It emits `events.ChatsChanged` only when `Created` is true.
 
+### Size — a request the backend would refuse
+
+Two more runs exist, both in `internal/chat/oversize.go`, and both because folding *is* the
+answer to a backend saying the request is too big (the vendor's own shapes are in GROQ.md §6):
+
+- **`foldForSize`** runs *after* a refusal and is the recovery. The refused turn was never
+  answered, so its empty reply row is dropped, the history is folded (`Force`, `Trigger:
+  too_large`, `ProtectNewestTurn`) and the turn is sent once more. It reports whether it folded,
+  which is also whether a retry is worth making: a fold that had nothing older to fold produces
+  the identical body and the identical refusal, so nothing is sent and the user gets the limit
+  and the fix rather than the vendor's envelope.
+- **`foldForCeiling`** runs *before* the request, where the send pipeline meets
+  `maybeAutoCompact`, and only for a backend that publishes a per-request ceiling
+  (`llm.RequestCeiling` — Groq, whose per-minute token allowance is also the largest single
+  request the account may send). The gate is `0.9 × ceiling` against the *projected* prompt, and
+  the fold aims at the ceiling through `Target`, because the planner prices against the model's
+  window: `sizeTarget` hands it `ceiling / limit`. Its card says `auto`, which is exactly what a
+  threshold nobody pressed means.
+
+  Where that ceiling comes from is what decides which turn it can save. It is the vendor's own
+  number, read from **the budget header of any response** — `x-ratelimit-limit-tokens`, which
+  Groq sends with the answer as much as with the refusal, handed to the provider by the shared
+  client before the body is read — and from **the sentence of a refusal**, which is the fallback
+  for a session whose very first request is already oversized. So the second turn of a session
+  is planned against the real limit while the first one still goes out against the window: a
+  response is what carries the number, so the ceiling is one request behind by construction
+  (GROQ.md §6, §9.6). Two rules keep that safe — the header is read for Groq alone (another
+  vendor's rate-limit header is not evidence about the largest request it accepts), and a newly
+  read number may only *tighten* what a refusal already proved.
+
+  The **remainder** of the same header family is what a *turn* is paced against: a request the
+  minute's allowance cannot pay for waits instead of being refused (GROQ.md §6.4). A
+  summarisation call is deliberately not paced, because it carries no watcher and a wait that
+  nothing can show is not taken — so a compaction that runs into a spent minute is still answered
+  with the vendor's own 429 and waited out by the shared client.
+
+Neither is gated by `settings.Compact.Enabled` or a chat's `AutoCompact`. Those decide whether
+compaction happens *quietly*; by the time either of these runs, something has already refused the
+request or is about to be refused, which puts both beside the Compact button rather than beside the
+silent threshold.
+
 ### Refusals, before any token is spent
 
 | condition | result |
@@ -172,6 +213,14 @@ string records the decision, e.g. `Kontext bei 83% (Schwelle 80%)`, or
 `manuell ausgelöst` for a forced run. The threshold is measured against the **projected**
 next request (which includes the response reserve), not the last one — it must fire
 before the request that would overflow, not after it.
+
+**The ratio is taken against the limit the next request has to fit, which is not always the
+window.** `ContextBudget.EffectiveLimit` is the smaller of the model's window and the backend's
+own per-request ceiling (Groq's per-minute token allowance, GROQ.md §6), and `Percent`,
+`ProjectedRatio` and `OverLimit` are all computed from it. So on a backend that publishes such a
+ceiling, this gate and the automatic threshold above it are the same question as the switch, and
+the percentage the user reads in the meter is the percentage the planner acts on — a chat at 7 %
+of a 131k window but 108 % of an 8k ceiling is already over the line, and reads that way.
 
 Effective values, most specific first (`maintenance.go:354`, `:364`):
 
@@ -216,6 +265,15 @@ outcomes exist — they fire in this order (`compact.go:167–183`, then `:223�
   `TestManualCompactionOnShortChatFoldsWhatExists`,
   `TestManualCompactionOnSingleTurnFoldsIt`,
   `TestManualCompactionOnlyNoopsWhenEverythingIsAlreadyFolded`.
+
+The last resort above is a **manual** run's privilege. `PlanInput.ProtectNewestTurn`
+(`CompactOptions.ProtectNewestTurn`) turns it off, and every fold that exists to make a request
+smaller sets it: the message the user just sent is what the next request has to carry, and folding
+it would answer the question with a summary of itself while leaving the request exactly as large —
+the summary is written from the same text. With the escape off, a chat whose only foldable content
+is the current turn folds nothing and says so, which is the honest answer a size fold needs:
+`foldForSize` then skips its retry, and the user is told the limit rather than handed a body that
+would be refused identically.
 
 ### 5.4 Manual targets: "→ 60 %" means 60 %
 
@@ -800,6 +858,9 @@ assume are covered.
 | memory injection, `FirstVerbatimSeq`, budget segments | `internal/chat/context.go:117`, `:197`, `:207`, `:213` |
 | row shape, per-chat overrides, streaming status | `internal/store/models.go:12`, `:19`, `:127` |
 | cascade delete of later compactions | `internal/store/queries.go:733` |
+| size fold: the recovery, the preventive fold, the target arithmetic, the message shown | `internal/chat/oversize.go` |
+| the refusal that says the request is too big, and the ceiling it names | `internal/llm/limits.go`, `internal/llm/openai.go` (`noteRequestCeiling`) |
+| the per-request budget read from a response's headers, and the watcher that carries them | `internal/llm/limits.go` (`ceilingFromHeaders`), `internal/llm/httpclient.go` (`responseWatcher`), `internal/llm/openai.go` (`requestBudget`) |
 | settings, defaults | `internal/config/config.go:63`, `:129` |
 | capability check, reasoning control, cache, retirement | `internal/llm/openai.go:120`, `:447`, `:487`, `:534`, `:551`, `:607`, `:630` |
 | compaction card, fold grouping, 🗜 badge | `frontend/src/components/MessageParts.tsx:268`, `ChatView.tsx:72`, `:358` |

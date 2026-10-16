@@ -53,6 +53,9 @@ export namespace chat {
 	export class ContextBudget {
 	    limit: number;
 	    limitSource: string;
+	    ceiling: number;
+	    ceilingSource: string;
+	    effectiveLimit: number;
 	    system: number;
 	    memory: number;
 	    attachments: number;
@@ -79,6 +82,9 @@ export namespace chat {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.limit = source["limit"];
 	        this.limitSource = source["limitSource"];
+	        this.ceiling = source["ceiling"];
+	        this.ceilingSource = source["ceilingSource"];
+	        this.effectiveLimit = source["effectiveLimit"];
 	        this.system = source["system"];
 	        this.memory = source["memory"];
 	        this.attachments = source["attachments"];

@@ -352,7 +352,11 @@ export function ChatView() {
                         // line exists to remove.
                         seconds: formatNumber(Math.max(1, Math.round(phaseWaitMs / 1000))),
                       })
-                    : phase}
+                    : phase === 'paced'
+                      ? t('chat.paced', {
+                          seconds: formatNumber(Math.max(1, Math.round(phaseWaitMs / 1000))),
+                        })
+                      : phase}
           </div>
         )}
 

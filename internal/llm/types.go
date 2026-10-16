@@ -213,6 +213,53 @@ type ThinkingToggle interface {
 	CanToggleThinking() bool
 }
 
+// Ceiling is what a backend has published about the largest single request it accepts
+// for one model.
+type Ceiling struct {
+	// Tokens is the limit as the backend stated it, or 0 when it has stated none.
+	Tokens int
+	// Source names where the number came from, so that a panel can say why it believes
+	// it rather than presenting it as a property of the model. It is empty exactly
+	// when Tokens is 0.
+	Source string
+}
+
+// Where a per-request ceiling came from. Both are the vendor's own number, read from
+// two different places; they name one limit seen at two moments.
+const (
+	// CeilingFromRefusal: a refusal stated it in its own sentence, which is how a
+	// request that was already too large teaches the app the number.
+	CeilingFromRefusal = "refusal"
+	// CeilingFromHeader: a response published it. This is the better of the two, and
+	// the reason it is read at all: the ceiling is then known from an ordinary answer
+	// instead of from a failure, so the next oversized request is folded before it is
+	// sent rather than after it is refused.
+	CeilingFromHeader = "header"
+)
+
+// RequestCeiling is implemented by a provider that knows of a ceiling on the size
+// of one request, smaller than the model's context window.
+//
+// Groq is why it exists. Its per-minute token allowance is also the largest single
+// request the account may send, so a conversation that fits the 131k window of
+// `openai/gpt-oss-20b` perfectly is refused outright once it passes that allowance:
+// the request is bigger than a whole minute of budget, and no amount of waiting
+// makes it smaller. The window the listing publishes is honest and useless as a
+// plan, so the ceiling is planned against too — and it is the vendor's own number
+// rather than a guess, read from its refusal and from the budget header of every
+// response (internal/llm/openai.go, internal/chat/oversize.go, internal/chat/context.go).
+//
+// It is a separate interface rather than a method on Provider so a backend that
+// publishes no such limit does not have to implement an empty one.
+type RequestCeiling interface {
+	// RequestCeiling is the largest single request this provider will accept for a
+	// model and where that number came from, or the zero value when it knows of none
+	// — which is the answer of every backend that publishes no such limit. A number
+	// here is always the backend's own, never an estimate: an invented ceiling would
+	// compact a chat the backend would have accepted.
+	RequestCeiling(model string) Ceiling
+}
+
 // BackendAPIKeyName qualifies a secret with the backend it belongs to, so each
 // backend's key lives under its own name in the secret store without colliding
 // with the Brave key or with another backend.
