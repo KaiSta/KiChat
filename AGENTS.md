@@ -616,8 +616,19 @@ this, in this order. The number in the request is the number everywhere:
    check that it landed there. 0.4.0 was bumped without a tag and only got one after the
    fact, which is the mistake this step exists for.
 5. **The tag stays local until asked for.** `git push origin x.y.z` is a separate request,
-   like any other push. A published tag is never moved or deleted: a mistake is the next
-   patch number.
+   like any other push — nothing here pushes a tag on its own. What the repo's own config
+   changes is what an asked-for push carries: `.git/config` sets `push.followTags = true`,
+   so a plain `git push origin master` also sends every *annotated* tag that is missing
+   from the remote and reachable from the branch being pushed. Measured on a scratch
+   remote: the tag arrives even when the branch itself is already up to date (`* [new tag]
+   v1 -> v1` on a push reporting nothing to update), which makes the setting a repair for a
+   tag an earlier push left behind, not only a habit. Lightweight tags are never carried,
+   and four of the early releases are lightweight — `0.1.0`, `0.2.0`, `0.2.1` and `v0.4.0`
+   — so those need `git push origin <tag>` said out loud. The setting lives in `.git/config`,
+   which is not cloned: a fresh checkout elsewhere starts without it and wants
+   `git config push.followTags true`, while fetching needs nothing, because a clone brings
+   every tag. A published tag is never moved or deleted: a mistake is the next patch
+   number.
 
 **A tag that went missing is repaired rather than rewritten.** An annotated tag on the bump
 commit, whose message says it is late and why and summarises the changes from `git log` since
