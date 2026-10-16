@@ -1002,7 +1002,9 @@ func (a *App) installRuntime(dist rt.Distribution, accelerator string) {
 	a.settings.Runtime.Distribution = dist.ID
 	a.settings.Runtime.Tag = asset.Dir()
 	a.settings.Runtime.Accelerator = asset.Variant
-	updated := a.settings
+	// A clone, not the struct: what follows marshals this value, and the maps inside it
+	// are written by other goroutines under settingsMu (config.Settings.Clone).
+	updated := a.settings.Clone()
 	a.settingsMu.Unlock()
 	if err := a.sanitize(updated).Save(a.store); err != nil {
 		a.finishInstall(fmt.Errorf("Installation speichern: %w", err))
@@ -1261,7 +1263,10 @@ func (a *App) SetManagedModel(backendID string, mm config.ManagedModel) error {
 		a.settings.Runtime.Models = map[string]config.ManagedModel{}
 	}
 	a.settings.Runtime.Models[backendID] = mm
-	updated := a.settings
+	// Cloned under the lock, because everything below reads or marshals it outside: a
+	// shallow copy here is the reported race — this map write against the settings save a
+	// managed server's state callback runs, which marshals the same map.
+	updated := a.settings.Clone()
 	a.settingsMu.Unlock()
 
 	if err := a.sanitize(updated).Save(a.store); err != nil {
@@ -1451,7 +1456,7 @@ func (a *App) SetModelOverride(backend, model string, ov llm.ModelOverride) erro
 	} else {
 		a.settings.ModelOverrides[key] = ov
 	}
-	settings := a.settings
+	settings := a.settings.Clone()
 	a.settingsMu.Unlock()
 
 	if err := a.store.PutModelOverride(backend, model, ov); err != nil {
@@ -1669,7 +1674,7 @@ func (a *App) applyModelProbes(backend string, probes []llm.ModelProbe) (int, st
 
 	a.settingsMu.Lock()
 	a.settings.HiddenModels = out
-	updated := a.settings
+	updated := a.settings.Clone()
 	a.settingsMu.Unlock()
 	// Sanitised, the way SaveSettings persists: the in-memory snapshot keeps the
 	// real backend keys so the registry can authenticate, and the blob must not.
@@ -2637,7 +2642,7 @@ func (a *App) SaveAttachmentAs(attachmentID string) (string, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != a.Settings().Images.SaveFolder {
 		a.settingsMu.Lock()
 		a.settings.Images.SaveFolder = dir
-		snapshot := a.settings
+		snapshot := a.settings.Clone()
 		a.settingsMu.Unlock()
 		if err := a.sanitize(snapshot).Save(a.store); err != nil {
 			// Remembering the folder is a convenience, and the picture is already on

@@ -79,7 +79,8 @@ internal/
     models.go        Chat, Message, Attachment, Document, Chunk, Compaction
     queries.go       CRUD, FTS5 BM25 search, counters, cascade deletes
     store.go         Schema creation and migrations
-  config/          Settings, defaults, normalisation, default system prompt, presets
+  config/          Settings, defaults, normalisation, default system prompt, presets,
+                   and Clone — the only way a settings value leaves App's lock
   chat/            The engine
     engine.go        Send/Stop/turn serialisation, Measurement registry
     generate.go      One turn: model resolution, streaming, tool loop, stats
@@ -347,6 +348,8 @@ type stops being homomorphic and destroys arrays), then exports namespaced alias
 
 **The system-prompt presets are data, not code branches.** `config.DefaultPresets(lang)` returns five built-ins — research (the default), small-local, assistant, coding and blank — and the settings view offers them as a dropdown. The small-local one exists because a local setup often starts on a model that cannot hold a long instruction block: it is short, imperative, and bans the two failure modes that bite hardest at that size (inventing facts, and running off into unstructured prose). The list is stored whole in the settings blob, so a preset shipped later would never reach an existing installation — `normalise()` therefore appends any built-in that is missing while leaving an edited one untouched, the same way the shipped backends are re-added.
 
+**A settings value that leaves the lock is a copy of its contents, not just of the struct.** `App` keeps its settings behind `settingsMu`, and every setter takes the lock, writes one entry of one map, and releases it *before* persisting — and persisting marshals the whole settings value. A plain `settings := a.settings` copies the struct and the *headers* of the maps and slices inside it, so marshalling walked the live `Runtime.Models` map and the live `Backends` slice on one goroutine while the next setter wrote them. Measured under `-race` on a model save crossing a managed server's state callback: three separate pairs, on the managed-model map, on the backend slice the callback writes, and on the map the registry was being built from. `config.Settings.Clone()` is therefore the only way a value leaves `settingsMu`: `App.Settings()` clones under the read lock, each setter clones under the write lock it already holds, and everything downstream — the bridge, the settings blob, `rebuildServices` — gets a value nobody can change under it. It copies every map and every slice, including the capability list inside a single model override, and `TestCloneSharesNothingWithTheOriginal` walks the whole value with reflection so a map or slice added without a line in `Clone()` fails there rather than becoming a race in the app. The price is one small copy per read, which is what `GetSettings` — the bridge's whole settings round trip — pays to marshal a value no setter is halfway through writing.
+
 **The context window is re-read on demand.** The limit is resolved from the model's loaded context length, falling back to its maximum only when the model is not loaded — LM Studio reports both, and confusing them is how a model running at 8k gets displayed as 128K. Because a listing is cached (30 s in the registry, 10 minutes for Ollama's `/api/show`, and indefinitely in the frontend store), a model loaded or reconfigured after the app last looked keeps showing the old number. The meter therefore carries an explicit re-check that forces a fresh listing *and* clears the providers' own caches — `CacheInvalidator` is a separate optional interface, so a provider without such a cache does not have to implement an empty one — then recomputes the chat state, since the budget is derived from that same catalogue server-side.
 
 **The transcript follows the newest content.** A reply arrives as *one* item whose text grows, and Virtuoso's `followOutput` reacts to appended items only — its own documentation says "keep the list aligned when new items are appended" — so the view stayed at the offset it had when that item was appended. Measured in the mock-bridge harness before the change: the streamed reply left the last ~740 px of the answer below the fold, and it was still there once the turn had ended, so every reply had to be fetched with a scroll of its own. The follow is therefore driven by the list's own height, which changes for an appended item and a growing one alike, and the decision to act on it is the direction of the user's scroll rather than the distance from the bottom: growth pushes the bottom away without moving the scroll position at all, so a position that has moved up is someone reading history and one that reaches the bottom again is someone done with it. Two details are load-bearing, both from that run. The upward test carries an 8 px tolerance, because the engine settled a follow of its own by moving the position back by *one* pixel, and a strict comparison read that as the user and stopped following for the rest of the turn. And Virtuoso's `atBottomStateChange` is deliberately not the flag, for the same reason in a different disguise: one frame of growth between a follow and that callback's next test says "not at the bottom". Sending re-enables the follow, because it is a deliberate move to the newest content, and opening a chat lands on the newest *message* — `initialTopMostItemIndex` with `align: 'end'`, since a bare index aligns the last item's top with the top of the viewport, which for a long reply is the middle of it.
@@ -477,6 +480,17 @@ immediately before the button press, and typing only lands once the window is fo
 An early test run accidentally hit "Dateien hinzufügen", which opens a modal GTK file
 dialog that silently swallows all further input — if automated input stops working, look
 for that dialog before debugging anything else.
+
+**A whole-suite `-race` run currently ends in a `log.Fatalf` on some runs, and that is not a
+race.** A test app has no Wails lifecycle context, and an error on a managed-server start or
+stop path reaches `runtime.LogErrorf(a.ctx, …)` (`app.go:269`, `:288`, `:660`), which kills the
+*test binary* rather than failing the test that caused it: the run reports `cannot call …
+LogErrorf: An invalid context was passed` and the package fails with no test named. Measured on
+this machine: six runs of `go test ./... -count=1 -race` at `2b400c4` gave one such fatal, two
+failures of the settings-snapshot race, and three clean runs; five runs after that race was
+fixed gave two such fatals, three clean runs and no race report. Making it usable as a gate
+means routing those log calls through something a test can silence the way `a.emitFn` already
+silences `a.emit` — until then, this failure is excluded rather than read as a passed run.
 
 ---
 
