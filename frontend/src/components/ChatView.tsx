@@ -356,7 +356,11 @@ export function ChatView() {
                       ? t('chat.paced', {
                           seconds: formatNumber(Math.max(1, Math.round(phaseWaitMs / 1000))),
                         })
-                      : phase}
+                      : phase === 'spread'
+                        ? t('chat.spread', {
+                            seconds: formatNumber(Math.max(1, Math.round(phaseWaitMs / 1000))),
+                          })
+                        : phase}
           </div>
         )}
 

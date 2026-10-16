@@ -8,19 +8,27 @@ import (
 	"kichat/internal/llm"
 )
 
-// The two chat phases a request can wait under. Both are reported together with the
-// wait the backend named, because "waiting" alone does not say whether this is a
-// second or a minute.
+// The three chat phases a request can wait under. All are reported together with the
+// wait, because "waiting" alone does not say whether this is a second or a minute, nor
+// whether anything went wrong.
 const (
 	// throttledPhase is shown while a retry waits out a backend's throttle: the
 	// request was sent, refused, and is going out again.
 	throttledPhase = "throttled"
-	// pacedPhase is shown while a request waits for the backend's own token allowance
-	// to have room for it, *before* it is sent (internal/llm/pace.go). It is a phase
-	// of its own rather than the throttle's because the sentence differs: nothing was
-	// refused, so telling the user the backend is throttling this request — and that
-	// it is being retried — would be describing something that has not happened.
+	// pacedPhase is shown while a request waits for the backend's own allowance to have
+	// room for it, *before* it is sent (internal/llm/pace.go). It is a phase of its own
+	// rather than the throttle's because the sentence differs: nothing was refused, so
+	// telling the user the backend is throttling this request — and that it is being
+	// retried — would be describing something that has not happened.
 	pacedPhase = "paced"
+	// spreadPhase is shown while a *turn* is spaced against the request rate the backend
+	// published: the answer needs more requests than the minute allows, so its rounds go
+	// out one per slot rather than in a burst that then sits at the wall
+	// (internal/chat/pace.go). It has a sentence of its own for the same reason paced
+	// has one: nothing was refused here either, and unlike a paced wait the allowance
+	// is not spent — the app is deliberately spreading the turn, and a line that said
+	// the minute was used up would be false.
+	spreadPhase = "spread"
 )
 
 // watchingRetries returns the context the turn's own request is made with, so a

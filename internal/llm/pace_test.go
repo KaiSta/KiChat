@@ -794,3 +794,163 @@ func TestPacingIsGroqOnly(t *testing.T) {
 		t.Error("a budget was learned from a backend whose headers mean nothing to this app")
 	}
 }
+
+// TestNoRateAndAFittingSeriesAreNotSpaced pins the two cases in which a plan must not exist.
+// An unstated rate is not a rate to pace against, and a series that fits in the minute's room
+// is not delayed at all: the window rolls continuously, so taking a slot now cannot cost a
+// later one, and the earliest request is therefore the best one.
+func TestNoRateAndAFittingSeriesAreNotSpaced(t *testing.T) {
+	if got := (Allowance{}).Spread(10); got != nil {
+		t.Errorf("an unstated rate planned %v", got)
+	}
+	if got := (Allowance{Limit: 4, Spent: 0}).Spread(4); got != nil {
+		t.Errorf("a series that fits exactly was planned: %v", got)
+	}
+	if got := (Allowance{Limit: 4, Spent: 2}).Spread(2); got != nil {
+		t.Errorf("a series inside the room was planned: %v", got)
+	}
+	// One past the room, and there is a plan.
+	if got := (Allowance{Limit: 4, Spent: 2}).Spread(3); len(got) != 3 {
+		t.Errorf("a series past the room was not planned: %v", got)
+	}
+	// And nothing is planned for nothing.
+	if got := (Allowance{Limit: 4}).Spread(0); got != nil {
+		t.Errorf("an empty series planned %v", got)
+	}
+}
+
+// TestASeriesIsSpacedAtTheAllowanceRate is the arithmetic the whole feature is: thirty
+// requests a minute is one every two seconds, so a series that does not fit goes out one per
+// slot — starting immediately, while the minute can still pay for the first one.
+func TestASeriesIsSpacedAtTheAllowanceRate(t *testing.T) {
+	const (
+		limit    = 30
+		requests = 40
+	)
+	waits := Allowance{Limit: limit}.Spread(requests)
+	if len(waits) != requests {
+		t.Fatalf("the plan covers %d requests, want %d", len(waits), requests)
+	}
+	period := time.Minute / limit
+	for i, wait := range waits {
+		want := time.Duration(i) * period
+		if wait != want {
+			t.Errorf("request %d goes at %s, want %s — one slot per %s", i, wait, want, period)
+		}
+	}
+}
+
+// TestASpentMinuteIsWaitedOutAndThenSpaced: the window has nothing to give until its oldest
+// request leaves it, so that wait comes first and the rate applies from there. This is the
+// state a tool-heavy turn most often starts in — the previous round spent the last slot.
+func TestASpentMinuteIsWaitedOutAndThenSpaced(t *testing.T) {
+	a := Allowance{
+		Limit: 3, Spent: 3,
+		Free: []time.Duration{10 * time.Second, 30 * time.Second, 50 * time.Second},
+	}
+	if a.Room() != 0 {
+		t.Fatalf("room = %d, want a full minute", a.Room())
+	}
+	waits := a.Spread(4)
+	want := []time.Duration{10 * time.Second, 30 * time.Second, 50 * time.Second, 70 * time.Second}
+	if len(waits) != len(want) {
+		t.Fatalf("plan = %v, want %v", waits, want)
+	}
+	for i := range want {
+		if waits[i] != want[i] {
+			t.Errorf("request %d goes at %s, want %s", i, waits[i], want[i])
+		}
+	}
+}
+
+// TestASlotIsNeverTakenBeforeTheWindowHasRoom is why the plan is a simulation rather than a
+// division. Twenty-nine of a thirty-request minute are still inside it and all of them leave
+// at once ten seconds from now: spacing the second request one period (two seconds) after the
+// first would put it in a window that holds thirty requests already — the request the vendor
+// refuses. The plan waits for the slot instead.
+func TestASlotIsNeverTakenBeforeTheWindowHasRoom(t *testing.T) {
+	const limit = 30
+	free := make([]time.Duration, limit-1)
+	for i := range free {
+		free[i] = 10 * time.Second
+	}
+	waits := Allowance{Limit: limit, Spent: len(free), Free: free}.Spread(3)
+	if len(waits) != 3 {
+		t.Fatalf("plan = %v, want three requests", waits)
+	}
+	if waits[0] != 0 {
+		t.Errorf("the first request waits %s, want none: the minute has one slot left", waits[0])
+	}
+	if waits[1] != 10*time.Second {
+		t.Errorf("the second request goes at %s, want the 10s its slot needs", waits[1])
+	}
+	// From there the rate applies again: the window is nearly empty and the period is two
+	// seconds.
+	if waits[2] != 12*time.Second {
+		t.Errorf("the third request goes at %s, want 12s", waits[2])
+	}
+}
+
+// TestTheAllowanceIsWhatTheAppCountedForTheModel: the reading is the same state the
+// per-request guard spends — the rate a refusal taught, and this app's own count with the
+// moment each of those requests frees its slot — and it is empty for anything nobody has
+// stated.
+func TestTheAllowanceIsWhatTheAppCountedForTheModel(t *testing.T) {
+	p := newGroqProvider("groq", "Groq", "", "k")
+	const model = "openai/gpt-oss-20b"
+
+	if got := p.RequestAllowance(model); got.Known() || got.Spent != 0 || len(got.Free) != 0 {
+		t.Errorf("a model nobody asked reads %+v, want nothing", got)
+	}
+
+	// A rate with nothing spent: the number is known and the minute is whole, which is not
+	// the same reading as a rate nobody stated.
+	p.noteRequestRate(model, 3)
+	got := p.RequestAllowance(model)
+	if got.Limit != 3 || got.Spent != 0 || !got.Known() || got.Room() != 3 {
+		t.Errorf("allowance = %+v, want the 3 the refusal named with nothing spent", got)
+	}
+
+	// Two requests answered inside the minute: the count, and the slots they hold.
+	p.noteRequestSpent(model, time.Now())
+	p.noteRequestSpent(model, time.Now())
+	got = p.RequestAllowance(model)
+	if got.Spent != 2 || got.Room() != 1 {
+		t.Errorf("allowance = %+v, want 2 of 3 spent", got)
+	}
+	if len(got.Free) != 2 {
+		t.Fatalf("free = %v, want a slot for each counted request", got.Free)
+	}
+	for _, free := range got.Free {
+		if free <= 0 || free > time.Minute {
+			t.Errorf("a slot frees in %s, want the remainder of the trailing minute", free)
+		}
+	}
+
+	// A full minute is no room and a wait, which is the first thing a plan does with it.
+	p.noteRequestSpent(model, time.Now())
+	full := p.RequestAllowance(model)
+	if full.Room() != 0 || len(full.Free) != 3 {
+		t.Fatalf("a full minute reads %+v, want no room and three slots freeing", full)
+	}
+	if waits := full.Spread(1); len(waits) != 1 || waits[0] <= 0 {
+		t.Errorf("a one-request plan against a full minute = %v, want the wait for its slot", waits)
+	}
+}
+
+// TestTheAllowanceIsNotReadFromAnotherVendor is the boundary the pacing already has: these
+// numbers are a measurement of Groq, so another OpenAI-compatible service's refusal teaches
+// this app nothing it may plan a turn against.
+func TestTheAllowanceIsNotReadFromAnotherVendor(t *testing.T) {
+	p := &openAICompatProvider{
+		id: "custom", name: "Custom", baseURL: "http://127.0.0.1:1",
+		chatPaths: []string{"http://127.0.0.1:1/chat/completions"},
+	}
+	// Even with the state written, which is what a refusal would do if the classification were
+	// ever reached for another flavour.
+	p.noteRequestRate("m", 5)
+	p.noteRequestSpent("m", time.Now())
+	if got := p.RequestAllowance("m"); got.Known() || got.Spent != 0 || len(got.Free) != 0 {
+		t.Errorf("another vendor's numbers became a plan: %+v", got)
+	}
+}

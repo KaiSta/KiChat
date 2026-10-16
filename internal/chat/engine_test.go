@@ -43,6 +43,12 @@ type fakeProvider struct {
 	// Groq's is its per-minute token allowance: much smaller than the model's
 	// window, and the largest request the account may send.
 	ceiling int
+	// allowance, when its limit is > 0, publishes what the minute has left for
+	// *requests* (llm.RequestAllowance): the rate the vendor stated and this app's own
+	// spend. It is the reading a tool-heavy turn is planned against, so a test about
+	// the pacing of a turn sets it and every other test leaves it at the zero value —
+	// which is the backend that has stated no rate, and therefore no plan at all.
+	allowance llm.Allowance
 	// ceilingSource is where that ceiling came from, defaulting to a refusal.
 	ceilingSource string
 	// blockAfter, when > 0, makes a generation stall after that many events until
@@ -75,6 +81,11 @@ func (f *fakeProvider) Name() string {
 
 // CanToggleThinking implements llm.ThinkingToggle.
 func (f *fakeProvider) CanToggleThinking() bool { return f.toggleThinking }
+
+// RequestAllowance implements llm.RequestAllowance, and answers the zero value unless a test
+// stated one — which is the shape of a backend whose request rate nothing has measured, and
+// the state every turn that is not paced is in.
+func (f *fakeProvider) RequestAllowance(string) llm.Allowance { return f.allowance }
 
 // RequestCeiling implements llm.RequestCeiling. It answers the zero value unless a
 // test published a ceiling, which is the shape of a backend that reports a window and

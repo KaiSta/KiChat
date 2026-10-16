@@ -199,6 +199,9 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   refusal's own sentence against a count of this app's own responses — because no header of this
   API carries a per-minute request rate at all (GROQ.md §6.4). Either one being spent holds the
   request back rather than letting it be refused, so the wait taken is the longer of the two. A
+  turn that needs more requests than the minute allows is spread against that rate *before* its
+  first request instead, so its rounds go out one per slot rather than in a burst that then sits at
+  the wall (GROQ.md §6.4, `internal/chat/pace.go`). A
   summarisation call is deliberately not paced, because it carries no watcher and a wait that
   nothing can show is not taken — so a compaction that runs into a spent minute is still answered
   with the vendor's own 429 and waited out by the shared client.

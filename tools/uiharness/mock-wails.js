@@ -1292,6 +1292,12 @@ Verfügbare Tools: {{tool_list}}`,
   // is sent (internal/llm/pace.go). The phase reads differently on purpose — nothing was
   // refused — and one of the two sentences would otherwise never be rendered.
   const paceFixture = query.get('pace') === '1'
+  // ?spread=1 is the third reason a turn waits, and the one nothing is spent for: the answer
+  // needs more requests than the minute's request rate allows, so the app spreads its rounds
+  // over the minute before the first of them (internal/chat/pace.go). Its sentence differs from
+  // ?pace=1's on purpose — this allowance is not used up, the turn is being paced — and without
+  // the flag the third sentence would never be rendered.
+  const spreadFixture = query.get('spread') === '1'
   // The wait the pretend refusal names, held for real rather than shown and skipped: a number
   // on screen that does not match the pause the viewer sits through is worse than no number.
   const THROTTLE_WAIT_MS = 6000
@@ -1299,6 +1305,10 @@ Verfügbare Tools: {{tool_list}}`,
   // until one request may be retried, while a spent minute stays spent until its window turns
   // over — tens of seconds on the allowance this was measured against. Both are held for real.
   const PACE_WAIT_MS = 20000
+  // The spread pause is one round's share of the minute, and it is short because it is paid
+  // before *each* round rather than once: a thirty-per-minute allowance is one request every
+  // two seconds, and this fixture renders one of those waits.
+  const SPREAD_WAIT_MS = 2000
   // How often a pretending draw reports. Slower than the real single-second poll would be a
   // boring wait; faster would spend the run repainting. It is chosen to make the counter and
   // the thumbnail visibly move, which is the only thing this fixture exists to show.
@@ -1737,23 +1747,24 @@ Verfügbare Tools: {{tool_list}}`,
       emit('chat:reasoning', { chatId, messageId, text: i <= 8 ? REASONING.slice(0, 20) : '' })
       timers.set(chatId, setTimeout(step, 40))
     }
-    if (throttleFixture || paceFixture) {
-      // The sequence the real app produces around a retry — or around a turn held back for the
-      // minute's budget: the phase with the wait, then a retraction, then a reply that streams
-      // as usual. It is emitted here rather than at the top of the turn because the wait sits
-      // between the request and its first token.
-      const waitMs = throttleFixture ? THROTTLE_WAIT_MS : PACE_WAIT_MS
-      emit('chat:status', {
-        chatId,
-        phase: throttleFixture ? 'throttled' : 'paced',
-        waitMs,
-      })
+    if (throttleFixture || paceFixture || spreadFixture) {
+      // The sequence the real app produces around a retry — or around a request held back for
+      // the minute's allowance, or around a turn spaced against its request rate: the phase
+      // with the wait, then a retraction, then a reply that streams as usual. It is emitted
+      // here rather than at the top of the turn because the wait sits between the request and
+      // its first token.
+      const wait = throttleFixture
+        ? { ms: THROTTLE_WAIT_MS, phase: 'throttled' }
+        : paceFixture
+          ? { ms: PACE_WAIT_MS, phase: 'paced' }
+          : { ms: SPREAD_WAIT_MS, phase: 'spread' }
+      emit('chat:status', { chatId, phase: wait.phase, waitMs: wait.ms })
       timers.set(
         chatId,
         setTimeout(() => {
           emit('chat:status', { chatId, phase: 'idle' })
           timers.set(chatId, setTimeout(step, 60))
-        }, waitMs),
+        }, wait.ms),
       )
       return
     }

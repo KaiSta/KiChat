@@ -230,15 +230,32 @@ func (r *requestRate) spentIn(now time.Time) int {
 // for its oldest request to fall out. That wait is the remainder of a trailing minute
 // and can never exceed one.
 func (r *requestRate) roomIn(now time.Time) time.Duration {
-	if r.Limit <= 0 {
+	a := r.allowance(now)
+	if !a.Known() || a.Room() > 0 || len(a.Free) == 0 {
 		return 0
 	}
-	if spent := r.spentIn(now); spent >= r.Limit {
-		if wait := requestWindow - now.Sub(r.At[0]); wait > 0 {
-			return wait
+	return a.Free[0]
+}
+
+// allowance is this rate as a reading rather than a duration: the limit, the count inside
+// the window and the moment each of those requests frees its slot.
+//
+// One arithmetic serves both questions the request half is asked — "may this request go
+// now" (roomIn, per request) and "when may these requests go" (Allowance.Spread, per turn)
+// — which is why the reading is built here instead of in a second walk of r.At: two walks
+// could disagree about the same window, and the plan a turn makes would then be about a
+// minute the request-level guard does not recognise.
+func (r *requestRate) allowance(now time.Time) Allowance {
+	a := Allowance{Limit: r.Limit, Spent: r.spentIn(now)}
+	if len(r.At) > 0 {
+		a.Free = make([]time.Duration, 0, len(r.At))
+		for _, at := range r.At {
+			if free := requestWindow - now.Sub(at); free > 0 {
+				a.Free = append(a.Free, free)
+			}
 		}
 	}
-	return 0
+	return a
 }
 
 // noteRequestRate remembers the requests-per-minute allowance a refusal named.
@@ -309,6 +326,26 @@ func (p *openAICompatProvider) rateFor(model string) *requestRate {
 	return r
 }
 
+// RequestAllowance implements llm.RequestAllowance: what this model's minute has left for
+// requests, and when the slots it has spent will free.
+//
+// It is the same measurement the per-request pacing spends, read out for a caller that has
+// to plan a whole turn with it, and it carries the same boundary: this vendor's numbers
+// only, because they are a measurement of Groq rather than a property of OpenAI-compatible
+// servers — and a rate nobody stated is an empty reading rather than an assumed one.
+func (p *openAICompatProvider) RequestAllowance(model string) Allowance {
+	if p.modelsFlavour != flavourGroq || model == "" {
+		return Allowance{}
+	}
+	p.rateMu.Lock()
+	defer p.rateMu.Unlock()
+	r := p.requestRates[model]
+	if r == nil {
+		return Allowance{}
+	}
+	return r.allowance(time.Now())
+}
+
 // paceRequest holds a request back until both of the backend's minute allowances can
 // pay for it, and reports how long it waited.
 //
@@ -356,6 +393,82 @@ func (p *openAICompatProvider) paceRequest(ctx context.Context, req ChatRequest)
 		// a retry's wait does.
 		return 0
 	}
+}
+
+// Spread plans a series of requests against this allowance and returns the wait before each
+// of them, oldest first — or nil when they are not spaced at all, which is the answer when
+// no rate has been stated and when the whole series fits in what the minute has left. Inside
+// the minute's room the earliest request is the best one, so a series that fits is not
+// delayed by even a millisecond.
+//
+// The series is spaced at the allowance's own rate, one request per window/limit, which is
+// what spreading a turn's rounds means: the first one is not held back while the window can
+// pay for it, and each request after it waits for its own place in the minute. Earlier than
+// that place is impossible — the trailing minute is full by then — and later would only make
+// the turn slower, so this is the earliest schedule that never asks the vendor for room it
+// does not have.
+//
+// The arithmetic is a small simulation rather than a division, because the window already
+// holds requests when the series starts: those are in Free, and the requests this plan places
+// join them as they are placed. A slot is available while fewer than Limit requests are
+// inside the trailing minute *including* the one about to be sent — the vendor refuses the
+// request that reaches the limit, not the one that passes it.
+func (a Allowance) Spread(requests int) []time.Duration {
+	if a.Limit <= 0 || requests <= 0 || requests <= a.Room() {
+		return nil
+	}
+	// The allowance's own period: a rate of 30 per minute is one request every two seconds,
+	// and a spent minute refills at exactly that rate.
+	gap := requestWindow / time.Duration(a.Limit)
+
+	// free holds the moment each request leaves the window, oldest first: the ones already
+	// counted, and then the ones this plan places. Their expiry is as far ahead as the
+	// pre-existing ones are from their own arrival, which is why appending keeps the list in
+	// order — a lifetime inside the window is always shorter than the whole window.
+	free := make([]time.Duration, 0, len(a.Free)+requests)
+	free = append(free, a.Free...)
+
+	waits := make([]time.Duration, 0, requests)
+	for placed := 0; placed < requests; placed++ {
+		at := time.Duration(0)
+		if placed > 0 {
+			at = waits[placed-1] + gap
+		}
+		for inside(free, at) >= a.Limit {
+			next := nextFree(free, at)
+			if next <= at {
+				break // nothing left to wait for, so this is as early as this request can be
+			}
+			at = next
+		}
+		waits = append(waits, at)
+		free = append(free, at+requestWindow)
+	}
+	return waits
+}
+
+// inside is how many of the requests in free are still inside the trailing window at at.
+// A request whose moment has arrived has left, which is why the comparison is strict.
+func inside(free []time.Duration, at time.Duration) int {
+	n := 0
+	for _, leaves := range free {
+		if leaves > at {
+			n++
+		}
+	}
+	return n
+}
+
+// nextFree is the earliest moment after at when one of those requests leaves the window, and
+// 0 when there is nothing left to wait for.
+func nextFree(free []time.Duration, at time.Duration) time.Duration {
+	next := time.Duration(0)
+	for _, leaves := range free {
+		if leaves > at && (next == 0 || leaves < next) {
+			next = leaves
+		}
+	}
+	return next
 }
 
 // tokenWait is how long the minute's *token* allowance needs before it can pay for this

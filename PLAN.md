@@ -98,6 +98,9 @@ internal/
                      ceiling the backend's budget header states before anything is
                      refused folds the next turn through compact.go instead
                      (GROQ.md §6)
+    pace.go          A turn that needs more requests than the minute allows: its
+                     rounds spaced at the request rate the backend stated, read
+                     before the first of them (GROQ.md §6.4)
     searchfirst.go   Search-before-answer seeding
   research/        search.go, chain.go (Brave -> DuckDuckGo), brave.go, duckduckgo.go,
                    scrape.go (SSRF + robots guards), util.go

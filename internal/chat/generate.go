@@ -70,8 +70,23 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 	// single large scrape cannot fill the window on its own.
 	toolBudget := newToolOutputBudget(in.Settings)
 
+	// A tool-heavy turn is many requests back to back, and the minute's *request*
+	// allowance can be smaller than the rounds the model will ask for. Reading it before
+	// the first request is what turns that into a plan (pace.go): the turn's rounds are
+	// spaced at the rate the allowance grants, so it does not spend every slot of the
+	// minute and then sit at the wall with the rest of the answer still to come. It is
+	// empty — and this loop is exactly as it was — for every backend that publishes no
+	// such rate and for every turn that fits in what the minute has left.
+	pacing := planTurnRequests(in.Provider, in.ModelID, maxIter)
+
 	for iteration := 0; iteration < maxIter; iteration++ {
 		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		// The planned wait for this round, reported as a phase of its own while it lasts.
+		// A turn whose rounds are spread is answering, not stuck: the allowance is not
+		// spent and nothing was refused, which is why this wait says something else.
+		if !e.holdRound(ctx, in.Chat.ID, pacing.waitFor(iteration, time.Now())) {
 			return result, ctx.Err()
 		}
 

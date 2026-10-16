@@ -260,6 +260,65 @@ type RequestCeiling interface {
 	RequestCeiling(model string) Ceiling
 }
 
+// Allowance is what a backend's minute has left for *requests*: the rate the vendor
+// stated, and this app's own spend inside the trailing window.
+//
+// It exists because pacing one request is not a plan for a turn. llm.paceRequest holds a
+// request back when the minute cannot pay for it, which is what keeps a slow chat
+// working; a turn that makes many requests back to back — a tool loop — needs to know
+// *before it starts* whether the minute has room for them, because the alternative is to
+// spend every slot and then sit at the wall with the rest of the turn still to run
+// (GROQ.md §6.4).
+//
+// Its two halves come from different places, which is the whole shape of this limit: the
+// rate is the vendor's own number, learned from a refusal because no header of this API
+// publishes the minute's request rate, while the spend is this app's own count of the
+// responses it has had for the model — a lower bound on the account's, since a second
+// client and this app's own listings are spent too and cannot be counted.
+type Allowance struct {
+	// Limit is the requests per minute the vendor stated, or 0 when nothing has stated
+	// one. 0 is "unknown" rather than "none": nothing is spaced without a number.
+	Limit int
+	// Spent is how many of this model's requests this app has had answered inside the
+	// trailing minute.
+	Spent int
+	// Free lists, oldest first, how long each of those spent requests still has to run:
+	// Free[i] is when the i-th of them leaves the window and frees a slot. It is what
+	// makes a plan exact rather than optimistic — a turn spaced against the rate alone
+	// would put its next request where the window has no room for it.
+	Free []time.Duration
+}
+
+// Known reports whether a rate has been stated for this model at all. An unknown
+// allowance is not a spent one, and the difference matters: a full minute means wait, an
+// unmeasured one means nothing has been published to wait for.
+func (a Allowance) Known() bool { return a.Limit > 0 }
+
+// Room is how many requests the minute can pay for right now. It is 0 both for a full
+// minute and for one nobody has described, so a caller that cares reads Known.
+func (a Allowance) Room() int {
+	if a.Limit <= 0 || a.Spent >= a.Limit {
+		return 0
+	}
+	return a.Limit - a.Spent
+}
+
+// RequestAllowance is implemented by a provider that can state what its minute has left
+// for requests, and when the slots it has spent will free. llm.Allowance is the reading;
+// this is the interface a caller plans against.
+//
+// It is a separate interface rather than a method on Provider, for the same reason
+// RequestCeiling is: a backend whose request rate nobody measured a number for does not
+// have to implement an empty one, and a caller that finds it unimplemented invents
+// nothing — which is the answer for every backend but Groq, where the rate is a
+// measurement of a vendor rather than a property of OpenAI-compatible servers.
+type RequestAllowance interface {
+	// RequestAllowance is what this provider's minute has left for the model, as the
+	// vendor stated it and as this app has spent it. The zero value means "nothing has
+	// been stated", and nothing may be paced or spaced against it.
+	RequestAllowance(model string) Allowance
+}
+
 // BackendAPIKeyName qualifies a secret with the backend it belongs to, so each
 // backend's key lives under its own name in the secret store without colliding
 // with the Brave key or with another backend.

@@ -50,6 +50,8 @@ const de = {
   'chat.throttled': 'Das Backend begrenzt gerade die Anfragen — neuer Versuch in etwa {{seconds}} s.',
   'chat.paced':
     'Das Kontingent dieses Modells für diese Minute ist aufgebraucht — die Anfrage geht in etwa {{seconds}} s raus.',
+  'chat.spread':
+    'Diese Antwort braucht mehr Anfragen, als die Minute erlaubt — die nächste Runde geht in etwa {{seconds}} s raus.',
   'chat.regenerate': 'Neu generieren',
   'chat.copy': 'Kopieren',
   'chat.copied': 'Kopiert',
@@ -654,6 +656,8 @@ const en: Record<keyof typeof de, string> = {
   'chat.throttled': 'The backend is throttling this request — retrying in about {{seconds}} s.',
   'chat.paced':
     "This model's allowance for the minute is spent — the request goes out in about {{seconds}} s.",
+  'chat.spread':
+    'This answer needs more requests than the minute allows — the next round goes out in about {{seconds}} s.',
   'chat.regenerate': 'Regenerate',
   'chat.copy': 'Copy',
   'chat.copied': 'Copied',
@@ -1240,6 +1244,7 @@ const zh: Record<keyof typeof de, string> = {
   'chat.stopping': '正在停止……',
   'chat.throttled': '后端正在限流——约 {{seconds}} 秒后重试。',
   'chat.paced': '该模型本分钟的额度已用完——请求将在约 {{seconds}} 秒后发出。',
+  'chat.spread': '本次回答需要的请求数超过本分钟的上限——下一轮将在约 {{seconds}} 秒后发出。',
   'chat.regenerate': '重新生成',
   'chat.copy': '复制',
   'chat.copied': '已复制',

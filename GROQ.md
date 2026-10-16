@@ -354,8 +354,11 @@ turn. `internal/chat/oversize.go`:
 
    `openAICompatProvider` keeps whichever is tighter under `noteRequestCeiling`, published as
    `llm.RequestCeiling` with the source it came from, and from then on **the next turn is folded
-   before the request goes out**. The refusal is therefore paid once per model per session rather
-   than once per turn — and, after the first answer *or* refusal, not at all.
+   before the request goes out** — as one of the two bounds of the planner's single automatic
+   decision, compared with the user's own threshold in `PlanCompaction` (`automaticBound`), so a
+   turn that would cross both folds once rather than twice (COMPACT.md §4, §5.1). The refusal is
+   therefore paid once per model per session rather than once per turn — and, after the first
+   answer *or* refusal, not at all.
 
    Both numbers are visible: the context meter measures against the effective per-request budget
    and the inspector names the ceiling beside where it came from (§6.3).
@@ -518,6 +521,7 @@ seconds — but with its own sentence, because the two waits are not the same ev
 | --- | --- | --- |
 | `throttled` | a request was *sent*, refused, and is going out again | *"The backend is throttling this request — retrying in about 9 s."* |
 | `paced` | a request has **not been sent**; one of the minute's two allowances has no room for it yet | *"This model's allowance for the minute is spent — the request goes out in about 9 s."* |
+| `spread` | a **turn** needs more requests than the minute allows, so its rounds go out one per slot | *"This answer needs more requests than the minute allows — the next round goes out in about 2 s."* |
 
 The distinction travels on the watcher itself: a paced wait is the only one with **no error
 behind it**, which is exactly the difference between a request that was refused and one that has
@@ -535,6 +539,57 @@ nothing outside a turn is paced. The allowance is spent by requests, so that is 
 measured — a budget held back for a message nobody has sent yet would make the meter understate
 the room a chat has.
 
+#### A turn that needs more requests than the minute allows
+
+Everything above is per request, and a per-request guard is not a plan for a *turn*. Ten tool
+rounds against a minute with two slots left send two requests at once and then wait at the wall for
+each of the other eight — and the wall is exactly where this app's arithmetic is weakest, because
+its count is a *lower bound* on the account's spend (a second client, or this app's own listings
+and probes, are spent too and are not in it) while the vendor refuses on its own. So the tool loop
+reads the allowance **before its first request** and spaces its rounds against it
+(`internal/chat/pace.go`, `planTurnRequests`).
+
+The reading is a value of its own, `llm.Allowance`, published by the provider through
+`llm.RequestAllowance` — the same shape as `llm.RequestCeiling`, and gated the same way: this
+vendor's numbers only. It carries the two halves the per-request guard already keeps, plus the one
+thing a plan needs that a guard does not: **when each counted request frees its slot** (`Free`).
+Without it a series spaced against the rate alone would put its next request where the window has
+no room for it.
+
+`Allowance.Spread(requests)` returns the wait before each of them, and the turn turns those into
+the moments its rounds go out:
+
+- **The series is spaced at the allowance's own rate**, one request per `window / limit` — two
+  seconds for thirty a minute. The first request is not held back while the window can pay for it,
+  and each one after it waits for its own place in the minute.
+- **The arithmetic is a simulation, not a division**, because the window already holds requests
+  when the series starts: those are in `Free`, and the requests the plan places join them as they
+  are placed. A slot is available while fewer than `Limit` requests are inside the trailing minute
+  *including* the one about to be sent — the vendor refuses the request that reaches the limit, not
+  the one that passes it. Twenty-nine of a thirty-request minute that all leave in ten seconds is
+  the case this exists for: two seconds later is not a slot, ten seconds is.
+- **Nothing is spaced when the turn fits, or when no rate has been stated.** Inside the minute's
+  room the earliest request is the best one — the window rolls continuously, so taking a slot now
+  cannot cost a later one — and a turn that fits therefore behaves exactly as it did before.
+- **It is a schedule, not a reservation.** The plan covers as many rounds as the iteration cap
+  allows, which is the worst case; a turn that uses fewer leaves the later slots unspent, and a
+  turn that never calls a tool pays nothing for their having been planned.
+
+What it costs is small and stated: the turn's *last* request can land up to one round later than a
+greedy schedule would have sent it, in exchange for the burst being gone. What it buys is that no
+request is sent to sit at the limit — the state in which a vendor whose accounting is a little ahead
+of ours refuses it — and that the waits are known before the turn starts instead of being discovered
+by the request that hits the wall. A paced wait says the allowance is spent and a spread wait is
+taken while it is *not* (the app is deliberately spreading the turn), which is why the third phase
+exists rather than one sentence serving both.
+
+Two things are deliberately not done. The reading happens **once**, at the start of the turn, so a
+retry the shared client performs — or a second chat's turn — changes the count under the plan: the
+per-request guard stays where it is, behind the plan, and remains the thing that decides whether a
+request may go at all, which is why a turn that outran its plan meets the guard rather than the
+vendor. And nothing is planned for a rate nobody has stated, so a session whose first request is
+already over the rate still pays that one refusal before any of this can help (§9.6).
+
 ---
 
 ## 7. Where the code is
@@ -549,19 +604,22 @@ the room a chat has.
 | [internal/llm/openai.go:280](internal/llm/openai.go#L280) | `flavourGroq` — the branch that picks the mapper |
 | [internal/llm/limits.go](internal/llm/limits.go) | `ErrRequestTooLarge`, `classifyRequestTooLarge` — the phrases that tell an oversized request from a throttle, and the `Limit`/`Requested` read out of the refusal |
 | [internal/llm/limits.go:118](internal/llm/limits.go#L118) | `rateLimitTokensHeader`, `ceilingFromHeaders` — the per-request budget read out of a response |
-| [internal/llm/pace.go](internal/llm/pace.go) | `budgetFromHeaders`, `modelBudget`, `noteRequestBudget`, `paceRequest` — the minute, and the wait before a request it cannot pay for |
+| [internal/llm/pace.go](internal/llm/pace.go) | `budgetFromHeaders`, `modelBudget`, `noteRequestBudget`, `paceRequest` — the minute, and the wait before a request it cannot pay for — and the turn's half of it: `Allowance`, `RequestAllowance`, `Allowance.Spread` |
+| [internal/chat/pace.go](internal/chat/pace.go) | `planTurnRequests`, `turnPacing.waitFor`, `holdRound` — a turn's rounds planned against the minute before its first request, and the wait that spreads them |
 | [internal/llm/httpclient.go:255](internal/llm/httpclient.go#L255) | `responseWatcher`, `withResponseWatcher`, `observeResponse` — every response's headers, before its body is read |
 | [internal/llm/openai.go:159](internal/llm/openai.go#L159) | `noteRequestCeiling` / `RequestCeiling` — the per-model ceiling, tightened rather than replaced, with `requestBudget` as the header's reader |
-| [internal/chat/oversize.go](internal/chat/oversize.go) | `foldForSize` (the recovery), `foldForCeiling` (the preventive fold), `sizeTarget`, `turnFailureText` |
+| [internal/chat/compact.go](internal/chat/compact.go) | `automaticBound`, `atCeiling`, `ceilingRatio`, `ceilingTarget` — the ceiling as one of the two automatic bounds the planner compares, and the aim it folds to |
+| [internal/chat/oversize.go](internal/chat/oversize.go) | `foldForSize` (the recovery), `sizeTarget`, `turnFailureText` |
 | [internal/chat/context.go:37](internal/chat/context.go#L37) | `ContextBudget.Ceiling` / `CeilingSource` / `EffectiveLimit` — the limit the percentage is measured against |
 | [frontend/src/components/ModelSwitcher.tsx:23](frontend/src/components/ModelSwitcher.tsx#L23) | `ContextMeter` and `ContextInspector` — the effective budget, the note, and the row naming the ceiling's source |
 | [internal/chat/engine.go:330](internal/chat/engine.go#L330) | the `runTurn` wiring: the fold before the request, the one retry after a refusal, the message the user is shown |
+| [internal/chat/generate.go:80](internal/chat/generate.go#L80) | the tool loop: the minute's request allowance is read before the first round, and each round waits for its own moment |
 | [internal/chat/maintenance.go:270](internal/chat/maintenance.go#L270) | the summarisation budget clamped to the summariser's own ceiling |
 | [internal/llm/httpclient.go:94](internal/llm/httpclient.go#L94) | `retryHint` — the `Retry-After` header, and the wait a refusal writes in prose |
 | [internal/llm/httpclient.go:133](internal/llm/httpclient.go#L133) | `retryWait` — the hint obeyed up to one minute, the doubling backoff otherwise |
 | [internal/llm/httpclient.go:180](internal/llm/httpclient.go#L180) | `RetryWatcher`, `WithRetryWatcher`/`RetryWatcherOf` — how a wait is reported to whoever is painting a window |
-| [internal/chat/throttle.go:17](internal/chat/throttle.go#L17) | `throttledPhase`, `pacedPhase`, `watchingRetries`, `emitWaiting` — the two waits as a `chat:status` phase, with their length |
-| [frontend/src/components/ChatView.tsx:348](frontend/src/components/ChatView.tsx#L348) | the line that renders the phase and the seconds it named, and the two sentences a wait can carry |
+| [internal/chat/throttle.go:17](internal/chat/throttle.go#L17) | `throttledPhase`, `pacedPhase`, `spreadPhase`, `watchingRetries`, `emitWaiting` — the three waits as a `chat:status` phase, with their length |
+| [frontend/src/components/ChatView.tsx:348](frontend/src/components/ChatView.tsx#L348) | the line that renders the phase and the seconds it named, and the three sentences a wait can carry |
 | [internal/llm/registry.go:117](internal/llm/registry.go#L117) | the `case "groq"` that builds the provider |
 | [internal/llm/registry.go:427](internal/llm/registry.go#L427) | the shipped-but-disabled entry |
 | [internal/config/config.go:934](internal/config/config.go#L934) | the address repair in `normalise()` |
@@ -627,6 +685,15 @@ live budget (`internal/llm/retry_test.go`, `internal/chat/throttle_test.go`):
   does not end in a phase, and the reply still arrives after the wait. The provider is a fake
   rather than a server because the client's half is the two tests above; what this one pins is
   the wiring between them.
+- `internal/chat/pace_test.go` — the turn's plan and its wiring, which is the half a paced turn
+  has that a paced request does not: `TestAToolHeavyTurnIsSpacedOverTheMinute` (no round follows
+  the one before it by less than the allowance's period, the first is not held back while the
+  minute has room, and nothing past the plan waits), `TestAToolHeavyTurnIsSpacedAndSaysSo` (the
+  same turn driven through the engine: it still makes every round of its cap, it takes the time
+  the plan asked for, and the `spread` phase arrives carrying the milliseconds the plan named),
+  `TestATurnWithoutARateIsNotPlanned` (a backend that cannot state one, and the one that can but
+  has stated nothing), and `TestATurnThatFitsIsNotHeldBack` — the regression a plan like this
+  could introduce, where every answer would pay its latency rather than only the tool-heavy ones.
 
 ### Offline — the oversized request, in two packages
 
@@ -651,7 +718,15 @@ Groq's live state:
   a covered request is not delayed, an unwatched one is never held (`TestAnUnwatchedRequestIsNeverPaced`),
   a reset beyond one window is sent instead of waited out, a request larger than the whole
   allowance is left to the size fold, another vendor's lookalike headers pace nothing, and a Stop
-  during the wait ends the turn without the request ever reaching the wire.
+  during the wait ends the turn without the request ever reaching the wire. The turn's half is
+  arithmetic and is pinned without a server at all: `TestASeriesIsSpacedAtTheAllowanceRate`
+  (thirty a minute is one request every two seconds — forty requests, exactly that plan),
+  `TestASpentMinuteIsWaitedOutAndThenSpaced` (the window gives nothing until its oldest request
+  leaves it, and the rate applies from there), `TestASlotIsNeverTakenBeforeTheWindowHasRoom` (the
+  simulation rather than the division: twenty-nine of thirty still inside a minute that frees up
+  in ten seconds means ten seconds, not two), `TestNoRateAndAFittingSeriesAreNotSpaced` (the two
+  cases in which no plan may exist at all), and `TestTheAllowanceIsWhatTheAppCountedForTheModel`
+  with `TestTheAllowanceIsNotReadFromAnotherVendor` for the reading itself.
 - `internal/chat/oversize_test.go` — `TestASpentMinuteWaitsBeforeTheTurnGoesOut` is the same
   thing through the engine and the registry's own `groq` kind, where what matters is the part a
   provider test cannot see: the turn waits a second and a half the server's reset header named,
@@ -763,7 +838,9 @@ one, and the numbers in §4.
    the account rather than the model being planned for. The ceiling is therefore one request
    behind by construction, not by omission. The pacing of §6.4 sits on the same footing: the
    minute is read from a response too, so the first turn of a session is not paced either — and
-   it is the one turn that most often pays for the discovery.
+   it is the one turn that most often pays for the discovery. So is a *turn's* plan (§6.4): with
+   no rate stated there is nothing to space against, so the one crossing is paid first and the
+   spreading begins after it.
 7. **A raised allowance is not noticed until the app restarts.** The ceiling only ever tightens
    (§6), so a key that moves to a higher tier keeps being planned against the smaller number it
    was measured at. Re-reading it would have to mean *loosening* what a refusal proved, and the
