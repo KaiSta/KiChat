@@ -49,7 +49,7 @@ const de = {
   'chat.stopping': 'Wird gestoppt …',
   'chat.throttled': 'Das Backend begrenzt gerade die Anfragen — neuer Versuch in etwa {{seconds}} s.',
   'chat.paced':
-    'Das Token-Kontingent dieses Modells für diese Minute ist aufgebraucht — die Anfrage geht in etwa {{seconds}} s raus.',
+    'Das Kontingent dieses Modells für diese Minute ist aufgebraucht — die Anfrage geht in etwa {{seconds}} s raus.',
   'chat.regenerate': 'Neu generieren',
   'chat.copy': 'Kopieren',
   'chat.copied': 'Kopiert',
@@ -653,7 +653,7 @@ const en: Record<keyof typeof de, string> = {
   'chat.stopping': 'Stopping …',
   'chat.throttled': 'The backend is throttling this request — retrying in about {{seconds}} s.',
   'chat.paced':
-    "This model's token allowance for the minute is spent — the request goes out in about {{seconds}} s.",
+    "This model's allowance for the minute is spent — the request goes out in about {{seconds}} s.",
   'chat.regenerate': 'Regenerate',
   'chat.copy': 'Copy',
   'chat.copied': 'Copied',
@@ -1239,7 +1239,7 @@ const zh: Record<keyof typeof de, string> = {
   'chat.stop': '停止',
   'chat.stopping': '正在停止……',
   'chat.throttled': '后端正在限流——约 {{seconds}} 秒后重试。',
-  'chat.paced': '该模型本分钟的 token 额度已用完——请求将在约 {{seconds}} 秒后发出。',
+  'chat.paced': '该模型本分钟的额度已用完——请求将在约 {{seconds}} 秒后发出。',
   'chat.regenerate': '重新生成',
   'chat.copy': '复制',
   'chat.copied': '已复制',

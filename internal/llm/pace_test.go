@@ -422,6 +422,342 @@ func TestAStopEndsAPacedWait(t *testing.T) {
 	}
 }
 
+// groqRateServer is a Groq-shaped account that counts *requests*: it allows `limit` of
+// them inside a trailing minute and refuses the rest with the envelope the vendor sends
+// — which is the only place this API states a requests-per-minute limit, since the
+// header family beside it describes the day.
+//
+// It sends none of the token headers, so the two halves of the pacing cannot quietly
+// cover for each other in a test: what is measured here is the request rate alone.
+type groqRateServer struct {
+	limit int
+	// wait is the pause the refusal's own sentence names ("Please try again in 0.2s"). A
+	// short one keeps a test out of the shared client's retry path: the sentence is what
+	// `retryHint` falls back to when the refusal carries no header, and it is obeyed.
+	wait  string
+	reply string
+
+	mu    sync.Mutex
+	at    []time.Time
+	calls int
+}
+
+// rateRefusalBody is the vendor's requests-per-minute refusal, verbatim in the shape it
+// was measured in: HTTP 429, `type: "requests"`, and the limit, the spend and the wait
+// in one sentence. It takes its numbers rather than reading the server's fields so the
+// handler cannot build it from state another request is mutating.
+func rateRefusalBody(limit int, wait string) string {
+	return fmt.Sprintf(`{"error":{"message":"Rate limit reached for model `+"`openai/gpt-oss-20b`"+
+		` in organization `+"`org_01kz7a9rsze9da1b4q1yv7w8bx`"+` on requests per minute (RPM): `+
+		`Limit %d, Used %d, Requested 1. Please try again in %s. Visit `+
+		`https://console.groq.com/docs/rate-limits for more information.","type":"requests",`+
+		`"code":"rate_limit_exceeded"}}`, limit, limit, wait)
+}
+
+func (g *groqRateServer) handler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, _ *http.Request) {
+		now := time.Now()
+		g.mu.Lock()
+		g.calls++
+		spent := 0
+		for _, at := range g.at {
+			if now.Sub(at) < time.Minute {
+				spent++
+			}
+		}
+		g.at = append(g.at, now)
+		limit, wait, reply := g.limit, g.wait, g.reply
+		g.mu.Unlock()
+
+		if spent >= limit {
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, rateRefusalBody(limit, wait))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":%q}}]}\n\n", reply)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}
+}
+
+func (g *groqRateServer) requestCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.calls
+}
+
+// rateOf reads the request-rate state the way no production caller does: pacing only
+// ever asks whether the window has room, while a test has to see the limit it was
+// taught and the count it keeps, which is the whole evidence this half rests on.
+func rateOf(t *testing.T, p *openAICompatProvider, model string) requestRate {
+	t.Helper()
+	p.rateMu.Lock()
+	defer p.rateMu.Unlock()
+	r := p.requestRates[model]
+	if r == nil {
+		return requestRate{}
+	}
+	return requestRate{Limit: r.Limit, At: append([]time.Time(nil), r.At...)}
+}
+
+// TestTheRequestWindowIsATrailingMinute pins the arithmetic of the only allowance the
+// app has to measure itself, and the two directions it can be wrong in: a window with
+// room waits for nothing, and a full one waits exactly as long as its oldest request
+// has left to run — which is when one slot frees, not when a clock-aligned minute ends.
+func TestTheRequestWindowIsATrailingMinute(t *testing.T) {
+	now := time.Now()
+	full := &requestRate{Limit: 3, At: []time.Time{
+		now.Add(-40 * time.Second), now.Add(-20 * time.Second), now.Add(-5 * time.Second),
+	}}
+	if got := full.roomIn(now); got != 20*time.Second {
+		t.Errorf("a full window waits %s, want the 20s its oldest request has left", got)
+	}
+
+	// One request has fallen out of the window, so there is room for one more.
+	aged := &requestRate{Limit: 3, At: []time.Time{
+		now.Add(-61 * time.Second), now.Add(-20 * time.Second), now.Add(-5 * time.Second),
+	}}
+	if got := aged.roomIn(now); got != 0 {
+		t.Errorf("a window one request short of its limit waits %s, want none", got)
+	}
+	if got := aged.spentIn(now); got != 2 {
+		t.Errorf("spent in the window = %d, want the 2 that are still inside it", got)
+	}
+	if len(aged.At) != 2 {
+		t.Errorf("the window still holds %d requests, want it trimmed to 2", len(aged.At))
+	}
+
+	// Two under the limit is still under it: the vendor refuses the request that would
+	// *reach* the limit, so a count below it is room.
+	under := &requestRate{Limit: 3, At: []time.Time{now.Add(-30 * time.Second), now.Add(-10 * time.Second)}}
+	if got := under.roomIn(now); got != 0 {
+		t.Errorf("two requests of a three-request minute waits %s, want none", got)
+	}
+
+	// And a rate nobody stated is not a rate to wait for.
+	unknown := &requestRate{At: []time.Time{now.Add(-time.Second)}}
+	if got := unknown.roomIn(now); got != 0 {
+		t.Errorf("an unstated limit waits %s, want none", got)
+	}
+}
+
+// TestARequestRateRefusalTeachesTheLimitAndPacesTheNextRequest is this half's whole
+// point: no header states a requests-per-minute limit, so a refusal that names one is
+// the only place it can be learned — and once it is known, the next request waits for
+// the window instead of being refused by it.
+func TestARequestRateRefusalTeachesTheLimitAndPacesTheNextRequest(t *testing.T) {
+	// One request per minute, so the fixture needs no thirty round trips to be full.
+	g := &groqRateServer{limit: 1, wait: "0.2s", reply: "hi"}
+	srv := httptest.NewServer(g.handler(t))
+	defer srv.Close()
+	p := groqBudgetProvider(t, srv)
+
+	const model = "openai/gpt-oss-20b"
+	watcher := &recordingWatcher{}
+	ctx := WithRetryWatcher(context.Background(), watcher)
+
+	// The first request goes out, and that is the point of the first half: the fixture's
+	// minute is full after it, but nothing has *stated* a rate yet, and the app invents
+	// none.
+	if err := runTurn(t, p, ctx, ChatRequest{
+		Model: model, Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("first Chat: %v", err)
+	}
+	if got := rateOf(t, p, model); got.Limit != 0 {
+		t.Errorf("a rate of %d was known before anything refused one", got.Limit)
+	}
+	if waits, _, _ := watcher.seen(); len(waits) != 0 {
+		t.Errorf("the first request was paced with %v, want none: nothing had stated a rate", waits)
+	}
+
+	// The second request is the one the minute refuses, and the refusal is where the
+	// rate comes from. The shared client obeys the 0.2s the sentence names and tries
+	// twice more, so this Chat reaches the vendor three times and ends as the failure it
+	// is.
+	if err := runTurn(t, p, ctx, ChatRequest{
+		Model: model, Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}); err == nil {
+		t.Fatal("the second request answered, so nothing taught the request rate")
+	}
+	learned := rateOf(t, p, model)
+	if learned.Limit != 1 {
+		t.Errorf("request rate = %d, want the 1 the refusal's own sentence named", learned.Limit)
+	}
+	// Every response counts, the refusals as much as an answer: what a rate is measured
+	// against is how many requests reached the vendor.
+	if got := g.requestCount(); got != 4 {
+		t.Fatalf("the fixture saw %d requests, want the answer, the refusal and its two retries", got)
+	}
+	if len(learned.At) != 4 {
+		t.Errorf("the window holds %d requests, want the 4 that were answered", len(learned.At))
+	}
+
+	// The next request is held back for the rest of that minute — reported, with no
+	// failure behind it, because it has not been sent yet. The wait is cut short by the
+	// context so the test does not sit through it; what matters is the number shown.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	paced := &recordingWatcher{onWait: cancel}
+	started := time.Now()
+	_ = runTurn(t, p, WithRetryWatcher(ctx, paced), ChatRequest{
+		Model: model, Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("the paced wait took %v — it was waited out rather than cut short", elapsed)
+	}
+	waits, errs, waited := paced.seen()
+	if len(waits) != 1 {
+		t.Fatalf("the watcher was told about %d waits, want the one this request was held for", len(waits))
+	}
+	if waits[0] < 55*time.Second || waits[0] > time.Minute {
+		t.Errorf("the wait shown was %s, want the rest of the trailing minute", waits[0])
+	}
+	if errs[0] != nil {
+		t.Errorf("the wait carried the error %v, want none: this request was not sent", errs[0])
+	}
+	if waited != 1 {
+		t.Errorf("the wait was retracted %d times, want 1", waited)
+	}
+	if got := g.requestCount(); got != 4 {
+		t.Errorf("the fixture saw %d requests, want the held-back one never sent", got)
+	}
+}
+
+// TestATokenThrottleDoesNotTeachARequestRate: the two limits share an envelope and a
+// code, so the reading has to tell them apart by what each one says. A token throttle
+// teaches nothing about requests, or a chat with tokens to spare would be parked on a
+// request count nothing had bounded.
+func TestATokenThrottleDoesNotTeachARequestRate(t *testing.T) {
+	// The sentences are the measured and documented token shapes. Their durations are
+	// shortened to a fifth of a second, because the shared client *obeys* the wait a
+	// refusal names and the classifier reads the phrase and the limit, not the seconds —
+	// a verbatim 9.9s would cost this test forty seconds of sleeping to assert the same
+	// fact.
+	bodies := map[string]string{
+		"input tokens": `{"error":{"message":"Rate limit reached for model ` + "`openai/gpt-oss-20b`" +
+			` in organization ` + "`org_1`" + ` on input tokens per minute (ITPM): Limit 7000, Used 1911, ` +
+			`Requested 6248. Please try again in 0.2s.","type":"tokens","code":"rate_limit_exceeded"}}`,
+		"the documented token shape": `{"error":{"message":"Rate limit reached for model ` +
+			"`openai/gpt-oss-20b`" + ` in organization ` + "`org_1`" + ` on tokens per minute (TPM): ` +
+			`Limit 8000, Used 8000, Requested 12. Please try again in 0.2s.","type":"tokens",` +
+			`"code":"rate_limit_exceeded"}}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusTooManyRequests)
+				fmt.Fprint(w, body)
+			}))
+			defer srv.Close()
+			p := groqBudgetProvider(t, srv)
+
+			_, err := p.Chat(context.Background(), ChatRequest{
+				Model: "openai/gpt-oss-20b", Messages: []Message{{Role: RoleUser, Content: "hi"}},
+			})
+			if err == nil {
+				t.Fatal("the refusal was swallowed")
+			}
+			if got := rateOf(t, p, "openai/gpt-oss-20b"); got.Limit != 0 {
+				t.Errorf("a token throttle taught a request rate of %d", got.Limit)
+			}
+		})
+	}
+}
+
+// TestARequestRateOnlyEverTightens is the rule that keeps two statements about one
+// limit safe, and it is the ceiling's: fitting the smaller of two numbers fits both,
+// while the looser one costs the refusal it was learned from again. What it must not do
+// is touch the count, which is a measurement rather than a statement.
+func TestARequestRateOnlyEverTightens(t *testing.T) {
+	p := newGroqProvider("groq", "Groq", "", "k")
+	const model = "openai/gpt-oss-20b"
+	now := time.Now()
+
+	p.noteRequestRate(model, 30)
+	p.noteRequestSpent(model, now)
+	p.noteRequestRate(model, 10)
+	if got := rateOf(t, p, model); got.Limit != 10 {
+		t.Errorf("rate after a tighter statement = %d, want 10", got.Limit)
+	}
+	p.noteRequestRate(model, 50)
+	got := rateOf(t, p, model)
+	if got.Limit != 10 {
+		t.Errorf("rate after a looser statement = %d, want the 10 already known", got.Limit)
+	}
+	if len(got.At) != 1 {
+		t.Errorf("the window holds %d requests, want the one that was counted", len(got.At))
+	}
+	// And a statement with no number states nothing.
+	p.noteRequestRate(model, 0)
+	if got := rateOf(t, p, model); got.Limit != 10 {
+		t.Errorf("rate after an empty statement = %d, want 10", got.Limit)
+	}
+}
+
+// TestTheRequestRateCountIsPerModelAndPerResponse pins what the count is: one per
+// response the vendor gave, under the model that asked. It is the app's own spend and
+// nothing else — a model nobody asked has no count, and the number is never carried
+// between models whose allowances are separate.
+func TestTheRequestRateCountIsPerModelAndPerResponse(t *testing.T) {
+	g := &groqRateServer{limit: 100, wait: "0.2s", reply: "hi"}
+	srv := httptest.NewServer(g.handler(t))
+	defer srv.Close()
+	p := groqBudgetProvider(t, srv)
+
+	for i := 0; i < 2; i++ {
+		if err := runTurn(t, p, context.Background(), ChatRequest{
+			Model: "openai/gpt-oss-20b", Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		}); err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+	}
+	if err := runTurn(t, p, context.Background(), ChatRequest{
+		Model: "qwen/qwen3.8-27b", Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	if got := len(rateOf(t, p, "openai/gpt-oss-20b").At); got != 2 {
+		t.Errorf("the model that was asked twice counts %d, want 2", got)
+	}
+	if got := len(rateOf(t, p, "qwen/qwen3.8-27b").At); got != 1 {
+		t.Errorf("the model that was asked once counts %d, want 1", got)
+	}
+	if got := rateOf(t, p, "llama-3.3-70b-versatile"); len(got.At) != 0 || got.Limit != 0 {
+		t.Errorf("a model nobody asked has %+v, want nothing", got)
+	}
+}
+
+// TestAnUnwatchedRequestIsNotPacedByTheRequestRate: the boundary is about the *wait*,
+// not about the limit. A request with no watcher carries no phase to explain a pause
+// with, so it goes out — and a count that is already over the limit is exactly the case
+// where the vendor's own 429 and its hint do the work instead.
+func TestAnUnwatchedRequestIsNotPacedByTheRequestRate(t *testing.T) {
+	g := &groqRateServer{limit: 100, wait: "0.2s", reply: "hi"}
+	srv := httptest.NewServer(g.handler(t))
+	defer srv.Close()
+	p := groqBudgetProvider(t, srv)
+
+	const model = "openai/gpt-oss-20b"
+	p.noteRequestRate(model, 1)
+	p.noteRequestSpent(model, time.Now())
+
+	started := time.Now()
+	if err := runTurn(t, p, context.Background(), ChatRequest{
+		Model: model, Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Errorf("an unwatched request waited %v, want none", elapsed)
+	}
+	if got := g.requestCount(); got != 1 {
+		t.Errorf("the fixture saw %d requests, want the one that was sent", got)
+	}
+}
+
 // TestPacingIsGroqOnly: the numbers are a measurement of one vendor. Another
 // OpenAI-compatible service's rate-limit headers say nothing about the allowance a
 // request is planned against here, and waiting on them would delay turns for a rule

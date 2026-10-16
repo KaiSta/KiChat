@@ -52,9 +52,11 @@ internal/
                      handed to a watcher on the context
     limits.go        An over-size refusal told apart from a throttle, and the
                      per-request ceiling it states (GROQ.md §6)
-    pace.go          The minute a turn is paced against: what is left of a
-                     backend's token allowance and when it resets, and the wait
-                     before a request they cannot pay for (GROQ.md §6.4)
+    pace.go          The minute a turn is paced against, in both the ways it is
+                     measured: what is left of a backend's tokens and when they
+                     reset, and the requests-per-minute rate learned from a
+                     refusal and counted from this app's own responses — and the
+                     wait before a request either cannot pay for (GROQ.md §6.4)
     openai.go        LM Studio / OpenAI-compatible SSE streaming
     ollama.go        Ollama NDJSON streaming
     deepseek.go      DeepSeek over the OpenAI wire format, with its own error envelope

@@ -422,16 +422,65 @@ survives. What it does not do is avoid asking for the refusal in the first place
 what §6.4 is: the request is held back until the numbers the vendor itself published say there
 is room for it.
 
-The numbers are two more headers of the same family, sent on every response:
-**`x-ratelimit-remaining-tokens`** — what is left of the minute — and
-**`x-ratelimit-reset-tokens`** — how long that remainder lasts, as a duration (`7.66s`,
-`2m59.56s`). Together with the limit they are read by `budgetFromHeaders`
-([internal/llm/pace.go](internal/llm/pace.go)) into a per-model statement, and a turn is paced
-against it by `paceRequest`.
+**The minute is measured two ways, and each is read from the evidence that exists for it.**
+One of them is the vendor's own statement and the other has to be reconstructed, which is the
+whole shape of this section:
 
-The rule is one sentence: **a request waits when the allowance left cannot cover it, and
-nothing is waited for that the vendor's numbers do not say.** Four things follow from it, and
+- **Tokens**, from two more headers of the same family, sent on every response:
+  **`x-ratelimit-remaining-tokens`** — what is left of the minute — and
+  **`x-ratelimit-reset-tokens`** — how long that remainder lasts, as a duration (`7.66s`,
+  `2m59.56s`). Together with the limit they are read by `budgetFromHeaders`
+  ([internal/llm/pace.go](internal/llm/pace.go)) into a per-model statement. A statement is not
+  a counter: past its reset the whole allowance is back, which is what a rolling minute means,
+  and the newest response is the freshest reading of a quantity that moves rather than a second
+  opinion about a fixed one.
+- **Requests**, from nothing in the headers at all. The `requests` family beside the token ones
+  is the **day's** allowance (`x-ratelimit-limit-requests` is RPD, per the vendor's own note),
+  and the minute's request rate — 30 for the models this was measured against — is published in
+  the console's table and in no response. So the app learns the *number* where the vendor states
+  it and measures the *spend* itself:
+
+  - **The number** comes from a refusal that names one, and only from that. Measured on another
+    client's report (a client making 30 autocomplete calls back to back, which is exactly the
+    shape a tool-heavy turn has):
+
+    ```json
+    {"error":{"message":"Rate limit reached for model `llama-3.1-8b-instant` in organization
+    `org_…` on requests per minute (RPM): Limit 30, Used 30, Requested 1. Please try again in
+    1.969s. Visit https://console.groq.com/docs/rate-limits for more information.",
+    "type":"requests","code":"rate_limit_exceeded"}}
+    ```
+
+    The sentence names `requests per minute (RPM)` where the token throttle names input or
+    output tokens (ITPM/OTPM), and `type` says `requests` where the token one says `tokens`;
+    both are read, because the `code` is `rate_limit_exceeded` for all of them
+    (`requestsPerMinuteLimit`). The number may only ever **tighten**, for the reason the ceiling
+    does: a plan that fits the smaller of two statements about one limit fits both. What it must
+    not do is touch the count, which is a measurement rather than a statement.
+  - **The spend** is the app's own: every response this provider receives for the model, counted
+    in the trailing minute, including the refusals. That is the only measurement of a rate
+    nothing publishes — and it is a *lower bound* on the account's spend, since a second client,
+    or this app's own listings and probes, spend the same allowance without being counted. The
+    error has a direction on purpose: the vendor's own 429 still covers what the count misses,
+    while a count that over-estimated would park turns for room the account had all along.
+    Counting at the *response* is what makes it a count of requests that reached the vendor
+    rather than of requests the app intended: a retry the shared client performed is one more,
+    and a connection that never got an answer is none.
+
+  A rate of 30 with 30 counted is a full minute, so the next request waits for the oldest of
+  those 30 to fall out of the window — up to a minute, and by construction never more. The count
+  is per model, because the limit is: the same account has 30 for `openai/gpt-oss-20b` and 3 for
+  a guard classifier.
+
+The rule is one sentence: **a request waits when either allowance cannot pay for it, and
+nothing is waited for that the vendor's numbers do not say.** Five things follow from it, and
 each is a boundary rather than an implementation detail:
+
+- **Both allowances must have room, so the wait taken is the longer of the two.** A minute with
+  tokens to spare and no requests left is still a minute this request cannot be sent in. Each
+  half reports "no wait" for its own reasons — an unknown number, a covered request, a token
+  reset too far out to be this vendor's minute — and the two are independent, so neither can
+  veto the other's wait.
 
 - **The cost compared is an estimate; the allowance is not.** It is the same heuristic the
   meter and the compaction planner use, because the allowance is spent by tokens rather than by
@@ -468,12 +517,18 @@ seconds — but with its own sentence, because the two waits are not the same ev
 | phase | when | what it says |
 | --- | --- | --- |
 | `throttled` | a request was *sent*, refused, and is going out again | *"The backend is throttling this request — retrying in about 9 s."* |
-| `paced` | a request has **not been sent**; the minute has no room for it yet | *"This model's token allowance for the minute is spent — the request goes out in about 9 s."* |
+| `paced` | a request has **not been sent**; one of the minute's two allowances has no room for it yet | *"This model's allowance for the minute is spent — the request goes out in about 9 s."* |
 
 The distinction travels on the watcher itself: a paced wait is the only one with **no error
 behind it**, which is exactly the difference between a request that was refused and one that has
 not been made (`llm.RetryWatcher.Waiting`). Both phases were already needed for the same reason
 (§6): a ten-second wait while nothing arrives on the wire is indistinguishable from a hang.
+
+The sentence says *allowance* rather than naming tokens, and that is deliberate: the paced wait
+can now come from either half of the minute, and one line that named the wrong one would be a
+false statement about a turn that is waiting. Which of the two is binding is a detail the user
+cannot act on differently — both are "wait a few seconds" — while the tooltip and the inspector
+are where the numbers live.
 
 What is deliberately **not** done: nothing is reserved for a turn that is merely being typed, and
 nothing outside a turn is paced. The allowance is spent by requests, so that is where it is
@@ -716,16 +771,27 @@ one, and the numbers in §4.
    fold, and the cost of a too-generous one is the refused turn this whole section exists to
    avoid. (The *remainder* is the opposite case and is refreshed by every response — §6.4 — so a
    tier change deforms the plan only until the next answer.)
-8. **Only a turn is paced, and only against tokens.** The same header family describes requests as
-   well, and none of it is read. That is a deliberate reading of the vendor's own note on the
-   headers — `x-ratelimit-limit-requests`/`-remaining-requests`/`-reset-requests` are always the
-   **day's** request allowance, not a minute's — while the per-minute request rate (30 for the
-   models here) is published in the console's table and in no header at all. Neither is what a
-   chat runs into: three turns of a few thousand tokens each spend the token minute long before
-   three turns approach either request number. A summarisation call is a request of its own and is
-   not paced either — it carries no watcher, so a wait for it could not be shown (see §6.4) —
-   which means a compaction that runs into a spent minute is still answered with the vendor's own
-   429 and waited out.
+8. **The day's request allowance is read by nothing, and the minute's only half measurable.** The
+   `requests` headers are deliberately unread: the vendor's own note on the family is that they are
+   always the **day's** (`x-ratelimit-limit-requests` is RPD), so they would pace a turn against a
+   window nine hundred times too long. What §6.4 paces on instead is the minute's request *rate*,
+   and two of its three parts are only partly available:
+   - **The number comes from a refusal**, so a session's first crossing is still sent and refused —
+     the same one-request-behind shape the ceiling has (§9.6). It is the vendor's own `Limit 30`
+     when it arrives, and never an assumed rate; the rate is per model, like every other limit here.
+   - **The spend is this app's own count of responses**, which makes it a *lower bound*: requests
+     made outside a turn — listings, the availability check — are not counted, and neither is a
+     second client of the same account. The vendor's 429 stays the backstop for what the count
+     misses, and for the wait it names.
+   - **The refusal's shape rests on a measured report from another client** rather than on a
+     request made here: what this machine has seen is the token throttle. That is why
+     `requestsPerMinuteLimit` reads two signals — the sentence's `requests per minute (RPM)` and
+     the envelope's `type: "requests"` — so a reworded sentence still teaches the number, and why
+     a `type` that is not seen again costs nothing worse than the learning going quiet.
+
+   A summarisation call is a request of its own and is not paced either — it carries no watcher,
+   so a wait for it could not be shown (see §6.4) — which means a compaction that runs into a
+   spent minute is still answered with the vendor's own 429 and waited out.
 9. **The day's *token* allowance is invisible, and nothing is inferred from it.** The console's
    table gives each model four numbers — RPM, RPD, TPM and TPD — and the response headers carry
    only the middle two, so a daily token ceiling exists for every model and no response states

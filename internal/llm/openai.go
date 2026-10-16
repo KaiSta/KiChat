@@ -128,6 +128,15 @@ type openAICompatProvider struct {
 	// in three turns waits by seconds instead of being refused (internal/llm/pace.go).
 	budgetMu       sync.Mutex
 	requestBudgets map[string]modelBudget
+
+	// requestRates remembers, per model, the minute's *request* rate: the number a
+	// refusal named, against a count of the requests this app has had answered in the
+	// trailing minute. It is the one allowance no header of this API states — the
+	// request headers beside the token ones describe the day — so a tool-heavy turn
+	// that spends a minute of requests is paced on evidence the app had to gather
+	// differently (internal/llm/pace.go).
+	rateMu       sync.Mutex
+	requestRates map[string]*requestRate
 }
 
 // modelListFlavour names the shape of a model listing. The zero value is LM
@@ -212,6 +221,11 @@ func (b requestBudget) ResponseHeaders(h http.Header) {
 	// question: the ceiling says whether one request fits at all, the remainder says
 	// whether there is anything left of the minute to spend on it (pace.go).
 	b.provider.noteRequestBudget(b.model, h)
+	// And the request itself, counted here because here is where a response happens at
+	// all: the minute's *request* rate is a count, so what it is measured against is
+	// how many of this model's requests the vendor has answered for this app inside the
+	// trailing minute — every response, the refusals as much as the answers (pace.go).
+	b.provider.noteRequestSpent(b.model, time.Now())
 }
 
 // keyCheck reports a backend that needs a credential and has none.
@@ -1137,6 +1151,14 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 			// limit they are describing.
 			if too, ok := RequestTooLarge(err); ok {
 				p.noteRequestCeiling(req.Model, Ceiling{Tokens: too.Limit, Source: CeilingFromRefusal})
+			}
+			// The minute's request rate is stated nowhere else — the header family's
+			// `requests` numbers are the day's — so a refusal that names one is the
+			// only place it can be learned. Keeping it is what turns a tool-heavy
+			// turn's next request from something to be refused into something to
+			// wait for (pace.go).
+			if limit, ok := requestsPerMinuteLimit(err); ok {
+				p.noteRequestRate(req.Model, limit)
 			}
 			return nil, err
 		}

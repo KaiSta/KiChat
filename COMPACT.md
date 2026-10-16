@@ -176,8 +176,11 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   vendor's rate-limit header is not evidence about the largest request it accepts), and a newly
   read number may only *tighten* what a refusal already proved.
 
-  The **remainder** of the same header family is what a *turn* is paced against: a request the
-  minute's allowance cannot pay for waits instead of being refused (GROQ.md §6.4). A
+  What a *turn* is paced against is the minute, and the vendor measures it two ways: the
+  **remainder** of the same header family for tokens, and for **requests** a limit learned from a
+  refusal's own sentence against a count of this app's own responses — because no header of this
+  API carries a per-minute request rate at all (GROQ.md §6.4). Either one being spent holds the
+  request back rather than letting it be refused, so the wait taken is the longer of the two. A
   summarisation call is deliberately not paced, because it carries no watcher and a wait that
   nothing can show is not taken — so a compaction that runs into a spent minute is still answered
   with the vendor's own 429 and waited out by the shared client.

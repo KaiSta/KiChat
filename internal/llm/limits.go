@@ -113,6 +113,57 @@ func classifyRequestTooLarge(err error) error {
 	}
 }
 
+// A requests-per-minute refusal is the same envelope as the token throttle and a
+// different limit, and — unlike the oversized request of ErrRequestTooLarge — it is a
+// genuine throttle: the fix is to wait, which the shared client already does. What is
+// worth keeping is the number, because nothing else states it. Measured:
+//
+//	{"error":{"message":"Rate limit reached for model `llama-3.1-8b-instant` in
+//	organization `org_01ht7j91w5fjx8yabp2xh9hq37` on requests per minute (RPM): Limit
+//	30, Used 30, Requested 1. Please try again in 1.969s. Visit
+//	https://console.groq.com/docs/rate-limits for more information.","type":"requests",
+//	"code":"rate_limit_exceeded"}}
+//
+// against the token throttle, which says `type: "tokens"` and names input or output
+// tokens per minute instead. Two things tell them apart and both are read, because one
+// of them is a word and the other a field: the sentence spells out `requests per minute
+// (RPM)`, and `type` says `requests`. The `code` is `rate_limit_exceeded` for all of
+// them, which is why nothing here reads it.
+var (
+	// "… on requests per minute (RPM): Limit 30 …". The period and the parenthesised
+	// unit are what keep it off the token shapes — `input tokens per minute (ITPM)` and
+	// `output tokens per minute (OTPM)` both contain "per minute" and neither contains
+	// this phrase.
+	requestRatePhrase = regexp.MustCompile(`(?i)\brequests? per minute\s*\(RPM\)`)
+	// The envelope's own name for the same limit, so a vendor that rewords its sentence
+	// still teaches the number.
+	requestRateType = regexp.MustCompile(`(?i)"type"\s*:\s*"requests"`)
+)
+
+// requestsPerMinuteLimit reads the requests-per-minute allowance out of a refusal that
+// names one, or reports that this failure is not that refusal.
+//
+// The number is worth keeping because this API publishes the *day's* request allowance
+// in a header (`x-ratelimit-limit-requests`) and the minute's request rate only in a
+// table in its console, so a refusal is the one place on the wire where the rate a
+// tool-heavy turn runs into is stated. Narrow like classifyRequestTooLarge: only a
+// client error, and only one whose body names this limit with a positive number.
+func requestsPerMinuteLimit(err error) (int, bool) {
+	he, ok := err.(*HTTPError)
+	if !ok || he.StatusCode < 400 || he.StatusCode >= 500 {
+		return 0, false
+	}
+	body := he.Body
+	if !requestRatePhrase.MatchString(body) && !requestRateType.MatchString(body) {
+		return 0, false
+	}
+	limit := firstNumber(limitInBody, body)
+	if limit <= 0 {
+		return 0, false
+	}
+	return limit, true
+}
+
 // rateLimitTokensHeader is the header every Groq response carries, success or
 // refusal: the tokens-per-minute allowance that applies to the model that answered.
 //
@@ -122,6 +173,12 @@ func classifyRequestTooLarge(err error) error {
 // *single request* the account may send is a measurement of this app's rather than a
 // documented rule — the 413 in GROQ.md §6.1 refused a `Requested 15088` request with
 // `Limit 10000` on TPM, which is one statement of both quantities at once.
+//
+// The same note is why the *request* headers beside it are not read at all: they are
+// the day's, not the minute's, and the minute's request rate (30 for the models here)
+// is published in the console and in no header — which is why the rate a turn is paced
+// against is learned from a refusal's own sentence instead (requestsPerMinuteLimit,
+// internal/llm/pace.go).
 //
 // Reading it is therefore inference from that measurement, kept in the safe
 // direction: a ceiling learned this way may only *tighten* what the app already
