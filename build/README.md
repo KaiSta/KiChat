@@ -50,7 +50,16 @@ build with `wails build`.
 - `icon.ico` - The icon used for the application. This is used when building using `wails build`. If you wish to
   use a different icon, simply replace this file with your own. If it is missing, a new `icon.ico` file
   will be created using the `appicon.png` file in the build directory.
-- `installer/*` - The files used to create the Windows installer. These are used when building using `wails build`.
+- `installer/*` - The files used to create the Windows installer. `make nsis` is the target that
+  consumes them (`wails build -nsis` underneath, so `make windows` alone does not need NSIS).
+- `installer/project.nsi` - Source. The installer's pages, shortcuts and uninstall section; a `!define`
+  put at the top of it wins over the generated one beside it.
+- `installer/wails_tools.nsh` - **Generated, and not tracked.** Wails rewrites it on every `-nsis` run
+  from the template inside the tool, resolving its `{{.Info.*}}` placeholders against `wails.json` in
+  place — so a committed copy is a template `makensis` cannot use and every packaging run dirties it.
+  `installer/tmp/` (the WebView2 bootstrapper it embeds) is ignored for the same reason.
 - `info.json` - Application details used for Windows builds. The data here will be used by the Windows installer,
-  as well as the application itself (right click the exe -> properties -> details)
+  as well as the application itself (right click the exe -> properties -> details). This file and
+  `wails.exe.manifest` are templates too, but Wails renders them elsewhere rather than overwriting them,
+  so they stay as committed — the `{{.Info.*}}` placeholders are not meant to be filled in by hand.
 - `wails.exe.manifest` - The main application manifest file.

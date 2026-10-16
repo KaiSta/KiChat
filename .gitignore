@@ -3,6 +3,16 @@
 build/bin
 # `make deb` stages the package tree here and writes the .deb next to it.
 build/deb
+# `make nsis` has Wails stage the WebView2 bootstrapper here to embed it in the
+# installer. The installer itself lands in build/bin, which is ignored above.
+build/windows/installer/tmp
+# Wails rewrites this on every `-nsis` run from the template embedded in the tool,
+# resolving the `{{.Info.*}}` placeholders against wails.json in place. It says "DO
+# NOT EDIT - Generated automatically by `wails build`" for that reason, and the
+# tracked form is not usable by makensis at all, so it is generated output like
+# frontend/dist rather than a source file. project.nsi beside it *is* a source file:
+# defines put there win over the generated ones.
+build/windows/installer/wails_tools.nsh
 node_modules
 frontend/dist
 

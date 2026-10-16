@@ -18,6 +18,10 @@ func startInOwnGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+// stopRequestName is what the graceful half of a stop is called here, for the log lines
+// that can only report what was attempted.
+func stopRequestName() string { return "SIGTERM" }
+
 // terminate signals the server's whole process group. force sends SIGKILL, which
 // cannot be ignored, for a server that did not stop on SIGTERM.
 //
