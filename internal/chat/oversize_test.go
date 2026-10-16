@@ -306,6 +306,78 @@ func TestGroqWithoutAnythingToFoldSaysWhatToDo(t *testing.T) {
 	}
 }
 
+// TestAFoldThatFailsIsNotReportedAsNothingToFold pins the three outcomes apart. A fold
+// that wrote a memory, a fold with nothing older to fold, and a fold that broke are
+// three different situations for the person reading the failure: the first asks for a
+// smaller message, the second says the chat is already as small as it can be, and the
+// third says the app tried and could not. Reporting the broken summariser as an empty
+// history would also contradict the warning the same turn already emitted about it.
+func TestAFoldThatFailsIsNotReportedAsNothingToFold(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	// Enough turns that the cut leaves some of them to fold: the size fold keeps the
+	// newest turn verbatim, so a chat shorter than the keep-turns setting has nothing
+	// older to summarise and never reaches the summariser at all.
+	seedLongHistory(t, st, 10)
+
+	too := &llm.RequestTooLargeError{
+		Cause:     &llm.HTTPError{StatusCode: 413, Status: "413 Request Entity Too Large", Body: groqOversizedBody},
+		Limit:     10000,
+		Requested: 15088,
+	}
+	provider := &fakeProvider{
+		model:    llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		refusals: []error{too, errors.New("das Zusammenfassungs-Backend antwortet nicht")},
+	}
+	engine, captured := newTestEngine(t, st, provider)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Und weiter?"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the turn did not finish")
+	}
+
+	var failure string
+	var warnings []string
+	for _, ev := range captured.snapshot() {
+		switch ev.name {
+		case events.Error:
+			failure, _ = ev.payload["error"].(string)
+		case events.Warning:
+			if text, ok := ev.payload["warning"].(string); ok {
+				warnings = append(warnings, text)
+			}
+		}
+	}
+	if !strings.Contains(failure, "ließ sich nicht komprimieren") {
+		t.Errorf("error text %q does not say the fold failed", failure)
+	}
+	if strings.Contains(failure, "es gab keinen Verlauf") {
+		t.Errorf("error text %q blames an empty history for a fold that broke", failure)
+	}
+	// The cause is named, and it is the summariser rather than the chat: that warning
+	// and the sentence above describe one event, so they cannot disagree.
+	sawCause := false
+	for _, w := range warnings {
+		if strings.Contains(w, "konnte nicht komprimiert werden") && strings.Contains(w, "antwortet nicht") {
+			sawCause = true
+		}
+	}
+	if !sawCause {
+		t.Errorf("no warning named the failing summariser: %v", warnings)
+	}
+	// And nothing was retried: the body the backend refused is the body that would go
+	// out again, which is what the missing fold is about.
+	if got := provider.requestCount(); got != 2 {
+		t.Errorf("backend calls = %d, want the refusal and the summariser: %v", got, warnings)
+	}
+	// No memory was written, so the transcript must not claim one.
+	if got := len(summariesOf(t, st)); got != 0 {
+		t.Errorf("compactions = %d, want none after a fold that failed", got)
+	}
+}
+
 // seedLongHistory plants enough turns, of enough length, for a fold to have
 // something to fold and for the estimate to reach a small ceiling. The default
 // fixture is two short messages: fine for a threshold, useless for a limit that is

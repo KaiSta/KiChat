@@ -101,10 +101,29 @@ func ceilingNote(too *llm.RequestTooLargeError) string {
 	return fmt.Sprintf(" (höchstens %d Token pro Anfrage)", too.Limit)
 }
 
+// foldOutcome is what a size fold did, and it has three names rather than being a bool
+// because "the fold did not happen" has two causes that read differently to the person
+// who was refused. A chat whose history is already as small as it can be cannot be
+// helped by folding; a fold that failed was an attempt the app made and could not
+// finish. Telling someone there was nothing to fold when the summariser is what broke
+// would be a lie about their own chat.
+type foldOutcome string
+
+const (
+	// foldNothing: nothing older than the message that just went out could be folded, so
+	// a retry would produce the identical body and the identical refusal.
+	foldNothing foldOutcome = "nothing"
+	// foldFailed: a fold was attempted and wrote no memory — the summariser was refused,
+	// no backend answered for it, or the window is unknown. Reported as itself, and the
+	// backend's refusal stands.
+	foldFailed foldOutcome = "failed"
+	// foldFolded: a memory was written, and the request is worth sending once more.
+	foldFolded foldOutcome = "folded"
+)
+
 // foldForSize folds a chat's history because the backend refused the request for its
-// own size. It reports whether a memory was written, which is also whether the
-// request is worth sending again: a fold that had nothing to fold would produce the
-// identical body and the identical refusal.
+// own size, and reports what it did — which is also whether the request is worth
+// sending again: only a written memory makes the retried body a smaller one.
 //
 // The fold is forced, deliberately. settings.Compact.Enabled and the chat's
 // AutoCompact decide whether compaction happens *quietly*; this is the only way
@@ -114,7 +133,7 @@ func ceilingNote(too *llm.RequestTooLargeError) string {
 // asked was the backend.
 func (e *Engine) foldForSize(ctx context.Context, chat *store.Chat, provider llm.Provider,
 	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings,
-	too *llm.RequestTooLargeError) bool {
+	too *llm.RequestTooLargeError) foldOutcome {
 
 	// The refused request was never answered, so the empty reply row it left behind
 	// goes: the retry uses the same user message, and a red row in the transcript for
@@ -145,18 +164,21 @@ func (e *Engine) foldForSize(ctx context.Context, chat *store.Chat, provider llm
 			"chatId":  chat.ID,
 			"warning": "Der Verlauf wurde komprimiert — die Anfrage wird erneut gesendet.",
 		})
-		return true
+		return foldFolded
 	}
 	// Folding is best-effort. A summariser that fails — refused for its own size, no
 	// backend, no room to summarise in — must not replace a refusal the user can act
 	// on with a different error they cannot, so it is reported and the refusal stands.
+	// The outcome says which of the two it was, because the sentence the turn ends with
+	// names the reason and the two reasons are not the same.
 	if err != nil {
 		e.emit(events.Warning, map[string]any{
 			"chatId":  chat.ID,
 			"warning": fmt.Sprintf("Der Verlauf konnte nicht komprimiert werden: %s", err.Error()),
 		})
+		return foldFailed
 	}
-	return false
+	return foldNothing
 }
 
 // foldForCeiling folds the history *before* the request goes out, when the backend
@@ -181,6 +203,14 @@ func (e *Engine) foldForCeiling(ctx context.Context, chat *store.Chat, provider 
 	}
 	ceiling := ceiler.RequestCeiling(modelID).Tokens
 	if ceiling <= 0 {
+		return false, nil
+	}
+	// A window nobody reports cannot be folded *against*: the planner prices the turns
+	// it keeps as a ratio of it, and compactWith refuses the run for the same reason.
+	// Returning before it does is not just an optimisation — that refusal would
+	// otherwise be reported on every turn, and a standing fact about a model is not an
+	// incident in a turn (the same reasoning maybeAutoCompact carries).
+	if limit, _ := limitFor(*chat, modelInfo); limit <= 0 {
 		return false, nil
 	}
 	assembly, _, err := e.buildAssembly(ctx, chat, backendID, modelID, settings, modelInfo, "")
@@ -217,19 +247,28 @@ func (e *Engine) foldForCeiling(ctx context.Context, chat *store.Chat, provider 
 // A refusal caused by the request's own size is the one failure whose message is
 // worth replacing. The vendor's sentence is written for an API client — it names an
 // organization, a service tier and a billing page — while what the user needs is
-// which limit was hit, whether the app already tried to fit it, and what reduces it.
+// which limit was hit, what the app did about it, and what reduces the request.
 // Every other failure keeps the backend's own words, which is the rule everywhere
 // else in this engine.
-func turnFailureText(providerName string, err error, folded bool) string {
+//
+// What the app did is the outcome and not a yes/no, because the three states are three
+// different situations for the reader: a folded history that still does not fit asks
+// for a smaller message, a fold that failed says the app tried and could not, and a
+// chat with nothing older to fold has nothing to try. Only the first is a claim about
+// the backend; the other two are claims about this chat.
+func turnFailureText(providerName string, err error, outcome foldOutcome) string {
 	too, ok := llm.RequestTooLarge(err)
 	if !ok {
 		return err.Error()
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Die Anfrage ist zu groß für %s%s", providerName, ceilingNote(too))
-	if folded {
+	switch outcome {
+	case foldFolded:
 		b.WriteString(" — auch mit komprimiertem Verlauf passt sie nicht hinein.")
-	} else {
+	case foldFailed:
+		b.WriteString(" — der Verlauf ließ sich nicht komprimieren.")
+	default:
 		b.WriteString(" — es gab keinen Verlauf, der sich noch hätte zusammenfassen lassen.")
 	}
 	b.WriteString(" Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.")

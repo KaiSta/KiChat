@@ -219,8 +219,11 @@ distinction `RESEARCH.md` §5 makes for Brave's rejected token.
 
 **The budget is the tight resource here, and it is per minute — and per model.** Every
 response carries `x-ratelimit-limit-requests`, `-limit-tokens`, `-remaining-*` and
-`-reset-*`; the account measured allows **1000 requests** but only **8000 tokens per minute**
-across it, while a single model on the `on_demand` tier publishes a ceiling of its own. A real
+`-reset-*`; the vendor's own note on them is that the `requests` family always means the
+**day** and the `tokens` family always the **minute**. The account measured allows **1000
+requests a day** but only **8000 tokens a minute** across it, while a single model on the
+`on_demand` tier publishes a ceiling of its own — so the minute is what a long chat spends,
+and it is the one the app reads (§6.4) and the one the numbers below describe. A real
 turn against `qwen/qwen3.8-27b` was refused with this, which is the shape every fact below is
 read from — the model's own limit **7000**, the 1911 already spent, the 6248 this request was
 counted at, and the wait in prose:
@@ -328,9 +331,12 @@ turn. `internal/chat/oversize.go`:
    user message — the history is folded, and the request goes out again. A fold with nothing
    older to fold folds nothing (`ProtectNewestTurn`: the message the user just sent is what the
    next request has to carry) and the turn is not retried, because the body would be identical.
-   One sentence explains it, in the transcript's own language: *"Groq hat die Anfrage als zu
-   groß abgelehnt (höchstens 10000 Token pro Anfrage, angefragt waren 15088). Der Verlauf wird
-   komprimiert und die Anfrage erneut gesendet."*
+   It is explained in the transcript's own language, in two sentences and only one of them a
+   promise: *"Groq hat die Anfrage als zu groß abgelehnt (höchstens 10000 Token pro Anfrage,
+   angefragt waren 15088)."*, and — **after** the memory exists, never before it — *"Der Verlauf
+   wurde komprimiert — die Anfrage wird erneut gesendet."* The order is the point: a promise of
+   a retry that never comes would be the one thing in that turn which is not true, and a fold
+   can still fail (see item 4).
 2. **The ceiling is remembered, per model — and read from an ordinary answer wherever one
    exists.** No route of this API publishes it: the listing reports windows, not budgets. Two
    of the vendor's own statements do, and both are read.
@@ -360,8 +366,16 @@ turn. `internal/chat/oversize.go`:
    the summariser publishes.
 4. **A refusal that survives all that is explained rather than quoted.** The vendor's sentence
    names an organization, a service tier and a billing page; what the user is shown is which
-   limit was hit, that the history was already folded, and what reduces the request — *"Kürze
-   die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit."*
+   limit was hit, what the app did about it, and what reduces the request — *"Kürze die
+   Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit."* What it did is
+   one of three outcomes (`foldOutcome`), because "the fold did not happen" is not one fact:
+   *"auch mit komprimiertem Verlauf passt sie nicht hinein"* (a memory was written and the turn
+   was refused anyway), *"der Verlauf ließ sich nicht komprimieren"* (a fold was attempted and
+   broke — a summariser that was refused, had no backend, or ran out of room), and *"es gab
+   keinen Verlauf, der sich noch hätte zusammenfassen lassen"* (there was nothing older to
+   fold). Only the **middle** one is a failure of the app, and it is reported beside the
+   warning that names the cause, so the two sentences describe one event instead of
+   contradicting each other.
 
 The fold is forced, which puts it beside the Compact button rather than beside the automatic
 threshold: `settings.Compact.Enabled` and a chat's `AutoCompact` decide whether compaction
@@ -702,11 +716,23 @@ one, and the numbers in §4.
    fold, and the cost of a too-generous one is the refused turn this whole section exists to
    avoid. (The *remainder* is the opposite case and is refreshed by every response — §6.4 — so a
    tier change deforms the plan only until the next answer.)
-8. **Only a turn is paced, and only against tokens.** The allowance is per minute and per model
-   for *requests* as well — `x-ratelimit-limit-requests` and its remainder are sent beside the
-   token ones and are not read, because the measured account allows 1000 requests against 8000
-   tokens and the tokens are what runs out: three turns of a few thousand tokens each spend the
-   minute long before three turns are 1000. A summarisation call is a request of its own and is
+8. **Only a turn is paced, and only against tokens.** The same header family describes requests as
+   well, and none of it is read. That is a deliberate reading of the vendor's own note on the
+   headers — `x-ratelimit-limit-requests`/`-remaining-requests`/`-reset-requests` are always the
+   **day's** request allowance, not a minute's — while the per-minute request rate (30 for the
+   models here) is published in the console's table and in no header at all. Neither is what a
+   chat runs into: three turns of a few thousand tokens each spend the token minute long before
+   three turns approach either request number. A summarisation call is a request of its own and is
    not paced either — it carries no watcher, so a wait for it could not be shown (see §6.4) —
    which means a compaction that runs into a spent minute is still answered with the vendor's own
    429 and waited out.
+9. **The day's *token* allowance is invisible, and nothing is inferred from it.** The console's
+   table gives each model four numbers — RPM, RPD, TPM and TPD — and the response headers carry
+   only the middle two, so a daily token ceiling exists for every model and no response states
+   how much of it is left. Reading `x-ratelimit-remaining-tokens` as if it described a day would
+   be the worst kind of invented number: it would pace a turn against room that a spent day had
+   already taken. A session that reaches that ceiling therefore arrives as one more
+   `rate_limit_exceeded` with a wait in prose — the throttle shape, told apart by nothing — and
+   the app answers it the way it answers a throttle, by obeying the wait. That wait is honest and
+   futile at the same time: no wait inside a minute refills a day. The shape of that refusal has
+   not been measured here, and until it is, a spent day is a throttle that keeps coming back.

@@ -281,11 +281,11 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	// the turn is sent once more. This is what keeps a long chat from becoming an
 	// unusable one, and it is the only retry here: a second refusal is reported with
 	// the limit the vendor named instead of its envelope (turnFailureText).
-	folded := false
+	outcome := foldNothing
 	if genErr != nil && ctx.Err() == nil {
 		if too, ok := llm.RequestTooLarge(genErr); ok {
-			folded = e.foldForSize(ctx, &chat, provider, backendID, modelID, modelInfo, settings, too)
-			if folded {
+			outcome = e.foldForSize(ctx, &chat, provider, backendID, modelID, modelInfo, settings, too)
+			if outcome == foldFolded {
 				result, genErr = e.generate(ctx, in)
 			}
 		}
@@ -309,7 +309,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		e.emit(events.Error, map[string]any{
 			"chatId":    req.ChatID,
 			"messageId": result.PrimaryMessageID,
-			"error":     turnFailureText(provider.Name(), genErr, folded),
+			"error":     turnFailureText(provider.Name(), genErr, outcome),
 		})
 	}
 

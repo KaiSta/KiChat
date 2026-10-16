@@ -172,7 +172,7 @@ type ChunkHit struct {
 type Compaction struct {
 	ID           string    `json:"id"`
 	ChatID       string    `json:"chatId"`
-	Trigger      string    `json:"trigger"` // auto | manual
+	Trigger      string    `json:"trigger"` // auto | manual | too_large
 	FromSeq      int       `json:"fromSeq"`
 	ToSeq        int       `json:"toSeq"`
 	Summary      string    `json:"summary"`

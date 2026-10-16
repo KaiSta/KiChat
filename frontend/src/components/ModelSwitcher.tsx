@@ -25,7 +25,14 @@ export function ContextMeter({ onOpen }: { onOpen: () => void }) {
   const budget = useStore((s) => s.chatState?.budget)
   const phase = useStore((s) => (s.activeChatId ? s.phase[s.activeChatId] : undefined))
 
-  if (!budget || budget.limit <= 0) {
+  // The number the next request has to fit under: the model's window, or a backend's own
+  // smaller cap on one request (Groq), which makes a percentage of the window read as
+  // free room that does not exist. Either number is a reading — a backend that publishes
+  // a per-request budget and no window still bounds the request — so the meter waits for
+  // both to be missing, not for the window alone.
+  const cap = budget ? (budget.effectiveLimit > 0 ? budget.effectiveLimit : budget.limit) : 0
+
+  if (!budget || cap <= 0) {
     return (
       <button type="button" className="btn btn-sm btn-ghost" onClick={onOpen} title={t('context.inspector')}>
         {t('context.title')}: {t('context.unknown')}
@@ -35,10 +42,6 @@ export function ContextMeter({ onOpen }: { onOpen: () => void }) {
 
   const tone = usageTone(budget.percent)
   const remeasuring = !budget.measuredValid && budget.measured > 0
-  // The number the next request has to fit under: a backend that caps one request
-  // below its window (Groq) makes a percentage of the window read as free room that
-  // does not exist.
-  const cap = budget.effectiveLimit > 0 ? budget.effectiveLimit : budget.limit
   const ceilingBinds = budget.ceiling > 0 && budget.ceiling < budget.limit
   const ceilingNote = t('context.ceilingNote', {
     tokens: formatNumber(budget.ceiling),
@@ -55,7 +58,7 @@ export function ContextMeter({ onOpen }: { onOpen: () => void }) {
           ? t('context.overLimit')
           : ceilingBinds
             ? `${formatNumber(budget.used)} / ${formatNumber(cap)} ${t('metrics.tokens')} — ${ceilingNote}`
-            : `${formatNumber(budget.used)} / ${formatNumber(budget.limit)} ${t('metrics.tokens')}`
+            : `${formatNumber(budget.used)} / ${formatNumber(cap)} ${t('metrics.tokens')}`
       }
     >
       <span className="relative block h-2 w-24 overflow-hidden rounded-full" style={{ background: 'var(--surface-3)' }}>

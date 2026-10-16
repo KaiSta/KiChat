@@ -151,10 +151,12 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
 
 - **`foldForSize`** runs *after* a refusal and is the recovery. The refused turn was never
   answered, so its empty reply row is dropped, the history is folded (`Force`, `Trigger:
-  too_large`, `ProtectNewestTurn`) and the turn is sent once more. It reports whether it folded,
-  which is also whether a retry is worth making: a fold that had nothing older to fold produces
-  the identical body and the identical refusal, so nothing is sent and the user gets the limit
-  and the fix rather than the vendor's envelope.
+  too_large`, `ProtectNewestTurn`) and the turn is sent once more. It reports a `foldOutcome`
+  rather than a bool, because the two ways a fold does not happen read differently to the user: a
+  fold that had nothing older to fold produces the identical body and the identical refusal, so
+  nothing is sent and the user gets the limit and the fix rather than the vendor's envelope,
+  while a fold whose summariser *broke* is reported as the failure it is — the sentence the turn
+  ends with does not blame an empty history (GROQ.md §6.2).
 - **`foldForCeiling`** runs *before* the request, where the send pipeline meets
   `maybeAutoCompact`, and only for a backend that publishes a per-request ceiling
   (`llm.RequestCeiling` — Groq, whose per-minute token allowance is also the largest single
@@ -271,8 +273,7 @@ The last resort above is a **manual** run's privilege. `PlanInput.ProtectNewestT
 smaller sets it: the message the user just sent is what the next request has to carry, and folding
 it would answer the question with a summary of itself while leaving the request exactly as large —
 the summary is written from the same text. With the escape off, a chat whose only foldable content
-is the current turn folds nothing and says so, which is the honest answer a size fold needs:
-`foldForSize` then skips its retry, and the user is told the limit rather than handed a body that
+is the current turn folds nothing and says so, which is the honest answer a size fold needs:  `foldForSize` then skips its retry, and the user is told the limit rather than handed a body that
 would be refused identically.
 
 ### 5.4 Manual targets: "→ 60 %" means 60 %
