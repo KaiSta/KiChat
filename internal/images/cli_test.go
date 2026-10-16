@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -669,6 +671,97 @@ func TestCLIReportsStepsAndAPreviewWhileItDraws(t *testing.T) {
 	}
 	if !strings.Contains(result.Info, "generating image:") {
 		t.Errorf("Result.Info = %q, want the report lines worth keeping", result.Info)
+	}
+}
+
+// cliWithHeldDraw is a fake `sd-cli` that draws until the test lets it finish: it reports its
+// first bar and preview at once and then waits for a file to appear beside the script. A draw
+// whose end the test chooses is what makes the window below a window rather than a
+// coincidence — the same stub as cliWithPreview with its sleeps replaced by that wait.
+const cliWithHeldDraw = `
+if [ "$1" = "-h" ]; then
+  echo "usage: sd-cli [options]"
+  echo "  --preview <method>        preview decoding method (none, vae, tae)"
+  echo "  --preview-path <path>     write the preview to this file"
+  echo "  --preview-interval <n>    how often to update it"
+  exit 0
+fi
+out=""; prev=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    --preview-path) prev="$2"; shift 2 ;;
+    --preview|--preview-interval) shift 2 ;;
+    *) shift ;;
+  esac
+done
+echo "  |=====>              | 1/2 - 2.20s/it"
+cp "$(dirname "$0")/picture.png" "$prev"
+while [ ! -f "$(dirname "$0")/finish" ]; do sleep 0.05; done
+cp "$(dirname "$0")/picture.png" "$out"
+echo "generating image: 1/1 - seed 4242"
+exit 0
+`
+
+// TestCLIDoesNotReportAfterTheDrawIsOver is the promise the test above only made visible under
+// `-race`: a progress report belongs to the call that was given the callback, so none may still
+// be running — or arrive — once GenerateWithProgress has returned.
+//
+// The watcher used to be stopped with a bare `close(stopWatch)`, which asks it to stop without
+// waiting for it, and the last report of a draw could therefore finish after the draw's own
+// caller was gone. On this backend that is not only a test's problem: the callback the app
+// passes emits `image:progress`, so a finished draw kept repainting its own progress row, and
+// the shared slice in the test above — a plain append from another goroutine — was a data race.
+//
+// The report is held open *across the moment the process exits*, which is the window the race
+// lived in: the fake draw ends when the test says so, the callback stays inside the report for a
+// further two seconds, and a client that returns in between is the bug. The release cannot come
+// from the test's own flow — a client that waits for the report it is running would then be
+// waiting for a report that waits for it — so a watchdog does it, and both a fixed and a buggy
+// client get to finish.
+func TestCLIDoesNotReportAfterTheDrawIsOver(t *testing.T) {
+	binary := fakeCLI(t, cliWithHeldDraw)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+
+	release := make(chan struct{})
+	var once sync.Once
+	letGo := func() { once.Do(func() { close(release) }) }
+	defer letGo()
+
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	var running atomic.Int32
+
+	go func() {
+		select {
+		case <-started:
+		case <-time.After(10 * time.Second):
+			// The draw is held open below, so a report that never came would otherwise be
+			// a hang rather than a failure: the stub is let go either way.
+			t.Errorf("the held draw reported nothing, so the window this test needs never opened")
+		}
+		// End the draw while the report below is still being delivered. The script leaves
+		// within one poll of this file appearing, so the client's return and the end of the
+		// report are far apart in time — which is what the margin below is for.
+		if err := os.WriteFile(filepath.Join(filepath.Dir(binary), "finish"), []byte("done"), 0o644); err != nil {
+			t.Errorf("let the fake draw finish: %v", err)
+		}
+		time.Sleep(2 * time.Second)
+		letGo()
+	}()
+
+	if _, err := client.GenerateWithProgress(t.Context(), Request{Prompt: "a red fox"}, func(Progress) {
+		running.Add(1)
+		startedOnce.Do(func() { close(started) })
+		<-release
+		running.Add(-1)
+	}); err != nil {
+		t.Fatalf("GenerateWithProgress: %v", err)
+	}
+
+	if n := running.Load(); n != 0 {
+		t.Errorf("%d progress report(s) were still running when the draw returned; a report may not "+
+			"outlive the call that asked for it", n)
 	}
 }
 

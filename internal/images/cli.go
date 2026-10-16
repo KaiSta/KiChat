@@ -435,8 +435,12 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 		}
 	}()
 	stopWatch := make(chan struct{})
+	watcherDone := make(chan struct{})
 	if watch {
-		go watchPreview(stopWatch, previewPath, sdlog, report)
+		go func() {
+			defer close(watcherDone)
+			watchPreview(stopWatch, previewPath, sdlog, report)
+		}()
 	}
 	// The draw is the wait, and the watching has to last exactly as long: stopping the preview
 	// watcher before the process exits would leave every draw longer than the bound un-
@@ -444,7 +448,19 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	// fixing this: with the drain placed before the wait and bounded by a flat two seconds, a
 	// three-second draw reported exactly one step and then went quiet.
 	runErr := cmd.Wait()
-	close(stopWatch)
+	// The watcher is stopped *and waited for*, which is the shape the WebUI backend's watcher
+	// already had (sdwebui.go, watchProgress). A bare close only asks the goroutine to stop: a
+	// report it was already delivering then finishes after this function has returned, so the
+	// caller's callback is invoked for a draw it has been told is over — a progress row that
+	// repaints itself after the picture is there — and a caller accumulating those reports in
+	// a plain variable is racing with it, which is how `-race` found this (cli_test.go,
+	// TestCLIDoesNotReportAfterTheDrawIsOver). Waiting is what makes a report belong to the
+	// call that asked for it, in both directions: none is delivered after the result, and the
+	// return does not happen while one is half-delivered.
+	if watch {
+		close(stopWatch)
+		<-watcherDone
+	}
 	// The drain runs after, so the lines the program wrote on its way out are in hand before
 	// the result is built. Its bound is for the case WaitDelay was added for in the first
 	// place — a wrapper script that started the program without `exec` and left a grandchild
