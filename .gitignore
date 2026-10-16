@@ -3,6 +3,9 @@
 build/bin
 # `make deb` stages the package tree here and writes the .deb next to it.
 build/deb
+# `make dmg` stages the .app beside an /Applications symlink to build the disk image from,
+# then removes it. The .dmg itself lands in build/dmg, like the .deb does in build/deb.
+build/dmg
 # `make nsis` has Wails stage the WebView2 bootstrapper here to embed it in the
 # installer. The installer itself lands in build/bin, which is ignored above.
 build/windows/installer/tmp

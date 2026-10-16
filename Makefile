@@ -13,8 +13,10 @@
 #	make            build the app for this machine, into build/bin/$(APP)
 #	make windows    cross-build build/bin/kichat.exe (works from Linux and macOS)
 #	make nsis       the same again, wrapped in a Windows Setup.exe (needs makensis)
+#	make darwin     build build/bin/kichat.app (macOS hosts only)
+#	make dmg        the same again, wrapped in a .dmg (macOS hosts only)
 #	make check      gofmt, vet, go test, the TypeScript check, and a
-#	                GOOS=windows compile of everything
+#	                GOOS=windows and GOOS=darwin compile of everything
 #	make run        start the built app, detached, logging to a file
 #	make deb        build a .deb installer into build/deb/ (Debian hosts only)
 #	make help       the full list
@@ -54,8 +56,22 @@ TARGETARCH ?= $(HOSTARCH)
 # beats a target's own.
 WINDOWS_ARCH ?= amd64
 
+# The macOS build is `universal` — one .app carrying both the arm64 and the x86_64 slice,
+# which is what a download should be: Wails builds both and combines them with `lipo`, and a
+# release's architecture must not depend on whose Mac produced it. It is a Wails platform
+# value and *not* a Go one, which is why the compile gate below names arm64 on its own.
+# `make darwin DARWIN_ARCH=arm64` builds the single slice, for a quick local build.
+DARWIN_ARCH ?= universal
+
 # Windows names its binary; nothing else does.
 EXE = $(if $(filter windows,$(TARGETOS)),.exe,)
+
+# A darwin build is packaged by default, so the thing a target has to name is the *bundle*:
+# Wails moves the executable to build/bin/kichat.app/Contents/MacOS/kichat and writes the
+# plist and the icon beside it, leaving no bare build/bin/kichat at all. ARTIFACT is what
+# `build` reports, so one recipe covers both shapes.
+APPBUNDLE = build/bin/$(APP).app
+ARTIFACT  = $(if $(filter darwin,$(TARGETOS)),$(APPBUNDLE),$(BIN))
 
 # The webkit2gtk tag is Linux-only and mandatory there: this machine has
 # webkit2gtk-4.1 and nothing else, and a build without the tag fails to link.
@@ -102,10 +118,11 @@ INSTALL_SCOPE ?= machine
 # comma exists because make splits function arguments on commas, so a literal
 # comma inside $(if ...) would truncate the value — that is not hypothetical, it
 # silently reduced -extldflags=-Wl,-z,now to -Wl the first time.
-# ...and all of it is ELF policy: `-buildmode=pie` is Go's Linux flag and `-z,now` is
-# an ELF linker option that mingw and the Mach-O linker would each reject. So the
-# hardening follows the *target* and is off for Windows, where the flags are not
-# policy but a broken link.
+# ...and all of it is ELF policy: `-z,now` is an ELF linker option that mingw and the
+# Mach-O linker would each reject. So the hardening follows the *target* and is off
+# everywhere but Linux, where the flags would not be policy but a broken link. Nothing is
+# lost on macOS: Go's darwin default buildmode is already PIE (internal/platform's
+# DefaultPIE answers true for darwin), which is the one half of this that would apply there.
 comma := ,
 HARDEN         ?= $(if $(filter linux,$(TARGETOS)),1,0)
 HARDEN_GOFLAGS  = $(if $(filter 1,$(HARDEN)),-buildmode=pie,)
@@ -196,9 +213,9 @@ INSTALL_FILES = install -D -m 0755 $(BIN) $(1)$(PREFIX)/bin/$(APP) && \
 	install -D -m 0644 build/appicon.svg $(1)$(PREFIX)/share/icons/hicolor/scalable/apps/$(APP).svg && \
 	install -D -m 0644 build/appicon.png $(1)$(PREFIX)/share/pixmaps/$(APP).png
 
-.PHONY: all help deps frontend bindings icon build windows nsis check-makensis check fmt vet \
-        vet-windows test typecheck run install uninstall deb lint-deb version-info clean \
-        distclean
+.PHONY: all help deps frontend bindings icon build windows nsis check-makensis darwin dmg \
+        check-darwin-host check fmt vet vet-windows vet-darwin test typecheck run install \
+        uninstall deb lint-deb version-info clean distclean
 
 all: build
 
@@ -209,8 +226,14 @@ help:
 	@echo "  nsis        the same + a Windows Setup.exe -> build/bin/$(APP)-$(WINDOWS_ARCH)-installer.exe"
 	@echo "  WEBVIEW2=x  installer/app WebView2 strategy (download|embed|browser|error)"
 	@echo "  INSTALL_SCOPE=x  installer scope, machine (elevated) or user (no elevation)"
-	@echo "  check       gofmt, go vet, go test ./..., tsc --noEmit, GOOS=windows compile"
+	@echo "  darwin      build $(APPBUNDLE) for darwin/$(DARWIN_ARCH) (macOS hosts only)"
+	@echo "  dmg         the same + $(DMG_FILE)"
+	@echo "  check       gofmt, go vet, go test ./..., tsc --noEmit, GOOS=windows and GOOS=darwin compile"
+ifeq ($(HOSTOS),darwin)
+	@echo "  run         open $(APPBUNDLE)"
+else
 	@echo "  run         start $(BIN) detached (log: $(RUNLOG))"
+endif
 	@echo "  deb         build $(DEB_FILE) from a staged tree (Debian hosts)"
 	@echo "  HARDEN=0    skip the Debian hardening flags, for a quick local build"
 	@echo "  install     install into $(DESTDIR)$(PREFIX) (override PREFIX/DESTDIR)"
@@ -269,17 +292,100 @@ icon:
 	$(IM_CONVERT) build/appicon.png -define icon:auto-resize=256,128,64,48,32,24,16 build/windows/icon.ico
 	@echo "regenerated build/appicon.png and build/windows/icon.ico from build/appicon.svg"
 
+# --- the macOS app and installer --------------------------------------------
+#
+# macOS is the one platform Wails can only package *on*: the tool calls its packager with
+# `runtime.GOOS` (v2.15.0's build.go carries `TODO: Allow cross platform build`), and the
+# darwin path is cgo against AppKit and WebKit — so unlike `make windows` there is no darwin
+# cross-build from Linux.
+#
+# Worse, Wails does not treat that as a failure. Measured on this Linux machine:
+# `wails build -platform darwin/universal` prints
+# "WARNING  Crosscompiling to Mac not currently supported.", returns, and exits **0** —
+# build/bin is left exactly as it was and there is no .app anywhere. A target that trusted
+# the exit status would report success and ship nothing, which is the same trap
+# `check-makensis` exists for. This prerequisite is what turns that silence into a failure,
+# and it runs *before* the frontend build rather than after it. `need-linux` below is the
+# same idea for the Debian targets.
+define need-darwin
+	@if [ "$(HOSTOS)" != "darwin" ]; then \
+		echo "this target builds a macOS app and needs a macOS host (this is $(HOSTOS))." >&2; \
+		echo "Wails packages for the host it runs on and its darwin path is cgo against AppKit and WebKit," >&2; \
+		echo "so there is no darwin cross-build the way there is a Windows one." >&2; \
+		echo "On this host: 'make build' for this machine, 'make windows' or 'make nsis' for Windows." >&2; \
+		exit 1; \
+	fi
+endef
+
+check-darwin-host:
+	$(call need-darwin)
+
+# The Mac app is a bundle, not a bare binary. `wails build -platform darwin/$(DARWIN_ARCH)`
+# writes build/bin/kichat.app/Contents/{Info.plist,MacOS/kichat,Resources/iconfile.icns}: the
+# plist is build/darwin/Info.plist with wails.json's `info` block substituted in (the same
+# block `version-info` maintains for Windows, which is why macOS does not get a version knob
+# of its own), and the .icns is encoded from build/appicon.png by a pure-Go encoder — so no
+# iconfile.icns is tracked here and `make icon` has nothing darwin-specific to do.
+#
+# The recipe then reads the number back out of the built plist, the way `make nsis` reads it
+# out of the exe: a bundle whose CFBundleShortVersionString disagrees with `kichat --version`
+# is exactly the drift `version-info` exists to prevent, and only the artifact can prove it.
+darwin: TARGETOS := darwin
+darwin: TARGETARCH := $(DARWIN_ARCH)
+darwin: check-darwin-host build
+	@test -d "$(APPBUNDLE)" || { echo "no $(APPBUNDLE) was produced" >&2; exit 1; }
+	@test -x "$(APPBUNDLE)/Contents/MacOS/$(APP)" || { echo "$(APPBUNDLE) holds no $(APP) executable" >&2; exit 1; }
+	@v="$$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$(APPBUNDLE)/Contents/Info.plist")"; \
+	 if [ "$$v" != "$(VERSION_NUMERIC)" ]; then \
+		echo "$(APPBUNDLE) says $$v, VERSION says $(VERSION_NUMERIC)" >&2; exit 1; \
+	 fi
+	@echo "made $(APPBUNDLE) — $(DARWIN_ARCH), bundle id $$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$(APPBUNDLE)/Contents/Info.plist"), version $$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$(APPBUNDLE)/Contents/Info.plist")"
+
+# The .dmg is what a Mac user downloads: the bundle beside an /Applications symlink, so
+# dragging it across is the install. `hdiutil` ships with macOS (nothing to install, which is
+# why there is no `check-hdiutil` the way makensis has a check) and UDZO is a compressed
+# read-only image.
+#
+# The staged copy is renamed from Wails' `kichat.app`, because Finder shows the *directory*
+# name and a lowercase one is a poor thing to hand someone. Nothing inside the bundle
+# changes: the executable and the identity come from Info.plist. Apple's TN2206 is the
+# evidence that the enclosing name is not part of what a signature protects — a signature
+# seals a bundle's *files*, enumerated relative to Contents/, and the designated requirement's
+# identifier defaults to CFBundleIdentifier rather than the folder name — and the same note
+# has Gatekeeper relocating a quarantined app to a read-only location of its own choosing.
+# That is inference from Apple's documentation rather than a measurement on a Mac, so
+# `make dmg MACOS_APPNAME=kichat` puts Wails' own name back if a Mac ever objects.
+#
+# Wails signs darwin bundles ad hoc (`codesign --sign -`), which is not a Developer ID: a
+# download is quarantined and needs `xattr -dr com.apple.quarantine`.
+MACOS_APPNAME ?= KiChat
+DMG_STAGE     := build/dmg/stage
+DMG_FILE      := build/dmg/$(APP)_$(VERSION)_$(DARWIN_ARCH).dmg
+
+dmg: check-darwin-host darwin
+	@rm -rf $(DMG_STAGE) $(DMG_FILE)
+	@mkdir -p $(DMG_STAGE)
+	cp -R $(APPBUNDLE) "$(DMG_STAGE)/$(MACOS_APPNAME).app"
+	ln -s /Applications $(DMG_STAGE)/Applications
+	hdiutil create -volname "$(MACOS_APPNAME)" -srcfolder $(DMG_STAGE) -ov -format UDZO $(DMG_FILE)
+	@rm -rf $(DMG_STAGE)
+	@# hdiutil's own exit status is not enough: an image that was written somewhere else, or
+	@# emptied by a failure, is the shape of bug this whole section exists to make impossible.
+	@test -s "$(DMG_FILE)" || { echo "hdiutil left no $(DMG_FILE)" >&2; exit 1; }
+	@echo "made $(DMG_FILE) ($$(wc -c < "$(DMG_FILE)") bytes) — ad-hoc signed, not notarized"
+
 # --- build ------------------------------------------------------------------
 
-# The Windows file properties are not linked in, they are *rendered*: Wails fills
-# build/windows/info.json and wails.exe.manifest with the `info` block of wails.json
-# before the Go build, and there is no flag to override it (checked: `wails build
-# --help` has none). So the version Windows shows in a file's Properties would be a
-# second place to type it in, and a build that forgot would ship an executable whose
-# resource says 1.0.0 — which is what the default is (measured on the first
-# cross-built kichat.exe: ProductVersion 1.0.0, LegalCopyright "Copyright.........",
-# manifest assemblyIdentity version="1.0.0.0"). This step is what keeps the promise
-# that the version is authored once in VERSION.
+# Neither Windows' file properties nor the Mac's bundle version are linked in, they are
+# *rendered*: Wails fills build/windows/info.json and wails.exe.manifest from the `info` block
+# of wails.json before the Go build, and renders build/darwin/Info.plist against the same
+# block — with no flag to override either (checked: `wails build --help` has none). So the
+# version a file's Properties or a bundle's Get Info shows would be a second place to type it
+# in, and a build that forgot would ship Windows an executable whose resource says 1.0.0 —
+# which is what the default is (measured on the first cross-built kichat.exe: ProductVersion
+# 1.0.0, LegalCopyright "Copyright.........", manifest assemblyIdentity version="1.0.0.0")
+# — and Mac a bundle whose CFBundleShortVersionString is the same untouched default. This step
+# is what keeps the promise that the version is authored once in VERSION.
 #
 # Two details of the format. Windows version fields are numbers with up to four parts,
 # so `0.4.0` is written as it stands and the manifest's fourth part is appended by
@@ -297,7 +403,7 @@ version-info:
 		sed -e 's|"productVersion": "[^"]*"|"productVersion": "$(VERSION_NUMERIC)"|' \
 		    -e 's|"comments": "[^"]*"|"comments": "$(VERSION_INFO_COMMENT)"|' \
 		    wails.json > wails.json.tmp && mv wails.json.tmp wails.json; \
-		echo "wails.json: info block set to $(VERSION) (Windows resource version $(VERSION_NUMERIC)) — commit it with the release"; \
+		echo "wails.json: info block set to $(VERSION) (Windows resource and macOS bundle version $(VERSION_NUMERIC)) — commit it with the release"; \
 	fi
 
 # -trimpath keeps the build directory out of the shipped binary, which is both
@@ -312,7 +418,7 @@ build: frontend version-info
 	@# executable bit set; the repo tracks them 644, so without this every build
 	@# leaves mode churn in `git status` that is not a change.
 	@chmod 644 frontend/wailsjs/go/main/* frontend/wailsjs/go/models.ts frontend/wailsjs/runtime/* 2>/dev/null || true
-	@ls -l $(BIN)
+	@ls -ld $(ARTIFACT)
 
 # A Windows build of the same commit, without a Windows machine. Wails writes the
 # executable's version resource, its manifest and its icon in pure Go, and neither
@@ -367,7 +473,7 @@ nsis: check-makensis windows
 	fi
 # --- checks -----------------------------------------------------------------
 
-check: fmt vet vet-windows test typecheck
+check: fmt vet vet-windows vet-darwin test typecheck
 
 fmt:
 	@out="$$($(GOFMT) -l .)"; if [ -n "$$out" ]; then echo "gofmt wants to rewrite:"; echo "$$out"; exit 1; fi
@@ -386,6 +492,19 @@ vet-windows:
 	GOOS=windows GOARCH=$(WINDOWS_ARCH) $(GO) vet ./...
 	@echo "vet: windows/$(WINDOWS_ARCH) compiles"
 
+# The same for macOS, and here it is *only* a compile: the darwin bundle cannot be packaged on
+# a non-Mac at all (check-darwin-host), so this is what keeps `runtime.GOOS == "darwin"`
+# branches and the darwin rows of the installer's variant tables compiling on a machine that
+# has no Mac. arm64 rather than DARWIN_ARCH: `universal` is a Wails platform, not a Go
+# architecture, and it is the slice a current Mac runs and the one internal/images answers
+# with a Metal build for. It is `?=` rather than a literal so `make vet-darwin
+# DARWIN_VET_ARCH=amd64` can compile the other slice where that ever matters.
+DARWIN_VET_ARCH ?= arm64
+
+vet-darwin:
+	GOOS=darwin GOARCH=$(DARWIN_VET_ARCH) $(GO) vet ./...
+	@echo "vet: darwin/$(DARWIN_VET_ARCH) compiles"
+
 test:
 	$(GO) test ./... -count=1
 
@@ -394,13 +513,20 @@ typecheck: deps
 
 # --- run --------------------------------------------------------------------
 
+ifeq ($(HOSTOS),darwin)
+# `open` hands the bundle to launchd, which puts the app outside make's process group
+# entirely — the same guarantee setsid buys on Linux, without a setsid(1) macOS does not have.
+run: $(APPBUNDLE)
+	@open $(APPBUNDLE)
+	@echo "started $(APPBUNDLE)"
+else ifeq ($(HOSTOS),windows)
 run: $(BIN)
-ifeq ($(HOSTOS),windows)
 	@# `start` is the Windows way to launch detached: the app is a GUI executable, so
 	@# a shell that waits for it would hold the terminal until the window is closed.
 	@cmd //c start "" "$(BIN)"
 	@echo "started $(BIN)"
 else
+run: $(BIN)
 	@# Detached on purpose: a plain background launch dies with "Ctrl+C detected.
 	@# Shutting down..." whenever a tool call's timeout kills the whole process
 	@# group, which looks exactly like a crash. Do not "fix" this by removing setsid.
@@ -410,6 +536,9 @@ endif
 
 $(BIN):
 	@echo "$(BIN) is missing — run 'make build' first" >&2; exit 1
+
+$(APPBUNDLE):
+	@echo "$(APPBUNDLE) is missing — run 'make build' first" >&2; exit 1
 
 # --- install / package ------------------------------------------------------
 #
@@ -498,7 +627,7 @@ lint-deb: $(DEB_FILE)
 	lintian --display-info --suppress-tags-from-file build/deb/suppressed-tags.txt $(DEB_FILE)
 
 clean:
-	rm -rf build/bin build/deb
+	rm -rf build/bin build/deb build/dmg
 
 distclean: clean
 	rm -rf frontend/dist $(NODE_DEPS)

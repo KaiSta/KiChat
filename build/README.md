@@ -41,6 +41,40 @@ The directory contains the following files:
 - `Info.plist` - the main plist file used for Mac builds. It is used when building using `wails build`.
 - `Info.dev.plist` - same as the main plist file but used when building using `wails dev`.
 
+`make darwin` and `make dmg` are the targets that consume them, and both need a macOS host:
+the Wails packager is called with `runtime.GOOS` and its darwin path is cgo against AppKit
+and WebKit, so there is no darwin cross-build the way there is a Windows one. From
+`make darwin` Wails writes `build/bin/kichat.app` — the bundle name is the project `name`
+in `wails.json`, and `outputfilename` names the executable inside `Contents/MacOS/`.
+
+**There is no tracked `iconfile.icns`, and none is needed.** Wails encodes
+`Contents/Resources/iconfile.icns` from `build/appicon.png` itself, with a pure-Go ICNS
+encoder (`github.com/jackmordaunt/icns`) rather than `iconutil`, so `make icon` has nothing
+darwin-specific to do and the icon cannot drift from the one Windows and Linux get. That is
+the tool's behaviour as read from its source, not something measured on a Mac here.
+
+The plist is a **template**: Wails resolves its `{{.Info.*}}` placeholders against the `info`
+block of `wails.json` and writes the result into the bundle. Next to macOS, that block is what
+the Windows version resource is rendered from, which is why `make version-info` maintains it
+from `VERSION` instead of either platform getting a number to type in by hand. `CFBundleVersion`
+and `CFBundleShortVersionString` both come from `Info.ProductVersion`, so both carry the
+* numeric* half of a Debian pre-release (`0.2.0~beta1` -> `0.2.0`).
+
+**The bundle identifier is still Wails' placeholder.** It reads
+`com.wails.{{safeBundleID .Name}}`, which is what `wails init` writes — a name in Wails' own
+reverse-DNS namespace rather than this project's. It is deliberately left alone here rather
+than guessed at, but it is a thing to set before distributing: Launch Services, the Keychain
+and (later) notarization all key off it, and changing it after a release makes the new bundle
+a different app to the system. One line in each plist.
+
+`make dmg` then wraps that bundle into `build/dmg/kichat_<version>_<arch>.dmg` with `hdiutil`
+(part of macOS), holding `KiChat.app` beside an `/Applications` symlink so dragging across is
+the install. The staged copy is renamed from Wails' `kichat.app` because Finder shows the
+directory name; the executable and the identity come from `Info.plist`, which is untouched.
+Wails ad-hoc signs the bundle (`codesign --sign -`, which is not a Developer ID and not
+notarization), so a downloaded copy is quarantined and needs
+`xattr -dr com.apple.quarantine /Applications/KiChat.app` before Gatekeeper will open it.
+
 ## Windows
 
 The `windows` directory contains the manifest and rc files used when building with `wails build`.

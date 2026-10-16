@@ -17,25 +17,67 @@ calling with a text-protocol fallback, and in-chat model switching with a Stop b
 - **A chat backend** — LM Studio on `:1234` or Ollama on `:11434`
 - **Linux**: GTK3 and WebKit2GTK. Systems that ship only `webkit2gtk-4.1`
   (Ubuntu 24.04+, Linux Mint 22+) must pass the `webkit2_41` build tag.
+- **macOS**: the Xcode Command Line Tools, and a Mac to build on — Wails packages macOS
+  only from macOS (see *macOS* below).
 - **Node 20.19+ or 22.12+** (so npm 10+). Node 18 can build this project, but only once
   the native Tailwind binding is already installed — see *Node and npm versions* below.
 
 ## Build
 
 ```sh
+# Linux
 wails build -tags webkit2_41   # when only webkit2gtk-4.1 is available
 wails build                    # when webkit2gtk-4.0 is available
+
+# macOS
+wails build                    # produces build/bin/kichat.app
+
+# Windows, from Linux or macOS
+wails build -platform windows/amd64
 ```
+
+The `Makefile` wraps all of these and resolves `wails`, `npm` and `make`'s own tools from
+`PATH` with fallbacks, which is the easier entry point: `make build` for this machine,
+`make windows` (and `make nsis` for a Setup.exe), `make darwin` (and `make dmg` for a disk
+image), `make deb` on Debian.
 
 `wails build` installs the frontend dependencies, compiles `frontend/dist`, and only
 then compiles Go, because `main.go` embeds that directory. A bare `go build ./...` on a
 fresh clone therefore fails with `pattern all:frontend/dist: no matching files found`
 until the frontend has been built once — that is expected, not a packaging error.
 
+## macOS
+
+A macOS build is a Wails build like any other — nothing in KiChat's own code needs cgo, and
+`internal/secret` uses the Keychain without being told to — but it has to be built **on a
+Mac**. Wails runs its packager for the host it is running on (its darwin layer is cgo against
+AppKit and WebKit), so there is no cross-build the way there is a Windows one: `make darwin`
+and `make dmg` say so on any other host rather than failing somewhere inside the tool.
+
+```sh
+make darwin      # -> build/bin/kichat.app   (universal: arm64 + x86_64)
+make dmg         # -> build/dmg/kichat_<version>_universal.dmg
+```
+
+`make darwin DARWIN_ARCH=arm64` builds the one slice instead of the universal pair. The
+`.dmg` holds `KiChat.app` beside an `/Applications` symlink, so dragging across is the
+install. The bundle is **ad-hoc signed, not notarized** — Wails signs it with
+`codesign --sign -` — so a downloaded copy carries the quarantine flag and Gatekeeper will
+refuse it until that is cleared once:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/KiChat.app
+```
+
+Settings and chats live in `~/Library/Application Support/kichat` rather than `~/.config`,
+which is what `os.UserConfigDir` answers on macOS, and Escape stops a running generation
+there too — a fullscreen window included, where KiChat asks AppKit not to spend the key on
+leaving fullscreen.
+
 ## Development
 
 ```sh
-wails dev -tags webkit2_41
+wails dev -tags webkit2_41     # Linux; on macOS: wails dev
 ```
 
 Requires Node 20.19+/22.12+ (see below). Wails additionally serves the app on
@@ -219,8 +261,8 @@ the server named a device.
 
 | What | Location |
 | --- | --- |
-| Chats, messages, documents, FTS index, settings | `~/.config/kichat/kichat.db` |
-| API keys (e.g. Brave Search) | `~/.config/kichat/secrets` |
+| Chats, messages, documents, FTS index, settings | `~/.config/kichat/kichat.db` (`~/Library/Application Support/kichat/kichat.db` on macOS) |
+| API keys (e.g. Brave Search) | `~/.config/kichat/secrets` (same directory) |
 
 Keys are written outside the working tree and are never read from the repository.
 

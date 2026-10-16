@@ -9,6 +9,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
+	"github.com/wailsapp/wails/v2/pkg/options/mac"
 
 	"kichat/internal/version"
 )
@@ -65,6 +66,27 @@ func main() {
 		Linux: &linux.Options{
 			Icon:             appIcon,
 			WebviewGpuPolicy: linux.WebviewGpuPolicyNever,
+		},
+		// macOS takes its icon from the bundle itself — Wails encodes
+		// Contents/Resources/iconfile.icns out of build/appicon.png — so the two
+		// things a bundle cannot express are all that is set here.
+		//
+		// About gives the app menu the standard About panel (Wails renders it as an
+		// NSAlert with the title as its headline, the message as the informative text
+		// and the icon beside them). Without it the menu item still exists but says
+		// nothing, and on macOS the version would be visible only inside Settings.
+		//
+		// DisableEscapeExitsFullscreen is not cosmetic. This app spends Escape on two
+		// actions of its own: stopping a running generation (ChatView) and cancelling a
+		// chat rename (App). In a fullscreen window AppKit would otherwise take the key
+		// to leave fullscreen and neither would ever fire.
+		Mac: &mac.Options{
+			About: &mac.AboutInfo{
+				Title:   "KiChat",
+				Message: version.String(),
+				Icon:    appIcon,
+			},
+			DisableEscapeExitsFullscreen: true,
 		},
 		OnStartup:  app.startup,
 		OnShutdown: app.shutdown,

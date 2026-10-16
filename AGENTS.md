@@ -176,15 +176,124 @@ so that part of the port cannot rot on a machine with no Windows.
 `make install`, `make uninstall`, `make deb` and `make lint-deb` are Debian's and say so
 instead of failing part-way through an `install -D` Windows does not have.
 
+## macOS
+
+A macOS build is supported, and most of the Go side was already platform-clean: the data
+directory comes from `os.UserConfigDir` (`~/Library/Application Support/kichat`),
+`internal/secret` reaches the Keychain through go-keyring, the three LM Studio model folders
+`internal/runtime` discovers are the same paths on every platform, and the installer's variant
+tables already list the `macos-arm64` / `macos-x64` archives and the
+`sd-…-bin-Darwin-macOS-…-arm64.zip` picture builds. Nothing in this app's own code uses cgo.
+
+The Keychain needs no code either, and it is reached through a CLI. go-keyring's darwin
+backend (v0.2.8, `keyring_darwin.go`) shells out to `/usr/bin/security
+find-generic-password -s <service> -wa <account>`, and maps its "could not be found" text to
+`ErrNotFound` — which is exactly the answer `probeKeyring()` in `internal/secret` reads as
+"a keyring is available", so `secret.New` chooses the Keychain on a Mac and the probe itself
+does not prompt, because the item it asks for does not exist yet. Secrets land in the login
+keychain under the service `kichat`; the access is attributed to `security` rather than to
+KiChat, which is why the library uses the CLI at all, and the library documents a macOS size
+ceiling of roughly 3000 bytes for service + account + secret, which no KiChat key approaches.
+Not observed on a Mac — it is that library's source as read here.
+
+**macOS is the one platform that cannot be built from a Linux machine, and it is the tool's
+design rather than a gap here.** `wails build` calls its packager with `runtime.GOOS`
+(v2.15.0's `build.go` carries `TODO: Allow cross platform build`), and the darwin desktop
+layer is cgo against AppKit and WebKit. `make windows` can cross-build because Wails writes
+the PE resource, the manifest and the icon in pure Go; nothing equivalent is true for a
+`.app`.
+
+**And Wails does not treat the attempt as a failure.** Measured on this Linux machine:
+`wails build -platform darwin/universal` prints
+`WARNING  Crosscompiling to Mac not currently supported.`, returns and exits **0** — leaving
+`build/bin` untouched and no `.app` anywhere. That is the same silent-success shape as
+`makensis`, which is why `make darwin` and `make dmg` check the host themselves and refuse
+with a sentence: verified on Linux, both exit 2 before the frontend is touched and name
+`make build` / `make windows` instead.
+
+**What `make darwin` produces.** Wails packages a darwin build by default, so the artifact is
+the bundle `build/bin/kichat.app` — the bundle name is the project `name` in `wails.json`,
+and no bare `build/bin/kichat` is left behind (the Makefile's `ARTIFACT` is what makes one
+`build` recipe report either shape). Inside it, `Contents/Info.plist` is
+`build/darwin/Info.plist` with `wails.json`'s `info` block rendered into it, and
+`Contents/Resources/iconfile.icns` is encoded from `build/appicon.png` by a **pure-Go** ICNS
+encoder (`github.com/jackmordaunt/icns`), not by `iconutil` — which is why no `iconfile.icns`
+is tracked and `make icon` has nothing darwin-specific to do. The default target arch is
+`universal` (Wails builds both slices and combines them with `lipo`), so a release's
+architecture does not depend on whose Mac produced it; `make darwin DARWIN_ARCH=arm64` builds
+the one slice. The `darwin` recipe then reads the version back out of the built plist with
+`/usr/libexec/PlistBuddy` and fails if it disagrees with `VERSION` — the same read-it-back-out
+the `nsis` target does, for the same reason: a bundle whose `CFBundleShortVersionString`
+drifts from `kichat --version` is exactly the failure `version-info` exists to prevent, and
+only the artifact can prove it.
+
+**`make dmg` is the installer**, and it is `hdiutil` (part of macOS — nothing to install,
+which is why there is no `check-hdiutil` the way there is a `check-makensis`) writing a
+compressed read-only image: `build/dmg/kichat_<version>_<arch>.dmg` holding `KiChat.app`
+beside an `/Applications` symlink, so dragging across is the install. The staged copy is
+renamed from Wails' `kichat.app` because Finder shows the *directory* name and a lowercase one
+is a poor thing to hand someone — nothing inside the bundle changes, since the executable and
+the identity come from `Info.plist`. The evidence that the enclosing name is not part of what
+a signature protects is Apple's TN2206: a signature seals a bundle's *files*, enumerated
+relative to `Contents/`, and the designated requirement's identifier defaults to
+`CFBundleIdentifier` rather than the folder name — and the same note has Gatekeeper relocating
+a quarantined app to a read-only location of its own choosing. That is inference from Apple's
+documentation rather than a measurement on a Mac, so `make dmg MACOS_APPNAME=kichat` restores
+Wails' own name if a Mac ever objects. Wails signs darwin bundles **ad hoc** (`codesign --sign -`), which is neither a
+Developer ID nor notarization, so a downloaded copy is quarantined and needs
+`xattr -dr com.apple.quarantine /Applications/KiChat.app` before Gatekeeper will open it.
+
+**Two macOS-specific things in the app itself.** `main.go` sets `Mac: &mac.Options{…}`
+beside the existing `Linux:` block. `About` gives the app menu the standard About panel —
+Wails renders it as an `NSAlert` with the title as its headline and the message as the
+informative text — so the version is visible without opening Settings; macOS is the platform
+with nowhere else to put it. `DisableEscapeExitsFullscreen` is not cosmetic: this app spends
+Escape on stopping a running generation (`ChatView`) and cancelling a chat rename (`App`),
+and in a fullscreen window AppKit would otherwise take the key to leave fullscreen and
+neither handler would ever fire.
+
+**`LSMinimumSystemVersion` is left at Wails' template value**, `10.13.0`. That is the
+documented floor for the `darwin/amd64` slice; the `arm64` slice in the same universal bundle
+needs 11.0, so the effective floor on Apple Silicon is 11 whatever the plist says. It was not
+raised to 11.0 here because that would drop Intel Macs on 10.15 for no measured reason —
+Wails' own CLI lists 10.13 for amd64, and a number invented here would be an unverified
+compatibility claim in a user-visible field.
+
+**The bundle identifier is still Wails' placeholder.** `build/darwin/Info.plist` reads
+`com.wails.{{safeBundleID .Name}}`, which is what `wails init` writes — a name in Wails' own
+reverse-DNS namespace rather than this project's. It is deliberately left alone rather than
+guessed at (there is no project domain in the repo to derive one from), but it is the one line
+to set before distributing: Launch Services, the Keychain and notarization all key off it, and
+changing it after a release makes the new bundle a different app to the system.
+
+**What is verified here, and what is not.** There is no Mac behind this section. Verified *on
+Linux*: `make check` includes `GOOS=darwin GOARCH=arm64 go vet ./...`, which type-checks and
+compiles every `runtime.GOOS == "darwin"` branch and every darwin row of the tests, so that
+half of the port cannot rot on a machine with no Mac; `make -n darwin` shows the exact command
+— `wails build -platform darwin/universal` with **no** webkit2gtk tag and **no** ELF hardening
+flags, because both follow the target and Go's darwin default buildmode is already PIE
+(`internal/platform`'s `DefaultPIE` answers true for darwin); `make -n dmg` shows the
+`hdiutil` invocation; and `make darwin` / `make dmg` on a non-Mac fail with the sentence
+above. **Not verified**: anything that happens on a Mac. The bundle layout, the rendered
+`Info.plist` and its version, the ICNS Wails encodes, `hdiutil`'s image, the ad-hoc
+`codesign`, the Keychain prompt, `open` launching the bundle, and whether an Escape handler
+really survives a fullscreen window all rest on the vendors' documented behaviour and on
+Wails' source as read here. A report from a Mac would be the first evidence of that kind.
+
+`make check` includes a darwin compile of everything (`GOOS=darwin go vet ./...`), for the same
+reason as its Windows twin: a `//go:build darwin` file or a darwin branch of a test fails here,
+on Linux, instead of on a Mac.
+
 ## Checks that must pass
 
 ```bash
-make check                                  # the next five, in one step
+make check                                  # the next six, in one step
 make build                                  # the last one, into build/bin/kichat
 
 gofmt -l .                                  # must print nothing
 go vet ./...
 GOOS=windows go vet ./...                   # the Windows half compiles
+GOOS=darwin go vet ./...                    # the macOS half compiles
 cd frontend && npx tsc --noEmit             # or: npm run build (tsc && vite build)
 wails build -tags webkit2_41                # produces build/bin/kichat
 go test ./... -count=1
