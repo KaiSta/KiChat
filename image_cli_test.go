@@ -409,14 +409,51 @@ func TestCLIRedrawPinsTheSeedItRecorded(t *testing.T) {
 // a load before the first step. A bound carried over unchanged would cut a real draw off
 // mid-load and report it as a failure.
 func TestTheCLIDrawBoundIsTheBackendsOwn(t *testing.T) {
+	small := images.Request{Width: 1024, Height: 1024}
 	cli := config.Default()
 	cli.Images.Kind = config.ImageKindCLI
-	if got := imageDrawTimeout(cli); got != images.DefaultCLITimeout {
+	if got := imageDrawTimeout(cli, small); got != images.DefaultCLITimeout {
 		t.Errorf("CLI bound = %s, want the CLI's own %s", got, images.DefaultCLITimeout)
 	}
 	server := config.Default()
-	if got := imageDrawTimeout(server); got != 10*time.Minute {
+	if got := imageDrawTimeout(server, small); got != 10*time.Minute {
 		t.Errorf("server bound = %s, want 10m", got)
+	}
+}
+
+// TestADrawThatFallsBackToTheCpuGetsTheTimeItNeeds pins the other half of the bound: the flat
+// number was written for a draw that fits on the card, and a picture large enough that the
+// backend drops to CPU sampling is hours rather than minutes. Measured on an RX 7900 XT, a
+// 3840x2176 second pass spent 303 s on three steps *on the GPU*; on CPU threads the same
+// pass does not finish inside the flat bound, so a bound that did not follow the size would
+// kill the draw after the sampling had already been paid for.
+func TestADrawThatFallsBackToTheCpuGetsTheTimeItNeeds(t *testing.T) {
+	cli := config.Default()
+	cli.Images.Kind = config.ImageKindCLI
+
+	// The FHD recipe: 1920x1080 at 2x is 3840x2176, eight megapixels.
+	uhd := images.Request{
+		Width:  1920,
+		Height: 1080,
+		Hires:  images.Hires{Enabled: true, Scale: 2, Denoise: 0.4},
+	}.Normalised()
+	if width, height := uhd.OutputSize(); width*height < 7*1024*1024 {
+		t.Fatalf("the FHD recipe outputs %dx%d, which is not a 4K-sized test", width, height)
+	}
+	if got := imageDrawTimeout(cli, uhd); got < 3*time.Hour {
+		t.Errorf("4K bound = %s, want hours rather than the flat %s", got, images.DefaultCLITimeout)
+	}
+
+	// And it is a cap rather than a multiplier that grows forever: the largest picture this
+	// app can build still gets a finite bound, so a wedged process cannot hold the draw slot
+	// for a day.
+	largest := images.Request{
+		Width:  images.MaxDimension,
+		Height: images.MaxDimension,
+		Hires:  images.Hires{Enabled: true, Scale: images.MaxHiresScale, Denoise: 0.4},
+	}.Normalised()
+	if got := imageDrawTimeout(cli, largest); got != images.MaxDrawTimeout {
+		t.Errorf("largest bound = %s, want the cap %s", got, images.MaxDrawTimeout)
 	}
 }
 

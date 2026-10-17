@@ -1003,18 +1003,24 @@ func (a *App) imageServerRestartNeeded() bool {
 	return started != imageCLI(settings).ServerKey()
 }
 
-// imageDrawTimeout bounds one draw by the backend that performs it.
+// imageDrawTimeout bounds one draw by the backend that performs it and the picture it will
+// produce.
 //
-// The two are minutes apart because the work is: a server that already holds its model in
-// memory spends the whole bound on sampling, while the CLI backend pays a model load before
-// the first step — a bound that would be generous for the first cuts the second off
+// The two backends are minutes apart because the work is: a server that already holds its
+// model in memory spends the whole bound on sampling, while the CLI backend pays a model load
+// before the first step — a bound that would be generous for the first cuts the second off
 // mid-load and reports it as a failure. Both are guards against a wedged process rather than
 // a promise to the user: Stop is what ends a draw that is merely slow.
-func imageDrawTimeout(settings config.Settings) time.Duration {
+//
+// Both also scale with the output, for the same reason: a picture large enough that the
+// backend falls back to CPU sampling is hours of work rather than minutes, and a bound
+// written for the card would kill it after the sampling had already been paid for. See
+// images.DrawTimeout.
+func imageDrawTimeout(settings config.Settings, req images.Request) time.Duration {
 	if config.IsImageCLI(settings.Images.Kind) {
-		return images.DefaultCLITimeout
+		return images.DrawTimeout(images.DefaultCLITimeout, req)
 	}
-	return 10 * time.Minute
+	return images.DrawTimeout(10*time.Minute, req)
 }
 
 // currentImageProvider is the picture server in use, nil when image generation is

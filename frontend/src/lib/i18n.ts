@@ -77,6 +77,9 @@ const de = {
   'images.fhd': 'FHD',
   'images.fhdHint':
     'Dieses Bild mit zweiter Stufe auf {{width}}×{{height}} zeichnen — 1920 px an der langen Kante, Seitenverhältnis bleibt.',
+  'images.uhd': '4K',
+  'images.uhdHint':
+    'Dieses Bild mit zweiter Stufe auf {{width}}×{{height}} zeichnen — 3840 px an der langen Kante, Seitenverhältnis bleibt. Dauert Minuten; reicht der Grafikspeicher nicht, rechnet der Rechner auf der CPU weiter.',
   'images.edit': 'Rezept bearbeiten',
   'images.editClose': 'Bearbeiten schließen',
   'images.editHint': 'Prompt, Größe oder Schritte ändern und damit neu zeichnen.',
@@ -707,6 +710,9 @@ const en: Record<keyof typeof de, string> = {
   'images.fhd': 'FHD',
   'images.fhdHint':
     'Redraw this picture with a second pass at {{width}}×{{height}} — 1920 px on the long side, aspect ratio kept.',
+  'images.uhd': '4K',
+  'images.uhdHint':
+    'Redraw this picture with a second pass at {{width}}×{{height}} — 3840 px on the long side, aspect ratio kept. Minutes of work; if the card cannot hold it, the draw continues on the CPU.',
   'images.edit': 'Edit recipe',
   'images.editClose': 'Close editor',
   'images.editHint': 'Change the prompt, size or steps and draw with it.',
@@ -1317,6 +1323,9 @@ const zh: Record<keyof typeof de, string> = {
   'images.variationHint': '相同的提示词，使用新的种子。',
   'images.fhd': 'FHD',
   'images.fhdHint': '用第二阶段重绘为 {{width}}×{{height}} —— 长边 1920 像素，保持宽高比。',
+  'images.uhd': '4K',
+  'images.uhdHint':
+    '用第二阶段重绘为 {{width}}×{{height}} —— 长边 3840 像素，保持宽高比。需要数分钟；显存不足时会在 CPU 上继续绘制。',
   'images.edit': '编辑配方',
   'images.editClose': '关闭编辑',
   'images.editHint': '修改提示词、尺寸或步数，然后用它重新绘制。',

@@ -93,6 +93,49 @@ func (m ModelFiles) Empty() bool {
 // the process rather than by asking a server to interrupt.
 const DefaultCLITimeout = 30 * time.Minute
 
+// drawPixelsPerTimeout is the picture size DefaultCLITimeout is written for: one megapixel,
+// about an FHD draw's first pass. Larger pictures get the bound multiplied by their
+// megapixels, so the bound follows the work rather than the other way round.
+const drawPixelsPerTimeout = 1024 * 1024
+
+// maxDrawTimeoutScale caps how far the size-divided bound may grow, so a wedged process
+// cannot hold the app's single draw slot for a working day: eight megapixels times the base
+// bound, which a 16:9 4K picture reaches and the largest request this app can build — 2048 a
+// side, doubled — passes.
+const maxDrawTimeoutScale = 8
+
+// MaxDrawTimeout is the longest bound any request may receive, the cap above times the base.
+const MaxDrawTimeout = DefaultCLITimeout * maxDrawTimeoutScale
+
+// DrawTimeout is how long one draw may take, given the base bound and the picture it will
+// produce.
+//
+// The flat bound was written for a draw that fits on the card. A draw that *does not* — one
+// large enough that the backend falls back to CPU sampling, which is the case this exists
+// for — is another order of work: measured on an RX 7900 XT (20 GB) with master-959-d637cfb,
+// a 3840x2176 second pass spent 303 s on three steps *on the GPU*, and the same pass on CPU
+// threads is hours. A flat 30 minutes would cut that off after the sampling was already
+// paid for, which is the one outcome worse than waiting: no picture, and the time spent.
+//
+// So the bound scales with output pixels, one base bound per megapixel, capped at
+// maxDrawTimeoutScale. A request of unknown size keeps the base bound. This is still a guard
+// against a wedged process rather than a promise — Stop is what ends a draw that is merely
+// slow, and it works here by killing the process.
+func DrawTimeout(base time.Duration, req Request) time.Duration {
+	width, height := req.OutputSize()
+	if width <= 0 || height <= 0 {
+		return base
+	}
+	scale := float64(width*height) / drawPixelsPerTimeout
+	if scale <= 1 {
+		return base
+	}
+	if scale > maxDrawTimeoutScale {
+		scale = maxDrawTimeoutScale
+	}
+	return time.Duration(float64(base) * scale)
+}
+
 // cliSamplerNames are the sampling methods stable-diffusion.cpp's option table lists,
 // quoted from `examples/common/common.cpp`.
 //
@@ -600,7 +643,11 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 			"--preview-interval", cliPreviewInterval, "--preview-path", previewPath)
 	}
 
-	drawCtx, cancel := context.WithTimeout(ctx, c.Timeout)
+	// The bound follows the picture rather than the base alone: a draw that falls back to CPU
+	// sampling is hours of work, and the flat bound would kill it once the sampling had
+	// already been paid for. See DrawTimeout.
+	limit := DrawTimeout(c.Timeout, req)
+	drawCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 
 	cmd := exec.CommandContext(drawCtx, binary, args...)
@@ -700,7 +747,7 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	}
 	if runErr != nil {
 		if drawCtx.Err() != nil {
-			return Result{}, fmt.Errorf("das Zeichnen hat länger als %s gedauert", c.Timeout)
+			return Result{}, fmt.Errorf("das Zeichnen hat länger als %s gedauert", limit)
 		}
 		return Result{}, fmt.Errorf("%s: %v%s", binary, runErr, logTail(stderr.String(), sdlog.tail()))
 	}

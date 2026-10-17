@@ -220,9 +220,16 @@ value, spelled the way a working command line spells it. It is deliberately the 
 with a control of its own: every flag that carries a value stays in the extra arguments,
 where a renamed option costs nothing. It is also not part of a recipe — it changes where the
 work happens, not what the picture is — so a redraw reads it from settings rather than from
-the stored picture.- **The draw bound is this backend's own** (`images.DefaultCLITimeout`, 30 minutes). A bound
-  carried over from the server unchanged would cut a real draw off mid-load and report it as a
-  failure; Stop, not the bound, is the control for a draw that is merely slow.
+the stored picture.- **The draw bound is this backend's own** (`images.DefaultCLITimeout`, 30 minutes), and it
+  **grows with the picture** (`images.DrawTimeout`): one base bound per megapixel of output,
+  capped at eight so a wedged process cannot hold the app's single draw slot for a working
+  day. A bound carried over from the server unchanged would cut a real draw off mid-load and
+  report it as a failure, and a flat one would do the same to a 4K picture that fell back to
+  CPU sampling *after* the card had already spent minutes on it — the one outcome worse than
+  waiting, because the wait has been paid and nothing arrives. The app's outer context
+  (`imageDrawTimeout`) applies the same function to both kinds, so a server's 10-minute
+  figure scales with the size too. Stop, not the bound, is still the control for a draw that
+  is merely slow.
 
 ### The same program as a server, started and stopped by KiChat
 
@@ -936,6 +943,25 @@ is what makes four controls out of one call:
   otherwise, the seed is kept, and the button disappears on a picture already at 1920 or more
   and on a recipe whose base size the server chose (there is no number to multiply). What it
   files is an ordinary two-pass picture, redrawn later from its own recipe like any other.
+- **4K `<width>×<height>`** is the same shortcut at four times the pixels: **3840 px on the
+  long side**, aspect kept, so a 16:9 picture is 3840×2160 and a 4:3 one 3840×2880. The base
+  is raised to 1920 — still inside the 2048 per-pass bound, and the largest size the 2× pass
+  can take to 3840. Measured on an RX 7900 XT (20 GB) with the qwen-image 2.1 UC Q5 pipeline,
+  `--diffusion-fa` and `--vae-tiling`, at 1920×1080 → 3840×2176: the hires pass ran at
+  98.8–105.5 s/it (303 s for its three steps) on a 6.2 GB compute buffer, the tiled decode
+  took 36.1 s over 464 tiles, and the whole call — two base steps included — 362 s, with the
+  GPU at 100 % and **19.1 of the card's 21.4 GB** in use. A normal 20-step draw is therefore
+  roughly nine minutes, which is why this is a separate button with the wait in its hint
+  rather than a menu default. Unlike the FHD button, a 4K draw that does not fit is **allowed
+  to fall back to the CPU** rather than refused: the picture arrives either way and only the
+  time changes. That fallback is what `images.DrawTimeout` exists for: at 8.35 megapixels the
+  CLI bound is the base 30 minutes times the output's megapixels — four hours at 16:9 4K, and
+  the cap for anything larger. That is a bound rather than a measurement, since a 4K pass on
+  CPU threads was not timed here; what it rules out is the failure where the sampling is
+  finished and the process is killed for taking longer than an FHD draw is allowed. Fitting on
+  the card is a separate claim and not a guarantee: the first 4K run here died silently in its
+  third hires step, with no error line and no picture, and the identical retry succeeded — so
+  4K is "fits, with nothing to spare" on this card and an honest wait everywhere else.
 - **Edit recipe** opens the recipe in a form under the picture — prompt, negative prompt,
   size, steps, guidance scale, seed, checkpoint, sampler — prefilled from the picture's own,
   and **Draw**
@@ -1503,9 +1529,10 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   restart reading is computed from the stored command line rather than stored as a constant,
   so a save that changes the model under a running server really does raise the badge. It
   proves the rendering, the caption, the save button, the Settings section with its
-  populated checkpoint and sampler pickers, the test-connection flow, and all four draw
-  controls — including the `FHD 1,920×1,280` shortcut its 768×512 recipe produces, which the
-  mock logs as a 960×640 base at 2× rather than as a flag. Its recipe is a **two-pass**
+  populated checkpoint and sampler pickers, the test-connection flow, and all five draw
+  controls — including the `FHD 1,920×1,280` and `4K 3,840×2,560` shortcuts its 768×512
+  recipe produces, which the mock logs as a 960×640 and a 1920×1280 base at 2× rather than
+  as a flag. Its recipe is a **two-pass**
   one — `hires` with its scale and denoise beside a
   measured `durationMs` — so the caption's `1.5×` and duration chips and the editor's
   second-pass switch are renderable rather than conditions no fixture ever enters, and the

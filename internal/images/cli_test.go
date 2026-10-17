@@ -1246,3 +1246,51 @@ echo "not a draw"
 		t.Fatalf("help = %q, err = %v, want the build's own option table", help, err)
 	}
 }
+
+// TestDrawTimeoutFollowsThePicture pins the bound that a CPU fallback needs. The flat
+// DefaultCLITimeout was written for a draw that fits on the card; a picture large enough that
+// the backend continues on the CPU is hours rather than minutes, and a bound that did not
+// follow the size would kill it after the sampling had already been paid for. It is a guard
+// against a wedged process, so it is also capped rather than unbounded.
+func TestDrawTimeoutFollowsThePicture(t *testing.T) {
+	base := DefaultCLITimeout
+
+	// One megapixel is what the flat bound is written for, and anything under it keeps it.
+	for _, req := range []Request{
+		{},
+		{Width: 512, Height: 512},
+		{Width: 1024, Height: 1024},
+	} {
+		if got := DrawTimeout(base, req); got != base {
+			t.Errorf("DrawTimeout(%dx%d) = %s, want the base %s", req.Width, req.Height, got, base)
+		}
+	}
+
+	// The FHD/4K recipe: 1920x1080 at 2x. 8.35 megapixels is eight times the base within a
+	// minute, and that is the cap — so this is as long as a bound may get.
+	uhd := Request{Width: 1920, Height: 1088, Hires: Hires{Enabled: true, Scale: 2, Denoise: 0.4}}
+	width, height := uhd.OutputSize()
+	if got := DrawTimeout(base, uhd); got < MaxDrawTimeout-time.Minute || got > MaxDrawTimeout {
+		t.Errorf("DrawTimeout(%dx%d) = %s, want about the cap %s", width, height, got, MaxDrawTimeout)
+	}
+	// The largest picture this app builds — 2048 a side, doubled — is past the cap and gets
+	// exactly it, so the guard has a fixed ceiling rather than a number that keeps growing.
+	largest := Request{
+		Width:  MaxDimension,
+		Height: MaxDimension,
+		Hires:  Hires{Enabled: true, Scale: MaxHiresScale, Denoise: 0.4},
+	}
+	if got, want := DrawTimeout(base, largest), MaxDrawTimeout; got != want {
+		t.Errorf("DrawTimeout(%dx%d) = %s, want the cap %s", MaxDimension, MaxDimension, got, want)
+	}
+	if MaxDrawTimeout <= 3*time.Hour {
+		t.Errorf("MaxDrawTimeout = %s, which is not hours of CPU sampling", MaxDrawTimeout)
+	}
+
+	// Halfway up: a 2x pass from 1024x1024 is four megapixels, so four base bounds, and the
+	// growth is by pixels rather than by long side.
+	mid := Request{Width: 1024, Height: 1024, Hires: Hires{Enabled: true, Scale: 2, Denoise: 0.4}}
+	if got, want := DrawTimeout(base, mid), 4*base; got != want {
+		t.Errorf("DrawTimeout(2048x2048) = %s, want %s", got, want)
+	}
+}

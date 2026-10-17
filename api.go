@@ -2287,8 +2287,6 @@ func (a *App) TestImageBackend() (string, error) {
 		return "", images.ErrDrawInProgress
 	}
 	defer releaseDraw()
-	ctx, cancel := context.WithTimeout(a.ctx, imageDrawTimeout(settings))
-	defer cancel()
 	// The size is the user's own when they chose one, and a small square otherwise:
 	// a setup that only works at its trained size would otherwise fail a test that
 	// real draws pass. Bounded by the same call every other request goes through.
@@ -2298,6 +2296,9 @@ func (a *App) TestImageBackend() (string, error) {
 		}
 		return 512
 	}
+	request := images.Request{Width: dimension(settings.Images.Width), Height: dimension(settings.Images.Height)}.Normalised()
+	ctx, cancel := context.WithTimeout(a.ctx, imageDrawTimeout(settings, request))
+	defer cancel()
 	// Registered so the button that started it can also stop it. The id is fixed rather than a
 	// uuid because there is no attachment and no message behind this draw: the panel's Stop
 	// sends the same string, which is the whole contract. No progress callback is wired to it,
@@ -2307,8 +2308,8 @@ func (a *App) TestImageBackend() (string, error) {
 	result, err := provider.Generate(ctx, images.Request{
 		Prompt:         "a simple color test pattern",
 		NegativePrompt: settings.Images.NegativePrompt,
-		Width:          dimension(settings.Images.Width),
-		Height:         dimension(settings.Images.Height),
+		Width:          request.Width,
+		Height:         request.Height,
 		Steps:          settings.Images.Steps,
 		Sampler:        settings.Images.Sampler,
 		CfgScale:       settings.Images.CfgScale,
@@ -2369,7 +2370,20 @@ func (a *App) RegenerateImage(attachmentID string, recipe store.GenerationRecipe
 	// the bound on sampling, while the CLI kind loads one from disk first. A user who will
 	// not wait that long presses Stop, which cancels this context — that, rather than the
 	// bound, is the control for a draw that is merely slow.
-	ctx, cancel := context.WithTimeout(a.ctx, imageDrawTimeout(a.Settings()))
+	// The size is the recipe's, because that is what decides how much work the bound has to
+	// cover: the same redraw of the same recipe at 4K is an order of magnitude longer than at
+	// the size it was drawn at, and a bound that could not tell them apart would either cut
+	// the large one off or hold the small one open far too long.
+	size := images.Request{
+		Width:  recipe.Width,
+		Height: recipe.Height,
+		Hires: images.Hires{
+			Enabled: recipe.Hires,
+			Scale:   recipe.HiresScale,
+			Denoise: recipe.HiresDenoise,
+		},
+	}.Normalised()
+	ctx, cancel := context.WithTimeout(a.ctx, imageDrawTimeout(a.Settings(), size))
 	defer cancel()
 	// The chat is read here rather than inside the service so the progress events can say
 	// which chat they belong to, the way every other event does; one indexed row read is a

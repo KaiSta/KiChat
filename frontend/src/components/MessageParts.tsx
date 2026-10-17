@@ -575,41 +575,54 @@ const MAX_IMAGE_HIRES_SCALE = 2
 const MIN_IMAGE_HIRES_DENOISE = 0.2
 const MAX_IMAGE_HIRES_DENOISE = 0.6
 
-/** The long side the FHD button draws to — 1920, the width of a full-HD frame.
+/** The long sides the two enlargement buttons draw to — 1920 for FHD, 3840 for 4K.
  *
- * The long side rather than 1920×1080 exactly, because a picture's aspect ratio is part
- * of what the prompt drew: a 4:3 sketch enlarged to a 16:9 frame would crop or stretch
- * it, and "make this picture bigger" is not "recompose it". */
+ * The long side rather than a fixed frame, because a picture's aspect ratio is part of
+ * what the prompt drew: a 4:3 sketch enlarged to a 16:9 frame would crop or stretch it,
+ * and "make this picture bigger" is not "recompose it". So 4K is 3840 px on the long
+ * side, which is 3840×2160 for a 16:9 picture and 3840×2880 for a 4:3 one — the label
+ * on the button names which.
+ *
+ * Both are inside the backend's own limits, and that is not a coincidence: a base is
+ * capped at 2048 a side (MAX_IMAGE_DIMENSION) and the second pass at 2×, so 1920 is the
+ * largest base a 3840 target needs, and 3840 is under the 4096 a picture may end up at.
+ * A 4K square would be 3840×3840 and still fit; a 4K 4:3 is 11 megapixels, which is
+ * where a 20 GB card stops holding the pass — from there the backend continues on the
+ * CPU rather than refusing, which is the trade this button makes.
+ */
 const FHD_LONG_SIDE = 1920
+const UHD_LONG_SIDE = 3840
 
-/** What the FHD button draws, and the size it will come out at.
+/** What an enlargement button draws, and the size it will come out at.
  *
  * A second pass is capped at 2× per side (MAX_IMAGE_HIRES_SCALE, from
  * internal/images/limits.go), so a base smaller than half the target cannot reach it —
- * 800×600 needs 2.4×. The base is then raised to the smallest size whose 2× lands on
- * 1920, keeping the aspect ratio: 960×720, drawn as 1920×1440. That is a different first
- * pass rather than a bigger version of the same one, which is why the button names the size
- * it will draw instead of just saying FHD.
+ * 800×600 needs 2.4× for FHD and 4.8× for 4K. The base is then raised to the smallest
+ * size whose 2× lands on the target, keeping the aspect ratio: 800×600 becomes 960×720
+ * (1920×1440) or 1920×1440 (3840×2880). That is a different first *pass* rather than a
+ * bigger version of the same one, which is why the button names the size it will draw
+ * instead of just saying FHD or 4K.
  *
  * Returns null when there is nothing to do or nothing to compute from: a base size the
- * server chose is not a number this can multiply, and a picture already at 1920 or more
+ * server chose is not a number this can multiply, and a picture already at the target
  * has no larger pass to ask for. */
-function fhdRecipe(
+function enlargedRecipe(
   recipe: storeTypes.GenerationRecipe,
+  target: number,
 ): { recipe: storeTypes.GenerationRecipe; width: number; height: number } | null {
   const width = recipe.width ?? 0
   const height = recipe.height ?? 0
   if (width <= 0 || height <= 0) return null
   const long = Math.max(width, height)
-  if (long >= FHD_LONG_SIDE) return null
-  const needed = FHD_LONG_SIDE / long
+  if (long >= target) return null
+  const needed = target / long
   const scale = Math.min(MAX_IMAGE_HIRES_SCALE, needed)
   // Aligned to the 8-pixel latent grid the backend rounds to anyway; the base is only
   // rescaled when the cap forces it, so an ordinary picture keeps the size it was drawn at.
   const align = (value: number) => Math.max(64, Math.round(value / 8) * 8)
   // Above the cap the *base* grows to meet the target — 800×600 becomes 960×720, whose 2×
   // is 1920×1440 — rather than the second pass exceeding the bound it is named for.
-  const grow = needed > MAX_IMAGE_HIRES_SCALE ? FHD_LONG_SIDE / MAX_IMAGE_HIRES_SCALE / long : 1
+  const grow = needed > MAX_IMAGE_HIRES_SCALE ? target / MAX_IMAGE_HIRES_SCALE / long : 1
   const baseWidth = align(width * grow)
   const baseHeight = align(height * grow)
   // What the second pass will actually produce. Rounded up like Request.OutputSize does,
@@ -726,7 +739,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   const [expanded, setExpanded] = useState(false)
   // Which draw is in flight, if any. Every control here spends GPU seconds, so they are
   // mutually disabled while one runs — otherwise a second click draws a second picture.
-  const [busy, setBusy] = useState<'same' | 'new' | 'edit' | 'fhd' | null>(null)
+  const [busy, setBusy] = useState<'same' | 'new' | 'edit' | 'fhd' | 'uhd' | null>(null)
   // The editor is closed until the user opens it: a chat full of pictures would
   // otherwise be a chat full of forms.
   const [editing, setEditing] = useState(false)
@@ -752,7 +765,8 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   const recipe = attachment.generation
   // The FHD shortcut is read from the recipe rather than stored, so it disappears on a
   // picture that is already that large and follows the size the recipe really used.
-  const fhd = recipe ? fhdRecipe(recipe) : null
+  const fhd = recipe ? enlargedRecipe(recipe, FHD_LONG_SIDE) : null
+  const uhd = recipe ? enlargedRecipe(recipe, UHD_LONG_SIDE) : null
 
   useEffect(() => {
     let cancelled = false
@@ -796,7 +810,10 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   // are live cannot be reached by editing one of them alone.
   const blocked = busy !== null || stoppingUi
 
-  const draw = async (next: storeTypes.GenerationRecipe, mode: 'same' | 'new' | 'edit' | 'fhd') => {
+  const draw = async (
+    next: storeTypes.GenerationRecipe,
+    mode: 'same' | 'new' | 'edit' | 'fhd' | 'uhd',
+  ) => {
     setBusy(mode)
     stopping.current = false
     try {
@@ -964,6 +981,24 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
                   : `${t('images.fhd')} ${formatNumber(fhd.width)}×${formatNumber(fhd.height)}`}
               </button>
             )}
+            {/* The same shortcut at four times the pixels, and deliberately a separate
+                button rather than a menu: a 4K pass is minutes of GPU time, so it is a
+                choice a user makes with the size in front of them. When the card cannot
+                hold the buffers the backend continues on the CPU — slow, but the picture
+                arrives, which is what the button promises. */}
+            {uhd && (
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                disabled={blocked}
+                title={t('images.uhdHint', { width: uhd.width, height: uhd.height })}
+                onClick={() => void draw(uhd.recipe, 'uhd')}
+              >
+                {busy === 'uhd'
+                  ? t('images.redrawing')
+                  : `${t('images.uhd')} ${formatNumber(uhd.width)}×${formatNumber(uhd.height)}`}
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-sm btn-ghost"
@@ -976,7 +1011,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
             {/* Stop appears beside the buttons it stops, and only while one is running: a
                 draw from the editor gets its Stop on the editor's own button instead, so
                 there is never a Stop for a draw it cannot reach. */}
-            {(busy === 'same' || busy === 'new' || busy === 'fhd') && (
+            {(busy === 'same' || busy === 'new' || busy === 'fhd' || busy === 'uhd') && (
               <button
                 type="button"
                 className="btn btn-sm btn-danger"
