@@ -1,6 +1,7 @@
 package images
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -674,6 +675,129 @@ func TestCLIReportsStepsAndAPreviewWhileItDraws(t *testing.T) {
 	}
 }
 
+// cliWithCarriageReturnBars is the shape the real program writes, and the shape that used to
+// freeze the step counter: a step is a carriage return (it redraws the same bar in place),
+// a pass ends with a newline, and the preview file is written once rather than every step.
+//
+// Both halves are measured on stable-diffusion.cpp `master-959-d637cfb`: a scanner split on
+// `\n` alone delivered a whole pass as one line, `stepFromLog` read the *first* bar out of
+// it, and the window showed "step 1 of 3" once the pass was already over.
+const cliWithCarriageReturnBars = `
+if [ "$1" = "-h" ]; then
+  echo "usage: sd-cli [options]"
+  echo "  --preview <method>        preview decoding method"
+  echo "  --preview-path <path>     write the preview to this file"
+  echo "  --preview-interval <n>    how often to update it"
+  exit 0
+fi
+out=""; prev=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    --preview-path) prev="$2"; shift 2 ;;
+    --preview|--preview-interval) shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '  |=====>    | 1/3 - 2.20s/it\r'
+sleep 1
+printf '  |=======>  | 2/3 - 2.20s/it\r'
+sleep 1
+printf '  |========> | 3/3 - 2.20s/it\r'
+cp "$(dirname "$0")/picture.png" "$prev"
+sleep 1
+printf '\n'
+cp "$(dirname "$0")/picture.png" "$out"
+echo "generating image: 1/1 - seed 4242"
+exit 0
+`
+
+// TestCLIReportsEveryStepEvenWithoutANewPreview is the bug a user reported as "the step
+// progress no longer increases": the counter was only reported when the preview file
+// changed, and a real build writes that file once per pass rather than once per step. A
+// frozen picture therefore froze the whole row.
+//
+// Two assertions, and they are the two halves of the fix: the steps advance although the
+// preview file stood still, and at least one report carries no preview at all — a report
+// that is a step and nothing else.
+func TestCLIReportsEveryStepEvenWithoutANewPreview(t *testing.T) {
+	binary := fakeCLI(t, cliWithCarriageReturnBars)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+
+	var reports []Progress
+	if _, err := client.GenerateWithProgress(t.Context(), Request{Prompt: "a red fox"}, func(p Progress) {
+		reports = append(reports, p)
+	}); err != nil {
+		t.Fatalf("GenerateWithProgress: %v", err)
+	}
+	if len(reports) < 2 {
+		t.Fatalf("only %d report(s) arrived; the bar is redrawn with a carriage return and each "+
+			"one is a step: %+v", len(reports), reports)
+	}
+	stepless := false
+	for _, report := range reports {
+		if report.Step > 0 && len(report.Preview) == 0 {
+			stepless = true
+		}
+	}
+	if !stepless {
+		t.Errorf("no report carried a step without a preview; the counter is still waiting for the "+
+			"picture file: %+v", reports)
+	}
+	last := reports[len(reports)-1]
+	if last.Step != 3 || last.Steps != 3 {
+		t.Errorf("last report = %d/%d, want 3/3 from the bars the program wrote with carriage "+
+			"returns", last.Step, last.Steps)
+	}
+}
+
+// TestTheRealStepBarIsReadThroughItsCarriageReturns pins the exact bytes the measurement
+// produced, not a paraphrase of them: a bar redrawn with `\r`, an ANSI erase-in-line after
+// each one, an interleaved info line, and the second bar's rate written as `it/s` rather
+// than `s/it`. Read as one newline-terminated line it yields step 1 twice; read through
+// splitLogLines it yields 1 then 2, which is what makes the counter move.
+func TestTheRealStepBarIsReadThroughItsCarriageReturns(t *testing.T) {
+	const log = "\r  |=========================>                        | 1/2 - 10.93s/it\x1b[K" +
+		"[I] qwen_image_2_1 build cached graph cut plan done (taking 2 ms) --- ggml_graph_cut.cpp:1032" +
+		"\r  |==================================================| 2/2 - 3.28it/s\x1b[K\n"
+	scanner := bufio.NewScanner(strings.NewReader(log))
+	scanner.Split(splitLogLines)
+	var steps []int
+	for scanner.Scan() {
+		if step, _, ok := stepFromLog(scanner.Text()); ok {
+			steps = append(steps, step)
+		}
+	}
+	if len(steps) != 2 || steps[0] != 1 || steps[1] != 2 {
+		t.Fatalf("steps read = %v, want [1 2] — one per carriage return", steps)
+	}
+}
+
+// TestTheVAEDecodeBarIsNotASamplingStep pins the second half of the measured log shape. A
+// tiled decode prints `|…| 24/54 - 27.03it/s` — the same bar the sampler prints — after the
+// last sampling pass has already finished, so a shape-only parser moved the row from
+// "step 5 of 5" to "step 24 of 54". The program says `decoding 1 latents` before it and
+// `latent 1 decoded` after, and that is what separates the two.
+func TestTheVAEDecodeBarIsNotASamplingStep(t *testing.T) {
+	log := &cliLog{pass: 1, passes: 2}
+	for _, line := range []string{
+		"  |=====>    | 1/5 - 2.20s/it",
+		"  |==========| 5/5 - 2.20s/it",
+		"[I] sampling completed, taking 11.23s --- image.cpp:899",
+		"[I] hires sampling 1/1 completed, taking 27.56s --- image.cpp:1021",
+		"[I] decoding 1 latents --- image.cpp:554",
+		"  |=========================>  | 24/54 - 27.03it/s",
+		"  |============================| 54/54 - 27.03it/s",
+		"[I] latent 1 decoded, taking 2.22s --- image.cpp:620",
+	} {
+		log.write(line)
+	}
+	step, steps, _, _ := log.progress()
+	if step != 5 || steps != 5 {
+		t.Fatalf("progress after the decode = %d/%d, want the last sampling step 5/5", step, steps)
+	}
+}
+
 // cliWithHires is a fake `sd-cli` whose own help lists the second pass and the VAE tiling
 // switches, which is the only thing that makes this client pass them.
 const cliWithHires = `
@@ -962,6 +1086,81 @@ func TestCLIDoesNotPreviewForABuildThatHasNoSuchFlag(t *testing.T) {
 	}
 	if joined := strings.Join(argsOf(t, binary), " "); strings.Contains(joined, "--preview") {
 		t.Errorf("preview flags were passed to a build whose help does not list them:\n%s", joined)
+	}
+}
+
+// cliWithMemoryFlags is a build that lists the two switches a large draw needs to stay on
+// the GPU, which is what makes the client add them.
+const cliWithMemoryFlags = `
+if [ "$1" = "-h" ]; then
+  echo "usage: sd-cli [options]"
+  echo "  --hires                   enable a second sampling pass"
+  echo "  --hires-scale <n>         how much larger the output is"
+  echo "  --hires-width <n>         target width of the second pass"
+  echo "  --hires-height <n>        target height of the second pass"
+  echo "  --hires-denoising-strength <n>  denoise strength of the second pass"
+  echo "  --vae-tiling              decode the latent in tiles"
+  echo "  --vae-tile-size <n>       tile size for the VAE"
+  echo "  --diffusion-fa            flash attention in the diffusion model"
+  exit 0
+fi
+` + cliRecorder
+
+// TestALargeDrawKeepsItsWorkOnTheGPU is the measurement the thresholds in memoryArgs come
+// from. A 1600×1216 second pass on a 20 GB card allocated an attention buffer that did not
+// fit, printed `ggml_vulkan: Failed to allocate pinned memory`, and sampled on eight CPU
+// threads; the final decode wanted a 10 GB VAE buffer and spent 55.75 s on the CPU against
+// 7.75 s tiled on the GPU. Both switches only decide *how* the same picture is computed.
+func TestALargeDrawKeepsItsWorkOnTheGPU(t *testing.T) {
+	binary := fakeCLI(t, cliWithMemoryFlags)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+
+	if _, err := client.Generate(t.Context(), Request{
+		Prompt: "a red fox",
+		Width:  1024,
+		Height: 1024,
+		Hires:  Hires{Enabled: true, Scale: 2, Denoise: 0.4},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	joined := strings.Join(argsOf(t, binary), " ")
+	for _, want := range []string{"--vae-tiling", "--diffusion-fa"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("a 2048×2048 draw was not given %s:\n%s", want, joined)
+		}
+	}
+}
+
+// TestASmallDrawIsLeftAlone is the other half of the rule: the flags are for a picture that
+// does not fit, and a draw that fits keeps the build's own defaults.
+func TestASmallDrawIsLeftAlone(t *testing.T) {
+	binary := fakeCLI(t, cliWithMemoryFlags)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+
+	if _, err := client.Generate(t.Context(), Request{Prompt: "a red fox", Width: 512, Height: 512}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	joined := strings.Join(argsOf(t, binary), " ")
+	for _, unwanted := range []string{"--vae-tiling", "--diffusion-fa"} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("a 512×512 draw was given %s, which it does not need:\n%s", unwanted, joined)
+		}
+	}
+}
+
+// TestAUserFlashAttentionChoiceWins keeps the extra arguments authoritative: the app's own
+// flags are appended after them, so an added `--diffusion-fa` would outvote a `--fa` the
+// user wrote — the opposite of what that field is for.
+func TestAUserFlashAttentionChoiceWins(t *testing.T) {
+	binary := fakeCLI(t, cliWithMemoryFlags)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"},
+		Options{Extra: []string{"--fa"}})
+
+	if _, err := client.Generate(t.Context(), Request{Prompt: "a red fox", Width: 1024, Height: 1024}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if joined := strings.Join(argsOf(t, binary), " "); strings.Contains(joined, "--diffusion-fa") {
+		t.Errorf("the client added --diffusion-fa beside the user's own --fa:\n%s", joined)
 	}
 }
 

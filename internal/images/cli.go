@@ -141,9 +141,10 @@ type Options struct {
 	//
 	// Both are probed against the build's own `-h` before they are passed (see vaeArgs),
 	// because an unknown option fails the whole run on this backend: a build without them
-	// would turn "decode this in tiles" into "draw nothing". They belong to the model load
-	// rather than to one picture, so they are part of the server's key and of a redraw's
-	// command line alike.
+	// would turn "decode this in tiles" into "draw nothing". A stored choice belongs to the
+	// model load, so it is part of the server's key; the CLI kind *also* tiles a draw too
+	// large for one decode without this being set (memoryArgs), and that one is not stored —
+	// it is a property of the picture, not of the setup.
 	VaeTiling   bool
 	VaeTileSize int
 }
@@ -232,8 +233,11 @@ func (c *CLI) supports(ctx context.Context, binary, flag string) bool {
 // The tile size is probed separately from the switch: `--vae-tiling` is the older of the
 // two, and a build that can tile but has no size option should still tile rather than lose
 // the feature to the flag beside it.
-func (c *CLI) vaeArgs(ctx context.Context, binary string) []string {
-	if !c.opts.VaeTiling {
+//
+// tiling is a parameter rather than read from the options because a large draw asks for it
+// whether or not the user did; see memoryArgs and largeDrawPixels.
+func (c *CLI) vaeArgs(ctx context.Context, binary string, tiling bool) []string {
+	if !tiling {
 		return nil
 	}
 	if !c.supports(ctx, binary, "--vae-tiling") {
@@ -244,6 +248,62 @@ func (c *CLI) vaeArgs(ctx context.Context, binary string) []string {
 		args = append(args, "--vae-tile-size", strconv.Itoa(c.opts.VaeTileSize))
 	}
 	return args
+}
+
+// largeDrawPixels is where a picture stops fitting in one piece, and therefore where this
+// client stops leaving the memory question to a build that cannot ask it.
+//
+// Measured on an RX 7900 XT (20 GB) with stable-diffusion.cpp master-959-d637cfb and a
+// qwen-image 2.1 pipeline at 800×600 enlarged 2× (1600×1216):
+//
+//   - the hires sampling allocated an attention buffer the card could not fit, printed
+//     `ggml_vulkan: Failed to allocate pinned memory`, and ran the 27 s of sampling on the
+//     CPU instead — 8 threads pegged, the GPU at ~12 %, minutes instead of seconds;
+//   - the final decode wanted a 10 GB VAE compute buffer, failed to allocate it, and
+//     decoded in RAM on the CPU: 55.75 s against 7.75 s with `--vae-tiling` (486 MB).
+//
+// `--diffusion-fa` and `--vae-tiling` avoid both without changing what the picture is —
+// one picks the attention kernel, the other decides how the latent is decoded. A megapixel
+// is below that case and above the size a small card decodes comfortably (800×600 is
+// 0.5 MP), which is why it is the line.
+const largeDrawPixels = 1024 * 1024
+
+// memoryArgs keeps a large draw on the GPU, without touching what the user stored.
+//
+// Both switches are passed only when the build's own `-h` lists them: an unknown option
+// fails the whole run on this backend, so a flag added for a machine that needs it would
+// otherwise turn "slow" into "no picture" on a build that does not know it. The user's own
+// extra arguments win: this app's arguments are appended after `Extra`, so a `--fa` or
+// `--diffusion-fa` already there is left alone rather than outvoted.
+func (c *CLI) memoryArgs(ctx context.Context, binary string, req Request) []string {
+	width, height := req.OutputSize()
+	if width <= 0 || height <= 0 || width*height < largeDrawPixels {
+		return nil
+	}
+	var args []string
+	// The decode comes first in the command line because it is the step that fails last:
+	// every sampling pass has already been paid for by the time the latent is decoded.
+	if !c.opts.VaeTiling {
+		args = append(args, c.vaeArgs(ctx, binary, true)...)
+	}
+	if !c.userSetFlashAttention() && c.supports(ctx, binary, "--diffusion-fa") {
+		args = append(args, "--diffusion-fa")
+	}
+	return args
+}
+
+// userSetFlashAttention reports whether the user's own arguments already decide how the
+// attention runs. `--fa` and `--diffusion-fa` are spelled differently because a build may
+// carry either; both are left to the user.
+func (c *CLI) userSetFlashAttention() bool {
+	for _, arg := range c.opts.Extra {
+		for _, flag := range []string{"--diffusion-fa", "--fa"} {
+			if arg == flag || strings.HasPrefix(arg, flag+"=") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // vaeArgsConfigured is the same request without the probe, for ServerKey.
@@ -583,11 +643,16 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	go func() {
 		defer close(scanned)
 		scanner := bufio.NewScanner(stdout)
+		// A line is a newline *or* a carriage return; see splitLogLines for why the second
+		// one is what makes the step counter move at all.
+		scanner.Split(splitLogLines)
 		// Progress bars are long single lines, and a wide terminal's worth of them exceeds the
 		// scanner's default limit; a log that cannot be read would silently cost the seed line.
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
-			sdlog.write(scanner.Text())
+			if line := scanner.Text(); line != "" {
+				sdlog.write(line)
+			}
 		}
 	}()
 	stopWatch := make(chan struct{})
@@ -676,7 +741,10 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 // picture while the recipe claims otherwise.
 func (c *CLI) cliArgs(ctx context.Context, binary string, req Request, prompt string, seed int64, output string) ([]string, error) {
 	args := c.modelArgs()
-	args = append(args, c.vaeArgs(ctx, binary)...)
+	args = append(args, c.vaeArgs(ctx, binary, c.opts.VaeTiling)...)
+	// A draw too large for one piece of the card gets the two switches that keep it on the
+	// GPU; see memoryArgs. After the user's own tiling choice, so the two cannot disagree.
+	args = append(args, c.memoryArgs(ctx, binary, req)...)
 	hires, err := c.hiresArgs(ctx, binary, req)
 	if err != nil {
 		return nil, err
@@ -809,6 +877,34 @@ const (
 	cliLogLines = 400
 )
 
+// splitLogLines splits the program's own output into lines at a newline *or* a carriage
+// return.
+//
+// bufio.ScanLines is not enough here, and the gap is not cosmetic. The sampler redraws its
+// step bar in place — `\r  |=====>     | 3/12 - 2.20s/it` — and ends a *pass* with a newline,
+// so a scanner split on `\n` alone delivered a whole pass as one line. `stepFromLog` then
+// read the first bar out of that line, which is step 1: the window showed "step 1 of 20",
+// once, after the pass was already over. Measured on stable-diffusion.cpp
+// `master-959-d637cfb`: one `\n` per sampling pass and one `\r` per step.
+//
+// A `\r\n` pair is one line break rather than an empty line between two.
+func splitLogLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if len(data) == 0 {
+		return 0, nil, nil // ask for more, or finish at EOF
+	}
+	if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+		advance = i + 1
+		if data[i] == '\r' && i+1 < len(data) && data[i+1] == '\n' {
+			advance++
+		}
+		return advance, data[:i], nil
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
 // cliStepLine finds the sampling step in the progress bar the program redraws with carriage
 // returns: `  |=====>    | 3/12 - 2.20s/it`.
 //
@@ -878,6 +974,12 @@ type cliLog struct {
 	// restarts at 1; without these the row would show the counter going *backwards*.
 	pass   int
 	passes int
+	// decoding marks the VAE's own bar as *not* being a sampling step. The tiled decode
+	// prints one with the same shape — `|…| 24/54 - 27.03it/s` — so a parser that only
+	// matched the shape reported "step 24 of 54" once the last sampling pass was over: a
+	// counter jumping to a number the draw never had. The program's own lines say when the
+	// decode begins and ends.
+	decoding bool
 }
 
 func (l *cliLog) write(line string) {
@@ -890,7 +992,19 @@ func (l *cliLog) write(line string) {
 	if seed := seedFromLog(line); seed != 0 {
 		l.seedN = seed
 	}
-	if step, steps, ok := stepFromLog(line); ok {
+	// The VAE decode prints a bar of the same shape as the sampler's, and it is not a
+	// sampling step: `[I] decoding 1 latents` opens it, `latent N decoded` (or the
+	// `decode_first_stage completed` summary) closes it. Measured on the tiled decode of a
+	// 1280×960 picture: 54 tiles at ~27 it/s, which read as "step 24 of 54" once the last
+	// sampling pass had finished at step 5.
+	if strings.Contains(line, "decoding") && strings.Contains(line, "latents") {
+		l.decoding = true
+	}
+	if strings.Contains(line, "decode_first_stage completed") ||
+		(strings.Contains(line, "latent ") && strings.Contains(line, " decoded")) {
+		l.decoding = false
+	}
+	if step, steps, ok := stepFromLog(line); ok && !l.decoding {
 		// A step below the one just read is the second pass starting, not a draw going
 		// backwards: the program prints one bar per pass and numbers each from 1. The
 		// guard on passes keeps a build that reprints a stale number from inventing a
@@ -973,33 +1087,45 @@ func (l *cliLog) summary() string {
 // One report carries both signals: the log's step is what makes a fraction ("3 von 12") and
 // the preview file is what makes a picture, and they are read on the same tick so a report
 // never pairs a step from one moment with a picture from another.
+//
+// They are *not* gated on each other, and that is the difference between a progress row that
+// moves and one that does not. Reporting only when the preview file changed looked right
+// while a build wrote a picture every step; measured on stable-diffusion.cpp
+// `master-959-d637cfb`, a draw wrote its preview once per *pass* (and at FHD that write is a
+// full-latent VAE decode). A step the log had already counted therefore stayed on screen
+// unchanged for minutes. The step is the progress — the picture is the bonus — so a changed
+// step is reported whether or not a new preview arrived, and the window keeps the last
+// picture it was given.
 func watchPreview(stop <-chan struct{}, path string, log *cliLog, report func(Progress)) {
 	ticker := time.NewTicker(cliPreviewPoll)
 	defer ticker.Stop()
 	var lastTime time.Time
 	var lastSize int64
+	var lastStep, lastPass int
 	for {
 		select {
 		case <-stop:
 			return
 		case <-ticker.C:
 		}
-		info, err := os.Stat(path)
-		if err != nil || info.Size() == 0 {
-			continue
-		}
-		if info.ModTime().Equal(lastTime) && info.Size() == lastSize {
-			continue
-		}
-		lastTime, lastSize = info.ModTime(), info.Size()
 		step, steps, pass, passes := log.progress()
 		update := Progress{Step: step, Steps: steps, Pass: pass, Passes: passes}
 		// A preview that cannot be read is not a failure: the draw is what matters, and the
 		// step counter alone is still an answer to "is it moving".
-		if data, err := readPreview(path); err == nil {
-			update.PreviewMime, _ = SniffImage(data, MimePNG, "png")
-			update.Preview = data
+		previewChanged := false
+		if info, err := os.Stat(path); err == nil && info.Size() > 0 &&
+			(!info.ModTime().Equal(lastTime) || info.Size() != lastSize) {
+			lastTime, lastSize = info.ModTime(), info.Size()
+			previewChanged = true
+			if data, err := readPreview(path); err == nil {
+				update.PreviewMime, _ = SniffImage(data, MimePNG, "png")
+				update.Preview = data
+			}
 		}
+		if !previewChanged && step == lastStep && pass == lastPass {
+			continue
+		}
+		lastStep, lastPass = step, pass
 		report(update)
 	}
 }

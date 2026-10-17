@@ -134,7 +134,7 @@ func (c *CLI) ServerSpec(ctx context.Context, port int) (ServerSpec, error) {
 		return ServerSpec{}, err
 	}
 	args := c.modelArgs()
-	args = append(args, c.vaeArgs(ctx, program)...)
+	args = append(args, c.vaeArgs(ctx, program, c.opts.VaeTiling)...)
 	args = append(args, "--listen-ip", serverHost, listenFlag, strconv.Itoa(port))
 	return ServerSpec{Program: program, Args: args, Model: model, Label: c.files.Label()}, nil
 }

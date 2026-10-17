@@ -74,6 +74,9 @@ const de = {
   'images.redrawn': 'Neu gezeichnet',
   'images.redrawHint': 'Erneut mit demselben Rezept und Seed — es kommt dasselbe Bild heraus.',
   'images.variationHint': 'Derselbe Prompt mit einem neuen Seed.',
+  'images.fhd': 'FHD',
+  'images.fhdHint':
+    'Dieses Bild mit zweiter Stufe auf {{width}}×{{height}} zeichnen — 1920 px an der langen Kante, Seitenverhältnis bleibt.',
   'images.edit': 'Rezept bearbeiten',
   'images.editClose': 'Bearbeiten schließen',
   'images.editHint': 'Prompt, Größe oder Schritte ändern und damit neu zeichnen.',
@@ -701,6 +704,9 @@ const en: Record<keyof typeof de, string> = {
   'images.redrawn': 'Redrawn',
   'images.redrawHint': 'Again with the same recipe and seed — it produces the same picture.',
   'images.variationHint': 'The same prompt with a new seed.',
+  'images.fhd': 'FHD',
+  'images.fhdHint':
+    'Redraw this picture with a second pass at {{width}}×{{height}} — 1920 px on the long side, aspect ratio kept.',
   'images.edit': 'Edit recipe',
   'images.editClose': 'Close editor',
   'images.editHint': 'Change the prompt, size or steps and draw with it.',
@@ -1309,6 +1315,8 @@ const zh: Record<keyof typeof de, string> = {
   'images.redrawn': '已重新绘制',
   'images.redrawHint': '使用相同的配方和种子重新绘制 —— 得到同一张图。',
   'images.variationHint': '相同的提示词，使用新的种子。',
+  'images.fhd': 'FHD',
+  'images.fhdHint': '用第二阶段重绘为 {{width}}×{{height}} —— 长边 1920 像素，保持宽高比。',
   'images.edit': '编辑配方',
   'images.editClose': '关闭编辑',
   'images.editHint': '修改提示词、尺寸或步数，然后用它重新绘制。',

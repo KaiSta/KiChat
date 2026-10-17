@@ -575,6 +575,65 @@ const MAX_IMAGE_HIRES_SCALE = 2
 const MIN_IMAGE_HIRES_DENOISE = 0.2
 const MAX_IMAGE_HIRES_DENOISE = 0.6
 
+/** The long side the FHD button draws to — 1920, the width of a full-HD frame.
+ *
+ * The long side rather than 1920×1080 exactly, because a picture's aspect ratio is part
+ * of what the prompt drew: a 4:3 sketch enlarged to a 16:9 frame would crop or stretch
+ * it, and "make this picture bigger" is not "recompose it". */
+const FHD_LONG_SIDE = 1920
+
+/** What the FHD button draws, and the size it will come out at.
+ *
+ * A second pass is capped at 2× per side (MAX_IMAGE_HIRES_SCALE, from
+ * internal/images/limits.go), so a base smaller than half the target cannot reach it —
+ * 800×600 needs 2.4×. The base is then raised to the smallest size whose 2× lands on
+ * 1920, keeping the aspect ratio: 960×720, drawn as 1920×1440. That is a different first
+ * pass rather than a bigger version of the same one, which is why the button names the size
+ * it will draw instead of just saying FHD.
+ *
+ * Returns null when there is nothing to do or nothing to compute from: a base size the
+ * server chose is not a number this can multiply, and a picture already at 1920 or more
+ * has no larger pass to ask for. */
+function fhdRecipe(
+  recipe: storeTypes.GenerationRecipe,
+): { recipe: storeTypes.GenerationRecipe; width: number; height: number } | null {
+  const width = recipe.width ?? 0
+  const height = recipe.height ?? 0
+  if (width <= 0 || height <= 0) return null
+  const long = Math.max(width, height)
+  if (long >= FHD_LONG_SIDE) return null
+  const needed = FHD_LONG_SIDE / long
+  const scale = Math.min(MAX_IMAGE_HIRES_SCALE, needed)
+  // Aligned to the 8-pixel latent grid the backend rounds to anyway; the base is only
+  // rescaled when the cap forces it, so an ordinary picture keeps the size it was drawn at.
+  const align = (value: number) => Math.max(64, Math.round(value / 8) * 8)
+  // Above the cap the *base* grows to meet the target — 800×600 becomes 960×720, whose 2×
+  // is 1920×1440 — rather than the second pass exceeding the bound it is named for.
+  const grow = needed > MAX_IMAGE_HIRES_SCALE ? FHD_LONG_SIDE / MAX_IMAGE_HIRES_SCALE / long : 1
+  const baseWidth = align(width * grow)
+  const baseHeight = align(height * grow)
+  // What the second pass will actually produce. Rounded up like Request.OutputSize does,
+  // so the size on the button is the size the backend will be asked for.
+  const alignUp = (value: number) => Math.ceil(value / 8) * 8
+  const outWidth = alignUp(baseWidth * scale)
+  const outHeight = alignUp(baseHeight * scale)
+  return {
+    recipe: {
+      ...recipe,
+      width: baseWidth,
+      height: baseHeight,
+      hires: true,
+      hiresScale: scale,
+      hiresDenoise:
+        recipe.hiresDenoise && recipe.hiresDenoise >= MIN_IMAGE_HIRES_DENOISE
+          ? recipe.hiresDenoise
+          : 0.4,
+    },
+    width: outWidth,
+    height: outHeight,
+  }
+}
+
 /** The recipe fields as the strings a form holds.
  *
  * Numbers live as text rather than as numbers so an emptied box can mean "the server's
@@ -667,7 +726,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   const [expanded, setExpanded] = useState(false)
   // Which draw is in flight, if any. Every control here spends GPU seconds, so they are
   // mutually disabled while one runs — otherwise a second click draws a second picture.
-  const [busy, setBusy] = useState<'same' | 'new' | 'edit' | null>(null)
+  const [busy, setBusy] = useState<'same' | 'new' | 'edit' | 'fhd' | null>(null)
   // The editor is closed until the user opens it: a chat full of pictures would
   // otherwise be a chat full of forms.
   const [editing, setEditing] = useState(false)
@@ -691,6 +750,9 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   // Only a picture KiChat drew carries a recipe. An uploaded photo has none, and
   // offering to redraw one would offer to draw something unrelated to it.
   const recipe = attachment.generation
+  // The FHD shortcut is read from the recipe rather than stored, so it disappears on a
+  // picture that is already that large and follows the size the recipe really used.
+  const fhd = recipe ? fhdRecipe(recipe) : null
 
   useEffect(() => {
     let cancelled = false
@@ -734,7 +796,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   // are live cannot be reached by editing one of them alone.
   const blocked = busy !== null || stoppingUi
 
-  const draw = async (next: storeTypes.GenerationRecipe, mode: 'same' | 'new' | 'edit') => {
+  const draw = async (next: storeTypes.GenerationRecipe, mode: 'same' | 'new' | 'edit' | 'fhd') => {
     setBusy(mode)
     stopping.current = false
     try {
@@ -885,6 +947,23 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
             >
               {busy === 'new' ? t('images.redrawing') : t('images.variation')}
             </button>
+            {/* The shortcut the user asked for: the same picture at full-HD size, with
+                the second pass switched on and its scale chosen to land there. It is a
+                recipe edit with one click rather than a second concept — the picture it
+                files is an ordinary hires picture, redrawn from its own recipe later. */}
+            {fhd && (
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                disabled={blocked}
+                title={t('images.fhdHint', { width: fhd.width, height: fhd.height })}
+                onClick={() => void draw(fhd.recipe, 'fhd')}
+              >
+                {busy === 'fhd'
+                  ? t('images.redrawing')
+                  : `${t('images.fhd')} ${formatNumber(fhd.width)}×${formatNumber(fhd.height)}`}
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-sm btn-ghost"
@@ -894,10 +973,10 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
             >
               {editing ? t('images.editClose') : t('images.edit')}
             </button>
-            {/* Stop appears beside the two buttons it stops, and only while one is
-                running: a draw from the editor gets its Stop on the editor's own button
-                instead, so there is never a Stop for a draw it cannot reach. */}
-            {(busy === 'same' || busy === 'new') && (
+            {/* Stop appears beside the buttons it stops, and only while one is running: a
+                draw from the editor gets its Stop on the editor's own button instead, so
+                there is never a Stop for a draw it cannot reach. */}
+            {(busy === 'same' || busy === 'new' || busy === 'fhd') && (
               <button
                 type="button"
                 className="btn btn-sm btn-danger"

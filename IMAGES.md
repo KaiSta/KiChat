@@ -686,6 +686,24 @@ the same restart from its step bars. A backend with no progress, and an ordinary
 draw, report `1 of 1` — `api.go` normalises both to at least one, because an absent pass
 count would otherwise render as "0 of 0".
 
+**The step is the progress; the preview is the bonus.** Two measured facts about
+`master-959-d637cfb` broke that on the CLI kind, and both are pinned by tests now. The
+sampler redraws its step bar with a carriage return and ends a *pass* with a newline, so a
+scanner split on `\n` alone delivered the whole pass as one line and `stepFromLog` read the
+first bar out of it: the row showed "step 1 of 20", once, after the pass was already over.
+The log is now read with `splitLogLines`, which breaks on either character. And the program
+writes its preview file about once per pass rather than once per step — at 1600×1216 that
+one write is a full-latent VAE decode — while the watcher used to report *only* when that
+file changed, so the row stood still for minutes with the step count already in hand. A
+report now goes out whenever the step changes, preview or not, and the window keeps the last
+picture it was given (`frontend/src/store.ts` merges `preview` forward). A third shape is
+the one a tiled decode adds: it prints the *same* bar the sampler does (`|…| 24/54 -
+27.03it/s`), so the parser tracks the program's `decoding N latents` / `latent N decoded`
+lines and ignores bars in between — without that the row jumped from "step 5 of 5" to
+"step 24 of 54" after the last pass, a number the draw never had. Driven against the real
+binary with a flux-2-klein / qwen3-4b pipeline (640×480, 2× hires): 1/4 → 2/4 → 4/4, then
+1/5 → 2/5 → 3/5 → 5/5 with the pass and preview moving with them.
+
 **VAE tiling is a different switch for a related consequence.** It is `--vae-tiling` and
 `--vae-tile-size` on a local build, and it makes the VAE decode the latent in tiles instead
 of in one piece: a card that can sample a 4096² latent may still be unable to decode it in one
@@ -696,6 +714,22 @@ decoded for this machine rather than what the picture is. They belong to the mod
 they are part of the managed server's key (`ServerKey`): changing one while `sd-server` runs
 is a restart, and the row says so. The HTTP route does not expose them — a WebUI already has
 its own VAE settings, and there is no per-request key this client can depend on.
+
+**A large draw asks for both switches itself, on the CLI kind.** Measured on an RX 7900 XT
+(20 GB) with the qwen-image 2.1 pipeline at 800×600 enlarged 2× (1600×1216): the second
+pass allocated an attention buffer the card could not fit, printed
+`ggml_vulkan: Failed to allocate pinned memory (… ErrorOutOfDeviceMemory)` and then ran the
+sampling on eight CPU threads at ~12 % GPU — minutes instead of the 27 s it took with
+`--diffusion-fa` — and the final decode wanted a 10 GB VAE compute buffer, failed to
+allocate it, and decoded in 20 GB of system RAM instead: **55.75 s on the CPU against 7.75 s
+with `--vae-tiling`** (486 MB). Neither switch changes what the picture is — one picks the
+attention kernel, the other how the latent is decoded — so `images.CLI` passes them when
+`Request.OutputSize()` reaches a megapixel (`largeDrawPixels`), only when the build's `-h`
+lists them, and never over a `--fa` or `--diffusion-fa` the user already wrote in the extra
+arguments, which keep the last word. Nothing is stored: it is a property of the draw, and a
+draw that fits keeps the build's own defaults. The managed server cannot do it — its flags
+are fixed at start and belong to `ServerKey` — so a large picture there still needs the
+stored switch, and the row still says a change is a restart.
 
 ### Profiles: the same fields, saved under a name
 
@@ -886,11 +920,22 @@ what puts it beside its source — an attachment on no message renders nowhere �
 backend emits `chat:attachments` afterwards, the same event the tool path uses, which is
 what makes the new picture appear without a reload.
 
-There are three of them, and the binding takes a **whole recipe** rather than a flag, which
-is what makes three controls out of one call:
+There are four of them, and the binding takes a **whole recipe** rather than a flag, which
+is what makes four controls out of one call:
 
 - **Redraw** passes the stored recipe back untouched — the same picture.
 - **Variation** passes it with the seed cleared, so the server chooses a new one.
+- **FHD `<width>×<height>`** is the second pass as one click: the same recipe at a base whose
+  2× enlargement lands on **1920 px on the long side**, aspect ratio kept. 800×600 becomes a
+  960×720 base drawing 1920×1440; a 1024×1024 picture keeps its base and is enlarged 1.875×,
+  because the bound (`MaxHiresScale`, 2×) can already reach the target. The base only grows
+  when it cannot, and the label names the resulting size rather than the word alone — a
+  raised base is a different *first* pass, not a bigger version of the old one, and hiding
+  that behind a three-letter button would be the same kind of unlabelled substitution the
+  empty-field rule exists to avoid. The denoise stays if the recipe had one and becomes 0.4
+  otherwise, the seed is kept, and the button disappears on a picture already at 1920 or more
+  and on a recipe whose base size the server chose (there is no number to multiply). What it
+  files is an ordinary two-pass picture, redrawn later from its own recipe like any other.
 - **Edit recipe** opens the recipe in a form under the picture — prompt, negative prompt,
   size, steps, guidance scale, seed, checkpoint, sampler — prefilled from the picture's own,
   and **Draw**
@@ -1458,8 +1503,10 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   restart reading is computed from the stored command line rather than stored as a constant,
   so a save that changes the model under a running server really does raise the badge. It
   proves the rendering, the caption, the save button, the Settings section with its
-  populated checkpoint and sampler pickers, the test-connection flow, and all three draw
-  controls. Its recipe is a **two-pass** one — `hires` with its scale and denoise beside a
+  populated checkpoint and sampler pickers, the test-connection flow, and all four draw
+  controls — including the `FHD 1,920×1,280` shortcut its 768×512 recipe produces, which the
+  mock logs as a 960×640 base at 2× rather than as a flag. Its recipe is a **two-pass**
+  one — `hires` with its scale and denoise beside a
   measured `durationMs` — so the caption's `1.5×` and duration chips and the editor's
   second-pass switch are renderable rather than conditions no fixture ever enters, and the
   `?drawfinish=1` draw streams the same shape: two steps in each of two passes, so the row
