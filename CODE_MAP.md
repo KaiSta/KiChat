@@ -1,0 +1,123 @@
+# Code map
+
+Where a thing lives, so nobody has to grep the tree to find it. Read this before
+adding a package, a bridge method or a provider; update it when a file moves or
+changes owner.
+
+Two rules keep this useful:
+
+- **A package owns one thing.** If a change needs a new responsibility, it
+  probably belongs in a new package, not in the nearest one.
+- **The map points, it does not explain.** *Why* a thing is the way it is lives
+  in the system document for that subsystem (see the table at the bottom of
+  [`AGENTS.md`](AGENTS.md)) or in the package's doc comment.
+
+## The shape of the app
+
+    frontend/src (React 19)          ← the window
+        │  window.go.* (Wails binds every exported App method)
+    api.go / app.go (package main)   ← the bridge: settings, chats, images, files
+        │
+    internal/*                       ← everything that can be tested without a window
+        │
+    SQLite (~/.config/kichat) + the backends you configured
+
+`main.go` is only the Wails bootstrap: window options, the embedded
+`frontend/dist`, and `--version`.
+
+## Top level
+
+| Path | What it is |
+| --- | --- |
+| `main.go` | Wails bootstrap, window/menu options, `go:embed all:frontend/dist`, `--version` |
+| `app.go` | The `App` struct and the chat lifecycle: send, regenerate, stop, chats CRUD, `GetBudget` |
+| `api.go` | The rest of the bridge: settings, backends and keys, runtime, images, attachments, search, prompts, compaction |
+| `internal/` | All logic, one package per subsystem (below) |
+| `frontend/` | React 19 + TypeScript; `frontend/dist` is embedded by the Go build |
+| `tools/` | `uiharness` (mock-bridge browser UI), `streamcheck` (renderer pin), `notices` (third-party notices) |
+| `packaging/` | Debian control, copyright, man page, `.desktop`, lintian overrides |
+| `build/` | Icon sources, generated Windows/macOS bundle files, build output |
+| `Makefile` | Every artifact: `build`, `windows`, `nsis`, `darwin`, `dmg`, `deb`, `install`, `check` |
+| `VERSION`, `wails.json` | The one author of the version, and the Windows/macOS resource it feeds |
+
+## Backend packages
+
+| Package | Owns | Start at | Tests |
+| --- | --- | --- | --- |
+| `internal/chat` | Context assembly, the model/tool loop, compaction, throttling and pacing, search-first turns | `engine.go` (`Engine.Send`), `context.go` (`Assemble`), `compact.go` (`PlanCompaction`) | package tests + root engine tests |
+| `internal/llm` | The provider abstraction and every backend that speaks it | `types.go` (`Provider`, `ChatRequest`, `StreamEvent`), `registry.go` (`DefaultBackendConfigs`, `NewRegistry`), `openai.go` (shared compatible path) | one `<vendor>_test.go` per backend + `live_*_test.go` |
+| `internal/config` | `Settings`, its defaults, normalisation, prompts and presets | `config.go` (`Default`, `Load`, `Save`, `normalise`, `Clone`), `prompts.go` | `config_test.go`, `clone_test.go` |
+| `internal/store` | SQLite: schema and migrations, chats/messages/attachments/documents, FTS5 search, caches | `store.go` (schema + `Open`), `models.go` (types), `queries.go` (every query) | `store` tests |
+| `internal/images` | Picture generation: the `Provider` interface, the WebUI client, `sd-cli`, the managed `sd-server` | `images.go` (`Provider`), `sdwebui.go`, `cli.go`, `sdserver.go`, `locate.go`, `limits.go` | `*_test.go` + `live_test.go`, `live_sdserver_test.go` |
+| `internal/runtime` | llama.cpp as a thing KiChat installs and supervises: releases, GPU families, model folders, projector pairing, offload reading | `install.go`, `builds.go`/`distribution.go`, `supervise.go`, `discover.go`, `libs.go`, `offload.go` | `*_test.go` + `live_prism_test.go` |
+| `internal/research` | Brave and DuckDuckGo, the search-first context route, the scraper and its guards | `search.go`, `chain.go`, `brave.go`, `brave_context.go`, `duckduckgo.go`, `scrape.go` | `*_test.go` + `live_test.go` |
+| `internal/ingest` | Attachments to text: PDF, office, chunking | `ingest.go` (dispatch), `pdf.go`, `office.go`, `chunk.go` | `ingest_test.go` |
+| `internal/tools` | What the model can call, native schema *and* text protocol, plus `generate_image` | `tools.go`, `image.go` | `tools_test.go`, `image_test.go` |
+| `internal/secret` | API keys: OS keyring, encrypted-file fallback | `secret.go` (`New`, `NewIsolated`) | `secret_test.go` |
+| `internal/events` | The names of every Wails event, so emitters and the frontend cannot drift | `events.go` | — |
+| `internal/version` | Build identity filled by `-ldflags -X` | `version.go` | `version_test.go` |
+
+## Frontend
+
+| Path | Owns |
+| --- | --- |
+| `frontend/src/App.tsx` | Shell: sidebar, chat list, settings modal, global key handling (Escape) |
+| `frontend/src/components/ChatView.tsx` | The conversation: message list, composer, attachments, context meter, stop |
+| `frontend/src/components/MessageParts.tsx` | How one message renders — the split between settled and streaming pieces |
+| `frontend/src/components/Markdown.tsx` | The markdown pipeline: remark/rehype, KaTeX, highlight.js |
+| `frontend/src/components/Settings.tsx` | Every settings tab, including the backend rows and their kind-specific fields |
+| `frontend/src/components/ModelSwitcher.tsx` | Model picker with capability badges and window size |
+| `frontend/src/lib/api.ts` | The typed wrapper over the generated `window.go` bindings |
+| `frontend/src/lib/i18n.ts` | Every user-facing string, in `de`, `en` and `zh` |
+| `frontend/src/lib/stream.ts` | Cutting a streaming reply into stable, append-only pieces (the memo depends on it) |
+| `frontend/src/store.ts` | Zustand state shared across components |
+| `frontend/wailsjs/` | **Generated** by `wails build`; never hand-edit |
+
+## Storage
+
+One SQLite file. Schema and migrations are in `internal/store/store.go`; adding a
+table is a new migration, never an edit of an old one.
+
+`chats`, `messages`, `compactions`, `tool_calls`, `attachments`, `documents`,
+`chunks` (+ `chunks_fts`, FTS5/BM25), `search_cache`, `scrape_cache`, `settings`
+(one JSON row — see `internal/config`), `model_overrides`, `counters`.
+
+## The request lifecycle
+
+    ChatView send
+      → lib/api.ts
+      → App.SendMessage (app.go)
+      → chat.Engine.Send
+          → chat.Assemble (system prompt + history + attachments + budgets)
+          → llm.Provider.Chat (per-backend request)
+          → chat.Complete / tool loop (tools.Service)
+          → events: chat:start, chat:delta, chat:reasoning, chat:tool, chat:budget, chat:done
+      → store writes
+      → the window's listeners (ChatView) render the deltas
+
+Anything that crosses the bridge is a method on `*App`; anything that emits
+progress uses a name from `internal/events`.
+
+## The extension points
+
+| To add… | Touch | Skill |
+| --- | --- | --- |
+| A chat backend (hosted API) | `internal/llm/<name>.go`, `registry.go`, `DefaultBackendConfigs`, `Settings.tsx` kind lists, docs | [`add-llm-backend`](.claude/skills/add-llm-backend/SKILL.md) |
+| An image backend | `internal/images/<name>.go` implementing `Provider`, `images.Provider` construction in `app.go`, settings | [`add-image-backend`](.claude/skills/add-image-backend/SKILL.md) |
+| A setting | `internal/config/config.go` (+ `clone_test.go`), the settings UI, i18n | [`change-settings`](.claude/skills/change-settings/SKILL.md) |
+| A tool the model can call | `internal/tools/tools.go` (`Definitions` + execution), `internal/chat` if it needs a round | — |
+| A Wails event | `internal/events/events.go`, the emitter, the frontend listener | — |
+| A user-visible string | `frontend/src/lib/i18n.ts`, all three languages | — |
+
+## Tests, by kind
+
+| Kind | Where | What it proves |
+| --- | --- | --- |
+| Unit | `*_test.go` beside the package | behaviour of one package, no network |
+| Bridge/JSON | `*_test.go` **at the repo root** | the shapes the frontend receives — `runtime_status_test.go` pins the null-vs-empty case |
+| Live | `live_*_test.go`, gated by `KICHAT_LIVE=1` | the real service, metered; see [`live-tests`](.claude/skills/live-tests/SKILL.md) |
+| Renderer | `tools/streamcheck/check.mjs` | every prefix of a reply renders identically streaming and settled |
+| UI | `tools/uiharness` | rendering, state flow and event wiring against a mocked bridge |
+
+Secrets in tests: always `secret.NewIsolated(dir)`. The real keyring is a
+per-user global resource, and `secret.New` probes it.
