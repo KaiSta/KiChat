@@ -85,6 +85,17 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 				extraSystem += "\n\n" + tools.ImageProtocolHint
 			}
 		}
+		// A native-tool model reads the tool description once and then chooses; a
+		// local one that was asked to "zeichne" something picks the tool whose name
+		// sounds like drawing even when a diagram was meant. One rule beside the
+		// prompt's own tool rules is what kept that from happening in the measured
+		// case (see tools.ImageUseHint), and it travels only while the tool does.
+		if in.UseNative && e.Tools != nil && e.Tools.Images != nil {
+			if extraSystem != "" {
+				extraSystem += "\n\n"
+			}
+			extraSystem += tools.ImageUseHint
+		}
 		assembly, toolDefs, err := e.buildAssembly(ctx, &in.Chat,
 			in.BackendID, in.ModelID, in.Settings, in.Model, extraSystem)
 		if err != nil {

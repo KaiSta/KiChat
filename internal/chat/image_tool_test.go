@@ -95,6 +95,15 @@ func TestTheImageToolIsInvisibleUntilAServerIsConfigured(t *testing.T) {
 					t.Errorf("the image hint is in the system prompt = %v, want %v:\n%s",
 						got, state.wantVisible && !path.native, system)
 				}
+				// A native model gets the restriction as a system rule of its own: it
+				// never reads the text-protocol hint, and the tool description is only
+				// consulted while it is already choosing a tool. Off, and on the text
+				// path (where the hint carries the same rule), the line must be absent
+				// rather than merely redundant.
+				if got := strings.Contains(system, tools.ImageUseHint); got != (state.wantVisible && path.native) {
+					t.Errorf("the image use rule is in the system prompt = %v, want %v:\n%s",
+						got, state.wantVisible && path.native, system)
+				}
 				// Whichever path is in play, the ordinary tool list may not name it.
 				if got := strings.Contains(system, tools.ToolGenerateImage); got != state.wantVisible {
 					t.Errorf("the system prompt mentions %q = %v, want %v:\n%s",

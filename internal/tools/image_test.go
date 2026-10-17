@@ -328,6 +328,59 @@ func TestGenerateImageIsAdvertised(t *testing.T) {
 	}
 }
 
+// TestTheImageToolAsksForAnExplicitRequest is the model-facing half of the
+// feature, and it is asserted rather than assumed because it is the whole of what
+// stops the tool being used for things it cannot draw.
+//
+// Measured before this contract existed: two small local models answered
+// "Zeichne ein UML-Klassendiagramm für eine Bibliothek" with a generate_image
+// call, because the description said the tool is for "ein Bild, eine Illustration,
+// eine Grafik oder ein Foto" and never said that only an explicit request is a
+// reason to draw. The permissive sentence is asserted absent so an edit cannot
+// quietly restore it; the three places a model reads the tool — the native
+// definition, the text-protocol hint, and the native system-prompt rule — are
+// each checked for the restriction, since a model on one path never sees the
+// other two.
+func TestTheImageToolAsksForAnExplicitRequest(t *testing.T) {
+	var description string
+	for _, def := range (&Service{}).Definitions() {
+		if def.Name == ToolGenerateImage {
+			description = def.Description
+		}
+	}
+	if description == "" {
+		t.Fatal("generate_image has no description")
+	}
+
+	allowed := "das Werkzeug darf auf eine ausdrückliche Bitte hin zeichnen"
+	forbidden := "ohne ausdrückliche Bitte darf es nicht von selbst zeichnen, und Diagramme gehören in Text"
+	texts := []struct {
+		name string
+		text string
+	}{
+		{name: "native description", text: description},
+		{name: "text protocol hint", text: ImageProtocolHint},
+		{name: "native system rule", text: ImageUseHint},
+	}
+	for _, tc := range texts {
+		if !strings.Contains(tc.text, "ausdrücklich") {
+			t.Errorf("%s does not require an explicit request (%s):\n%s", tc.name, allowed, tc.text)
+		}
+		if !strings.Contains(tc.text, "Diagramm") {
+			t.Errorf("%s does not send diagrams to text (%s):\n%s", tc.name, forbidden, tc.text)
+		}
+	}
+	// The native description is the one that can also be read as a licence: it
+	// has to rule out an unprompted call in words, not only require a request.
+	if !strings.Contains(description, "nicht von dir aus") {
+		t.Errorf("the description does not forbid drawing unprompted (%s):\n%s", forbidden, description)
+	}
+	if strings.Contains(description, "haben möchte") {
+		t.Errorf("the permissive \"haben möchte\" wording is back, which is what made a diagram prompt draw a picture:\n%s",
+			description)
+	}
+}
+
 func TestImageFilenameSlug(t *testing.T) {
 	cases := []struct {
 		prompt string

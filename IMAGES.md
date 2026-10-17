@@ -685,6 +685,48 @@ about the failure reads as a broken feature rather than as a setting that is swi
 - `ImageProtocolHint` is a constant of its own that travels with the tool, instead of
   being folded into the always-present `TextProtocolHint`.
 
+### It draws when asked, and not otherwise
+
+The rule is the user's: `generate_image` is a tool like `search_web`, not a mode. Having
+image generation switched on says the picture backend is available, not that every answer
+should carry a picture. That has to be **told** to the model in every place it reads the
+tool, because the tool itself cannot tell whether the user asked for one:
+
+- The native definition opens with the restriction rather than the capability
+  (`Service.Definitions`): an explicit request — including "mach das Bild blauer" about a
+  picture that already exists — is the only reason to call it, an unprompted call is
+  forbidden, and diagrams, charts, tables, UML and schematics are named as text the
+  backend cannot draw.
+- `tools.ImageUseHint` repeats that as one line of the system prompt, appended by
+  `generate.go` only while the tool is offered and only on the native path — a model
+  reads a description once, while already choosing a tool.
+- `tools.ImageProtocolHint` carries the same restriction for models without native tool
+  calling, since for them that hint is the whole of what the tool is.
+
+**Measured**, on two local models (Qwen3.5-4B agentic coder and Qwen3.5-4B super coder,
+through Ollama's OpenAI-compatible route, the tool list the app sends and the small-local
+preset):
+
+| prompt | before | after |
+| --- | --- | --- |
+| "Zeichne ein UML-Klassendiagramm für eine Bibliothek." | `generate_image` on **both** models | text, on both |
+| "Erkläre den Unterschied zwischen TCP und UDP als Tabelle." | text | text |
+| "Erstelle mir ein Bild von einem roten Fuchs im Schnee." | `generate_image` | `generate_image` |
+| "Was ist 17 mal 23?" / "Schreib ein kurzes Haiku …" | text | text |
+
+Every row was run before and after on at least one of the two models; the UML row, the one
+that failed, on both. This is a spot check rather than a benchmark — a single sample per
+cell, reported because it is what turned a report into a reproducible failure.
+
+The old description said what the tool *is* ("ein Bild, eine Illustration, eine Grafik oder
+ein Foto") and never what it is not for, and "Zeichne … Grafik" is a request a diffusion
+backend cannot satisfy — it draws pixels, not a class diagram. Tightening the description
+alone fixed one model and not the other: the second still drew the UML diagram until the
+system-prompt rule was added, which is why both places exist rather than only the
+schema. `TestTheImageToolAsksForAnExplicitRequest` pins the three texts a model can read,
+and `TestTheImageToolIsInvisibleUntilAServerIsConfigured` pins that the new rule is absent
+when the tool is.
+
 A third way exists that needs no model at all: the **controls under a picture**
 (`MessageParts.tsx` → `api.go:RegenerateImage` → `tools.Service.Regenerate`). They read the
 recipe off the attachment (§4) and call the provider directly, so drawing again costs GPU

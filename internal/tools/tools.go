@@ -151,12 +151,24 @@ func (s *Service) Definitions() []llm.ToolDefinition {
 			},
 		},
 		{
-			// The description carries the two things the model gets wrong most
-			// often: that the prompt should describe an image rather than ask for
+			// The description opens with the restriction rather than the capability,
+			// and that order is the fix for a measured failure: a tool described as
+			// "an image, an illustration, a graphic" is read as a licence to draw
+			// whenever a picture might help, so two small local models answered
+			// "Zeichne ein UML-Klassendiagramm für eine Bibliothek" with a tool call
+			// instead of a diagram. Only an explicit request is a reason to draw; a
+			// diagram, a chart or a table is text the picture backend cannot render.
+			// The rest of the description keeps the two things the model still gets
+			// wrong: that the prompt should describe an image rather than ask for
 			// one, and that it cannot see what it drew.
 			Name: ToolGenerateImage,
-			Description: "Erzeugt ein Bild aus einer Beschreibung und zeigt es im Chat an. Nutze dieses " +
-				"Tool, wenn der Nutzer ein Bild, eine Illustration, eine Grafik oder ein Foto haben möchte. " +
+			Description: "Erzeugt ein Bild aus einer Beschreibung und zeigt es im Chat an. Rufe dieses " +
+				"Tool ausschließlich auf, wenn der Nutzer in seiner Nachricht ausdrücklich um ein Bild, " +
+				"ein Foto oder eine Illustration bittet — auch ein Änderungswunsch zu einem bereits " +
+				"erzeugten Bild (\"mach es blauer\") zählt. Ohne eine solche ausdrückliche Bitte antworte " +
+				"in Text; rufe das Tool nicht von dir aus auf und nicht, um eine Erklärung zu " +
+				"illustrieren. Diagramme, Tabellen, Charts, UML und Schaubilder kann dieses Tool nicht " +
+				"sinnvoll zeichnen — die gehören als Text oder Markdown in die Antwort. " +
 				"Der Prompt beschreibt das Motiv selbst, nicht die Handlung (\"a red fox in deep snow, " +
 				"golden hour, photorealistic\"). Schritte, Größe, Sampler, CFG-Scale und Negativ-Prompt " +
 				"wählst du selbst passend zum Motiv; einen Wert, den der Nutzer in den Einstellungen " +
@@ -569,12 +581,36 @@ Verfügbare Tools: search_web ({"query": string, "freshness"?: "pd|pw|pm|py"}), 
 // because the tool is only offered when a picture server is configured, and a
 // hint that lists a tool the model cannot see would have it emit a text-protocol
 // call that is then answered with an error.
+//
+// The explicit-request rule comes first for the reason the native description
+// gives it first: the hint is the whole of what such a model knows about the
+// tool, and a hint that only says "damit erzeugst du ein Bild" is an invitation
+// to use it whenever a picture would be nice.
 const ImageProtocolHint = "Zusätzlich verfügbar: generate_image ({\"prompt\": string, " +
 	"\"negative_prompt\"?: string, \"width\"?: number, \"height\"?: number, \"steps\"?: number, " +
-	"\"seed\"?: number, \"sampler\"?: string, \"cfg_scale\"?: number}). Damit erzeugst du ein " +
-	"Bild; es erscheint direkt im Chat. Du siehst das Bild danach nicht — beschreibe seinen " +
-	"Inhalt nicht. Schritte, Größe, Sampler, CFG-Scale und Negativ-Prompt wählst du passend " +
-	"zum Motiv; in den Einstellungen festgelegte Werte haben Vorrang."
+	"\"seed\"?: number, \"sampler\"?: string, \"cfg_scale\"?: number}). Rufe es ausschließlich " +
+	"auf, wenn der Nutzer ausdrücklich um ein Bild, ein Foto oder eine Illustration bittet — " +
+	"auch ein Änderungswunsch zu einem erzeugten Bild zählt; sonst antworte in Text. Diagramme, " +
+	"Charts, Tabellen, UML und Schaubilder zeichnet es nicht sinnvoll — die gehören als Text " +
+	"oder Markdown in die Antwort. Es erscheint direkt im Chat, und du siehst es danach nicht: " +
+	"beschreibe seinen Inhalt nicht. Schritte, Größe, Sampler, CFG-Scale und Negativ-Prompt " +
+	"wählst du passend zum Motiv; in den Einstellungen festgelegte Werte haben Vorrang."
+
+// ImageUseHint is the native-tool counterpart of the rule above: one line added
+// to the system prompt whenever generate_image is offered, beside the prompt's
+// own tool rules.
+//
+// It exists because a tool description is read once, while choosing a tool, and
+// a small model that has just been asked to "zeichne" something reaches for the
+// one tool whose name sounds like drawing. Measured on two local models: with
+// the description alone, "Zeichne ein UML-Klassendiagramm für eine Bibliothek"
+// still produced a generate_image call on one of them; with this line in the
+// system prompt both answered it in text, while "Erstelle mir ein Bild von einem
+// roten Fuchs im Schnee" still drew. It is appended only while the tool is
+// offered, so a chat with image generation switched off never reads it.
+const ImageUseHint = "Bilder: generate_image nur auf ausdrückliche Bitte des Nutzers (auch als " +
+	"Änderungswunsch zu einem erzeugten Bild). Diagramme, Charts, Tabellen, UML und Schaubilder " +
+	"gehören als Text oder Markdown in die Antwort, nicht in ein Bild."
 
 func firstNonEmptyString(values ...string) string {
 	for _, v := range values {
