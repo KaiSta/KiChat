@@ -253,6 +253,10 @@ export interface ImageProgressPayload {
   chatId: string
   step: number
   steps: number
+  /** Which sampling pass this step belongs to, 1-based. A hires draw restarts the counter. */
+  pass: number
+  /** How many passes the whole draw runs: 1 for an ordinary draw, 2 for a hires fix. */
+  passes: number
   preview?: string
   /** True for the report that ends a draw, which exists so a progress row cannot outlive it. */
   done?: boolean

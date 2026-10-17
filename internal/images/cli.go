@@ -134,6 +134,18 @@ type Options struct {
 	// count while the binary drew with another, and the recorded recipe would describe a
 	// picture that does not exist.
 	Extra []string
+	// VaeTiling passes `--vae-tiling`: the VAE decodes the latent in tiles rather than in
+	// one piece, which is what makes a large picture fit on a card that can sample it but
+	// not decode it. VaeTileSize is `--vae-tile-size`, the tile's side in pixels, and is
+	// only meaningful with tiling on.
+	//
+	// Both are probed against the build's own `-h` before they are passed (see vaeArgs),
+	// because an unknown option fails the whole run on this backend: a build without them
+	// would turn "decode this in tiles" into "draw nothing". They belong to the model load
+	// rather than to one picture, so they are part of the server's key and of a redraw's
+	// command line alike.
+	VaeTiling   bool
+	VaeTileSize int
 }
 
 // CLI draws one picture per process through a local `sd-cli`.
@@ -181,6 +193,136 @@ func (c *CLI) help(ctx context.Context, binary string) (string, error) {
 	return c.helpOut, c.helpErr
 }
 
+// helpLists reports whether one flag appears as its own token in a help text.
+//
+// A plain substring answers yes for `--hires` when the build only lists
+// `--hires-upscalers-dir`, and this client would then pass an option the program does not
+// know — which on this backend fails the whole run. Tokens are trimmed of the punctuation a
+// usage line puts around a flag (`--hires,` in a list, `(--hires)` in a note) before the
+// comparison, and `--flag=<value>` counts as the flag itself because that is one spelling
+// of the same option. A description that mentions another flag still reads as a mention,
+// which is a weaker signal than a usage line, but parsing positions out of a help format no
+// build promises would break on the first one this app has not seen.
+func helpLists(help, flag string) bool {
+	for _, field := range strings.Fields(help) {
+		field = strings.Trim(field, ",;:()[]<>")
+		if field == flag || strings.HasPrefix(field, flag+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// supports reports whether this build's own help lists a flag.
+//
+// The same evidence previewSupport reads, generalised: an unknown option fails the whole
+// run on this backend, so a flag this app passes without asking is a flag that can turn a
+// draw into a non-zero exit. A build whose help does not answer at all is treated as "no",
+// which is the only safe reading when the cost of being wrong is no picture at all.
+func (c *CLI) supports(ctx context.Context, binary, flag string) bool {
+	help, err := c.help(ctx, binary)
+	if err != nil && help == "" {
+		return false
+	}
+	return helpLists(help, flag)
+}
+
+// vaeArgs is the VAE decoding mode, passed only when this build's help lists it.
+//
+// The tile size is probed separately from the switch: `--vae-tiling` is the older of the
+// two, and a build that can tile but has no size option should still tile rather than lose
+// the feature to the flag beside it.
+func (c *CLI) vaeArgs(ctx context.Context, binary string) []string {
+	if !c.opts.VaeTiling {
+		return nil
+	}
+	if !c.supports(ctx, binary, "--vae-tiling") {
+		return nil
+	}
+	args := []string{"--vae-tiling"}
+	if c.opts.VaeTileSize > 0 && c.supports(ctx, binary, "--vae-tile-size") {
+		args = append(args, "--vae-tile-size", strconv.Itoa(c.opts.VaeTileSize))
+	}
+	return args
+}
+
+// vaeArgsConfigured is the same request without the probe, for ServerKey.
+//
+// A key is a comparison and runs on a path that must not spawn a process (see ServerKey):
+// it says what the configuration *asks for*, and a server that is already running answers
+// for what its build could honour. Including an unsupported request is deliberate — turning
+// the switch on is a change to the configuration, and a row that did not report "restart
+// needed" for it would leave the setting looking applied when the running process never got
+// it.
+func (c *CLI) vaeArgsConfigured() []string {
+	if !c.opts.VaeTiling {
+		return nil
+	}
+	args := []string{"--vae-tiling"}
+	if c.opts.VaeTileSize > 0 {
+		args = append(args, "--vae-tile-size", strconv.Itoa(c.opts.VaeTileSize))
+	}
+	return args
+}
+
+// hiresArgs is the second sampling pass, passed only when this build's help lists it.
+//
+// Unlike the VAE switches this is *refused* rather than dropped when the build cannot do it:
+// the user asked for an enlarged picture, and drawing a base-size one instead — which is
+// what an ignored flag produces — would file a picture that is not the one requested while
+// the recipe said it was. The error names the build's own missing option, which is the one
+// fact a user needs to pick another archive.
+func (c *CLI) hiresArgs(ctx context.Context, binary string, req Request) ([]string, error) {
+	h := req.Hires
+	if !h.Enabled {
+		return nil, nil
+	}
+	if !c.supports(ctx, binary, "--hires") {
+		return nil, fmt.Errorf(
+			"%w: %s kennt die Option --hires nicht — dieser Build kann nicht hochrechnen; "+
+				"ein neueres Release von stable-diffusion.cpp kann es",
+			ErrHiresUnsupported, binary)
+	}
+	args := []string{"--hires"}
+	scaleSent := c.supports(ctx, binary, "--hires-scale")
+	if scaleSent {
+		args = append(args, "--hires-scale", strconv.FormatFloat(h.Scale, 'f', -1, 64))
+	}
+	// The build's own spelling. `--hires-denoise` is not an option any `sd-cli` accepts;
+	// a flag the program does not know fails the whole run, so an invented short name here
+	// would turn every second-pass draw into "unknown argument" — and only a test whose fake
+	// help also invented it would notice.
+	if c.supports(ctx, binary, "--hires-denoising-strength") {
+		args = append(args, "--hires-denoising-strength", strconv.FormatFloat(h.Denoise, 'f', -1, 64))
+	}
+	// The target, when the base size is known and the build lists both options. Without it
+	// `--hires-scale` leaves the rounding to the program, while `Request.OutputSize` has
+	// already named the size the recipe records and `verifyHiresOutput` uses as its floor;
+	// sending it makes the request name that size rather than leave the program to invent
+	// one. sd.cpp may still align the target up to its own spatial multiple, which the
+	// verification accepts as the same pass.
+	targetSent := false
+	if width, height := req.OutputSize(); width > 0 && height > 0 &&
+		c.supports(ctx, binary, "--hires-width") && c.supports(ctx, binary, "--hires-height") {
+		args = append(args, "--hires-width", strconv.Itoa(width), "--hires-height", strconv.Itoa(height))
+		targetSent = true
+	}
+	// Neither number can be named, so the program would enlarge by whatever it defaults to
+	// — upstream's `hires_scale` is 2, this app's is 1.5 — and the picture that came back
+	// would be refused by `verifyHiresOutput` after minutes of drawing, with a message about
+	// a size rather than about the option that is missing. Upstream ships all five flags in
+	// one table, so this is a fork's shape; it is still worth a refusal that costs nothing.
+	if !scaleSent && !targetSent {
+		return nil, fmt.Errorf(
+			"%w: %s kennt weder --hires-scale noch --hires-width/--hires-height — ohne eine "+
+				"dieser Optionen vergrößert der zweite Durchgang in der Größe, die das Programm "+
+				"selbst wählt, statt in der gefragten; ein neueres Release von "+
+				"stable-diffusion.cpp kann es",
+			ErrHiresUnsupported, binary)
+	}
+	return args, nil
+}
+
 // previewSupport reports whether this build's own help lists the preview options.
 //
 // It is asked rather than assumed. Those flags are newer than the first `sd-cli` builds, and
@@ -192,7 +334,7 @@ func (c *CLI) previewSupport(ctx context.Context, binary string) bool {
 	if err != nil && help == "" {
 		return false
 	}
-	return strings.Contains(help, "--preview")
+	return helpLists(help, "--preview")
 }
 
 // userPicksPreview reports whether the user's own arguments already decide the preview.
@@ -388,7 +530,10 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	output := filepath.Join(dir, "bild.png")
 	previewPath := filepath.Join(dir, "preview.png")
 
-	args := c.cliArgs(req, prompt, *seed, output)
+	args, err := c.cliArgs(ctx, binary, req, prompt, *seed, output)
+	if err != nil {
+		return Result{}, err
+	}
 	watch := report != nil && !c.userPicksPreview() && c.previewSupport(ctx, binary)
 	if watch {
 		args = append(args, "--preview", cliPreviewMethod,
@@ -423,7 +568,10 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	}
 	defer stdout.Close()
 	cmd.Stdout = stdoutW
-	sdlog := &cliLog{}
+	sdlog := &cliLog{pass: 1, passes: 1}
+	if req.Hires.Enabled {
+		sdlog.passes = 2
+	}
 	if err := cmd.Start(); err != nil {
 		stdoutW.Close()
 		return Result{}, fmt.Errorf("%s: %v", binary, err)
@@ -515,15 +663,26 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	return result, nil
 }
 
-// cliArgs builds one draw's command line: what is loaded, then what is asked for.
+// cliArgs builds one draw's command line: what is loaded, how the VAE decodes, whether a
+// second pass runs, then what is asked for.
 //
 // `req.Model` is deliberately not among these. The files this backend loads are a property
 // of the configured set rather than of one request — a pipeline's VAE and text encoder
 // cannot be switched per draw by a name — so a per-request checkpoint change is not offered
 // here, and a recipe records the set's own label instead.
-func (c *CLI) cliArgs(req Request, prompt string, seed int64, output string) []string {
+//
+// The probe-backed halves can refuse: a second pass this build does not have is reported
+// (ErrHiresUnsupported) before a process is started, rather than drawn as an ordinary
+// picture while the recipe claims otherwise.
+func (c *CLI) cliArgs(ctx context.Context, binary string, req Request, prompt string, seed int64, output string) ([]string, error) {
 	args := c.modelArgs()
-	return append(args, c.drawArgs(req, prompt, seed, output)...)
+	args = append(args, c.vaeArgs(ctx, binary)...)
+	hires, err := c.hiresArgs(ctx, binary, req)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, hires...)
+	return append(args, c.drawArgs(req, prompt, seed, output)...), nil
 }
 
 // modelArgs is the half of a command line that says *what* is loaded: the user's own
@@ -714,6 +873,11 @@ type cliLog struct {
 	seedN int64
 	step  int
 	steps int
+	// pass is which sampling pass the current step belongs to, and passes how many this
+	// draw will run. A hires draw prints a second bar for the enlarged pass, and it
+	// restarts at 1; without these the row would show the counter going *backwards*.
+	pass   int
+	passes int
 }
 
 func (l *cliLog) write(line string) {
@@ -727,6 +891,13 @@ func (l *cliLog) write(line string) {
 		l.seedN = seed
 	}
 	if step, steps, ok := stepFromLog(line); ok {
+		// A step below the one just read is the second pass starting, not a draw going
+		// backwards: the program prints one bar per pass and numbers each from 1. The
+		// guard on passes keeps a build that reprints a stale number from inventing a
+		// third pass.
+		if l.steps > 0 && step < l.step && l.pass < l.passes {
+			l.pass++
+		}
 		l.step, l.steps = step, steps
 	}
 }
@@ -737,10 +908,10 @@ func (l *cliLog) seed() int64 {
 	return l.seedN
 }
 
-func (l *cliLog) progress() (int, int) {
+func (l *cliLog) progress() (int, int, int, int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.step, l.steps
+	return l.step, l.steps, l.pass, l.passes
 }
 
 // tail renders the kept lines as one text block, for logTail.
@@ -821,8 +992,8 @@ func watchPreview(stop <-chan struct{}, path string, log *cliLog, report func(Pr
 			continue
 		}
 		lastTime, lastSize = info.ModTime(), info.Size()
-		step, steps := log.progress()
-		update := Progress{Step: step, Steps: steps}
+		step, steps, pass, passes := log.progress()
+		update := Progress{Step: step, Steps: steps, Pass: pass, Passes: passes}
 		// A preview that cannot be read is not a failure: the draw is what matters, and the
 		// step counter alone is still an answer to "is it moving".
 		if data, err := readPreview(path); err == nil {

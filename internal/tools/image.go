@@ -101,6 +101,15 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 		// would get a silent fallback to whatever was already loaded.
 		Model: cfg.Model,
 		Seed:  seedFromValue(args.Seed),
+		// The second pass is a *setting* and not an argument, for the same reason the
+		// checkpoint is: it is a property of the machine (a CLI build either has
+		// `--hires` or it does not, and a picture twice the size costs minutes), not a
+		// choice about one picture that a model can see the hardware for.
+		Hires: images.Hires{
+			Enabled: cfg.HiresEnabled,
+			Scale:   cfg.HiresScale,
+			Denoise: cfg.HiresDenoise,
+		},
 	}
 	// Bounded before anything is drawn *or recorded*. The recipe written below is built from
 	// this request, and the schema this call answers to advertises 64–2048 and 1–150 — but a
@@ -184,6 +193,19 @@ func summarizeGeneration(req images.Request, result images.Result) string {
 		fmt.Fprintf(&sb, "Größe: %dx%d", req.Width, req.Height)
 		if req.Steps > 0 {
 			fmt.Fprintf(&sb, ", %d Schritte", req.Steps)
+		}
+		sb.WriteString("\n")
+	}
+	// The final size is what the model has to call the picture: the base size above is
+	// where the first pass started, and a model told only that would describe a smaller
+	// picture than the one in the transcript.
+	if req.Hires.Enabled {
+		outputWidth, outputHeight := req.OutputSize()
+		fmt.Fprintf(&sb, "Zweite Stufe: ×%s, Denoise %s",
+			strconv.FormatFloat(req.Hires.Scale, 'f', -1, 64),
+			strconv.FormatFloat(req.Hires.Denoise, 'f', -1, 64))
+		if outputWidth > 0 && outputHeight > 0 {
+			fmt.Fprintf(&sb, " → %dx%d", outputWidth, outputHeight)
 		}
 		sb.WriteString("\n")
 	}
@@ -357,6 +379,12 @@ func recipeFrom(req images.Request, result images.Result) store.GenerationRecipe
 		Sampler:        req.Sampler,
 		CfgScale:       req.CfgScale,
 		Model:          firstNonEmptyString(result.Model, req.Model),
+		DurationMs:     result.DurationMs,
+	}
+	if req.Hires.Enabled {
+		recipe.Hires = true
+		recipe.HiresScale = req.Hires.Scale
+		recipe.HiresDenoise = req.Hires.Denoise
 	}
 	switch {
 	case result.Seed != 0:
@@ -387,6 +415,11 @@ func requestFromRecipe(recipe store.GenerationRecipe) images.Request {
 		Sampler:        recipe.Sampler,
 		CfgScale:       recipe.CfgScale,
 		Model:          recipe.Model,
+		Hires: images.Hires{
+			Enabled: recipe.Hires,
+			Scale:   recipe.HiresScale,
+			Denoise: recipe.HiresDenoise,
+		},
 	}
 	if recipe.Seed > 0 {
 		seed := recipe.Seed
@@ -532,13 +565,80 @@ func (s *Service) watchDraw(id, chatID string, cancel context.CancelFunc) func()
 // same reason the interrupt one is — so this falls back to a plain Generate and the draw is
 // simply silent. Nothing about the result depends on the reports having happened.
 func (s *Service) draw(ctx context.Context, id, chatID string, req images.Request) (images.Result, error) {
-	progressive, ok := s.Images.(images.Progressive)
-	if !ok || s.Progress == nil || id == "" {
-		return s.Images.Generate(ctx, req)
+	start := time.Now()
+	var result images.Result
+	var err error
+	if progressive, ok := s.Images.(images.Progressive); ok && s.Progress != nil && id != "" {
+		result, err = progressive.GenerateWithProgress(ctx, req, func(p images.Progress) {
+			s.Progress(id, chatID, p)
+		})
+	} else {
+		result, err = s.Images.Generate(ctx, req)
 	}
-	return progressive.GenerateWithProgress(ctx, req, func(p images.Progress) {
-		s.Progress(id, chatID, p)
-	})
+	// Measured here rather than in the backends so both a tool draw and a redraw record
+	// the same thing: the wall time a user waited, which is what a recipe can promise
+	// about the next draw. A failed draw's number is dropped with its result.
+	result.DurationMs = time.Since(start).Milliseconds()
+	if err != nil {
+		return result, err
+	}
+	if err := verifyHiresOutput(req, result); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// widestHiresAlignment is the coarsest spatial grid stable-diffusion.cpp aligns a target to:
+// `GenerationRequest::align_image_size` uses `vae_scale_factor * diffusion_model_down_factor`,
+// and the widest image case is a VAE factor of 8 with a down factor of 32 (256). A1111 only
+// pads to its latent stride of 8. The app's own `OutputSize` is an 8-grid prediction, so a
+// backend may return a size up to one grid step above it — 656 can come back as 704 from
+// sd.cpp's UNet path (8 × 8) — and that is alignment, not a failed second pass.
+const widestHiresAlignment = 256
+
+// verifyHiresOutput answers "did the second pass actually happen?" from the picture that came
+// back rather than from the request that went out.
+//
+// It has to be asked. The A1111 route accepts `enable_hr` without saying whether it honoured
+// it — a server built without hires support, or one whose own settings disagree, answers 200
+// with a base-size picture — and filing that under a recipe that claims two passes would tell
+// the next redraw to reproduce something that was never drawn. The size is read from the PNG
+// header, so the check costs no decode; formats Go cannot read (WebP) leave the question
+// unanswered rather than failed, because refusing a picture over the format it arrived in
+// would be a worse answer than trusting the server once.
+//
+// The requested target is a lower bound, not an equality: `OutputSize` is the app's 8-grid
+// prediction, while sd.cpp aligns the target again to a grid as coarse as 256. The upper bound
+// is that same prediction rounded up to the widest grid, so a server that ignored the target
+// and used a much larger scale is still refused. A base-size answer is below the lower bound
+// for every allowed scale (the minimum is 1.25), which is the failure this check exists for.
+//
+// The error names the expected range and the delivered size because that is the diagnosis,
+// and wraps ErrHiresUnsupported so a caller can tell this apart from a server that broke.
+func verifyHiresOutput(req images.Request, result images.Result) error {
+	if !req.Hires.Enabled {
+		return nil
+	}
+	wantWidth, wantHeight := req.OutputSize()
+	if wantWidth <= 0 || wantHeight <= 0 {
+		// The base size was the server's own, so there is no product to compare against.
+		return nil
+	}
+	maxWidth := (wantWidth + widestHiresAlignment - 1) / widestHiresAlignment * widestHiresAlignment
+	maxHeight := (wantHeight + widestHiresAlignment - 1) / widestHiresAlignment * widestHiresAlignment
+	for _, img := range result.Kept() {
+		width, height, ok := images.Size(img.Data)
+		if !ok {
+			continue
+		}
+		if width < wantWidth || height < wantHeight || width > maxWidth || height > maxHeight {
+			return fmt.Errorf(
+				"die zweite Zeichenstufe hat das Bild nicht auf die erwartete Größe vergrößert "+
+					"(%dx%d statt %dx%d bis %dx%d): %w",
+				width, height, wantWidth, wantHeight, maxWidth, maxHeight, images.ErrHiresUnsupported)
+		}
+	}
+	return nil
 }
 
 // InterruptDraw asks the image server to abandon the picture it is drawing.

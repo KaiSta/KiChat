@@ -581,6 +581,122 @@ gigabytes of latent, on the machine the user is sitting in front of. The tool's 
 advertises 64–2048 and 1–150, so a model that reads it is safe — and the small local models
 this app is built for are the ones that most often ignore it.
 
+#### The second pass, and the two switches that make it fit
+
+**Hires fix is a second sampling pass**: the picture is drawn at the requested
+`Width`×`Height`, enlarged, and repainted at a low denoise so the new pixels carry generated
+detail rather than interpolated blur. It is an `images.Hires` on the request rather than two
+requests, because every backend here has its own way to run both passes inside one call, and
+splitting it would hand the second pass an opaque picture with no seed, sampler or latent to
+continue from.
+
+It is **off by default**, in Settings and in a recipe alike. A second pass costs roughly
+another draw's sampling time for the same subject, which is not a cost to opt somebody into.
+The two numbers beside the switch are bounded in `internal/images/limits.go`:
+
+| field | range | default when enabled | why |
+| --- | --- | --- | --- |
+| `HiresScale` | 1.25–2 per side | 1.5 | below 1.25 the extra pass buys a few pixels for its whole cost; above 2 it is two doublings, and the second pass starts painting the first one's artefacts |
+| `HiresDenoise` | 0.2–0.6 | 0.4 | 0.2 refines edges; 0.6 is where the pass begins composing rather than enlarging, and a picture that no longer contains the first one reads as "it drew something else" |
+
+A1111's own `denoising_strength` default for hires is 0.7, which is why the ceiling is this
+app's number rather than an inherited one. `Hires.Normalised` treats zero the way every other
+generation field does — as "nobody chose one" — but only while the switch is on, so an
+ordinary draw stays the zero value and a configured-but-disabled pass keeps the numbers the
+user typed for the next time it is switched on. `config.NormaliseImageClamps` applies the
+same rule to the stored blob.
+
+The base size travels as the request's `Width`/`Height`; the output is their product, aligned
+*up* to the latent grid by `Request.OutputSize()` and capped at **4096 a side**
+(`MaxOutputDimension`, twice the per-pass `MaxDimension`). Aligning up rather than to the
+nearest multiple is what the backends themselves do with a scaled size — A1111's VAE encoder
+pads the edge before each stride-2 convolution, and stable-diffusion.cpp's `align_image_size`
+moves the scaled target up to the spatial multiple — so 650 becomes 656 rather than 648. The
+target is also passed to the backend explicitly, under its own option, whenever the base size
+is known: `hr_resize_x`/`hr_resize_y` on the HTTP route and `--hires-width`/`--hires-height` on
+a build whose `-h` lists them. That makes the size a request rather than a prediction, and
+leaves the scale factor as the fallback for a build that predates those options. That cap is a
+backstop rather than a clamp any normalised request meets: 2048² at 2× lands exactly on it,
+because the per-pass bound and this one are the same bound twice. The aspect ratio is kept.
+When either base side is zero — "the server's own size" — `OutputSize` answers zero too: a
+server's own size is not a number this app can multiply, and inventing one would record a
+recipe for a picture nobody drew.
+
+**The target is not necessarily what comes back, because the backend aligns it again.** 656 is
+on the app's 8-grid, but stable-diffusion.cpp's `GenerationRequest::align_image_size` rounds a
+target up to `vae_scale_factor * diffusion_model_down_factor` — 64 for a UNet, 256 for the
+widest image path — so the same 656 request produces **704×704** there, while A1111 returns 656.
+That is the build drawing the nearest size it can, not a different pass, and the check below is
+written to accept it.
+
+Each backend spells the pass its own way:
+
+- **A1111 / Forge / `sd-server`** take `enable_hr`, `hr_scale`, `hr_resize_x`,
+  `hr_resize_y` and `denoising_strength` on the one `/sdapi/v1/txt2img` request. The resize
+  pair is sent only when the base size is known, and it is the 8-grid `OutputSize`; `hr_scale`
+  travels beside it as the fallback a build without the pair can still honour. A1111's
+  `hr_resize_x`/`hr_resize_y` are its documented target fields (a target of `0` means "use the
+  scale"), and `sd-server`'s compatibility route parses both onto `hires_width`/`hires_height`
+  (`routes_sdapi.cpp`) before sd.cpp's own `align_image_size` rounds them to its 64-grid.
+  `hr_second_pass_steps` is deliberately not sent (its own default of 0 means "as many as the
+  first pass", which is what this app wants) and neither is the upscaler, so the server keeps
+  the one its user configured.
+- **`sd-cli`** gets `--hires`, `--hires-scale`, `--hires-denoising-strength`, and
+  `--hires-width`/`--hires-height` when its `-h` lists them. The denoise option is spelled
+  `--hires-denoising-strength` in the program's own option table, not `--hires-denoise`: an
+  unknown flag fails the whole run, so a short invention here would turn every second-pass
+  draw into an error. The width/height pair is the same `OutputSize` target as the HTTP route,
+  and `--hires-scale` remains the fallback. This is the one probe whose answer is a *refusal*
+  rather than a fallback: a build that ignored `--hires` would draw at base size and exit 0,
+  and the recipe would then claim an enlargement that never happened. The error wraps
+  `ErrHiresUnsupported` and names the missing option. The same refusal covers a narrower
+  shape — `--hires` listed with **no** scale and no target — because `--hires` alone enlarges
+  by the program's own `hires_scale` default (2 upstream, 1.5 here), which is a real second
+  pass in a size the recipe would misdescribe; without a number option the client cannot say
+  which, so it refuses before the sampling rather than after `verifyHiresOutput` reads the
+  product. Upstream ships all five flags in one option table, so that shape is a fork's.
+
+**"Did the second pass happen?" is answered from the picture, not from the request.** A1111
+accepts `enable_hr` without saying whether it honoured it, and a `sd-server` build that does
+not parse the keys ignores them silently. So `verifyHiresOutput` reads the returned PNG's
+header (`images.Size`) and requires each side to be **at least** `OutputSize()` — a base-size
+answer is below it for every allowed scale, because the minimum is 1.25 — and **at most** that
+prediction rounded up to the widest backend grid (256), which is what accepts sd.cpp's
+704×704 answer to a 656 request while still refusing a server that ignored the target and
+used a much larger scale. The error names the expected range and the delivered size, wraps
+`ErrHiresUnsupported`, and **nothing is filed**, because a picture filed under a two-pass
+recipe would make every redraw repeat the same lie. A format Go cannot read (WebP) leaves the
+question unanswered rather than failed, and an unknown base size has no product to compare.
+The managed `sd-server` is the same HTTP client, so it gets the same check.
+
+The **recipe stores the base size and the pass**, not the product: `hires`, `hiresScale` and
+`hiresDenoise` sit beside `width` and `height`, because a redraw has to ask for the same base
+and then enlarge it — recording only the output size would draw an already-large picture and
+enlarge it again. A picture drawn without the pass carries none of the three, and a recipe
+from before the fields existed simply decodes with them off. The panel's editor has the same
+switch and two boxes, so a redraw can turn the pass on or off without opening Settings, and
+the card shows the scale (`1.5×`) when the recorded picture used one. `DurationMs` is measured
+around the whole draw, both passes included, and the card shows it beside the seed: it is what
+the draw cost, and therefore the best predictor a redraw has.
+
+Progress reports carry `pass` and `passes` beside the step. The WebUI watcher knows the pass
+count from the request and detects the restart when the step counter goes backwards, so the
+window reads "Pass 2 of 2 · step 3 of 20" instead of appearing to lose ground; `sd-cli` reads
+the same restart from its step bars. A backend with no progress, and an ordinary one-pass
+draw, report `1 of 1` — `api.go` normalises both to at least one, because an absent pass
+count would otherwise render as "0 of 0".
+
+**VAE tiling is a different switch for a related consequence.** It is `--vae-tiling` and
+`--vae-tile-size` on a local build, and it makes the VAE decode the latent in tiles instead
+of in one piece: a card that can sample a 4096² latent may still be unable to decode it in one
+go. The tile side is bounded to 64–2048 like every other size, and zero is the build's own.
+Both flags are passed only when the build's `-h` lists them, and unlike hires an unsupported
+tiling request is **dropped rather than refused**, because tiling changes how a picture is
+decoded for this machine rather than what the picture is. They belong to the model load, so
+they are part of the managed server's key (`ServerKey`): changing one while `sd-server` runs
+is a restart, and the row says so. The HTTP route does not expose them — a WebUI already has
+its own VAE settings, and there is no per-request key this client can depend on.
+
 ### Profiles: the same fields, saved under a name
 
 A model is not a server. One WebUI serves several checkpoints, and the `cli` kind is one
@@ -655,7 +771,8 @@ No schema change, and three properties fall out for free:
 
 The picture is an attachment; the *recipe* is a column on it. `attachments.generation_json`
 holds the prompt, the negative prompt, the size, the steps, the sampler, the guidance scale,
-the seed and the checkpoint, and it is what turns "draw that again" into a control instead of a
+the seed, the checkpoint — and, when the picture went through a second pass, its scale and
+denoise — and it is what turns "draw that again" into a control instead of a
 conversation: the recipe is data, not a request in words, so no model has to be asked to
 use it.
 
@@ -920,6 +1037,14 @@ here — each is the program's own, and each is read at the moment it is useful:
   the seed, which makes a recipe record the number the program really used. The recent lines are
   kept in a ring (`cliLogLines`), which is what a failure prints.
 
+Both sources can tell a second pass from a step counter that went backwards. The WebUI
+watcher is told how many passes the request asks for and detects the reset; `sd-cli` reads the
+same reset from its step bars. The report therefore carries `pass`/`passes` as well as
+`step`/`steps`, and the window renders "Pass 2 of 2 · step 3 of 20" for a hires draw and a
+plain "Step 3 of 20" for an ordinary one. A backend that cannot report, or a draw from before
+the fields existed, arrives with zeros — `api.go` normalises them to `1`/`1`, so a missing
+count never renders as "0 of 0".
+
 Four decisions, each of which is the difference between a feature and a footgun:
 
 - **The flags are asked for, not assumed.** `sd-cli`'s preview options are newer than its first
@@ -1177,7 +1302,13 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   `TestOneAnswerFilesAtMostTheBound` files four of six pictures and checks that the other two
   reach the model in words, and `TestASecondDrawIsRefusedWhileOneHoldsTheSlot` shows the
   refusal reaching the caller as `ErrDrawInProgress` with the provider never called — and the
-  slot released afterwards whether the draw succeeded or failed.
+  slot released afterwards whether the draw succeeded or failed. The second pass has three of
+  its own: the settings-to-request direction plus the recipe it leaves behind
+  (`TestGenerateImageAsksForTheSecondPassConfiguredInSettings`, which also asserts a measured
+  `DurationMs` from a provider that actually sleeps), the round trip through a redraw
+  (`TestRegenerateKeepsTheRecordedSecondPass`), and the refusal of a base-size answer
+  (`TestGenerateImageRefusesASecondPassThatDidNotEnlargeThePicture` — the error wraps
+  `ErrHiresUnsupported`, names 768x512 and 1152x768, and **no attachment is filed**).
 - `image_stop_test.go` (package `main`) — the stop, end to end against a real
   `httptest` WebUI driven through the bound methods: the wait ends and the sentinel comes
   back, the server sees exactly one interrupt, nothing is filed, a server without the
@@ -1192,7 +1323,9 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
 - `internal/store/store_test.go` — the recipe round-trips, a corrupt one fails the read
   rather than degrading to "no recipe", and an **older database gains the column**: the
   upgrade path is built by dropping the column and rolling `user_version` back, because a
-  migration placed at the wrong index is skipped silently and breaks every installation.
+  migration placed at the wrong index is skipped silently and breaks every installation. The
+  recipe's second pass and its measured duration survive the same JSON trip, and a recipe
+  written before those fields existed decodes with them off.
 - `internal/images/limits_test.go` — the guidance scale's own table, because its reading of "unset"
   has to survive a float: zero stays zero rather than being raised to the floor, a negative says
   the same as an empty box, 250 lands on the ceiling, and a NaN — reachable through
@@ -1200,9 +1333,11 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   — folds to unset. The same file's provider tests assert `cfg_scale` on the wire and its absence
   when nobody chose one, and `--cfg-scale` in the command line the other kind runs.
 - `internal/config/config_test.go` — the feature ships off, the fields stay empty, and
-  the clamps hold; `Kind` keeps exactly the three spellings it has, so `cli` and `sdserver`
-  survive as themselves and everything else — `server` written out in full included — folds to
-  the empty value that means the HTTP server.
+  the clamps hold; that now includes the second pass (off, with both numbers kept while it is
+  off and defaulted to 1.5×/0.4 only when it is on) and the VAE tile side. `Kind` keeps
+  exactly the three spellings it has, so `cli` and `sdserver` survive as themselves and
+  everything else — `server` written out in full included — folds to the empty value that
+  means the HTTP server.
 - `internal/images/sdserver_test.go` — the managed kind's own unit: the model half of the
   command line with `--listen-ip`/`--listen-port` appended (the user's arguments first, the
   listener last so a typed `--listen-port` cannot outvote the port the app will probe), the two
@@ -1253,7 +1388,13 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
 - `internal/images/cli_test.go` — the CLI provider against a stub binary: the flag-by-flag
   command line, the `-m` and `--diffusion-model` shapes, empty fields omitted, the extra
   arguments passed through untouched, the failure tail, and the seed that is *sent* versus
-  the one the log *reports* winning. Its stop test is the decisive one: with the process
+  the one the log *reports* winning. The hires and VAE switches are here as the two opposite
+  answers of one rule: a build whose `-h` lists `--hires`, `--hires-scale`,
+  `--hires-denoising-strength`, `--hires-width`, `--hires-height`, `--vae-tiling` and
+  `--vae-tile-size` gets all seven, a build that lists none of them is
+  refused for the first five (`ErrHiresUnsupported`, the missing option named) and simply
+  loses the other two — and the refusal happens before a drawing process starts, which the
+  recorded command line proves. Its stop test is the decisive one: with the process
   group kill removed, the stub's grandchild holds the pipe and the test waits out the
   minute, which is how the `WaitDelay` above was found.
   `TestTheHelpProbeSurvivesAStoppedDraw` is the memoisation's other half: the `-h` probe is
@@ -1318,7 +1459,16 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   so a save that changes the model under a running server really does raise the badge. It
   proves the rendering, the caption, the save button, the Settings section with its
   populated checkpoint and sampler pickers, the test-connection flow, and all three draw
-  controls. The mock logs the recipe it is handed rather than a flag, which is what makes
+  controls. Its recipe is a **two-pass** one — `hires` with its scale and denoise beside a
+  measured `durationMs` — so the caption's `1.5×` and duration chips and the editor's
+  second-pass switch are renderable rather than conditions no fixture ever enters, and the
+  `?drawfinish=1` draw streams the same shape: two steps in each of two passes, so the row
+  really renders "Pass 2 of 2 · step 1 of 2" instead of a pass count no report ever carries.
+  The Settings side is filled the same way: `?pinned=1` also fixes the second pass (on, 1.5×
+  at 0.4), because a switch and two boxes that are only ever empty are the state a fresh
+  install has and nothing more, and the local fixture runs with `--vae-tiling` on so the tile
+  box and the restart badge the `startupKey` comparison raises are rendered too. The mock
+  logs the recipe it is handed rather than a flag, which is what makes
   the three separable: an edit shows the changed prompt and step count in the same object
   as the untouched negative prompt and checkpoint, a variation shows `seed: 0`, and a
   repeat shows the stored seed. It also files the drawn picture onto the message (so the

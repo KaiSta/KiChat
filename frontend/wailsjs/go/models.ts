@@ -180,6 +180,9 @@ export namespace config {
 	    height: number;
 	    negativePrompt: string;
 	    cfgScale: number;
+	    hiresEnabled: boolean;
+	    hiresScale: number;
+	    hiresDenoise: number;
 	    saveFolder: string;
 	    kind: string;
 	    startWithApp: boolean;
@@ -194,6 +197,8 @@ export namespace config {
 	    cliT5xxl: string;
 	    cliOffloadToCpu: boolean;
 	    cliExtraArgs: string;
+	    cliVaeTiling: boolean;
+	    cliVaeTileSize: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new ImageSettings(source);
@@ -211,6 +216,9 @@ export namespace config {
 	        this.height = source["height"];
 	        this.negativePrompt = source["negativePrompt"];
 	        this.cfgScale = source["cfgScale"];
+	        this.hiresEnabled = source["hiresEnabled"];
+	        this.hiresScale = source["hiresScale"];
+	        this.hiresDenoise = source["hiresDenoise"];
 	        this.saveFolder = source["saveFolder"];
 	        this.kind = source["kind"];
 	        this.startWithApp = source["startWithApp"];
@@ -225,6 +233,8 @@ export namespace config {
 	        this.cliT5xxl = source["cliT5xxl"];
 	        this.cliOffloadToCpu = source["cliOffloadToCpu"];
 	        this.cliExtraArgs = source["cliExtraArgs"];
+	        this.cliVaeTiling = source["cliVaeTiling"];
+	        this.cliVaeTileSize = source["cliVaeTileSize"];
 	    }
 	}
 	export class ImageProfile {
@@ -1332,6 +1342,10 @@ export namespace store {
 	    cfgScale?: number;
 	    seed?: number;
 	    model?: string;
+	    hires?: boolean;
+	    hiresScale?: number;
+	    hiresDenoise?: number;
+	    durationMs?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new GenerationRecipe(source);
@@ -1348,6 +1362,10 @@ export namespace store {
 	        this.cfgScale = source["cfgScale"];
 	        this.seed = source["seed"];
 	        this.model = source["model"];
+	        this.hires = source["hires"];
+	        this.hiresScale = source["hiresScale"];
+	        this.hiresDenoise = source["hiresDenoise"];
+	        this.durationMs = source["durationMs"];
 	    }
 	}
 	export class Attachment {

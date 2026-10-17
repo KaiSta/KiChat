@@ -849,6 +849,13 @@ Verfügbare Tools: {{tool_list}}`,
       // a value the input could not hold would look empty without being empty.
       cfgScale: imagesPinned ? 4.5 : 0,
       negativePrompt: imagesPinned ? 'blurry, extra fingers, text' : '',
+      // The second pass. `?pinned=1` is the state in which a user fixed it, which is the only
+      // state where the switch, the scale and the denoise boxes all hold a value: the same
+      // rule as the size and step count above, and what makes "a fixed value beats the
+      // model's own" renderable for these three fields too.
+      hiresEnabled: imagesPinned,
+      hiresScale: imagesPinned ? 1.5 : 0,
+      hiresDenoise: imagesPinned ? 0.4 : 0,
       saveFolder: '/home/user/Pictures',
       // The CLI kind's own fields. Empty here, because this fixture is the server
       // backend; `?images=cli` fills them in and switches the kind, which is what
@@ -880,6 +887,11 @@ Verfügbare Tools: {{tool_list}}`,
       // KiChat has no field for at all: `--sigmas` is the whole reason the extra list
       // exists, and `--diffusion-fa` reaches a turbo model's attention kernel.
       cliExtraArgs: imagesLocal ? '--diffusion-fa --cfg-scale 1.0 --sigmas 1.0,0.5,0.0' : '',
+      // Tiling is part of the load, so the live fixture has it on: that makes the switch, its
+      // tile box and the restart reading the panel computes from it (the frontend's
+      // `startupKey`) all renderable, rather than a checkbox that is only ever off.
+      cliVaeTiling: imagesLocal,
+      cliVaeTileSize: imagesLocal ? 512 : 0,
     },
     // Two saved configurations, one per backend, because the dropdown is a list of
     // *models*: the point of it is that picking "Qwen Image (CLI)" switches the kind as
@@ -1230,6 +1242,12 @@ Verfügbare Tools: {{tool_list}}`,
       sampler: 'Euler a',
       seed: 4242,
       model: 'sdxl.safetensors [a1b2c3]',
+      // The picture was made in two passes, so the card carries the scale and the time
+      // both passes cost — the two chips that only exist on a recipe like this one.
+      hires: true,
+      hiresScale: 1.5,
+      hiresDenoise: 0.4,
+      durationMs: 41_200,
     },
   }
 
@@ -1397,7 +1415,7 @@ Verfügbare Tools: {{tool_list}}`,
     serverState === 'failed'
       ? 'sd-server wurde beendet: exit status 1 — letzte Ausgabe:\nerror: failed to load diffusion model, unsupported GGUF version'
       : ''
-  // The twelve fields a start reads, in the order the frontend's own `startupKey` lists
+  // The fourteen fields a start reads, in the order the frontend's own `startupKey` lists
   // them. Keeping the two in step is the point: the badge is a *reading*, and a fixture that
   // compared a different set of fields would show it for edits the backend ignores.
   const serverStartupKey = (im = {}) =>
@@ -1414,6 +1432,10 @@ Verfügbare Tools: {{tool_list}}`,
       im.cliT5xxl,
       im.cliOffloadToCpu,
       im.cliExtraArgs,
+      // The VAE decode is part of the load, which is why `ServerKey` in `sdserver.go` carries
+      // it too: turning tiling on under a running server is a restart, not a next-draw change.
+      im.cliVaeTiling,
+      im.cliVaeTileSize,
     ])
   // A stray server is out of date by definition: the command line it was started from
   // belongs to a kind the settings no longer select, which is the reading the backend
@@ -1460,10 +1482,14 @@ Verfügbare Tools: {{tool_list}}`,
    * The first report goes out immediately rather than one interval later, because a Stop
    * button that appears a second after the draw starts is a second in which the draw looks
    * stuck — which is exactly the state this feature exists to remove.
+   *
+   * `passes` is the second sampling pass the real backend announces with every report: a
+   * hires draw runs its step bar once per pass, numbered from 1 again, which is why the row
+   * says "Pass 2 of 2" rather than looking like it lost ground.
    */
-  function beginDraw({ id, chatId, steps, reject, toolCall, finish }) {
+  function beginDraw({ id, chatId, steps, passes = 1, reject, toolCall, finish }) {
     clearDraw(pendingDraw)
-    const state = { id, chatId, steps, step: 0, reject, toolCall, timer: null }
+    const state = { id, chatId, steps, pass: 1, passes, step: 0, reject, toolCall, timer: null }
     pendingDraw = state
     const report = () =>
       emit('image:progress', {
@@ -1471,6 +1497,8 @@ Verfügbare Tools: {{tool_list}}`,
         chatId,
         step: state.step,
         steps,
+        pass: state.pass,
+        passes,
         preview: IMAGE_DATA_URL,
       })
     report()
@@ -1478,11 +1506,16 @@ Verfügbare Tools: {{tool_list}}`,
       // A closure that outlives its draw must not keep reporting: the row it belongs to is
       // about to be repainted with the real picture.
       if (pendingDraw !== state) return
-      state.step = Math.min(state.step + 1, steps)
+      if (state.step < steps) {
+        state.step += 1
+      } else if (state.pass < state.passes) {
+        state.pass += 1
+        state.step = 1
+      }
       report()
       // Only the ?drawfinish=1 fixture has a finish; every other simulated draw runs until
       // it is stopped, which is what ?slowdraw=1 is for and what the Stop button exists for.
-      if (!finish || state.step < steps) return
+      if (!finish || state.pass < state.passes || state.step < steps) return
       clearDraw(state)
       pendingDraw = null
       finish()
@@ -3063,14 +3096,16 @@ Verfügbare Tools: {{tool_list}}`,
         .find((m) => (m.attachments ?? []).some((a) => a.id === id))?.chatId
       const drawChat = hostChat ?? 'chat-image'
       if (drawFinishes && !slowDraw) {
-        // A draw that ends by itself. Four steps rather than a real draw's forty: this
-        // fixture is about the end, and waiting the real length to reach it would teach
-        // nothing. Stop is *not* what ends it — that shape is ?slowdraw=1.
+        // A draw that ends by itself. Two steps in each of two passes rather than a real
+        // draw's forty: this fixture is about the end, and about the step counter restarting
+        // for the second pass — the one thing a one-pass stub cannot show. Stop is *not*
+        // what ends it; that shape is ?slowdraw=1.
         return new Promise((resolve) => {
           beginDraw({
             id,
             chatId: drawChat,
-            steps: 4,
+            steps: 2,
+            passes: 2,
             finish: () => {
               // The same order the backend uses: the picture is filed first (that event is
               // what replaces the progress row) and the `done` follows from releasing the

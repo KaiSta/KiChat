@@ -254,6 +254,14 @@ func TestServerKeyIgnoresThePortAndFollowsEverythingElse(t *testing.T) {
 		{"offload switch", func() *CLI {
 			return NewCLI("images", "sd-cli", "", ModelFiles{DiffusionModel: "/models/qwen.gguf"}, Options{Folder: "/sd", OffloadToCPU: true, Extra: []string{"--cfg-scale", "1.0"}})
 		}},
+		// The VAE decode is part of the load, so turning tiling on — or changing the
+		// tile's side under it — has to offer the restart the row exists for.
+		{"vae tiling", func() *CLI {
+			return NewCLI("images", "sd-cli", "", ModelFiles{DiffusionModel: "/models/qwen.gguf"}, Options{Folder: "/sd", VaeTiling: true, Extra: []string{"--cfg-scale", "1.0"}})
+		}},
+		{"vae tile size", func() *CLI {
+			return NewCLI("images", "sd-cli", "", ModelFiles{DiffusionModel: "/models/qwen.gguf"}, Options{Folder: "/sd", VaeTiling: true, VaeTileSize: 512, Extra: []string{"--cfg-scale", "1.0"}})
+		}},
 		{"folder", func() *CLI {
 			return NewCLI("images", "sd-cli", "", ModelFiles{DiffusionModel: "/models/qwen.gguf"}, Options{Folder: "/other", Extra: []string{"--cfg-scale", "1.0"}})
 		}},

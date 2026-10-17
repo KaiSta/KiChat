@@ -13,9 +13,16 @@
 package images
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	// Registered for Size: the two formats the HTTP routes return, and the one the
+	// binary writes. WebP has no standard-library decoder and is reported as unknown.
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 )
 
 // Request is one text-to-image generation, normalised across servers.
@@ -49,6 +56,9 @@ type Request struct {
 	// their WebUI has already chosen a model, and overriding it with a guess would
 	// quietly ignore that.
 	Model string
+	// Hires asks for a second sampling pass that enlarges the first picture and
+	// repaints it. The zero value is one ordinary pass; see Hires and OutputSize.
+	Hires Hires
 }
 
 // Image is one generated picture together with the format it arrived in.
@@ -92,9 +102,29 @@ func SniffImage(data []byte, fallbackMime, fallbackExt string) (string, string) 
 	return fallbackMime, fallbackExt
 }
 
+// Size reports the pixel size of a picture this package produced, and false when the bytes
+// are not a format Go can read (WebP is one: no decoder in the standard library, and the
+// WebUI's own `samples_format` can choose it).
+//
+// It exists so "did the second pass actually enlarge this?" can be answered from the answer
+// rather than from the request: the A1111 route accepts a hires payload without saying
+// whether it honours it, and a build that ignores `enable_hr` returns a base-size picture
+// while looking like a success. Only the bytes can tell the two apart.
+func Size(data []byte) (int, int, bool) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return 0, 0, false
+	}
+	return cfg.Width, cfg.Height, true
+}
+
 // Result is what one generation produced.
 type Result struct {
 	Images []Image
+	// DurationMs is how long the draw took, as the caller measured it. It is recorded in
+	// the picture's recipe so the next draw of the same recipe can say what to expect
+	// instead of leaving a user to wonder whether the window has hung.
+	DurationMs int64
 	// Seed is the seed that reproduces this picture: the one the server reported
 	// using, or — when the server reports nothing — the one this app chose and sent.
 	// 0 means no seed is known, which is why a seed this app picks is never 0. The
@@ -123,10 +153,16 @@ type Result struct {
 // given and prints the sampling step into its own log. A draw that takes minutes is the
 // one case where "nothing to report" and "stuck" look identical in the window, which is
 // what makes this worth the wiring.
+// Step and Steps are the sampling pass's own numbering. Steps is the total, so a caller
+// can say "step 3 of 12"; zero means the total is unknown and only Step is worth showing.
 type Progress struct {
-	// Step and Steps are the sampling pass's own numbering. Steps is the total, so a caller
-	// can say "step 3 of 12"; zero means the total is unknown and only Step is worth showing.
 	Step, Steps int
+	// Pass and Passes say which sampling pass this step belongs to. Passes is 1 for an
+	// ordinary draw, and 2 when a hires pass will follow; Pass is 1 until that second
+	// pass starts. They exist because the step counter restarts between the two, and a
+	// row that showed it jumping from 20 of 20 back to 1 of 20 would look stuck rather
+	// than busy.
+	Pass, Passes int
 	// Preview is the picture as it looks so far, nil when this report carries none. It is a
 	// real (small) image rather than a placeholder, which is why a caller may render it.
 	Preview []byte
@@ -210,6 +246,14 @@ var ErrUnavailable = errors.New("image backend unavailable")
 
 // ErrNotConfigured marks a request made with no image server configured.
 var ErrNotConfigured = errors.New("no image backend is configured")
+
+// ErrHiresUnsupported marks a second sampling pass a backend's build does not have.
+//
+// It is separate from Unavailable because the remedy is different and so is the meaning: the
+// binary is installed and can draw, it just cannot enlarge, and the sentence that carries it
+// names the option the build is missing. A caller showing "backend unavailable" for this
+// would send a user to reinstall a program that is working.
+var ErrHiresUnsupported = errors.New("image backend cannot run a second sampling pass")
 
 // ErrCancelled marks a draw the user stopped.
 //

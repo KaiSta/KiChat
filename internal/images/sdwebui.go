@@ -216,7 +216,35 @@ type sdRequest struct {
 	// `generate_image` files what it gets onto one message — so the batch is asked for
 	// explicitly instead of inheriting whatever the server's last session left behind.
 	// stable-diffusion.cpp's `sd-server` parses the same key and draws one picture per `n`.
-	N int `json:"n"`
+	// The second sampling pass. `enable_hr` is A1111's switch for it, and the two keys
+	// beside it are its own names for the size factor and the repaint strength of that pass.
+	//
+	// `hr_second_pass_steps` is deliberately *not* sent: its documented default is 0, which
+	// means "as many steps as the first pass", and that is exactly what this app wants — an
+	// invented count would be this client deciding something the server already has an
+	// answer for. The upscaler is not sent either, for the same reason: the server's own
+	// `hr_upscaler` is what its user configured. An ordinary draw sends none of the three,
+	// because an enabled pass is normalised to the app's 1.5×/0.4 before it reaches here.
+	//
+	// sd-server parses the same keys where its build knows them; a build that does not
+	// ignores them silently, which is why the caller checks the returned picture's size
+	// instead of trusting the request (see images.Size and the generate_image tool).
+	//
+	// The exact target is sent beside the factor whenever the base size is known. That is
+	// deliberate rather than redundant: the two backends round a scale-derived target
+	// differently (A1111 resizes to its own rounded edge and pads the latent; sd.cpp aligns
+	// up), so `hr_scale` alone leaves the output size to the server's arithmetic. A target
+	// the app computed with `Request.OutputSize()` is what both of these routes honour
+	// instead, and it is the floor `verifyHiresOutput` compares the answer against — sd.cpp
+	// may align that target up again to its own coarser grid, which the check accepts.
+	// `hr_scale` remains in the payload for a build that predates `hr_resize_x`/`hr_resize_y`
+	// and because the factor is what the docs describe beside a zero target.
+	EnableHR          bool    `json:"enable_hr,omitempty"`
+	HrScale           float64 `json:"hr_scale,omitempty"`
+	HrResizeX         int     `json:"hr_resize_x,omitempty"`
+	HrResizeY         int     `json:"hr_resize_y,omitempty"`
+	DenoisingStrength float64 `json:"denoising_strength,omitempty"`
+	N                 int     `json:"n"`
 }
 
 // sdResponse is the txt2img answer. `images` holds base64 with no data: prefix —
@@ -293,14 +321,27 @@ func (s *SDWebUI) GenerateWithProgress(ctx context.Context, req Request, report 
 		SamplerName:    strings.TrimSpace(req.Sampler),
 		CfgScale:       req.CfgScale,
 		Seed:           seed,
+		// The second pass, when one was asked for. An omitted switch is the server's own
+		// one-pass behaviour, which is the same shape every other unset field takes.
+		EnableHR:          req.Hires.Enabled,
+		HrScale:           req.Hires.Scale,
+		DenoisingStrength: req.Hires.Denoise,
 		// One picture, whatever the server's own batch settings say; see the field's comment.
 		N: 1,
+	}
+	// A known base size has a target this app can name exactly, and both A1111 and sd-server
+	// take it under these two keys; see the field comments above.
+	if req.Hires.Enabled {
+		if width, height := req.OutputSize(); width > 0 && height > 0 {
+			payload.HrResizeX = width
+			payload.HrResizeY = height
+		}
 	}
 	if model := strings.TrimSpace(req.Model); model != "" {
 		payload.Override = map[string]any{"sd_model_checkpoint": model}
 	}
 
-	stopWatching := s.watchProgress(ctx, report)
+	stopWatching := s.watchProgress(ctx, req.Hires.Enabled, report)
 	defer stopWatching()
 
 	var decoded sdResponse
@@ -362,9 +403,17 @@ const sdPreviewMaxBytes = 4 << 20
 // A report is only sent when there is something in it — a step the server did not have
 // before, or a preview that differs from the last one — because each one crosses the bridge
 // and redraws a thumbnail.
-func (s *SDWebUI) watchProgress(ctx context.Context, report func(Progress)) func() {
+func (s *SDWebUI) watchProgress(ctx context.Context, hires bool, report func(Progress)) func() {
 	if report == nil || s.progressOff() {
 		return func() {}
+	}
+	// How many passes this draw runs, which is what lets the step counter be read as
+	// progress rather than as a number that went backwards when the second pass starts at
+	// 1 again. A server that reports one flat fraction walks past the detection below
+	// without ever looking like a restart, which is correct: it is one bar, not two.
+	passes := 1
+	if hires {
+		passes = 2
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -374,6 +423,8 @@ func (s *SDWebUI) watchProgress(ctx context.Context, report func(Progress)) func
 		defer ticker.Stop()
 		var lastImage string
 		var lastStep int
+		var lastSteps int
+		pass := 1
 		for {
 			select {
 			case <-stop:
@@ -399,6 +450,11 @@ func (s *SDWebUI) watchProgress(ctx context.Context, report func(Progress)) func
 				update.Steps = 100
 				update.Step = int(math.Round(p.Progress * 100))
 			}
+			if update.Steps > 0 && lastSteps > 0 && update.Step < lastStep && pass < passes {
+				pass++
+			}
+			lastSteps = update.Steps
+			update.Pass, update.Passes = pass, passes
 			if p.CurrentImage != "" && p.CurrentImage != lastImage {
 				lastImage = p.CurrentImage
 				if data, err := decodeImage(p.CurrentImage); err == nil && len(data) <= sdPreviewMaxBytes {

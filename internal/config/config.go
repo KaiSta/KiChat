@@ -124,6 +124,19 @@ type ImageSettings struct {
 	// field is the model's per picture, and one filled in here is a value the model
 	// cannot overrule (see internal/tools/image.go).
 	CfgScale float64 `json:"cfgScale"`
+	// HiresEnabled asks for a second sampling pass: the picture is drawn at Width×Height,
+	// enlarged, and repainted at HiresDenoise. It is off by default because it costs
+	// roughly one more draw's time for the same picture at a larger size.
+	//
+	// HiresScale is how much larger the output is per side and HiresDenoise how far the
+	// second pass may depart from the first — 0 for either means the app's own default
+	// (1.5× at 0.4), not the backend's, because the numbers are bounded here (see
+	// NormaliseImageClamps) and a WebUI's own 0.7 denoise is outside the range this app
+	// will repaint in. Both stay stored while the switch is off, so turning it back on
+	// returns the numbers the user chose rather than resetting them.
+	HiresEnabled bool    `json:"hiresEnabled"`
+	HiresScale   float64 `json:"hiresScale"`
+	HiresDenoise float64 `json:"hiresDenoise"`
 	// SaveFolder is where "Save as…" starts. It is remembered after a successful
 	// save because a user who exports pictures to a folder wants the next one to
 	// offer the same place, and re-picking it every time is the sort of friction
@@ -215,6 +228,18 @@ type ImageSettings struct {
 	// `--sigmas` schedule, `--diffusion-fa`, a `-v` log level — is exactly what a turbo
 	// model needs.
 	CLIExtraArgs string `json:"cliExtraArgs"`
+	// CLIVaeTiling passes `--vae-tiling`: the VAE decodes the latent in tiles rather than
+	// in one piece. It is what makes a large picture — in particular an enlarged second
+	// pass — fit on a card that can sample the latent but cannot decode it in one go.
+	// CLIVaeTileSize is `--vae-tile-size`, the tile's side in pixels, 0 for the build's
+	// own.
+	//
+	// Both are passed only when the build's own `-h` lists them (images.Options), because
+	// an unknown option fails the whole draw on this backend. They belong to the model
+	// load rather than to one picture, so they are part of the managed server's key: a
+	// change is a restart, and the row says so.
+	CLIVaeTiling   bool `json:"cliVaeTiling"`
+	CLIVaeTileSize int  `json:"cliVaeTileSize"`
 }
 
 // Image backend kinds, as stored in ImageSettings.Kind.
@@ -281,6 +306,18 @@ const (
 	// and therefore has its own clamp below.
 	MinImageCfgScale = images.MinCfgScale
 	MaxImageCfgScale = images.MaxCfgScale
+	// The second sampling pass's bounds, named the same way.
+	MinImageHiresScale     = images.MinHiresScale
+	MaxImageHiresScale     = images.MaxHiresScale
+	MinImageHiresDenoise   = images.MinHiresDenoise
+	MaxImageHiresDenoise   = images.MaxHiresDenoise
+	DefaultImageHiresScale = images.DefaultHiresScale
+	// DefaultImageHiresDenoise is what an enabled pass repaints at when nobody chose a
+	// number — the value Request.Hires.Normalised would apply, named here so the panel
+	// and the request cannot disagree about it.
+	DefaultImageHiresDenoise = images.DefaultHiresDenoise
+	// MaxImageOutputDimension is the largest side a hires picture may end up at.
+	MaxImageOutputDimension = images.MaxOutputDimension
 )
 
 // NormaliseImageClamps repairs the numeric image fields in place, reporting
@@ -331,6 +368,48 @@ func NormaliseImageClamps(s *ImageSettings) bool {
 	}
 	if cfg != s.CfgScale {
 		s.CfgScale = cfg
+		changed = true
+	}
+	// The second pass's two numbers, read with one difference from CfgScale above: they are
+	// only repaired while the pass is on. An enabled pass cannot keep a "nobody chose one"
+	// zero, because there is no backend default worth inheriting — the program's own hires
+	// denoise is 0.7, and repainting at 0.7 is composing a new picture rather than
+	// enlarging this one — so zero becomes this app's default and a typed number is clamped
+	// to the range. A disabled pass keeps whatever was stored, so flipping the switch back
+	// returns the numbers the user chose.
+	if s.HiresEnabled {
+		scale := s.HiresScale
+		switch {
+		case math.IsNaN(scale) || scale <= 0:
+			scale = DefaultImageHiresScale
+		case scale < MinImageHiresScale:
+			scale = MinImageHiresScale
+		case scale > MaxImageHiresScale:
+			scale = MaxImageHiresScale
+		}
+		if scale != s.HiresScale {
+			s.HiresScale = scale
+			changed = true
+		}
+		denoise := s.HiresDenoise
+		switch {
+		case math.IsNaN(denoise) || denoise <= 0:
+			denoise = DefaultImageHiresDenoise
+		case denoise < MinImageHiresDenoise:
+			denoise = MinImageHiresDenoise
+		case denoise > MaxImageHiresDenoise:
+			denoise = MaxImageHiresDenoise
+		}
+		if denoise != s.HiresDenoise {
+			s.HiresDenoise = denoise
+			changed = true
+		}
+	}
+	// The VAE tile side is a pixel count like the two sizes above: zero is the build's
+	// own, and a number outside what a card can hold is clamped. The floor is the smallest
+	// tile the program documents; anything below it is a decode in more pieces than pixels.
+	if next := clamp(s.CLIVaeTileSize, MinImageDimension, MaxImageDimension); next != s.CLIVaeTileSize {
+		s.CLIVaeTileSize = next
 		changed = true
 	}
 	// Three kinds have a spelling. The HTTP server is the empty string, which is what

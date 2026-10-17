@@ -931,6 +931,66 @@ func TestNormaliseClampsImageFields(t *testing.T) {
 	}
 }
 
+// TestNormaliseRepairsTheSecondPassOnlyWhileItIsOn pins the one difference between the
+// second pass's numbers and every other field: they are repaired while the switch is on and
+// left exactly as stored while it is off. Flipping the switch back has to return the numbers
+// the user chose, and a disabled pass must not quietly acquire defaults it would then send.
+func TestNormaliseRepairsTheSecondPassOnlyWhileItIsOn(t *testing.T) {
+	cases := []struct {
+		name           string
+		enabled        bool
+		scale, denoise float64
+		wantScale      float64
+		wantDenoise    float64
+	}{
+		{"disabled keeps a surprising number", false, 4, 0.9, 4, 0.9},
+		{"disabled keeps zero", false, 0, 0, 0, 0},
+		{"enabled with nothing chosen gets the defaults", true, 0, 0, DefaultImageHiresScale, DefaultImageHiresDenoise},
+		{"a real pair survives", true, 1.4, 0.35, 1.4, 0.35},
+		{"below the floors is raised", true, 1.01, 0.05, MinImageHiresScale, MinImageHiresDenoise},
+		{"above the ceilings is capped", true, 9, 0.99, MaxImageHiresScale, MaxImageHiresDenoise},
+		{"negative is 'nobody chose one'", true, -1, -1, DefaultImageHiresScale, DefaultImageHiresDenoise},
+		{"not a number is 'nobody chose one'", true, math.NaN(), math.NaN(), DefaultImageHiresScale, DefaultImageHiresDenoise},
+	}
+	for _, tc := range cases {
+		s := Default()
+		s.Images.HiresEnabled = tc.enabled
+		s.Images.HiresScale, s.Images.HiresDenoise = tc.scale, tc.denoise
+		s.normalise()
+		if s.Images.HiresScale != tc.wantScale || s.Images.HiresDenoise != tc.wantDenoise {
+			t.Errorf("%s: (%v, %v) normalised to (%v, %v), want (%v, %v)", tc.name,
+				tc.scale, tc.denoise, s.Images.HiresScale, s.Images.HiresDenoise,
+				tc.wantScale, tc.wantDenoise)
+		}
+	}
+}
+
+// TestNormaliseClampsTheVaeTileSize keeps the tile side under the same rule as the two
+// picture sizes: zero is the build's own (not a size to raise), and a number a card cannot
+// hold is clamped rather than handed to the program. The floor matters because a tile
+// smaller than the decoder's own block is more pieces than pixels.
+func TestNormaliseClampsTheVaeTileSize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"zero is the build's own", 0, 0},
+		{"a real tile survives", 512, 512},
+		{"below the floor is raised", 8, MinImageDimension},
+		{"above the ceiling is capped", 9000, MaxImageDimension},
+		{"negative is the build's own", -4, 0},
+	}
+	for _, tc := range cases {
+		s := Default()
+		s.Images.CLIVaeTileSize = tc.in
+		s.normalise()
+		if s.Images.CLIVaeTileSize != tc.want {
+			t.Errorf("%s: tile %d normalised to %d, want %d", tc.name, tc.in, s.Images.CLIVaeTileSize, tc.want)
+		}
+	}
+}
+
 // TestNormaliseRestoresTheImageAddress keeps an emptied field from hiding the
 // address the app would really use, exactly as the shipped backends do.
 func TestNormaliseRestoresTheImageAddress(t *testing.T) {

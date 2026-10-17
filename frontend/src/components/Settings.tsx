@@ -1700,6 +1700,18 @@ const MODEL_PATTERNS = ['*.gguf', '*.safetensors', '*']
  */
 const SIZE_PRESETS = [512, 768, 1024]
 
+// The second-pass bounds, mirrored from internal/images/limits.go. They are not bridge
+// constants — Go's exported names do not reach JavaScript — so the panel states its own
+// and the backend clamps again when the setting is saved.
+const IMAGE_HIRES_LIMITS = {
+  minScale: 1.25,
+  maxScale: 2,
+  defaultScale: 1.5,
+  minDenoise: 0.2,
+  maxDenoise: 0.6,
+  defaultDenoise: 0.4,
+}
+
 /**
  * Fills one CLI path from the native file dialog.
  *
@@ -2516,6 +2528,41 @@ function ImagesTab({
                 {t('settings.images.cliOffloadToCpuHint')}
               </span>
             </label>
+            {/* Tiling decides how the VAE decodes a picture larger than the card's memory
+                can hold at once. It is a bare flag like the offload switch, so it does not
+                depend on what the installed build calls the value; a build that lacks the
+                flag ignores it rather than failing the draw, and that is stated rather
+                than left to be discovered. */}
+            <label
+              className="flex items-center gap-2 text-[12px] sm:col-span-2"
+              title={t('settings.images.cliVaeTilingHint')}
+            >
+              <input
+                type="checkbox"
+                checked={images.cliVaeTiling ?? false}
+                aria-label={t('settings.images.cliVaeTiling')}
+                onChange={(e) => update({ cliVaeTiling: e.target.checked })}
+              />
+              <span>{t('settings.images.cliVaeTiling')}</span>
+              <span className="faint flex-1 text-[11px]">
+                {t('settings.images.cliVaeTilingHint')}
+              </span>
+            </label>
+            {images.cliVaeTiling ? (
+              <label className="text-[12px] sm:col-span-2">
+                {t('settings.images.cliVaeTileSize')}
+                <input
+                  className="input mono mt-1"
+                  type="number"
+                  min={64}
+                  max={2048}
+                  step={64}
+                  value={images.cliVaeTileSize || ''}
+                  onChange={(e) => update({ cliVaeTileSize: Number(e.target.value) || 0 })}
+                  placeholder={t('settings.images.auto')}
+                />
+              </label>
+            ) : null}
             <label className="text-[12px] sm:col-span-2" title={t('settings.images.cliExtraHint')}>
               {t('settings.images.cliExtra')}
               <input
@@ -2660,6 +2707,53 @@ function ImagesTab({
             placeholder={t('settings.images.modelDecides')}
           />
         </label>
+        {/* The second sampling pass. It is a fixed setting rather than something the model
+            may ask for, because it doubles the time a draw costs and turns a medium
+            picture into a large one — a decision for the person paying for the GPU. Its
+            two numbers stay stored while the switch is off, so flipping it back restores
+            what was chosen instead of resetting it. */}
+        <div className="sm:col-span-2">
+          <label className="flex items-center gap-2 text-[12px]" title={t('settings.images.hiresHint')}>
+            <input
+              type="checkbox"
+              checked={images.hiresEnabled ?? false}
+              aria-label={t('settings.images.hires')}
+              onChange={(e) => update({ hiresEnabled: e.target.checked })}
+            />
+            <span>{t('settings.images.hires')}</span>
+            <span className="faint flex-1 text-[11px]">{t('settings.images.hiresHint')}</span>
+          </label>
+          {images.hiresEnabled ? (
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              <label className="text-[12px]">
+                {t('settings.images.hiresScale')}
+                <input
+                  className="input mono mt-1"
+                  type="number"
+                  min={IMAGE_HIRES_LIMITS.minScale}
+                  max={IMAGE_HIRES_LIMITS.maxScale}
+                  step={0.05}
+                  value={images.hiresScale || ''}
+                  onChange={(e) => update({ hiresScale: Number(e.target.value) || 0 })}
+                  placeholder={String(IMAGE_HIRES_LIMITS.defaultScale)}
+                />
+              </label>
+              <label className="text-[12px]" title={t('settings.images.hiresDenoiseHint')}>
+                {t('settings.images.hiresDenoise')}
+                <input
+                  className="input mono mt-1"
+                  type="number"
+                  min={IMAGE_HIRES_LIMITS.minDenoise}
+                  max={IMAGE_HIRES_LIMITS.maxDenoise}
+                  step={0.05}
+                  value={images.hiresDenoise || ''}
+                  onChange={(e) => update({ hiresDenoise: Number(e.target.value) || 0 })}
+                  placeholder={String(IMAGE_HIRES_LIMITS.defaultDenoise)}
+                />
+              </label>
+            </div>
+          ) : null}
+        </div>
         <label className="text-[12px] sm:col-span-2">
           {t('settings.images.saveFolder')}
           <div className="mt-1 flex items-center gap-2">
@@ -2741,14 +2835,15 @@ function ImagesTab({
 }
 
 /**
- * The fields a start of the managed server reads: the model half of its command line.
+ * The fields a start of the managed server reads: the half of its command line that describes
+ * the load.
  *
- * It mirrors `images.CLI.modelArgs` on the backend — the folder, the program, the model set,
- * the offload switch and the user's own arguments — and nothing else. The listener is
- * deliberately not part of it: a port is chosen when the process starts, so including one
- * would make every running server look out of date the moment it came up. This is the only
- * place the frontend knows which fields those are, and it knows them for one question: will
- * applying this profile need a reload?
+ * It mirrors `images.CLI.ServerKey` on the backend — the folder, the program, the model set,
+ * the offload switch, the user's own arguments and the VAE decode switches — and nothing else.
+ * The listener is deliberately not part of it: a port is chosen when the process starts, so
+ * including one would make every running server look out of date the moment it came up. This is
+ * the only place the frontend knows which fields those are, and it knows them for one question:
+ * will applying this profile need a reload?
  */
 function startupKey(s: config.ImageSettings): string {
   return JSON.stringify([
@@ -2764,6 +2859,10 @@ function startupKey(s: config.ImageSettings): string {
     s.cliT5xxl,
     s.cliOffloadToCpu,
     s.cliExtraArgs,
+    // The VAE decode is part of the load rather than of a request, so turning tiling on —
+    // or changing the tile under it — is the same kind of change as a different checkpoint.
+    s.cliVaeTiling,
+    s.cliVaeTileSize,
   ])
 }
 

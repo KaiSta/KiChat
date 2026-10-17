@@ -1,10 +1,13 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,6 +28,9 @@ type fakeImageProvider struct {
 	result images.Result
 	err    error
 	calls  int
+	// delay makes a draw take measurable time, which is the only way a test can tell
+	// that DurationMs was measured by the caller rather than left at zero.
+	delay time.Duration
 }
 
 func (f *fakeImageProvider) ID() string                   { return "fake" }
@@ -37,6 +43,9 @@ func (f *fakeImageProvider) Samplers(context.Context) ([]string, error) { return
 func (f *fakeImageProvider) Generate(_ context.Context, req images.Request) (images.Result, error) {
 	f.calls++
 	f.got = req
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
 	if f.err != nil {
 		return images.Result{}, f.err
 	}
@@ -591,6 +600,192 @@ func TestGenerateImageRecordsWhatTheServerActuallyUsed(t *testing.T) {
 	}
 	if recipe.Model != "sdxl.safetensors" {
 		t.Errorf("model = %q, want the checkpoint the server reported using", recipe.Model)
+	}
+}
+
+// TestGenerateImageAsksForTheSecondPassConfiguredInSettings pins the settings-to-request
+// direction and the recipe it leaves behind. The picture here is the deliberately
+// undecodable fixture, so the verification that follows a draw cannot answer — the point of
+// this test is that the pass was asked for and recorded, not that a server honoured it.
+// DurationMs is asserted from a provider that actually sleeps, because a number measured
+// nowhere would otherwise still read as zero and look plausible.
+func TestGenerateImageAsksForTheSecondPassConfiguredInSettings(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture(), delay: 5 * time.Millisecond}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{
+		Width: 768, Height: 512, Steps: 20,
+		HiresEnabled: true, HiresScale: 1.5, HiresDenoise: 0.4,
+	})
+
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage,
+		`{"prompt":"a red fox in deep snow"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if !provider.got.Hires.Enabled {
+		t.Fatal("the second pass was configured but never asked for")
+	}
+	if provider.got.Hires.Scale != 1.5 || provider.got.Hires.Denoise != 0.4 {
+		t.Errorf("hires = %+v, want scale 1.5 and denoise 0.4", provider.got.Hires)
+	}
+	// The base size is what the request carries; the final size is its product.
+	if provider.got.Width != 768 || provider.got.Height != 512 {
+		t.Errorf("base size = %dx%d, want the configured 768x512", provider.got.Width, provider.got.Height)
+	}
+	if w, h := provider.got.OutputSize(); w != 1152 || h != 768 {
+		t.Errorf("the request's own final size = %dx%d, want 1152x768", w, h)
+	}
+
+	recipe := firstAttachment(t, st, chatID).Generation
+	if recipe == nil {
+		t.Fatal("the picture was stored without a recipe")
+	}
+	if !recipe.Hires || recipe.HiresScale != 1.5 || recipe.HiresDenoise != 0.4 {
+		t.Errorf("recipe lost the second pass: %+v", recipe)
+	}
+	if recipe.Width != 768 || recipe.Height != 512 {
+		t.Errorf("recipe must keep the base size, not the product: %+v", recipe)
+	}
+	if recipe.DurationMs < 5 {
+		t.Errorf("DurationMs = %d, want at least the 5 ms the provider slept", recipe.DurationMs)
+	}
+}
+
+// pngOfSize encodes a real PNG of the given size, which is what makes the size check
+// answerable: the ordinary fixture is a signature and a handful of bytes, so `images.Size`
+// refuses it and verification silently has nothing to compare.
+func pngOfSize(t *testing.T, width, height int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, width, height))); err != nil {
+		t.Fatalf("encode %dx%d png: %v", width, height, err)
+	}
+	return buf.Bytes()
+}
+
+// TestGenerateImageRefusesASecondPassThatDidNotEnlargeThePicture is the A1111 failure this
+// check exists for: the route accepts `enable_hr` and answers 200 with a base-size picture
+// when the server cannot honour it. Filing that under a recipe claiming an enlargement would
+// make every redraw ask for a second pass again and record the same lie, so nothing is filed
+// at all and the error names both sizes.
+func TestGenerateImageRefusesASecondPassThatDidNotEnlargeThePicture(t *testing.T) {
+	base := pngOfSize(t, 768, 512)
+	provider := &fakeImageProvider{result: images.Result{
+		Images: []images.Image{{Data: base, Mime: images.MimePNG, Ext: "png"}},
+		Seed:   7,
+	}}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{
+		Width: 768, Height: 512,
+		HiresEnabled: true, HiresScale: 1.5, HiresDenoise: 0.4,
+	})
+
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	_, err := service.Execute(ctx, chatID, ToolGenerateImage, `{"prompt":"a red fox"}`)
+	if err == nil {
+		t.Fatal("a base-size picture was accepted for a second-pass recipe")
+	}
+	if !errors.Is(err, images.ErrHiresUnsupported) {
+		t.Fatalf("error = %v, want it to wrap ErrHiresUnsupported", err)
+	}
+	for _, want := range []string{"768x512", "1152x768"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not name %s, which is the whole diagnosis: %v", want, err)
+		}
+	}
+	if attachments, _ := st.ListAttachments(chatID); len(attachments) != 0 {
+		t.Errorf("a refused second pass filed %d attachment(s)", len(attachments))
+	}
+}
+
+// TestGenerateImageFilesASecondPassThatDeliveredTheAlignedSize is the accepting half of the
+// check above, with the rounding that made it necessary: 520 × 1.25 is 650, `OutputSize`
+// aligns that up to 656, and both backends are asked for 656 exactly. A picture at that size
+// is filed, and the recipe keeps the 520×520 base it was drawn from.
+func TestGenerateImageFilesASecondPassThatDeliveredTheAlignedSize(t *testing.T) {
+	finished := pngOfSize(t, 656, 656)
+	provider := &fakeImageProvider{result: images.Result{
+		Images: []images.Image{{Data: finished, Mime: images.MimePNG, Ext: "png"}},
+		Seed:   4242,
+	}}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{
+		Width: 520, Height: 520,
+		HiresEnabled: true, HiresScale: 1.25, HiresDenoise: 0.4,
+	})
+
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage, `{"prompt":"a red fox"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if w, h := provider.got.OutputSize(); w != 656 || h != 656 {
+		t.Errorf("the request's own final size = %dx%d, want the aligned 656x656", w, h)
+	}
+	recipe := firstAttachment(t, st, chatID).Generation
+	if recipe == nil || !recipe.Hires || recipe.Width != 520 || recipe.Height != 520 {
+		t.Fatalf("the filed recipe does not describe the second pass from its base size: %+v", recipe)
+	}
+}
+
+// TestGenerateImageFilesASecondPassThatTheBackendAlignedFurther covers the other half of the
+// rounding, and the one stable-diffusion.cpp actually performs: the app asks for 656×656, but
+// `GenerationRequest::align_image_size` rounds a target up to `vae_scale_factor *
+// diffusion_model_down_factor` — 64 for a UNet — so the picture comes back 704×704. That is
+// the second pass at the size the build can draw, not a refusal.
+func TestGenerateImageFilesASecondPassThatTheBackendAlignedFurther(t *testing.T) {
+	finished := pngOfSize(t, 704, 704)
+	provider := &fakeImageProvider{result: images.Result{
+		Images: []images.Image{{Data: finished, Mime: images.MimePNG, Ext: "png"}},
+		Seed:   4242,
+	}}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{
+		Width: 520, Height: 520,
+		HiresEnabled: true, HiresScale: 1.25, HiresDenoise: 0.4,
+	})
+
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage, `{"prompt":"a red fox"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	recipe := firstAttachment(t, st, chatID).Generation
+	if recipe == nil || !recipe.Hires {
+		t.Fatalf("the filed recipe does not describe the second pass: %+v", recipe)
+	}
+}
+
+// TestRegenerateKeepsTheRecordedSecondPass is the redraw direction: a recipe that asks for
+// the second pass must ask for it again, and one without it must stay an ordinary draw. The
+// undecodable fixture is deliberate here too — a redraw of a second-pass recipe cannot be
+// checked against a size it never had in the fixture.
+func TestRegenerateKeepsTheRecordedSecondPass(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage,
+		`{"prompt":"a red fox","width":512,"height":512}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	original := firstAttachment(t, st, chatID)
+
+	withHires := *original.Generation
+	withHires.Hires = true
+	withHires.HiresScale = 1.75
+	withHires.HiresDenoise = 0.3
+	if _, err := service.Regenerate(context.Background(), original.ID, withHires); err != nil {
+		t.Fatalf("Regenerate(with hires): %v", err)
+	}
+	if !provider.got.Hires.Enabled || provider.got.Hires.Scale != 1.75 || provider.got.Hires.Denoise != 0.3 {
+		t.Errorf("a recorded second pass was not asked for again: %+v", provider.got.Hires)
+	}
+
+	withoutHires := withHires
+	withoutHires.Hires = false
+	withoutHires.HiresScale = 0
+	withoutHires.HiresDenoise = 0
+	if _, err := service.Regenerate(context.Background(), original.ID, withoutHires); err != nil {
+		t.Fatalf("Regenerate(without hires): %v", err)
+	}
+	if provider.got.Hires.Enabled {
+		t.Errorf("a recipe without a second pass asked for one: %+v", provider.got.Hires)
 	}
 }
 

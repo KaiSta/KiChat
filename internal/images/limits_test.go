@@ -96,6 +96,119 @@ func TestNormalisedBoundsTheGuidanceScale(t *testing.T) {
 	}
 }
 
+// TestHiresNormalisesItsNumbers pins the second pass's bounds and its one sentinel: a
+// disabled pass is the zero value, and an enabled one with no numbers gets the defaults
+// rather than the minimum. The distinction matters downstream because the recipe stores
+// these fields only when the pass ran, so "configured but off" must not leave numbers behind.
+func TestHiresNormalisesItsNumbers(t *testing.T) {
+	cases := []struct {
+		name string
+		in   Hires
+		want Hires
+	}{
+		{"off is the zero value", Hires{Enabled: false, Scale: 1.8, Denoise: 0.5}, Hires{}},
+		{"an enabled pass with no numbers gets the defaults", Hires{Enabled: true}, Hires{Enabled: true, Scale: DefaultHiresScale, Denoise: DefaultHiresDenoise}},
+		{"inside the range is untouched", Hires{Enabled: true, Scale: 1.4, Denoise: 0.35}, Hires{Enabled: true, Scale: 1.4, Denoise: 0.35}},
+		{"a scale below the minimum is raised", Hires{Enabled: true, Scale: 1.01, Denoise: 0.4}, Hires{Enabled: true, Scale: MinHiresScale, Denoise: 0.4}},
+		{"a scale above the maximum is capped", Hires{Enabled: true, Scale: 4, Denoise: 0.4}, Hires{Enabled: true, Scale: MaxHiresScale, Denoise: 0.4}},
+		{"a denoise below the minimum is raised", Hires{Enabled: true, Scale: 1.5, Denoise: 0.05}, Hires{Enabled: true, Scale: 1.5, Denoise: MinHiresDenoise}},
+		{"a denoise above the maximum is capped", Hires{Enabled: true, Scale: 1.5, Denoise: 0.99}, Hires{Enabled: true, Scale: 1.5, Denoise: MaxHiresDenoise}},
+		{"negative numbers are the sentinel", Hires{Enabled: true, Scale: -1, Denoise: -1}, Hires{Enabled: true, Scale: DefaultHiresScale, Denoise: DefaultHiresDenoise}},
+		{"not a number is the sentinel", Hires{Enabled: true, Scale: math.NaN(), Denoise: math.NaN()}, Hires{Enabled: true, Scale: DefaultHiresScale, Denoise: DefaultHiresDenoise}},
+	}
+	for _, c := range cases {
+		if got := c.in.Normalised(); got != c.want {
+			t.Errorf("%s: Normalised(%+v) = %+v, want %+v", c.name, c.in, got, c.want)
+		}
+		if again := c.in.Normalised().Normalised(); again != c.in.Normalised() {
+			t.Errorf("%s: normalising twice changed the pass: %+v then %+v", c.name, c.in.Normalised(), again)
+		}
+	}
+}
+
+// TestOutputSizeIsTheProductOfBaseAndScale keeps the one arithmetic both the recipe and the
+// verification of a second pass depend on in one place. The aspect ratio is scaled, not
+// independently rounded, and a size nobody chose stays unknown rather than becoming a number
+// this app made up.
+func TestOutputSizeIsTheProductOfBaseAndScale(t *testing.T) {
+	cases := []struct {
+		name         string
+		req          Request
+		wantW, wantH int
+	}{
+		{"no second pass is the base size", Request{Width: 768, Height: 512}, 768, 512},
+		{"one and a half times", Request{Width: 768, Height: 512, Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4}}, 1152, 768},
+		// The base is normalised first, because that is the size the first pass really
+		// draws: 700x500 becomes 704x504 on the latent grid, and 704x504 × 1.5 is
+		// 1056x756, which the second pass then rounds up to 1056x760.
+		{"the base is rounded before it is scaled", Request{Width: 700, Height: 500, Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4}}, 1056, 760},
+		// 520 × 1.25 is 650, and the app's 8-grid prediction is 656. A1111 returns that
+		// exact target; sd.cpp aligns it again to its own spatial multiple (704 for a UNet),
+		// which is why verification treats the prediction as a floor rather than an
+		// equality. Rounding to the nearest multiple would predict 648 and then refuse
+		// A1111's real answer.
+		{"a scaled edge is aligned up, not to the nearest multiple", Request{Width: 520, Height: 520, Hires: Hires{Enabled: true, Scale: 1.25, Denoise: 0.4}}, 656, 656},
+		{"an unknown base stays unknown", Request{Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4}}, 0, 0},
+		{"an unknown height stays unknown", Request{Width: 768, Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4}}, 768, 0},
+	}
+	for _, c := range cases {
+		gotW, gotH := c.req.OutputSize()
+		if gotW != c.wantW || gotH != c.wantH {
+			t.Errorf("%s: OutputSize() = %dx%d, want %dx%d", c.name, gotW, gotH, c.wantW, c.wantH)
+		}
+	}
+}
+
+// TestSDWebUIAsksForTheSecondPassOnlyWhenItIsOn pins the payload the A1111 route reads.
+// The keys are the server's own spelling, and the one that matters is enable_hr: a payload
+// that carried the numbers but not the switch would draw an ordinary picture and the tool
+// would have to reject it.
+func TestSDWebUIAsksForTheSecondPassOnlyWhenItIsOn(t *testing.T) {
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"images":["`+base64.StdEncoding.EncodeToString(pngBytes)+`"],"info":"{}"}`)
+	}))
+	defer server.Close()
+
+	client := NewSDWebUI("images", "SD WebUI", server.URL, "")
+	if _, err := client.Generate(context.Background(), Request{
+		Prompt: "a fox", Width: 768, Height: 512,
+		Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4},
+	}); err != nil {
+		t.Fatalf("Generate(hires): %v", err)
+	}
+	if _, err := client.Generate(context.Background(), Request{Prompt: "a fox"}); err != nil {
+		t.Fatalf("Generate(one pass): %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2", len(bodies))
+	}
+	// The target is the app's number, not a second description of the factor: 768×512 at
+	// 1.5× is 1152×768, and both A1111 and sd-server honour `hr_resize_x`/`hr_resize_y`.
+	for key, want := range map[string]any{
+		"enable_hr": true, "hr_scale": 1.5, "denoising_strength": 0.4,
+		"hr_resize_x": float64(1152), "hr_resize_y": float64(768),
+	} {
+		if got, ok := bodies[0][key]; !ok || got != want {
+			t.Errorf("the second-pass payload lacks %s=%v (got %v)", key, want, got)
+		}
+	}
+	if _, ok := bodies[1]["enable_hr"]; ok {
+		t.Errorf("an ordinary draw carried enable_hr: %v", bodies[1])
+	}
+	for _, key := range []string{"hr_resize_x", "hr_resize_y"} {
+		if _, ok := bodies[1][key]; ok {
+			t.Errorf("an ordinary draw carried %s: %v", key, bodies[1])
+		}
+	}
+}
+
 // TestSDWebUIBoundsTheRequestItSends is the half the callers cannot give: the number has to
 // be bounded by the provider as well, because a future caller is free to build a request
 // and never normalise it. Everything asserted here is read off the bytes that reached the

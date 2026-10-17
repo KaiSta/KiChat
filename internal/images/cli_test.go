@@ -674,6 +674,190 @@ func TestCLIReportsStepsAndAPreviewWhileItDraws(t *testing.T) {
 	}
 }
 
+// cliWithHires is a fake `sd-cli` whose own help lists the second pass and the VAE tiling
+// switches, which is the only thing that makes this client pass them.
+const cliWithHires = `
+if [ "$1" = "-h" ]; then
+  echo "usage: sd-cli [options]"
+  echo "  --hires                   enable a second sampling pass"
+  echo "  --hires-scale <n>         how much larger the output is"
+  echo "  --hires-width <n>         target width of the second pass"
+  echo "  --hires-height <n>        target height of the second pass"
+  echo "  --hires-denoising-strength <n>  denoise strength of the second pass"
+  echo "  --vae-tiling              decode the latent in tiles"
+  echo "  --vae-tile-size <n>       tile size for the VAE"
+  exit 0
+fi
+` + cliRecorder
+
+// cliWithHiresButNoSize is the fork shape upstream never ships: `--hires` is listed, and
+// neither a scale nor a target beside it. `--hires` alone is a second pass at whatever the
+// program's own `hires_scale` default is, which is 2 upstream and 1.5 in this app — so the
+// picture is real, the recipe records a different one, and only a refusal up front can tell
+// the two apart before minutes of sampling.
+const cliWithHiresButNoSize = `
+if [ "$1" = "-h" ]; then
+  echo "usage: sd-cli [options]"
+  echo "  --hires                   enable a second sampling pass"
+  echo "  --hires-denoising-strength <n>  denoise strength of the second pass"
+  exit 0
+fi
+` + cliRecorder
+
+// TestTheHelpProbeMatchesAFlagAsAWholeName is the substring trap: `--hires` is inside
+// `--hires-upscalers-dir`, which a build can list while lacking the second pass itself. A
+// probe that answered yes from a substring would then pass `--hires` to a program that does
+// not know it, and an unknown option fails the whole run on this backend. The punctuation
+// cases are here because usage lines spell a flag as `--hires,` or `(--hires)`.
+func TestTheHelpProbeMatchesAFlagAsAWholeName(t *testing.T) {
+	cases := []struct {
+		help, flag string
+		want       bool
+	}{
+		{"  --hires-upscalers-dir <dir>  where upscalers live", "--hires", false},
+		{"  --hires <n>  enable a second pass", "--hires", true},
+		{"  --hires, --hires-scale <n>", "--hires", true},
+		{"  --hires-scale=<n>  how much larger", "--hires-scale", true},
+		{"  (requires --vae-tiling)", "--vae-tiling", true},
+		{"  --preview-path <path>", "--preview", false},
+		{"", "--hires", false},
+	}
+	for _, tc := range cases {
+		if got := helpLists(tc.help, tc.flag); got != tc.want {
+			t.Errorf("helpLists(%q, %q) = %v, want %v", tc.help, tc.flag, got, tc.want)
+		}
+	}
+}
+
+// TestTheLogReadsASecondBarAsTheSecondPass pins the one signal that tells a hires row the
+// counter did not go backwards. The program prints one bar per sampling pass and numbers each
+// from 1, so the pass is inferred from a step that is lower than the one before it — and only
+// while the draw has another pass to enter. A one-pass draw that reprints a stale number must
+// stay on pass 1 rather than invent a pass that will never run.
+func TestTheLogReadsASecondBarAsTheSecondPass(t *testing.T) {
+	hires := &cliLog{pass: 1, passes: 2}
+	hires.write("  |=====>    | 4/4 - 2.20s/it")
+	hires.write("  |=>        | 1/4 - 2.20s/it")
+	if step, steps, pass, passes := hires.progress(); step != 1 || steps != 4 || pass != 2 || passes != 2 {
+		t.Errorf("hires progress = %d/%d pass %d/%d, want 1/4 pass 2/2", step, steps, pass, passes)
+	}
+
+	one := &cliLog{pass: 1, passes: 1}
+	one.write("  |=====>    | 4/4 - 2.20s/it")
+	one.write("  |=>        | 1/4 - 2.20s/it")
+	if _, _, pass, passes := one.progress(); pass != 1 || passes != 1 {
+		t.Errorf("one-pass progress = pass %d/%d, want the only pass", pass, passes)
+	}
+}
+
+// TestCLIAsksForTheSecondPassAndTheVaeSwitches pins the two groups of flags this client only
+// passes when the build's own help lists them. A build without `--hires` is refused rather
+// than drawn at base size — that is the next test — while a build without the VAE switches
+// simply loses them, because tiling is a comfort for a machine rather than a property of the
+// picture.
+func TestCLIAsksForTheSecondPassAndTheVaeSwitches(t *testing.T) {
+	binary := fakeCLI(t, cliWithHires)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"},
+		Options{VaeTiling: true, VaeTileSize: 512})
+
+	if _, err := client.Generate(t.Context(), Request{
+		Prompt: "a red fox",
+		Width:  768, Height: 512,
+		Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	args := strings.Join(argsOf(t, binary), " ")
+	for _, want := range []string{
+		"--hires", "--hires-scale 1.5", "--hires-denoising-strength 0.4",
+		"--hires-width 1152", "--hires-height 768",
+		"--vae-tiling", "--vae-tile-size 512",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("the command line lacks %q:\n%s", want, args)
+		}
+	}
+}
+
+// TestCLIAsksForTheAlignedOutputSize is the reason the target is passed at all: the base
+// size times the scale is rarely already a latent multiple, and the program's own rounding is
+// not the number the recipe records. 520 × 1.25 is 650, which `Request.OutputSize` aligns up
+// to 656; a command line carrying only `--hires-scale 1.25` would leave the program to pick
+// 648 or 656, and `verifyHiresOutput` would then disagree with a second pass that did happen.
+func TestCLIAsksForTheAlignedOutputSize(t *testing.T) {
+	binary := fakeCLI(t, cliWithHires)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+
+	if _, err := client.Generate(t.Context(), Request{
+		Prompt: "a red fox",
+		Width:  520, Height: 520,
+		Hires: Hires{Enabled: true, Scale: 1.25, Denoise: 0.4},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	args := strings.Join(argsOf(t, binary), " ")
+	for _, want := range []string{
+		"--hires-width 656", "--hires-height 656", "--hires-scale 1.25",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("the command line lacks %q:\n%s", want, args)
+		}
+	}
+}
+
+// TestCLIRefusesASecondPassItsBuildCannotDraw is the difference between an ignored flag and a
+// wrong picture: a build whose help does not list `--hires` would draw at base size and exit
+// 0, and the recipe would then claim an enlargement that never happened. The refusal comes
+// before the drawing process starts, which is what the recorded command line shows.
+func TestCLIRefusesASecondPassItsBuildCannotDraw(t *testing.T) {
+	binary := fakeCLI(t, cliRecorder)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+
+	_, err := client.Generate(t.Context(), Request{
+		Prompt: "a red fox",
+		Hires:  Hires{Enabled: true, Scale: 1.5, Denoise: 0.4},
+	})
+	if !errors.Is(err, ErrHiresUnsupported) {
+		t.Fatalf("Generate = %v, want ErrHiresUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "--hires") {
+		t.Errorf("the error does not name the option the build is missing: %v", err)
+	}
+	if args := argsOf(t, binary); len(args) != 1 || args[0] != "-h" {
+		t.Errorf("a draw was started anyway: the last command line was %v", args)
+	}
+}
+
+// TestCLIRefusesASecondPassItCannotSize is the other half of that refusal: a build that lists
+// `--hires` but none of the four number options would draw a second pass of its own choosing,
+// and `verifyHiresOutput` would then refuse the result after the sampling it took to produce
+// it. Both failures are the same fact — this build cannot express the enlargement the recipe
+// asks for — so the refusal happens before the draw, which is what the absent command line
+// shows: the fake records one for every run except its own `-h`.
+func TestCLIRefusesASecondPassItCannotSize(t *testing.T) {
+	binary := fakeCLI(t, cliWithHiresButNoSize)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+
+	_, err := client.Generate(t.Context(), Request{
+		Prompt: "a red fox",
+		Width:  768, Height: 512,
+		Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4},
+	})
+	if !errors.Is(err, ErrHiresUnsupported) {
+		t.Fatalf("Generate = %v, want ErrHiresUnsupported", err)
+	}
+	for _, want := range []string{"--hires-scale", "--hires-width", "--hires-height"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not name %s: %v", want, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(binary), "args.txt")); err == nil {
+		t.Errorf("a draw was started anyway: %v", argsOf(t, binary))
+	}
+}
+
 // cliWithHeldDraw is a fake `sd-cli` that draws until the test lets it finish: it reports its
 // first bar and preview at once and then waits for a file to appear beside the script. A draw
 // whose end the test chooses is what makes the window below a window rather than a

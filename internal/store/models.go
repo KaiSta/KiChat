@@ -125,6 +125,17 @@ type GenerationRecipe struct {
 	// was requested. Empty is "whatever is loaded", which is what a redraw asks for
 	// again rather than naming a checkpoint the server may no longer have.
 	Model string `json:"model,omitempty"`
+	// Hires says a second sampling pass ran, and the two numbers are what it ran with.
+	// They live beside the base Width and Height rather than replacing them, because a
+	// redraw has to ask for the same base and the same enlargement — recording only the
+	// output size would draw a picture that is already large and then enlarge it again.
+	Hires        bool    `json:"hires,omitempty"`
+	HiresScale   float64 `json:"hiresScale,omitempty"`
+	HiresDenoise float64 `json:"hiresDenoise,omitempty"`
+	// DurationMs is how long the draw took, when the caller measured it. It is recorded so
+	// the picture's card can show what it cost — both passes included, which is the best
+	// predictor a redraw has — and a recipe from before this field simply carries zero.
+	DurationMs int64 `json:"durationMs,omitempty"`
 }
 
 // Attachment placement modes.

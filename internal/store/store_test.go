@@ -779,7 +779,8 @@ func TestTheGenerationRecipeRoundTrips(t *testing.T) {
 	}
 	recipe := &GenerationRecipe{
 		Prompt: "a red fox in deep snow", NegativePrompt: "blurry", Width: 768, Height: 512,
-		Steps: 25, Sampler: "Euler a", Seed: 4242, Model: "sdxl.safetensors",
+		Steps: 25, Sampler: "Euler a", CfgScale: 6.5, Seed: 4242, Model: "sdxl.safetensors",
+		Hires: true, HiresScale: 1.5, HiresDenoise: 0.4, DurationMs: 4321,
 	}
 	if err := st.CreateAttachment(Attachment{
 		ID: "a1", ChatID: "c1", MessageID: "m1", Kind: "image",

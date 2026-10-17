@@ -70,6 +70,9 @@ export interface DrawProgress {
   chatId: string
   step: number
   steps: number
+  /** Which sampling pass this step belongs to, and how many the draw runs in total. */
+  pass: number
+  passes: number
   preview?: string
 }
 
@@ -639,6 +642,11 @@ function wireEvents(
         chatId: p.chatId,
         step: p.step,
         steps: p.steps,
+        // A backend that does not run a second pass reports neither field; the payload
+        // already normalises that to one pass, and this keeps an older one-side build in
+        // the same shape instead of rendering "pass undefined of undefined".
+        pass: p.pass || 1,
+        passes: p.passes || 1,
         // The preview is kept from the previous report when this one has none: a server
         // that sends its fraction and its picture separately, or a poll that landed
         // between two of them, must not make the thumbnail blink away.

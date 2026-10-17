@@ -821,6 +821,11 @@ func imageCLI(settings config.Settings) *images.CLI {
 			// command line's surface stays in the user's own arguments.
 			OffloadToCPU: settings.Images.CLIOffloadToCPU,
 			Extra:        rt.SplitArgs(settings.Images.CLIExtraArgs),
+			// A large second pass is exactly the draw whose latent a small card can
+			// sample but not decode in one piece, so the tiling switches belong here
+			// with the other load-time options rather than in the extra arguments.
+			VaeTiling:   settings.Images.CLIVaeTiling,
+			VaeTileSize: settings.Images.CLIVaeTileSize,
 		})
 }
 

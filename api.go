@@ -2451,11 +2451,26 @@ func (a *App) reportDrawProgress(id, chatID string, progress images.Progress) {
 // one cannot be left holding a progress row for a draw that is over — which is a Stop button
 // for something that is not running.
 func drawProgressPayload(id, chatID string, progress images.Progress, done bool) map[string]any {
+	// An ordinary draw (or the zero report that announces one) leaves both at zero, and
+	// the window's sentence is "one pass" rather than a blank — so the absent statement is
+	// spelled here, once, instead of in every render.
+	pass, passes := progress.Pass, progress.Passes
+	if passes <= 0 {
+		passes = 1
+	}
+	if pass <= 0 {
+		pass = 1
+	}
 	payload := map[string]any{
 		"drawId": id,
 		"chatId": chatID,
 		"step":   progress.Step,
 		"steps":  progress.Steps,
+		// Which sampling pass this step belongs to. A draw with a second pass restarts
+		// its step counter at 1 halfway through, so without these the window would show
+		// a counter that appears to go backwards.
+		"pass":   pass,
+		"passes": passes,
 		"done":   done,
 	}
 	if len(progress.Preview) > 0 && progress.PreviewMime != "" {

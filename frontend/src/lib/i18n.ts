@@ -89,6 +89,9 @@ const de = {
   'images.seed': 'Seed',
   'images.preview': 'Vorschau des laufenden Bildes',
   'images.progress': 'Schritt {{step}} von {{steps}}',
+  // A hires draw restarts its step counter for the second pass, so the pass is named.
+  'images.progressPass': 'Durchgang {{pass}} von {{passes}} · Schritt {{step}} von {{steps}}',
+  'images.progressPassUnknown': 'Durchgang {{pass}} von {{passes}} · wird gezeichnet …',
   'images.progressUnknown': 'Wird gezeichnet …',
   'chat.noChat': 'Kein Chat ausgewählt',
   'chat.you': 'Du',
@@ -475,6 +478,15 @@ const de = {
   'settings.images.size': 'Größe',
   'settings.images.sizePreset': 'Quadratische Größe',
   'settings.images.negative': 'Negativ-Prompt',
+  // The second pass is fixed in Settings rather than chosen by the model: it doubles the
+  // time a draw costs, which is a decision for the person whose card pays for it.
+  'settings.images.hires': 'Hires-Fix (zweiter Durchgang)',
+  'settings.images.hiresHint':
+    'Zeichnet erst die Grundgröße und vergrößert das Bild danach in einem zweiten Durchgang mit wenig Rauschen. Dauert etwa doppelt so lange und ergibt ein größeres Bild.',
+  'settings.images.hiresScale': 'Vergrößerung',
+  'settings.images.hiresDenoise': 'Rauschen im zweiten Durchgang',
+  'settings.images.hiresDenoiseHint':
+    'Wie viel im zweiten Durchgang neu gezeichnet wird (0,2–0,6, üblich 0,4). Niedrig hält die Komposition, hoch fügt Details hinzu — zu hoch ergibt ein anderes Bild.',
   'settings.images.saveFolder': 'Zielordner',
   'settings.images.pickFolder': 'Ordner wählen',
   'settings.images.cache': 'Bilder in KiChat',
@@ -568,6 +580,10 @@ const de = {
   'settings.images.cliOffloadToCpu': 'Auf die CPU auslagern (--offload-to-cpu)',
   'settings.images.cliOffloadToCpuHint':
     'Rechnet auf der CPU statt auf der GPU — für Flux auf einer Karte, die zu klein dafür ist. Die Gewichte bleiben, wo sie geladen wurden.',
+  'settings.images.cliVaeTiling': 'VAE-Kacheln (--vae-tiling)',
+  'settings.images.cliVaeTilingHint':
+    'Dekodiert das Bild in Kacheln statt auf einmal — für Bilder, für die sonst kein Speicher frei ist. Ein Build ohne dieses Flag ignoriert es, statt das Zeichnen abzubrechen.',
+  'settings.images.cliVaeTileSize': 'Kachelgröße (--vae-tile-size)',
   'settings.images.cliExtra': 'Weitere Argumente',
   'settings.images.cliExtraHint':
     'Alles, was KiChat nicht kennt — --diffusion-fa, --sigmas, --clip-skip — so wie du es auf der Kommandozeile schreiben würdest. KiChat reicht es unverändert durch, aber die eigenen Argumente kommen danach: ein --cfg-scale hier wird überstimmt, sobald das Modell einen Wert verlangt oder du oben einen festgelegt hast. Was gelten soll, gehört darum ins Feld CFG-Scale.',
@@ -699,6 +715,9 @@ const en: Record<keyof typeof de, string> = {
   'images.seed': 'Seed',
   'images.preview': 'Preview of the picture being drawn',
   'images.progress': 'Step {{step}} of {{steps}}',
+  // A hires draw restarts its step counter for the second pass, so the pass is named.
+  'images.progressPass': 'Pass {{pass}} of {{passes}} · step {{step}} of {{steps}}',
+  'images.progressPassUnknown': 'Pass {{pass}} of {{passes}} · drawing…',
   'images.progressUnknown': 'Drawing…',
   'chat.noChat': 'No chat selected',
   'chat.you': 'You',
@@ -1076,6 +1095,15 @@ const en: Record<keyof typeof de, string> = {
   'settings.images.size': 'Size',
   'settings.images.sizePreset': 'Square size',
   'settings.images.negative': 'Negative prompt',
+  // The second pass is fixed in Settings rather than chosen by the model: it doubles the
+  // time a draw costs, which is a decision for the person whose card pays for it.
+  'settings.images.hires': 'Hires fix (second pass)',
+  'settings.images.hiresHint':
+    'Draws the base size first, then enlarges the picture in a second pass with little noise. Takes roughly twice as long and produces a larger picture.',
+  'settings.images.hiresScale': 'Upscale',
+  'settings.images.hiresDenoise': 'Second-pass noise',
+  'settings.images.hiresDenoiseHint':
+    'How much the second pass repaints (0.2–0.6, usually 0.4). Low keeps the composition, high adds detail — too high makes a different picture.',
   'settings.images.saveFolder': 'Save folder',
   'settings.images.pickFolder': 'Choose folder',
   'settings.images.cache': 'Pictures in KiChat',
@@ -1165,6 +1193,10 @@ const en: Record<keyof typeof de, string> = {
   'settings.images.cliOffloadToCpu': 'Offload to CPU (--offload-to-cpu)',
   'settings.images.cliOffloadToCpuHint':
     'Runs the sampling on the CPU instead of the GPU — for Flux on a card too small to hold it. The weights stay where they were loaded.',
+  'settings.images.cliVaeTiling': 'VAE tiling (--vae-tiling)',
+  'settings.images.cliVaeTilingHint':
+    'Decodes the picture in tiles rather than all at once — for pictures that otherwise find no free memory. A build without this flag ignores it instead of failing the draw.',
+  'settings.images.cliVaeTileSize': 'Tile size (--vae-tile-size)',
   'settings.images.cliExtra': 'Extra arguments',
   'settings.images.cliExtraHint':
     'Anything KiChat does not know — --diffusion-fa, --sigmas, --clip-skip — written the way you would type it on a command line. KiChat passes it through unchanged, but its own arguments come last: a --cfg-scale here is outvoted as soon as the model asks for one or you pinned one above, so a value that has to hold belongs in the CFG-scale field.',
@@ -1291,6 +1323,9 @@ const zh: Record<keyof typeof de, string> = {
   'images.seed': '种子',
   'images.preview': '正在绘制图片的预览',
   'images.progress': '第 {{step}} 步，共 {{steps}} 步',
+  // A hires draw restarts its step counter for the second pass, so the pass is named.
+  'images.progressPass': '第 {{pass}} 遍，共 {{passes}} 遍 · 第 {{step}} 步，共 {{steps}} 步',
+  'images.progressPassUnknown': '第 {{pass}} 遍，共 {{passes}} 遍 · 正在绘制…',
   'images.progressUnknown': '正在绘制…',
   'chat.noChat': '未选择对话',
   'chat.you': '你',
@@ -1650,6 +1685,15 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.size': '尺寸',
   'settings.images.sizePreset': '正方形尺寸',
   'settings.images.negative': '负面提示词',
+  // The second pass is fixed in Settings rather than chosen by the model: it doubles the
+  // time a draw costs, which is a decision for the person whose card pays for it.
+  'settings.images.hires': '高清修复（第二遍）',
+  'settings.images.hiresHint':
+    '先按基础尺寸绘制，再以较低的噪声在第二遍中放大并细化画面。耗时约为两倍，得到的图片更大。',
+  'settings.images.hiresScale': '放大倍数',
+  'settings.images.hiresDenoise': '第二遍噪声',
+  'settings.images.hiresDenoiseHint':
+    '第二遍重绘的程度（0.2–0.6，常用 0.4）。较低可保留构图，较高会补充细节——过高则会变成另一张图。',
   'settings.images.saveFolder': '保存文件夹',
   'settings.images.pickFolder': '选择文件夹',
   'settings.images.cache': 'KiChat 中的图片',
@@ -1728,6 +1772,10 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.cliOffloadToCpu': '卸载到 CPU（--offload-to-cpu）',
   'settings.images.cliOffloadToCpuHint':
     '改由 CPU 而非 GPU 采样——适合显存不足以容纳 Flux 的情况。权重仍留在原加载位置。',
+  'settings.images.cliVaeTiling': 'VAE 分块（--vae-tiling）',
+  'settings.images.cliVaeTilingHint':
+    '按分块而非一次性解码图片——适合否则找不到可用内存的大图。没有此参数的构建会忽略它，而不会中止绘制。',
+  'settings.images.cliVaeTileSize': '分块尺寸（--vae-tile-size）',
   'settings.images.cliExtra': '额外参数',
   'settings.images.cliExtraHint':
     'KiChat 不认识的参数——--diffusion-fa、--sigmas、--clip-skip——按命令行写法直接填写，KiChat 原样传递；但 KiChat 自己的参数排在其后：这里的 --cfg-scale 一旦模型给出取值或你在上方固定了取值就会被覆盖，因此必须固定的取值请填在 CFG-Scale 字段。',

@@ -145,7 +145,16 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
         <span className="ml-auto faint">{formatDuration(call.durationMs)}</span>
       </button>
 
-      {draw && <LiveDraw preview={draw.preview} step={draw.step} steps={draw.steps} className="mt-2" />}
+      {draw && (
+        <LiveDraw
+          preview={draw.preview}
+          step={draw.step}
+          steps={draw.steps}
+          pass={draw.pass}
+          passes={draw.passes}
+          className="mt-2"
+        />
+      )}
       {draw && (
         <div className="mt-1 flex items-center gap-2">
           <button
@@ -201,6 +210,34 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
   )
 }
 
+/** The one sentence a running draw is described by, wherever it is shown.
+ *
+ * A hires draw runs two sampling passes and the step counter restarts at 1 for the
+ * second. The pass is therefore part of the sentence rather than a second line: "step 3
+ * of 20" twice in a row is what a counter that went backwards looks like, while "pass 2
+ * of 2, step 3 of 20" is what busy looks like. An ordinary draw says nothing about
+ * passes at all — there is only one.
+ */
+function drawProgressText(
+  t: (key: string, vars?: Record<string, string | number>) => string,
+  draw: { step: number; steps: number; pass: number; passes: number },
+): string {
+  const pass = draw.pass || 1
+  const passes = draw.passes || 1
+  if (draw.steps > 0) {
+    const vars = {
+      step: formatNumber(draw.step),
+      steps: formatNumber(draw.steps),
+      pass: formatNumber(pass),
+      passes: formatNumber(passes),
+    }
+    return passes > 1 ? t('images.progressPass', vars) : t('images.progress', vars)
+  }
+  return passes > 1
+    ? t('images.progressPassUnknown', { pass: formatNumber(pass), passes: formatNumber(passes) })
+    : t('images.progressUnknown')
+}
+
 /**
  * A picture that is still being drawn: what it looks like so far, and how far along it is.
  *
@@ -217,11 +254,15 @@ function LiveDraw({
   preview,
   step,
   steps,
+  pass,
+  passes,
   className,
 }: {
   preview?: string
   step: number
   steps: number
+  pass: number
+  passes: number
   className?: string
 }) {
   const t = useStore((s) => s.t)
@@ -236,11 +277,7 @@ function LiveDraw({
           style={{ maxWidth: 160, maxHeight: 160, border: '1px solid var(--border)' }}
         />
       ) : null}
-      <span className="faint text-[11px]">
-        {steps > 0
-          ? t('images.progress', { step: formatNumber(step), steps: formatNumber(steps) })
-          : t('images.progressUnknown')}
-      </span>
+      <span className="faint text-[11px]">{drawProgressText(t, { step, steps, pass, passes })}</span>
     </div>
   )
 }
@@ -530,6 +567,13 @@ export function MessageImages({ attachments }: { attachments: storeTypes.Attachm
 const MAX_IMAGE_DIMENSION = 2048
 const MAX_IMAGE_STEPS = 150
 const MAX_IMAGE_CFG = 30
+// The second-pass bounds, mirrored from internal/images/limits.go. They are applied here
+// so a box the user typed into cannot ask for a repaint the backend would silently clamp
+// to something else; the backend clamps again, because a request can arrive from anywhere.
+const MIN_IMAGE_HIRES_SCALE = 1.25
+const MAX_IMAGE_HIRES_SCALE = 2
+const MIN_IMAGE_HIRES_DENOISE = 0.2
+const MAX_IMAGE_HIRES_DENOISE = 0.6
 
 /** The recipe fields as the strings a form holds.
  *
@@ -546,6 +590,9 @@ type RecipeDraft = {
   seed: string
   sampler: string
   model: string
+  hires: boolean
+  hiresScale: string
+  hiresDenoise: string
 }
 
 function draftFromRecipe(recipe: storeTypes.GenerationRecipe): RecipeDraft {
@@ -560,6 +607,9 @@ function draftFromRecipe(recipe: storeTypes.GenerationRecipe): RecipeDraft {
     seed: num(recipe.seed),
     sampler: recipe.sampler ?? '',
     model: recipe.model ?? '',
+    hires: recipe.hires ?? false,
+    hiresScale: num(recipe.hiresScale),
+    hiresDenoise: num(recipe.hiresDenoise),
   }
 }
 
@@ -581,6 +631,13 @@ function recipeFromDraft(draft: RecipeDraft): storeTypes.GenerationRecipe {
     if (!Number.isFinite(n) || n <= 0) return 0
     return Math.min(Math.max(n, 1), MAX_IMAGE_CFG)
   }
+  // The second pass keeps zero as "the app's own default" — an emptied box is not a
+  // request for the smallest enlargement — and only clamps a number somebody typed.
+  const fraction = (value: string, min: number, max: number) => {
+    const n = Number(value)
+    if (!Number.isFinite(n) || n <= 0) return 0
+    return Math.min(Math.max(n, min), max)
+  }
   return {
     prompt: draft.prompt.trim(),
     negativePrompt: draft.negativePrompt.trim(),
@@ -591,6 +648,11 @@ function recipeFromDraft(draft: RecipeDraft): storeTypes.GenerationRecipe {
     seed: num(draft.seed),
     sampler: draft.sampler.trim(),
     model: draft.model.trim(),
+    hires: draft.hires,
+    hiresScale: draft.hires ? fraction(draft.hiresScale, MIN_IMAGE_HIRES_SCALE, MAX_IMAGE_HIRES_SCALE) : 0,
+    hiresDenoise: draft.hires
+      ? fraction(draft.hiresDenoise, MIN_IMAGE_HIRES_DENOISE, MAX_IMAGE_HIRES_DENOISE)
+      : 0,
   }
 }
 
@@ -768,9 +830,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
       />
       {live && (
         <span className="faint text-[11px]" title={t('images.preview')}>
-          {live.steps > 0
-            ? t('images.progress', { step: formatNumber(live.step), steps: formatNumber(live.steps) })
-            : t('images.progressUnknown')}
+          {drawProgressText(t, live)}
         </span>
       )}
       <figcaption className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -786,6 +846,20 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
         {recipe?.seed ? (
           <span className="faint" title={t('images.seed')}>
             s{recipe.seed}
+          </span>
+        ) : null}
+        {/* What makes this picture larger than its base size, without opening the
+            editor: a second pass that ran is part of how the picture was made. */}
+        {recipe?.hires ? (
+          <span className="faint" title={t('settings.images.hiresHint')}>
+            {recipe.hiresScale ? `${recipe.hiresScale}×` : t('settings.images.hires')}
+          </span>
+        ) : null}
+        {/* The time the draw cost, recorded rather than guessed — both passes included,
+            which is what makes it a better predictor of a redraw than the step count. */}
+        {recipe?.durationMs ? (
+          <span className="faint" title={t('metrics.duration')}>
+            {formatDuration(recipe.durationMs)}
           </span>
         ) : null}
         <button type="button" className="btn btn-sm btn-ghost" disabled={saving} onClick={() => void save()}>
@@ -972,6 +1046,50 @@ function RecipeEditor({
             value={draft.seed}
             onChange={(e) => set({ seed: e.target.value })}
             placeholder={t('settings.images.auto')}
+          />
+        </label>
+      </div>
+      {/* The second pass belongs in the recipe rather than only in Settings: it changes
+          the output size and the time the draw costs, which are two things a user
+          redrawing a picture is choosing. Its numbers stay in the boxes while the
+          switch is off, so turning it back on restores the last choice. */}
+      <label className="flex items-center gap-2 text-[11px]" title={t('settings.images.hiresHint')}>
+        <input
+          type="checkbox"
+          checked={draft.hires}
+          aria-label={t('settings.images.hires')}
+          onChange={(e) => set({ hires: e.target.checked })}
+        />
+        <span>{t('settings.images.hires')}</span>
+        <span className="faint flex-1">{t('settings.images.hiresHint')}</span>
+      </label>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="text-[11px]">
+          {t('settings.images.hiresScale')}
+          <input
+            className="input mono mt-1"
+            type="number"
+            min={MIN_IMAGE_HIRES_SCALE}
+            max={MAX_IMAGE_HIRES_SCALE}
+            step={0.05}
+            disabled={!draft.hires}
+            value={draft.hiresScale}
+            onChange={(e) => set({ hiresScale: e.target.value })}
+            placeholder="1.5"
+          />
+        </label>
+        <label className="text-[11px]" title={t('settings.images.hiresDenoiseHint')}>
+          {t('settings.images.hiresDenoise')}
+          <input
+            className="input mono mt-1"
+            type="number"
+            min={MIN_IMAGE_HIRES_DENOISE}
+            max={MAX_IMAGE_HIRES_DENOISE}
+            step={0.05}
+            disabled={!draft.hires}
+            value={draft.hiresDenoise}
+            onChange={(e) => set({ hiresDenoise: e.target.value })}
+            placeholder="0.4"
           />
         </label>
       </div>

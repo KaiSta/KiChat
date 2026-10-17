@@ -65,19 +65,25 @@ const ServerReadyPath = "/sdapi/v1/sd-models"
 const listenFlag = "--listen-port"
 
 // ServerKey is what a running server's configuration is compared by: the program it would run
-// and the model half of its command line, as one string.
+// and the half of its command line that describes the load, as one string.
 //
 // The listener is deliberately not part of it. A port is chosen per start, so including one
 // would make every running server look out of date the moment it came up. The *program* is part
 // of it, because it is the other half of what a start depends on: pointing the folder at a
-// different unpack is a different executable, even when every flag is identical. The two are
-// compared as configured (the folder and the typed path) rather than as resolved, because
-// resolving is a filesystem walk that can fail — and a comparison that has to fail before it
-// can answer is a comparison the panel would have to render as an error.
+// different unpack is a different executable, even when every flag is identical. So is the VAE
+// decode mode, because tiling is also a property of the load rather than of the request. The
+// two are compared as configured (the folder and the typed path) rather than as resolved,
+// because resolving is a filesystem walk that can fail — and a comparison that has to fail
+// before it can answer is a comparison the panel would have to render as an error.
 func (c *CLI) ServerKey() string {
-	key := make([]string, 0, len(c.modelArgs())+2)
+	key := make([]string, 0, len(c.modelArgs())+len(c.vaeArgsConfigured())+2)
 	key = append(key, c.folder, c.binary)
-	return strings.Join(append(key, c.modelArgs()...), "\x00")
+	key = append(key, c.modelArgs()...)
+	// Unprobed, deliberately: this runs on a path that must not spawn a process, and the
+	// question is "does the running server match what is configured" rather than "what
+	// would this build accept today". See vaeArgsConfigured.
+	key = append(key, c.vaeArgsConfigured()...)
+	return strings.Join(key, "\x00")
 }
 
 // ServerSpec is one start of the managed server: the program to run, the command line after
@@ -128,6 +134,7 @@ func (c *CLI) ServerSpec(ctx context.Context, port int) (ServerSpec, error) {
 		return ServerSpec{}, err
 	}
 	args := c.modelArgs()
+	args = append(args, c.vaeArgs(ctx, program)...)
 	args = append(args, "--listen-ip", serverHost, listenFlag, strconv.Itoa(port))
 	return ServerSpec{Program: program, Args: args, Model: model, Label: c.files.Label()}, nil
 }

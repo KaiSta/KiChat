@@ -20,13 +20,18 @@ import (
 // that stops any other local file from being read.
 func TestTheProgressEventCarriesWhatTheWindowReads(t *testing.T) {
 	payload := drawProgressPayload("att-1", "chat-1", images.Progress{
-		Step: 3, Steps: 12, Preview: []byte{1, 2, 3}, PreviewMime: images.MimeJPEG,
+		Step: 3, Steps: 12, Pass: 2, Passes: 2, Preview: []byte{1, 2, 3}, PreviewMime: images.MimeJPEG,
 	}, false)
 
-	for _, key := range []string{"drawId", "chatId", "step", "steps", "done", "preview"} {
+	for _, key := range []string{"drawId", "chatId", "step", "steps", "pass", "passes", "done", "preview"} {
 		if _, ok := payload[key]; !ok {
 			t.Errorf("the payload has no %q; the window reads it by that name", key)
 		}
+	}
+	// A second pass restarts the step counter, so a report that did not say which pass
+	// it belonged to would read as progress going backwards.
+	if payload["pass"] != 2 || payload["passes"] != 2 {
+		t.Errorf("the pass did not survive: %+v", payload)
 	}
 	if payload["drawId"] != "att-1" || payload["chatId"] != "chat-1" {
 		t.Errorf("the payload does not say which draw it belongs to: %+v", payload)
@@ -45,6 +50,11 @@ func TestTheProgressEventCarriesWhatTheWindowReads(t *testing.T) {
 	stepsOnly := drawProgressPayload("att-1", "chat-1", images.Progress{Step: 4, Steps: 12}, false)
 	if _, ok := stepsOnly["preview"]; ok {
 		t.Errorf("a report without a preview carries one anyway: %+v", stepsOnly)
+	}
+	// An ordinary draw reports neither field, and the window reads that as one pass
+	// rather than as a missing part of the sentence.
+	if stepsOnly["pass"] != 1 || stepsOnly["passes"] != 1 {
+		t.Errorf("an ordinary draw did not normalise to one pass: %+v", stepsOnly)
 	}
 	// And the same rule for a preview with no format: the bytes are unusable without one.
 	noMime := drawProgressPayload("att-1", "chat-1", images.Progress{Preview: []byte{1}}, false)
