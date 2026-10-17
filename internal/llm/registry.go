@@ -52,6 +52,24 @@ type BackendConfig struct {
 type ModelOverride struct {
 	ContextLimit int      `json:"contextLimit,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
+	// RequestCeiling is the largest single request the user's account may send to
+	// this model, in tokens, as they read it off the backend's own console — 0 when
+	// they have not said.
+	//
+	// It exists because one backend publishes that number to a signed-in page and
+	// nowhere a client can ask: Groq's per-request budget is the organization's TPM,
+	// which appears in no listing and is stated on the wire only in a *response* — so
+	// a chat that is already long has nothing to plan against until it has been
+	// refused once. The docs' tables cannot stand in for it: the Rate Limits page and
+	// the Models page disagree by more than an order of magnitude for the same models
+	// (GROQ.md §6.2), and the exact figure for an organization is only on its Limits
+	// page. A number the user typed there, and this app then plans against, is the
+	// one source that is both authoritative and available before the first request.
+	//
+	// It only ever tightens: a ceiling the vendor states on the wire wins when it is
+	// the smaller of the two, so a stale entry costs extra folding but never an
+	// oversized request.
+	RequestCeiling int `json:"requestCeiling,omitempty"`
 }
 
 // HealthStatus is a backend reachability report for the UI.

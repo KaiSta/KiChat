@@ -2945,65 +2945,152 @@ function ModelOverridesTab() {
   const draft = useStore((s) => s.settings)
   const [editing, setEditing] = useState<string | null>(null)
   const [value, setValue] = useState('')
+  // What has just been saved, so a row shows its new number without waiting for a
+  // settings reload: SetModelOverride writes the snapshot, not the draft this tab
+  // reads.
+  const [saved, setSaved] = useState<Record<string, number>>({})
 
-  // Only models without a reported window need a manual override.
-  const needsOverride = useMemo(() => models.filter((m) => !m.contextLimit), [models])
+  // Groq is the one backend whose per-request budget cannot be fetched before the
+  // first request: the listing publishes windows only, the Rate Limits and Models
+  // docs pages disagree by 31× for the same models, and the exact figure for an
+  // organization is on its Limits page — a page for a person, not for a client. The
+  // response header does carry it, but only on an answer, so a chat that is already
+  // long has nothing to plan against until it has been refused once. A number typed
+  // here is the only source that speaks first, which is why this field exists for
+  // this backend alone (GROQ.md §6.2).
+  // The kind alone decides it: the model list only ever contains models of backends
+  // that are switched on, so asking for `enabled` here would make the field depend on
+  // the settings row rather than on what is on screen — and a switched-off backend has
+  // no models to show it for anyway.
+  const groqBackends = useMemo(
+    () => new Set((draft?.backends ?? []).filter((b) => b.kind === 'groq').map((b) => b.id)),
+    [draft?.backends],
+  )
+
+  // A model needs a row when its window is unknown (the case this tab was built for)
+  // or when it belongs to a backend whose request budget nothing publishes.
+  const rows = useMemo(
+    () => models.filter((m) => !m.contextLimit || groqBackends.has(m.backend)),
+    [models, groqBackends],
+  )
+
+  const saveOverride = async (
+    backend: string,
+    id: string,
+    patch: { contextLimit?: number; requestCeiling?: number },
+  ) => {
+    const key = `${backend}/${id}`
+    const current = draft?.modelOverrides?.[key]
+    const next = {
+      contextLimit: current?.contextLimit ?? 0,
+      capabilities: current?.capabilities ?? [],
+      requestCeiling: current?.requestCeiling ?? 0,
+      ...patch,
+    } as llm.ModelOverride
+    await App.SetModelOverride(backend, id, next)
+    setSaved((prev) => ({ ...prev, [key]: next.requestCeiling ?? 0 }))
+    setEditing(null)
+    await useStore.getState().refreshModels(true)
+  }
 
   return (
-    <Section
-      title={t('model.overrides')}
-      hint={t('model.overrideHint')}
-    >
-      {needsOverride.length === 0 ? (
+    <Section title={t('model.overrides')} hint={t('model.overrideHint')}>
+      {rows.length === 0 ? (
         <div className="faint text-[12px]">Alle Modelle melden ihr Kontextfenster.</div>
       ) : (
-        <div className="space-y-2">
-          {needsOverride.map((m) => (
-            <div key={`${m.backend}/${m.id}`} className="flex items-center gap-2">
-              <span className="mono min-w-0 flex-1 truncate text-[12px]">
-                {m.backend}/{m.id}
-              </span>
-              {editing === `${m.backend}/${m.id}` ? (
-                <>
-                  <input
-                    className="input w-32"
-                    type="number"
-                    value={value}
-                    onChange={(e) => setValue(e.target.value)}
-                    placeholder="32768"
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-primary"
-                    onClick={async () => {
-                      await App.SetModelOverride(m.backend, m.id, {
-                        contextLimit: Number(value) || 0,
-                        capabilities: [],
-                      } as llm.ModelOverride)
-                      setEditing(null)
-                      await useStore.getState().refreshModels(true)
-                    }}
-                  >
-                    {t('settings.save')}
-                  </button>
-                </>
-              ) : (
-                <>
-                  <span className="badge badge-warn">{t('context.unknown')}</span>
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => {
-                      setEditing(`${m.backend}/${m.id}`)
-                      setValue(String(draft?.modelOverrides?.[`${m.backend}/${m.id}`]?.contextLimit ?? 32768))
-                    }}
-                  >
-                    {t('model.overrides')}
-                  </button>
-                </>
-              )}
-            </div>
-          ))}
+        <div className="space-y-3">
+          {rows.map((m) => {
+            const key = `${m.backend}/${m.id}`
+            const ceiling = saved[key] ?? draft?.modelOverrides?.[key]?.requestCeiling ?? 0
+            const needsWindow = !m.contextLimit
+            const needsCeiling = groqBackends.has(m.backend)
+            return (
+              <div key={key} className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="mono min-w-0 flex-1 truncate text-[12px]">
+                    {m.backend}/{m.id}
+                  </span>
+                  {needsWindow ? (
+                    editing === `window:${key}` ? (
+                      <>
+                        <input
+                          className="input w-32"
+                          type="number"
+                          value={value}
+                          onChange={(e) => setValue(e.target.value)}
+                          placeholder="32768"
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-primary"
+                          onClick={() => saveOverride(m.backend, m.id, { contextLimit: Number(value) || 0 })}
+                        >
+                          {t('settings.save')}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="badge badge-warn">{t('context.unknown')}</span>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => {
+                            setEditing(`window:${key}`)
+                            setValue(String(draft?.modelOverrides?.[key]?.contextLimit ?? 32768))
+                          }}
+                        >
+                          {t('model.overrides')}
+                        </button>
+                      </>
+                    )
+                  ) : null}
+                </div>
+                {needsCeiling ? (
+                  <div className="flex items-center gap-2">
+                    <span className="faint min-w-0 flex-1 truncate text-[11px]" title={t('model.ceilingHint')}>
+                      {t('model.ceiling')}
+                    </span>
+                    {editing === `ceiling:${key}` ? (
+                      <>
+                        <input
+                          className="input w-32"
+                          type="number"
+                          value={value}
+                          onChange={(e) => setValue(e.target.value)}
+                          placeholder="8000"
+                          title={t('model.ceilingHint')}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-primary"
+                          onClick={() => saveOverride(m.backend, m.id, { requestCeiling: Number(value) || 0 })}
+                        >
+                          {t('settings.save')}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="mono text-[11px]">
+                          {ceiling > 0 ? formatNumber(ceiling) : t('model.ceilingUnset')}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          title={t('model.ceilingHint')}
+                          onClick={() => {
+                            setEditing(`ceiling:${key}`)
+                            setValue(String(ceiling || 8000))
+                          }}
+                        >
+                          {t('model.ceiling')}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            )
+          })}
         </div>
       )}
     </Section>

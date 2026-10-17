@@ -583,6 +583,7 @@ export namespace llm {
 	export class ModelOverride {
 	    contextLimit?: number;
 	    capabilities?: string[];
+	    requestCeiling?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new ModelOverride(source);
@@ -592,6 +593,7 @@ export namespace llm {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.contextLimit = source["contextLimit"];
 	        this.capabilities = source["capabilities"];
+	        this.requestCeiling = source["requestCeiling"];
 	    }
 	}
 	export class Ref {

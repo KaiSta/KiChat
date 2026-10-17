@@ -235,6 +235,11 @@ const (
 	// instead of from a failure, so the next oversized request is folded before it is
 	// sent rather than after it is refused.
 	CeilingFromHeader = "header"
+	// CeilingFromManual: the user typed it in after reading the backend's own limits
+	// page. It is the only source that speaks before the backend does, which is why it
+	// exists — but it is a person's transcription rather than a vendor statement, so a
+	// number the backend states later wins when it is the smaller one.
+	CeilingFromManual = "manual"
 )
 
 // RequestCeiling is implemented by a provider that knows of a ceiling on the size

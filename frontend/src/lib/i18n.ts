@@ -127,6 +127,7 @@ const de = {
   'context.limitSource': 'Limit-Quelle',
   'context.ceiling': 'Limit pro Anfrage',
   'context.ceilingFrom.header': 'aus der Antwort des Backends',
+  'context.ceilingFrom.manual': 'aus dem Modell-Override',
   'context.ceilingFrom.refusal': 'aus einer abgelehnten Anfrage',
   'context.ceilingNote':
     'Pro Anfrage sind {{tokens}} Token möglich; das Modellfenster ist größer ({{window}}).',
@@ -148,6 +149,10 @@ const de = {
   'model.switchAndCompact': 'Wechseln und komprimieren',
   'model.overrides': 'Kontextfenster überschreiben',
   'model.overrideHint': 'Nur nötig, wenn das Backend das Fenster nicht meldet.',
+  'model.ceiling': 'Anfrage-Grenze (Token/Minute)',
+  'model.ceilingHint':
+    'Die Grenze für eine einzelne Anfrage, wie sie auf der Limits-Seite deiner Groq-Organisation steht. KiChat plant damit schon vor der ersten Anfrage; eine kleinere Zahl, die Groq selbst auf einer Antwort meldet, hat Vorrang.',
+  'model.ceilingUnset': 'nicht gesetzt',
   'model.check': 'prüfen',
   'model.checkTitle':
     'Fragt jedes Modell dieses Backends einmal an, um zu sehen, welche dieses Konto wirklich aufrufen darf. Was mit 404 antwortet, wird danach ausgeblendet.',
@@ -732,6 +737,7 @@ const en: Record<keyof typeof de, string> = {
   'context.limitSource': 'Limit source',
   'context.ceiling': 'Per-request limit',
   'context.ceilingFrom.header': "from the backend's own response",
+  'context.ceilingFrom.manual': 'from the model override',
   'context.ceilingFrom.refusal': 'from a refused request',
   'context.ceilingNote':
     'One request may carry {{tokens}} tokens; the model window is larger ({{window}}).',
@@ -753,6 +759,10 @@ const en: Record<keyof typeof de, string> = {
   'model.switchAndCompact': 'Switch and compact',
   'model.overrides': 'Override context window',
   'model.overrideHint': 'Only needed when the backend does not report the window.',
+  'model.ceiling': 'Request ceiling (tokens/minute)',
+  'model.ceilingHint':
+    'The largest single request, as shown on your Groq organization’s Limits page. KiChat plans against it before the first request; a smaller number Groq itself reports on a response takes precedence.',
+  'model.ceilingUnset': 'not set',
   'model.check': 'check',
   'model.checkTitle':
     'Asks every model of this backend once, to see which ones this account may really call. Whatever answers 404 is hidden afterwards.',
@@ -1318,6 +1328,7 @@ const zh: Record<keyof typeof de, string> = {
   'context.limitSource': '上限来源',
   'context.ceiling': '单次请求上限',
   'context.ceilingFrom.header': '来自后端的响应',
+  'context.ceilingFrom.manual': '来自模型覆盖设置',
   'context.ceilingFrom.refusal': '来自一次被拒绝的请求',
   'context.ceilingNote': '每次请求最多 {{tokens}} 个 token；模型窗口更大（{{window}}）。',
   'context.compactNow': '立即压缩',
@@ -1338,6 +1349,10 @@ const zh: Record<keyof typeof de, string> = {
   'model.switchAndCompact': '切换并压缩',
   'model.overrides': '覆盖上下文窗口',
   'model.overrideHint': '仅当后端未报告窗口大小时才需要。',
+  'model.ceiling': '单次请求上限（Token/分钟）',
+  'model.ceilingHint':
+    '单个请求的最大 Token 数，见 Groq 组织的 Limits 页面。KiChat 会在第一次请求之前据此规划；若 Groq 自己在响应中报告更小的数值，则以该数值为准。',
+  'model.ceilingUnset': '未设置',
   'model.check': '检查',
   'model.checkTitle':
     '对本后端的每个模型各请求一次，以确认当前账号真正可以调用哪些。返回 404 的模型随后会被隐藏。',

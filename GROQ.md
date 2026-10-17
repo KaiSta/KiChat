@@ -337,6 +337,26 @@ turn. `internal/chat/oversize.go`:
    wurde komprimiert — die Anfrage wird erneut gesendet."* The order is the point: a promise of
    a retry that never comes would be the one thing in that turn which is not true, and a fold
    can still fail (see item 4).
+
+   **The fold is aimed with the vendor's own count, not the app's estimate.** A refusal states
+   two numbers for the same body: `Requested`, what the vendor counted, and — from the assembly
+   that was sent — what the app estimated. The estimator is a heuristic (§6.4), and on a ceiling
+   that is a fraction of the window its error is the whole difference between a retry that fits
+   and a *second* refusal, which ends the turn because a refusal is folded once. So the fold's
+   aim is `ceiling × estimated / Requested` (`sizeTargetWithCount`, [internal/chat/oversize.go](internal/chat/oversize.go)),
+   applied only when the vendor counted more than the app did and capped at 4× so a wild number
+   cannot fold a chat to nothing. The same corrected ceiling budgets the summarisation call
+   (`CompactOptions.SummaryCeiling`): it is a request against the same limit, and a transcript
+   budgeted to a ceiling the vendor counts at twice the estimate is refused for the size of the
+   call that exists to make the chat smaller.
+
+   Measured, against a fixture that counts each request at twice the app's estimate: without the
+   correction the folded retry is refused again — 12 626 counted against the 10 000 limit — and
+   the turn ends *"auch mit komprimiertem Verlauf passt sie nicht hinein"*; with it the retry
+   fits and answers (`TestAFoldedRetryFitsWhenTheVendorCountsMoreThanTheApp`). The summariser
+   half is pinned separately: with a 30 000 ceiling and a 60-turn history an uncorrected
+   transcript is estimated at 19 936 tokens, refused by the same vendor, and the corrected
+   ceiling brings it under 6 000 (`TestTheSummariserFollowsTheCorrectedCeiling`).
 2. **The ceiling is remembered, per model — and read from an ordinary answer wherever one
    exists.** No route of this API publishes it: the listing reports windows, not budgets. Two
    of the vendor's own statements do, and both are read.
@@ -362,6 +382,35 @@ turn. `internal/chat/oversize.go`:
 
    Both numbers are visible: the context meter measures against the effective per-request budget
    and the inspector names the ceiling beside where it came from (§6.3).
+
+   **The check runs again between tool rounds.** A turn is not one request on this backend's
+   budget: a tool-heavy answer is several, and each round appends a model reply and a tool result
+   that the check before the turn never priced — which is why a long turn could still be refused
+   mid-answer even though its first request fitted. `generate` now asks the same planner before
+   every round after the first (`autoFold` with `ceilingOnly`), so the fold happens between the
+   rounds rather than being paid for on the turn's error, where it restarts the turn and loses the
+   work already done. Only the ceiling is asked there; the user's threshold belongs to the history
+   the turn was started with (COMPACT.md §4). Measured: a 12-turn history under a ceiling placed
+   just above it folds on the second round — the oldest turns gone, the new message kept, no
+   refusal (`TestAToolRoundFoldsBeforeItsNextRequestCrossesTheCeiling`).
+
+   **A number the user types in is the only source that speaks first.** Both routes above need
+   a request to have been answered, so the very first oversized request of a session — a fresh
+   process, a newly chosen model, or any settings save, which rebuilds the providers and drops
+   what they had learned — is still refused once. Nothing can be fetched in advance for it: there
+   is no limits route (`/openai/v1/models` returns model metadata only), the exact figure for an
+   organization is on a signed-in Limits page, and the public tables cannot stand in for it —
+   read on 2026-10-17, [the Rate Limits page](https://console.groq.com/docs/rate-limits) lists
+   **8K TPM** for `openai/gpt-oss-120b`, `openai/gpt-oss-20b` and `qwen/qwen3.8-27b` while
+   [the Models page](https://console.groq.com/docs/models) lists **250K TPM** for the same three,
+   both labelled Developer plan. So the per-model override (Settings → Backends → override) has a
+   request-ceiling field, offered for this backend's models only, and `Engine.ceilingFor` merges
+   it with whatever the provider learned, keeping the smaller of the two: the typed number fills
+   a silence and never overrules a measurement, so a stale entry costs an extra fold rather than
+   a refused request. `TestTheUsersOwnCeilingFoldsBeforeTheRequestGoesOut` pins that it drives the
+   same preventive fold (one summary, no refusal, before the first request),
+   `TestATypedCeilingNeverLoosensWhatTheBackendStated` the direction of the merge, and
+   `TestTheMeterShowsTheTypedCeiling` that the meter paints it with the source `manual`.
 3. **The summariser is budgeted against it too.** The call that makes a chat fit is a request
    of its own, subject to the same allowance: a transcript budgeted against the summary model's
    131k window is one more oversized request, which is how a compaction that exists to fix this
@@ -484,10 +533,11 @@ each is a boundary rather than an implementation detail:
   half reports "no wait" for its own reasons — an unknown number, a covered request, a token
   reset too far out to be this vendor's minute — and the two are independent, so neither can
   veto the other's wait.
-
 - **The cost compared is an estimate; the allowance is not.** It is the same heuristic the
   meter and the compaction planner use, because the allowance is spent by tokens rather than by
-  prompts: the prompt (`EstimateMessagesTokens` + `EstimateToolTokens`) plus the answer's room,
+  prompts: the prompt (`EstimateMessagesTokens` + `EstimateToolTokens` — the tool block priced as
+  the JSON it is sent as, since the flat per-schema figure undercounted the five shipped tools,
+  1 261 against the 1 385 a 128k tokenizer counted) plus the answer's room,
   which is the `max_tokens` the request asks for and nothing when it asks for the backend's own
   default. Two refinements keep that from doing harm. A *prompt* larger than the whole allowance
   is the case no wait can help, so that is what the "can never be sent" guard compares — the
@@ -589,6 +639,12 @@ per-request guard stays where it is, behind the plan, and remains the thing that
 request may go at all, which is why a turn that outran its plan meets the guard rather than the
 vendor. And nothing is planned for a rate nobody has stated, so a session whose first request is
 already over the rate still pays that one refusal before any of this can help (§9.6).
+
+The between-rounds fold (§6.2) is one more request the plan never counted, and it is left that way
+on purpose: the plan is drawn before the turn, and whether a fold is needed is known only after a
+round has been priced. It is rare by construction — a round has to cross the ceiling for it to
+happen at all — and it is covered twice, by the per-request guard behind the plan and by the
+shared client waiting out a throttle if the fold lands on a spent minute.
 
 ---
 
@@ -752,7 +808,13 @@ Groq's live state:
   ceiling — and `TestTheSummariserIsBudgetedAgainstTheCeiling` pins that the summary call itself
   fits. `TestASizeFoldIsNamedInTheTranscript` and `TestTheSizeTargetAimsTheFoldAtTheCeiling`
   cover the two smaller facts those rest on: the trigger name, and the arithmetic that hands a
-  ceiling to a planner that prices against the window.
+  ceiling to a planner that prices against the window. `TestTheFoldAimsWithTheVendorsOwnCountOfTheRequest`
+  pins the correction that follows a refusal — twice the estimate means half the aim, an
+  over-count changes nothing, a tiny estimate is noise and a wild ratio is capped — and
+  `TestAFoldedRetryFitsWhenTheVendorCountsMoreThanTheApp` drives the same thing through the
+  engine against a fixture whose vendor counts twice the app's estimate, where the turn used to
+  end in a second refusal after the summarisation had already been paid for.
+  `TestTheSummariserFollowsTheCorrectedCeiling` pins the one call left in that flow.
   `TestGroqLearnsTheBudgetFromAnAnswerAndFoldsTheNextTurn` is the end-to-end case that no refusal
   is involved in at all: a server that only ever answers normally, with the budget header on the
   answer, and the *second* turn folded before it goes out — asserted through the registry's own
@@ -840,7 +902,10 @@ one, and the numbers in §4.
    minute is read from a response too, so the first turn of a session is not paced either — and
    it is the one turn that most often pays for the discovery. So is a *turn's* plan (§6.4): with
    no rate stated there is nothing to space against, so the one crossing is paid first and the
-   spreading begins after it.
+   spreading begins after it. The same shape costs more than a restart suggests: the learned
+   numbers live in the provider instance, and `SaveSettings` rebuilds the registry
+   (`App.rebuildServices`) — so any settings save, however unrelated, starts a session's ceiling,
+   rate and estimate correction over again and the next oversized turn pays its refusal anew.
 7. **A raised allowance is not noticed until the app restarts.** The ceiling only ever tightens
    (§6), so a key that moves to a higher tier keeps being planned against the smaller number it
    was measured at. Re-reading it would have to mean *loosening* what a refusal proved, and the

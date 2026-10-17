@@ -250,7 +250,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	// the first few thousand tokens. It is learned from one refusal and from the budget
 	// header of any response (llm.RequestCeiling), and from then on the request is planned
 	// against the number the meter shows rather than the window.
-	if err := e.autoFold(ctx, &chat, provider, backendID, modelID, modelInfo, settings); err != nil {
+	if err := e.autoFold(ctx, &chat, provider, backendID, modelID, modelInfo, settings, false); err != nil {
 		// A failed compaction is reported but does not abort the turn: the user
 		// still deserves an answer, and an over-long context will surface as a
 		// backend error which is easier to understand.
@@ -478,20 +478,38 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 // caller, because it is one fact about one backend and model: the turn's budget, the
 // preview the model switcher shows and the summarisation budget all have to see the
 // same number, or the meter would tell the truth on one screen and not on another.
-// The answer is a number the provider already holds — no request is made to ask.
+// The answer is a number the provider already holds — no request is made to ask — or
+// the one the user typed into the model's override, which is the only source that can
+// speak before the backend has answered anything at all (llm.ModelOverride.RequestCeiling).
 func (e *Engine) ceilingFor(backendID, modelID string) llm.Ceiling {
-	if e.Registry == nil || backendID == "" || modelID == "" {
+	if e == nil || backendID == "" || modelID == "" {
 		return llm.Ceiling{}
 	}
-	provider, ok := e.Registry.Provider(backendID)
-	if !ok {
-		return llm.Ceiling{}
+	published := llm.Ceiling{}
+	if e.Registry != nil {
+		if provider, ok := e.Registry.Provider(backendID); ok {
+			if ceiler, ok := provider.(llm.RequestCeiling); ok {
+				published = ceiler.RequestCeiling(modelID)
+			}
+		}
 	}
-	ceiler, ok := provider.(llm.RequestCeiling)
-	if !ok {
-		return llm.Ceiling{}
+	manual := 0
+	if e.Settings != nil {
+		manual = e.Settings().ModelOverrides[backendID+"/"+modelID].RequestCeiling
 	}
-	return ceiler.RequestCeiling(modelID)
+	// The smaller of the two, for the reason noteRequestCeiling keeps the smaller of
+	// two vendor numbers: a request planned under the tighter one is sendable under
+	// both, while planning under the looser one spends a refusal rediscovering it.
+	// The manual number therefore cannot loosen what a header or a refusal stated, and
+	// a vendor statement that undercuts the user's entry takes over from it — which is
+	// the direction a transcription of a limits page should be corrected in.
+	switch {
+	case manual > 0 && (published.Tokens <= 0 || manual < published.Tokens):
+		return llm.Ceiling{Tokens: manual, Source: llm.CeilingFromManual}
+	case published.Tokens > 0:
+		return published
+	}
+	return llm.Ceiling{}
 }
 
 // toolDefinitions decides which tools to advertise for this model and chat.

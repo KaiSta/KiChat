@@ -38,12 +38,66 @@ import (
 // because the app guessed that a request was too big, only because the backend said
 // so or because it published a limit the request would cross.
 
+// maxSizeBias caps how far one refusal may shrink a fold's aim. The correction is a
+// ratio read from two numbers the vendor and this app counted for one request; a
+// wild one (a refusal that counted something else, a request whose estimate came out
+// near zero) would otherwise fold a chat down to nothing, which is the expensive
+// direction for something the user has to read afterwards.
+const maxSizeBias = 4.0
+
+// minSizeForBias is the estimate below which the refusal's ratio is noise rather
+// than a measurement: dividing by a handful of tokens turns a rounding difference
+// into a factor. A chat that small cannot be over a ceiling anyway.
+const minSizeForBias = 200
+
+// sizeTargetWithCount is sizeTarget with the one measurement a refusal carries: the
+// vendor's own count of the request it refused.
+//
+// The estimator behind every plan (llm.EstimateTokens) is a heuristic, deliberately,
+// and on a ceiling that is a small fraction of the window its error is the whole
+// difference between a folded request that fits and one that is refused again. That
+// second refusal ends the turn — foldForSize is called once — which is why the
+// vendor's count is used rather than trusted to the estimate: `Requested` and the
+// app's `Estimated` price the same request, so their ratio is how far the estimate
+// sits below reality, and the fold is aimed at the ceiling divided by it.
+//
+// Only an undercount is corrected. A request the app already prices above what the
+// vendor counted is safe to fold to the ceiling as it stands: folding less is what a
+// correction in that direction would buy, and the cost of being wrong is the refusal
+// this function exists to prevent.
+func sizeTargetWithCount(chat store.Chat, settings config.Settings, modelInfo llm.ModelInfo,
+	ceiling, requested, estimated int) float64 {
+	return sizeTarget(chat, settings, modelInfo, calibratedCeiling(ceiling, requested, estimated))
+}
+
+// calibratedCeiling is a ceiling expressed in the app's own estimated tokens: the
+// largest estimate that still fits under what the vendor really counts.
+func calibratedCeiling(ceiling, requested, estimated int) int {
+	if ceiling <= 0 || requested <= 0 || estimated < minSizeForBias {
+		return ceiling
+	}
+	bias := float64(requested) / float64(estimated)
+	if bias <= 1 {
+		return ceiling
+	}
+	if bias > maxSizeBias {
+		bias = maxSizeBias
+	}
+	aim := int(float64(ceiling) / bias)
+	if aim < 1 {
+		aim = 1
+	}
+	return aim
+}
+
 // sizeTarget is the fraction of the chat's own window that a folded prompt should fit,
 // which is how a ceiling that is not the window is handed to the planner: the plan prices
 // the kept turns against Budget.Limit, so aiming at ceiling/window aims the folded request
 // at the ceiling itself. It is the planner's own aim for the same case (ceilingTarget),
 // not a second way of computing it — the fold that answers a refusal and the fold that
-// prevents one have to land on the same request size.
+// prevents one land on the same request size, unless a refusal has just taught the app
+// that its estimate is low (sizeTargetWithCount), in which case the answering fold has to
+// aim lower than the preventing one would have.
 //
 // With no ceiling the request was over the model's *window*, so the aim is the same ratio
 // the automatic threshold uses — the user's setting, and 0.8 when they have not touched it.
@@ -123,10 +177,32 @@ func (e *Engine) foldForSize(ctx context.Context, chat *store.Chat, provider llm
 			provider.Name(), ceilingNote(too)),
 	})
 
+	// What this request was estimated at, for the one calibration a refusal offers.
+	// The failed row is already dropped, so the assembly prices the body that will be
+	// retried rather than the one that carried an empty assistant message.
+	estimated := 0
+	if assembly, _, err := e.buildAssembly(ctx, chat, backendID, modelID, settings, modelInfo, ""); err == nil {
+		estimated = assembly.Budget.Estimated
+	}
+	// A refusal does not always state the limit — Groq's context-window refusal asks
+	// for a shorter message without naming one — and the provider may have learned one
+	// from an earlier response, or the user may have typed it in. Planning against it is
+	// the same fold, aimed at a number that is known rather than at the user's threshold.
+	ceiling := too.Limit
+	if ceiling <= 0 {
+		ceiling = e.ceilingFor(backendID, modelID).Tokens
+	}
+	// The same correction has to reach the summariser, which is a request of its own
+	// against the same ceiling: a transcript budgeted to a limit the vendor counts at
+	// twice the app's estimate is refused for the size of the call that exists to make
+	// the chat smaller.
+	summaryCeiling := calibratedCeiling(ceiling, too.Requested, estimated)
+
 	compaction, err := e.compactWith(ctx, chat, provider, backendID, modelID, modelInfo, settings,
 		CompactOptions{
 			Force:             true,
-			Target:            sizeTarget(*chat, settings, modelInfo, too.Limit),
+			Target:            sizeTargetWithCount(*chat, settings, modelInfo, ceiling, too.Requested, estimated),
+			SummaryCeiling:    summaryCeiling,
 			Trigger:           triggerTooLarge,
 			ProtectNewestTurn: true,
 		})

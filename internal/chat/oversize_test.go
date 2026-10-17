@@ -18,6 +18,7 @@ import (
 	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/store"
+	"kichat/internal/tools"
 )
 
 // groqChatListing is the one model these tests drive, in the shape the live listing
@@ -755,6 +756,39 @@ func TestTheSummariserIsBudgetedAgainstTheCeiling(t *testing.T) {
 	}
 }
 
+// TestTheSummariserFollowsTheCorrectedCeiling is the second request a size fold makes.
+// The caller that learned the app's estimate sits below the vendor's count hands
+// compactWith a ceiling expressed in the app's own units, and the summarisation has
+// to be budgeted against that one — against the published ceiling it would be the one
+// oversized request left in a fold whose whole job is to remove them.
+func TestTheSummariserFollowsTheCorrectedCeiling(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	// A history long enough that an uncorrected summarisation would fill the published
+	// ceiling's transcript budget rather than fit in the output cap's shadow.
+	seedLongHistory(t, st, 60)
+
+	provider := &fakeProvider{
+		model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		ceiling: 30000,
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{
+		Force: true, SummaryCeiling: 6000,
+	}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	summaryTokens := llm.EstimateMessagesTokens(provider.requestAt(0).Messages)
+	if summaryTokens > 6000 {
+		t.Errorf("the summarisation request was estimated at %d tokens against the corrected "+
+			"ceiling of 6000", summaryTokens)
+	}
+}
+
 // TestASizeFoldIsNamedInTheTranscript keeps the trigger honest: a fold nobody pressed
 // is not "manual". The card in the transcript is the only place a user learns why
 // turns became a memory, and crediting them with a button press is a lie about the
@@ -805,6 +839,226 @@ func TestTheSizeTargetAimsTheFoldAtTheCeiling(t *testing.T) {
 	}
 }
 
+// TestTheFoldAimsWithTheVendorsOwnCountOfTheRequest pins the correction the recovery
+// needs when the vendor's tokenizer and the app's estimator disagree. One refusal
+// states two numbers for the same request — `Requested`, the vendor's count, and the
+// app's own estimate of the body it sent — and their ratio is how far the fold aims
+// below the ceiling. Without it the fold reaches a size the app believes is the
+// ceiling and the vendor refuses again, which ends the turn because a refusal is
+// folded only once.
+func TestTheFoldAimsWithTheVendorsOwnCountOfTheRequest(t *testing.T) {
+	chat := store.Chat{ID: "c"}
+	settings := config.Default()
+	settings.Compact.Threshold = 0
+	model := llm.ModelInfo{ID: "m", ContextLimit: 131072}
+
+	// Nothing counted: the plain ceiling, exactly as before.
+	if got, want := sizeTargetWithCount(chat, settings, model, 10000, 0, 0),
+		sizeTarget(chat, settings, model, 10000); got != want {
+		t.Errorf("target without a count = %v, want %v", got, want)
+	}
+	// The vendor counted the request at twice the app's estimate, so the fold has to
+	// aim at half the ceiling to land on it: 5000 of a 131k window.
+	got := sizeTargetWithCount(chat, settings, model, 10000, 20000, 10000)
+	if want := 5000.0 / 131072; math.Abs(got-want) > 1e-9 {
+		t.Errorf("target for a two-to-one undercount = %v, want %v", got, want)
+	}
+	// An over-count is the safe direction and must not fold less: the request is
+	// already under the ceiling in the vendor's units.
+	if got, want := sizeTargetWithCount(chat, settings, model, 10000, 8000, 10000),
+		sizeTarget(chat, settings, model, 10000); got != want {
+		t.Errorf("target for an over-count = %v, want the plain %v", got, want)
+	}
+	// A ratio read out of two tiny numbers is noise; a chat that small cannot be over
+	// a ten-thousand-token ceiling anyway.
+	if got, want := sizeTargetWithCount(chat, settings, model, 10000, 400, 50),
+		sizeTarget(chat, settings, model, 10000); got != want {
+		t.Errorf("target for a tiny estimate = %v, want the plain %v", got, want)
+	}
+	// A wild ratio is capped rather than allowed to fold the chat to nothing.
+	if got, want := sizeTargetWithCount(chat, settings, model, 10000, 90000, 1000),
+		2500.0/131072; math.Abs(got-want) > 1e-9 {
+		t.Errorf("target for a wild undercount = %v, want %v", got, want)
+	}
+}
+
+// countingServer is a vendor whose tokenizer counts a request at a multiple of the
+// app's own estimate and refuses anything over its limit. It is the failure the
+// correction exists for, modelled directly: the app's body looks small enough to it,
+// the vendor's count is not, and a fold aimed with the app's arithmetic is refused a
+// second time.
+type countingServer struct {
+	limit      int
+	multiplier float64
+	reply      string
+
+	mu     sync.Mutex
+	counts []int
+}
+
+func (c *countingServer) handler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/openai/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, groqChatListing)
+		case "/openai/v1/chat/completions":
+			raw, _ := io.ReadAll(r.Body)
+			requested := int(float64(estimateBodyTokens(string(raw))) * c.multiplier)
+			c.mu.Lock()
+			c.counts = append(c.counts, requested)
+			c.mu.Unlock()
+			w.Header().Set("X-Ratelimit-Limit-Tokens", fmt.Sprint(c.limit))
+			if requested > c.limit {
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				fmt.Fprintf(w, `{"error":{"message":"Request too large for model `+"`openai/gpt-oss-20b`"+
+					` on tokens per minute (TPM): Limit %d, Requested %d, please reduce your message size and `+
+					`try again.","type":"tokens","code":"rate_limit_exceeded"}}`, c.limit, requested)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":%q}}]}\n\n", c.reply)
+			fmt.Fprintf(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],"+
+				"\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":4,\"total_tokens\":%d}}\n\n", requested, requested+4)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}
+}
+
+func (c *countingServer) vendorCounts() []int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]int(nil), c.counts...)
+}
+
+// estimateBodyTokens prices a request body the way the app prices a request: the
+// messages, their tool calls, and the tool schemas. It is the same estimator, so a
+// body the app believes is N tokens is N here too — and the server's own multiplier
+// is what stands in for a tokenizer that counts more.
+func estimateBodyTokens(raw string) int {
+	var body struct {
+		Messages []struct {
+			Content   any    `json:"content"`
+			Reasoning string `json:"reasoning_content"`
+			ToolCalls []struct {
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+		Tools []struct {
+			Function struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				Parameters  any    `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		return len(raw) / 4
+	}
+	total := 0
+	for _, m := range body.Messages {
+		total += 4
+		switch content := m.Content.(type) {
+		case string:
+			total += llm.EstimateTokens(content)
+		case []any:
+			for _, part := range content {
+				if s, ok := part.(string); ok {
+					total += llm.EstimateTokens(s)
+				}
+			}
+		}
+		total += llm.EstimateTokens(m.Reasoning) / 2
+		for _, tc := range m.ToolCalls {
+			total += llm.EstimateTokens(tc.Function.Name) + llm.EstimateTokens(tc.Function.Arguments) + 8
+		}
+	}
+	for _, tool := range body.Tools {
+		total += llm.EstimateTokens(tool.Function.Name) + llm.EstimateTokens(tool.Function.Description) + 8
+		if tool.Function.Parameters != nil {
+			if schema, err := json.Marshal(tool.Function.Parameters); err == nil {
+				total += llm.EstimateTokens(string(schema))
+			}
+		}
+	}
+	return total
+}
+
+// TestAFoldedRetryFitsWhenTheVendorCountsMoreThanTheApp is the turn this fix is
+// about: before it, the fold made the chat smaller and the retry was refused anyway,
+// because the fold had been aimed with the app's estimate rather than the vendor's
+// count. The turn then ended as an error even though the history had already been
+// summarised — the most expensive possible outcome, since the summary was paid for.
+func TestAFoldedRetryFitsWhenTheVendorCountsMoreThanTheApp(t *testing.T) {
+	st := newTestStore(t)
+	groqChat(t, st)
+	// Enough history that the fold has real work to do: the retry has to drop most of
+	// it, and a fold aimed with the app's own arithmetic would keep turns whose real
+	// count is over the ceiling.
+	filler := strings.Repeat("Der Verlauf einer Recherche ist lang und wird länger. ", 40)
+	for i := 0; i < 40; i++ {
+		seq := i*2 + 1
+		if err := st.CreateMessage(store.Message{
+			ID: fmt.Sprintf("u%d", i), ChatID: "chat-1", Seq: seq, Role: "user",
+			Content: fmt.Sprintf("Frage %d: %s", i, filler), CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.CreateMessage(store.Message{
+			ID: fmt.Sprintf("a%d", i), ChatID: "chat-1", Seq: seq + 1, Role: "assistant",
+			Content: fmt.Sprintf("Antwort %d: %s", i, filler), CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	counter := &countingServer{limit: 10000, multiplier: 2, reply: "Antwort nach der Kompression"}
+	srv := httptest.NewServer(counter.handler(t))
+	defer srv.Close()
+	engine, captured, _ := groqEngine(t, st, srv)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Und weiter?"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the turn did not finish")
+	}
+
+	for _, ev := range captured.snapshot() {
+		if ev.name == events.Error {
+			t.Fatalf("the turn failed after folding: %v", ev.payload["error"])
+		}
+	}
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newest := messages[len(messages)-1]
+	if newest.Role != "assistant" || newest.Status != store.StatusComplete ||
+		!strings.Contains(newest.Content, "Antwort nach der Kompression") {
+		t.Fatalf("newest row = %s/%s %q, want a complete answer after the fold",
+			newest.Role, newest.Status, newest.Content)
+	}
+
+	// The last request — the answer — fits the vendor's count, and the first did not.
+	counts := counter.vendorCounts()
+	if len(counts) != 3 {
+		t.Fatalf("requests = %d, want a refusal, a summary and an answer: %v", len(counts), counts)
+	}
+	if counts[0] <= counter.limit {
+		t.Errorf("the fixture never refused: first request counted at %d of %d", counts[0], counter.limit)
+	}
+	if counts[2] > counter.limit {
+		t.Errorf("the answered request counted at %d, over the %d limit", counts[2], counter.limit)
+	}
+}
+
 // TestASizeRefusalThroughTheSharedClientIsClassified keeps the chat-layer tests
 // honest about what they are faking: the envelope these tests hand the engine is the
 // one the real client classifies. It goes through a real HTTP response, so a change
@@ -845,5 +1099,270 @@ func TestASizeRefusalThroughTheSharedClientIsClassified(t *testing.T) {
 	}
 	if envelope.Error.Code != "rate_limit_exceeded" {
 		t.Errorf("fixture code = %q, want the one that makes this refusal hard to read", envelope.Error.Code)
+	}
+}
+
+// settingsWithOverride is an engine's settings with one model override added, built the
+// way the settings panel leaves it. It is a function because Engine.Settings is one: the
+// engine reads the current snapshot on every call, so a test cannot hand it a value once.
+func settingsWithOverride(base config.Settings, backend, model string, ov llm.ModelOverride) func() config.Settings {
+	return func() config.Settings {
+		s := base
+		s.ModelOverrides = map[string]llm.ModelOverride{backend + "/" + model: ov}
+		return s
+	}
+}
+
+// TestTheUsersOwnCeilingFoldsBeforeTheRequestGoesOut is the one route to a per-request
+// ceiling that speaks before the backend does.
+//
+// Groq states that budget nowhere a client can ask: the listing publishes windows, the
+// two documentation tables disagree by more than an order of magnitude for the same
+// models, and the exact figure for an organization is on a signed-in page while the wire
+// carries it only on a *response* (GROQ.md §6.2). So the first request of a long chat is
+// refused once, and the prevention the header enables only works from the turn after it.
+// A figure the user read off their Limits page and typed into the model's override is the
+// only number available at that moment — and it has to drive the same preventive fold,
+// not a second code path beside it.
+func TestTheUsersOwnCeilingFoldsBeforeTheRequestGoesOut(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedLongHistory(t, st, 4)
+
+	// Nothing is published by this provider: no ceiling has been learned, because no
+	// request has been sent yet — which is exactly the state a fresh process is in.
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}},
+			{{Type: llm.EventDelta, Text: "Antwort"}, {Type: llm.EventDone}},
+		},
+	}
+	engine, captured := newTestEngine(t, st, provider)
+	if got := provider.requestCount(); got != 0 {
+		t.Fatalf("backend calls before the turn = %d, want none", got)
+	}
+	engine.Settings = settingsWithOverride(engine.Settings(), "fake", "fake-model",
+		llm.ModelOverride{RequestCeiling: 2000})
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Eine neue Frage"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the turn did not finish")
+	}
+
+	if got := len(summariesOf(t, st)); got != 1 {
+		t.Fatalf("compactions = %d, want the fold the typed ceiling asked for before the request", got)
+	}
+	// The summary and the answer: the fold ran first, so nothing was refused on the way.
+	if n := provider.requestCount(); n != 2 {
+		t.Fatalf("backend calls = %d, want the summary and the answer", n)
+	}
+	for _, ev := range captured.snapshot() {
+		if ev.name == events.Error {
+			t.Errorf("a turn the typed ceiling could be planned against failed: %v", ev.payload["error"])
+		}
+	}
+}
+
+// TestATypedCeilingNeverLoosensWhatTheBackendStated pins the direction of the merge. The
+// typed number exists to fill a silence, not to overrule a measurement: a vendor that
+// states a smaller budget has to win, or a stale entry in Settings would let the app send
+// requests it already knows are too big. The reverse — a typed figure tighter than the
+// header's — is kept, because the cost of being wrong in that direction is an extra fold
+// rather than a refused turn.
+func TestATypedCeilingNeverLoosensWhatTheBackendStated(t *testing.T) {
+	cases := []struct {
+		name       string
+		published  int
+		manual     int
+		want       int
+		wantSource string
+	}{
+		{"the vendor's smaller number wins", 2000, 64000, 2000, llm.CeilingFromRefusal},
+		{"the typed smaller number wins", 8000, 1000, 1000, llm.CeilingFromManual},
+		{"the typed number stands alone", 0, 4000, 4000, llm.CeilingFromManual},
+		{"neither states one", 0, 0, 0, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			provider := &fakeProvider{
+				model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072},
+				ceiling: c.published,
+			}
+			engine, _ := newTestEngine(t, newTestStore(t), provider)
+			engine.Settings = settingsWithOverride(engine.Settings(), "fake", "fake-model",
+				llm.ModelOverride{RequestCeiling: c.manual})
+
+			got := engine.ceilingFor("fake", "fake-model")
+			if got.Tokens != c.want {
+				t.Fatalf("ceiling = %d, want %d", got.Tokens, c.want)
+			}
+			if got.Source != c.wantSource {
+				t.Fatalf("source = %q, want %q", got.Source, c.wantSource)
+			}
+		})
+	}
+}
+
+// TestTheMeterShowsTheTypedCeiling is the other half of the same fact: the number the
+// fold uses is the number the meter paints. A typed ceiling that reached the planner but
+// not the budget would show a chat as comfortable while its next request was about to be
+// folded, and the inspector would name a source that is not the one in force.
+func TestTheMeterShowsTheTypedCeiling(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+	engine.Settings = settingsWithOverride(engine.Settings(), "fake", "fake-model",
+		llm.ModelOverride{RequestCeiling: 2000})
+
+	assembly, _, err := engine.buildAssembly(context.Background(), &chat, "fake", "fake-model",
+		engine.Settings(), provider.model, "")
+	if err != nil {
+		t.Fatalf("buildAssembly: %v", err)
+	}
+	if assembly.Budget.Ceiling != 2000 {
+		t.Fatalf("budget ceiling = %d, want the typed 2000", assembly.Budget.Ceiling)
+	}
+	if assembly.Budget.CeilingSource != llm.CeilingFromManual {
+		t.Fatalf("ceiling source = %q, want %q", assembly.Budget.CeilingSource, llm.CeilingFromManual)
+	}
+	if assembly.Budget.EffectiveLimit != 2000 {
+		t.Fatalf("effective limit = %d, want the ceiling rather than the 131k window",
+			assembly.Budget.EffectiveLimit)
+	}
+}
+
+// TestAToolRoundFoldsBeforeItsNextRequestCrossesTheCeiling is the mid-turn half of the
+// prevention: the check before a turn prices the history as it stands, and a tool round
+// then adds a model reply and a tool result that neither that check nor the request that
+// followed it ever saw.
+//
+// The turn is arranged so that only the *second* check can fire — the ceiling is placed
+// just above what the turn would send, measured rather than guessed, so the fold before
+// the turn stays quiet and the reply the model writes is what crosses the line. A refusal
+// at that point would cost the whole answer, because the fold that answers it restarts the
+// turn (foldForSize runs on the turn's error, not on a round's).
+func TestAToolRoundFoldsBeforeItsNextRequestCrossesTheCeiling(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	seedLongHistory(t, st, 12)
+
+	call := "```tool_call\n{\"name\": \"search_web\", \"arguments\": {\"query\": \"mietrecht\"}}\n```"
+	report := strings.Repeat("Der Bericht ist lang und wird länger. ", 120)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			// First round: a tool call, in the text protocol a model without native
+			// tools uses, with a report long enough to be the growth the fold exists for.
+			{{Type: llm.EventDelta, Text: call + "\n\n" + report}},
+			// The fold's summarisation, then the round it made room for.
+			{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}},
+			{{Type: llm.EventDelta, Text: "Antwort"}, {Type: llm.EventDone}},
+		},
+	}
+	engine, captured := newTestEngine(t, st, provider)
+
+	before, _, err := engine.buildAssembly(context.Background(), &chat, "fake", "fake-model",
+		engine.Settings(), provider.model, tools.TextProtocolHint)
+	if err != nil {
+		t.Fatalf("buildAssembly: %v", err)
+	}
+	projected := before.Budget.Projected
+	if projected <= 0 {
+		t.Fatalf("projected = %d, want a measured request size", projected)
+	}
+	// The fold point is 0.9 × ceiling, so a ceiling at 1.125 × projected leaves the turn's
+	// own check below its line (0.9 × 1.125 = 1.0125) while any real growth crosses it.
+	provider.ceiling = projected + projected/8 + 1
+	if provider.ceiling <= projected {
+		t.Fatalf("ceiling %d does not leave the turn's own check quiet (projected %d)",
+			provider.ceiling, projected)
+	}
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Eine neue Frage"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the turn did not finish")
+	}
+
+	if got := len(summariesOf(t, st)); got != 1 {
+		t.Fatalf("compactions = %d, want the one the second round's check asked for", got)
+	}
+	// Round one, the summary the second round paid for, then round two.
+	if n := provider.requestCount(); n != 3 {
+		t.Fatalf("backend calls = %d, want the round, its fold, and the next round", n)
+	}
+	second := provider.requestAt(2)
+	var carriedOldest, keptNewest bool
+	for _, m := range second.Messages {
+		if strings.Contains(m.Content, "Frage 0:") {
+			carriedOldest = true
+		}
+		if strings.Contains(m.Content, "Eine neue Frage") {
+			keptNewest = true
+		}
+	}
+	if carriedOldest {
+		t.Error("the round after the fold still carried the oldest turn verbatim")
+	}
+	if !keptNewest {
+		t.Error("the fold swallowed the message the user just sent")
+	}
+	for _, ev := range captured.snapshot() {
+		if ev.name == events.Error {
+			t.Errorf("a long tool turn failed although its fold could fit: %v", ev.payload["error"])
+		}
+	}
+}
+
+// TestTheBetweenRoundFoldAsksOnlyForTheCeiling pins the difference between the two calls
+// to autoFold. Before a turn both bounds are the planner's — the user's threshold as much
+// as a published ceiling — while between rounds only the ceiling is: the threshold was
+// already applied to the history the turn was started with, and folding for it again
+// mid-turn would summarise a transcript while the user is reading the answer to it.
+func TestTheBetweenRoundFoldAsksOnlyForTheCeiling(t *testing.T) {
+	fold := func(t *testing.T, ceilingOnly bool, ceiling int) int {
+		t.Helper()
+		st := newTestStore(t)
+		chat := makeChat(t, st)
+		// The shipped default switches automatic compaction on, and this chat opts in:
+		// the threshold is live and very low, so the only thing that can keep the fold
+		// from happening is ceilingOnly.
+		chat.AutoCompact = true
+		if err := st.UpdateChat(chat); err != nil {
+			t.Fatalf("enable auto-compaction: %v", err)
+		}
+		seedLongHistory(t, st, 12)
+		provider := &fakeProvider{
+			model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+			ceiling: ceiling,
+			replies: [][]llm.StreamEvent{
+				{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}},
+			},
+		}
+		engine, _ := newTestEngine(t, st, provider)
+		settings := engine.Settings()
+		settings.Compact.Threshold = 0.01
+		if err := engine.autoFold(context.Background(), &chat, provider, "fake", "fake-model",
+			provider.model, settings, ceilingOnly); err != nil {
+			t.Fatalf("autoFold: %v", err)
+		}
+		return len(summariesOf(t, st))
+	}
+
+	if got := fold(t, true, 0); got != 0 {
+		t.Fatalf("between-round folds with no ceiling = %d, want none", got)
+	}
+	if got := fold(t, false, 0); got != 1 {
+		t.Fatalf("the fold before the turn = %d, want the one the threshold asks for", got)
+	}
+	if got := fold(t, true, 2000); got != 1 {
+		t.Fatalf("between-round folds with a ceiling = %d, want the one it asks for", got)
 	}
 }

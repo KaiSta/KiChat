@@ -90,6 +90,27 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			return result, ctx.Err()
 		}
 
+		// A tool round is where a turn grows: the request that just finished was priced
+		// against a history without the reply it produced and without the tool results the
+		// round then appended. On a backend whose per-request ceiling is a fraction of the
+		// window, those two are enough to make the *next* request unsendable — and a
+		// refusal here costs the whole answer, not one request, because the fold that
+		// answers it restarts the turn. So the ceiling is asked again before every round
+		// after the first, through the same planner and with the same arithmetic as the
+		// check that ran before the turn; only the ceiling is asked (see autoFold).
+		//
+		// A backend that publishes no ceiling pays nothing for this: the guard is the
+		// number itself, and with none there is no wall to fold for.
+		if iteration > 0 && e.ceilingFor(in.BackendID, in.ModelID).Tokens > 0 {
+			if err := e.autoFold(ctx, &in.Chat, in.Provider, in.BackendID, in.ModelID,
+				in.Model, in.Settings, true); err != nil {
+				// Same contract as the fold before the turn: a failed summarisation is
+				// reported, and the round is sent anyway. Refusing to send would turn a
+				// fold that could not be written into an answer that never arrives.
+				e.emit(events.Warning, map[string]any{"chatId": in.Chat.ID, "warning": err.Error()})
+			}
+		}
+
 		extraSystem := ""
 		if !in.UseNative {
 			extraSystem = tools.TextProtocolHint

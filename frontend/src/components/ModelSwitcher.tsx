@@ -354,6 +354,8 @@ function ceilingSourceLabel(source: string, t: (k: string) => string): string {
       return t('context.ceilingFrom.header')
     case 'refusal':
       return t('context.ceilingFrom.refusal')
+    case 'manual':
+      return t('context.ceilingFrom.manual')
     default:
       return t('context.unknown')
   }

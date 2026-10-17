@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"encoding/json"
 	"math"
 	"unicode"
 )
@@ -94,13 +95,30 @@ func EstimateMessagesTokens(messages []Message) int {
 
 // EstimateToolTokens approximates the cost of the tool schemas injected into
 // every request.
+//
+// The schema is priced as the JSON it is sent as rather than as a flat allowance,
+// because a property's own description travels on the wire too. This app's tools are
+// the case that showed it: the image tool documents its size bounds, step bounds,
+// sampler names and guidance scale in the schema, and at a 128k-vocabulary tokenizer
+// the five shipped tools cost 1385 tokens where the old name + description + 96
+// figure said 1261. That undercount rides *every* request, including the one after a
+// fold, where nothing else corrects it — which is why the JSON estimate (1537, the
+// safe direction) is used instead.
 func EstimateToolTokens(tools []ToolDefinition) int {
 	total := 0
 	for _, t := range tools {
-		total += EstimateTokens(t.Name) + EstimateTokens(t.Description) + 64
+		total += EstimateTokens(t.Name) + EstimateTokens(t.Description)
 		if t.Schema != nil {
-			total += 96
+			if raw, err := json.Marshal(t.Schema); err == nil {
+				total += EstimateTokens(string(raw))
+			} else {
+				// A schema that will not marshal is not the shape a request can carry
+				// anyway; the flat figure keeps this a measurement of something.
+				total += 96
+			}
 		}
+		// The wire wrapper around it: {"type":"function","function":{…}}.
+		total += 8
 	}
 	return total
 }

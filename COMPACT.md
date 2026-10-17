@@ -174,7 +174,13 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   fold that had nothing older to fold produces the identical body and the identical refusal, so
   nothing is sent and the user gets the limit and the fix rather than the vendor's envelope,
   while a fold whose summariser *broke* is reported as the failure it is — the sentence the turn
-  ends with does not blame an empty history (GROQ.md §6.2).
+  ends with does not blame an empty history (GROQ.md §6.2). Its aim is the ceiling the refusal
+  named, **corrected by the vendor's own count of the refused body** (`sizeTargetWithCount`): the
+  app's estimate of that body against the refusal's `Requested` is how far the estimator was low,
+  the aim shrinks by that ratio (only when the vendor counted more, capped at 4×), and the same
+  corrected ceiling budgets the summarisation (`CompactOptions.SummaryCeiling`). Without it the
+  retry lands where the *estimate* says the ceiling is, and a backend whose tokenizer counts more
+  refuses it a second time — which ends the turn, because a refusal is folded once.
 - **the ceiling bound inside the planner** is the preventive fold, and it is not a second entry
   point any more: whether the next request would run into a published ceiling is the planner's own
   question, compared in one place with the user's threshold (`automaticBound`, §5.1) and answered
@@ -182,6 +188,14 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   ceiling has it at all (`llm.RequestCeiling` — Groq, whose per-minute token allowance is also the
   largest single request the account may send), and its gate is `0.9 × ceiling` against the
   *projected* prompt. Its card says `auto`, which is exactly what a threshold nobody pressed means.
+
+  The gate is asked again **between tool rounds** (`generate` calls `autoFold` with
+  `ceilingOnly` before every round after the first): a round appends a model reply and a tool
+  result that the check before the turn could not price, and a refusal there costs the whole
+  answer — `foldForSize` answers it on the turn's error and restarts the turn. Only the ceiling is
+  asked mid-turn; the user's threshold is a preference about how full the chat may become, it was
+  applied to the history the turn was started with, and re-asking it between rounds would
+  summarise a transcript while the user is reading the answer to it.
 
   Where that ceiling comes from is what decides which turn it can save. It is the vendor's own
   number, read from **the budget header of any response** — `x-ratelimit-limit-tokens`, which
@@ -193,6 +207,14 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   (GROQ.md §6, §9.6). Two rules keep that safe — the header is read for Groq alone (another
   vendor's rate-limit header is not evidence about the largest request it accepts), and a newly
   read number may only *tighten* what a refusal already proved.
+
+  A third source exists for the turn neither of those can save: a ceiling the user typed into
+  that model's override after reading their organization's Limits page
+  (`llm.ModelOverride.RequestCeiling`, GROQ.md §6.2). The backend publishes no route that answers
+  it before a response, so this is the only number available to the first request of a session —
+  and `ceilingFor` merges it with the learned one under the same rule, keeping the smaller, so it
+  cannot loosen what the vendor stated. The field is offered for Groq's models only, because it is
+  the one backend here whose per-request budget is published nowhere a client can ask.
 
   What a *turn* is paced against is the minute, and the vendor measures it two ways: the
   **remainder** of the same header family for tokens, and for **requests** a limit learned from a
@@ -441,6 +463,18 @@ maxTokens   = outputCap                                                  ← sen
 Because `overhead + Total + reserve ≤ limit`, the request provably fits: prompt,
 transcript **and** the worst-case output, plus a margin for the estimator undershooting the
 backend's real tokenizer.
+
+**`limit` is not always the provider's published ceiling.** When the summarisation is the second
+half of a size fold, `foldForSize` passes `CompactOptions.SummaryCeiling` — the published ceiling
+divided by the ratio between the refusal's own `Requested` and the app's estimate of the body it
+sent (GROQ.md §6.2) — and the budget above is computed against that. It only applies to a
+summariser that is the chat's own model, since the ratio was measured for that model's tokenizer.
+Measured: a 30 000-token ceiling over a 60-turn history gives an uncorrected summary request
+estimated at 19 936 tokens, which a vendor counting twice the estimate refuses; the corrected
+ceiling of 6 000 brings it under that ceiling
+(`TestTheSummariserFollowsTheCorrectedCeiling`). The `reserve` above is what hides this in the
+ordinary case — the output cap and the margin already cover a modest underestimate — which is why
+the correction only bites when the transcript fills its budget.
 
 ### Why the cap is 8192, and why it is a cap
 

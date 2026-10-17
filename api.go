@@ -1441,7 +1441,8 @@ func (a *App) ListModels(forceRefresh bool) ([]llm.ModelInfo, error) {
 	return a.visibleModels(ctx), nil
 }
 
-// SetModelOverride stores a per-model context window or capability correction.
+// SetModelOverride stores a per-model context window, capability correction or
+// per-request ceiling.
 func (a *App) SetModelOverride(backend, model string, ov llm.ModelOverride) error {
 	if err := a.ensure(); err != nil {
 		return err
@@ -1451,7 +1452,10 @@ func (a *App) SetModelOverride(backend, model string, ov llm.ModelOverride) erro
 		a.settings.ModelOverrides = map[string]llm.ModelOverride{}
 	}
 	key := backend + "/" + model
-	if ov.ContextLimit == 0 && len(ov.Capabilities) == 0 {
+	// Every field counts as content: an override that carried only a ceiling must not
+	// be deleted for lacking a window, which is the state Groq models are in (they
+	// report a window and publish no budget).
+	if ov.ContextLimit == 0 && ov.RequestCeiling == 0 && len(ov.Capabilities) == 0 {
 		delete(a.settings.ModelOverrides, key)
 	} else {
 		a.settings.ModelOverrides[key] = ov

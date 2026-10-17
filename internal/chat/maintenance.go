@@ -33,6 +33,16 @@ type CompactOptions struct {
 	Focus string
 	// Target is a desired usage ratio afterwards, 0 for "as much as possible".
 	Target float64
+	// SummaryCeiling is the per-request budget the summariser's own call has to fit
+	// under, in the app's estimated tokens, when the caller knows the app's estimate
+	// undercounts the backend's tokenizer. 0 leaves the summariser budgeted against
+	// the ceiling the provider publishes, which is the ordinary case.
+	//
+	// It exists because the summarisation is a request against the same limit as the
+	// turn that was refused: sizing it to a ceiling the vendor counts at twice the
+	// estimate makes the fold fail on the very call that was meant to make the chat
+	// fit (internal/chat/oversize.go).
+	SummaryCeiling int
 	// FromSeq/ToSeq narrow the range to fold. Zero means "let the planner decide".
 	FromSeq int
 	ToSeq   int
@@ -124,26 +134,35 @@ func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions
 // What is left here is resolving the two facts the decision needs and leaving early where
 // there is nothing to decide. Every send runs this, so the early return is also what keeps a
 // chat with no bound at all from being assembled for an answer that cannot change.
+//
+// ceilingOnly is the between-rounds call (generate.go). A tool round is exactly where a turn
+// grows — the assert before the turn priced neither the reply nor the tool result that the
+// previous round added — so the ceiling has to be asked again before each request. The user's
+// threshold is deliberately not: it is a preference about how full a chat may become, it was
+// considered against the history the turn was started with, and asking it again mid-turn would
+// fold a transcript while the user is watching the answer to it being written — for a cost
+// (one summary call, inside a turn somebody is waiting on) that the wall the ceiling describes
+// never justifies.
 func (e *Engine) autoFold(ctx context.Context, chat *store.Chat, provider llm.Provider,
-	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings) error {
+	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings,
+	ceilingOnly bool) error {
 
 	// The user's bound exists only while they have automatic compaction switched on, and 0
 	// is how its absence reaches the planner — which is why nothing defaults it here: the
 	// planner's default belongs to the user's setting, not to a caller that switched the
 	// feature off (effectiveThreshold is where it lives).
 	threshold := 0.0
-	if settings.Compact.Enabled && chat.AutoCompact {
+	if !ceilingOnly && settings.Compact.Enabled && chat.AutoCompact {
 		threshold = effectiveThreshold(*chat, settings)
 	}
 	// The backend's bound is a number it published, and it is not the window: Groq's
 	// per-minute token allowance is also the largest single request the account may send.
 	// Only a backend that publishes one has it (llm.RequestCeiling), learned from a
-	// refusal's own sentence or from the budget header of an ordinary answer — which is
-	// why it is read here rather than deduced from the model.
-	ceiling := 0
-	if ceiler, ok := provider.(llm.RequestCeiling); ok {
-		ceiling = ceiler.RequestCeiling(modelID).Tokens
-	}
+	// refusal's own sentence or from the budget header of an ordinary answer — or typed
+	// in by the user, which is the one route that speaks before the backend has answered
+	// anything (llm.ModelOverride.RequestCeiling). ceilingFor merges those, so the fold
+	// decided here and the budget the meter paints cannot disagree about the limit.
+	ceiling := e.ceilingFor(backendID, modelID).Tokens
 	if threshold <= 0 && ceiling <= 0 {
 		return nil
 	}
@@ -273,16 +292,24 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 			})
 		}
 	}
-	// A ceiling the summariser publishes is smaller than its window, and a request
-	// sized to the window would be refused for its own size: Groq's per-minute token
-	// allowance is that ceiling, so a transcript budgeted against a 131k window is
+	// A ceiling the summariser is planned against is smaller than its window, and a
+	// request sized to the window would be refused for its own size: Groq's per-minute
+	// token allowance is that ceiling, so a transcript budgeted against a 131k window is
 	// one more oversized request — which is how a compaction that exists to make a
 	// chat fit ends up failing on the same refusal. The summary call is budgeted
-	// against the ceiling instead, and the ceiling is the backend's own number.
-	if ceiler, ok := target.Provider.(llm.RequestCeiling); ok {
-		if ceiling := ceiler.RequestCeiling(target.Model).Tokens; ceiling > 0 && ceiling < limit {
-			limit = ceiling
-		}
+	// against the ceiling instead, and the ceiling is the backend's own number or the
+	// one the user typed for that model, whichever is tighter (ceilingFor).
+	if ceiling := e.ceilingFor(target.Backend, target.Model).Tokens; ceiling > 0 && ceiling < limit {
+		limit = ceiling
+	}
+	// And the caller's corrected reading of the same ceiling, when it has one: it
+	// was measured for the chat's model, so it is only applied to a summariser that
+	// is that model. A second model on the same backend has its own tokenizer as far
+	// as this number is concerned, and the published ceiling is the honest budget for
+	// it.
+	if opts.SummaryCeiling > 0 && target.Backend == backendID && target.Model == modelID &&
+		opts.SummaryCeiling < limit {
+		limit = opts.SummaryCeiling
 	}
 
 	// The transcript's allowance comes from the window of the model that has to
