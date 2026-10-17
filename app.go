@@ -139,6 +139,15 @@ type App struct {
 	draws     map[string]inflightDraw
 	drawToken uint64
 
+	// drawSlot is held for the length of every draw this app starts, whichever path started
+	// it. One picture at a time is a property of the machine rather than of one path into the
+	// feature: every backend here draws on the same GPU, and the CLI and managed kinds pay a
+	// model load per draw, so a second draw beside a first is either a queue on the server or
+	// two copies of one checkpoint in memory. A TryLock rather than a queue, because the
+	// second caller wants an answer it can act on ("one is already running") rather than a
+	// picture minutes later that it cannot tell apart from the first.
+	drawSlot sync.Mutex
+
 	// installCompleted records that a build was downloaded during this session.
 	// A server that was already running keeps the binary it was started from, so
 	// without it the panel's "restart the model" line would disappear exactly when
@@ -713,6 +722,7 @@ func (a *App) rebuildServices(settings config.Settings) {
 	// a picture that does not exist yet as well as for one that does.
 	toolService.Draws = a.registerDraw
 	toolService.Progress = a.reportDrawProgress
+	toolService.TryDraw = a.tryDraw
 	// A nil turns is only possible before init has run; NewEngineWithState makes its
 	// own in that case, so a half-initialised app cannot panic here.
 	engine := chat.NewEngineWithState(a.store, registry, toolService, a.Settings, a.emit, a.turns)

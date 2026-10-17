@@ -503,6 +503,12 @@ func (s *Server) fail(message string) {
 	// loading or hours later. A failed row that still says which device the layers
 	// went to is a claim about a model that is not running.
 	s.status.Offload = Offload{}
+	// The address described it too, and it is the more dangerous of the two claims:
+	// a URL on a failed row is one a user can click, a browser can reach, or another
+	// tool can be pointed at — and it answers nothing, because the process behind it
+	// is gone. A row that is red and says "failed" must not also carry a way in.
+	s.status.Port = 0
+	s.status.URL = ""
 	s.mu.Unlock()
 	s.publish()
 }

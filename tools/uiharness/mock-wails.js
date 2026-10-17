@@ -1276,6 +1276,13 @@ Verfügbare Tools: {{tool_list}}`,
   // constructor three times is how one of them ends up reading the wrong thing.
   const query = new URLSearchParams(location.search)
   const slowDraw = query.get('slowdraw') === '1'
+  // ?drawfinish=1 is a draw that ends on its own while the user is reading another chat: a
+  // redraw reports for a few seconds, files its picture and emits the `done` that ends the
+  // progress row. It exists because that end used to be dropped together with the rest of a
+  // background chat's traffic — the entry then stayed behind and rendered a progress row,
+  // and a Stop button for a draw that was already over, the moment that chat was opened
+  // again. Start it, switch chats, come back: there is nothing left to show.
+  const drawFinishes = query.get('drawfinish') === '1'
   const noInterrupt = query.get('nointerrupt') === '1'
   // ?drawtool=1 is a draw the *model* started that has not finished: the chat's picture is
   // gone and a `generate_image` tool call sits on the assistant message instead, running.
@@ -1345,8 +1352,10 @@ Verfügbare Tools: {{tool_list}}`,
   const serverListening = () => serverState === 'running' || serverState === 'starting'
   // The port a real start picks free, and the address the panel then names. Fixed here
   // because the row has to render the *same* address the log's first line carries. A failed
-  // start keeps its port: the listener is chosen before the process is spawned, and only the
-  // pid goes away when it dies — which is the distinction the real row reports too.
+  // start keeps the port in its *log* — the listener was chosen before the process was
+  // spawned, and that line records it — but not on the row: the process that held it is
+  // gone, so the row reports no address at all, exactly as the backend's own fail() clears
+  // both fields. A live-looking URL beside a red badge is a link to nothing.
   let serverPort = serverState === 'stopped' ? 0 : 8912
   let serverPid = serverListening() ? 4242 : 0
   let serverTimer = null
@@ -1417,8 +1426,8 @@ Verfügbare Tools: {{tool_list}}`,
   const START_SETTLE_MS = 900
   const imageServerRow = () => ({
     state: serverState,
-    url: serverPort ? `http://127.0.0.1:${serverPort}` : '',
-    port: serverPort,
+    url: serverPort && serverState !== 'failed' ? `http://127.0.0.1:${serverPort}` : '',
+    port: serverState === 'failed' ? 0 : serverPort,
     pid: serverPid,
     error: serverError,
     log: serverLog,
@@ -1452,7 +1461,7 @@ Verfügbare Tools: {{tool_list}}`,
    * button that appears a second after the draw starts is a second in which the draw looks
    * stuck — which is exactly the state this feature exists to remove.
    */
-  function beginDraw({ id, chatId, steps, reject, toolCall }) {
+  function beginDraw({ id, chatId, steps, reject, toolCall, finish }) {
     clearDraw(pendingDraw)
     const state = { id, chatId, steps, step: 0, reject, toolCall, timer: null }
     pendingDraw = state
@@ -1471,6 +1480,12 @@ Verfügbare Tools: {{tool_list}}`,
       if (pendingDraw !== state) return
       state.step = Math.min(state.step + 1, steps)
       report()
+      // Only the ?drawfinish=1 fixture has a finish; every other simulated draw runs until
+      // it is stopped, which is what ?slowdraw=1 is for and what the Stop button exists for.
+      if (!finish || state.step < steps) return
+      clearDraw(state)
+      pendingDraw = null
+      finish()
     }, DRAW_REPORT_MS)
     return state
   }
@@ -3023,6 +3038,51 @@ Verfügbare Tools: {{tool_list}}`,
         return Promise.reject(new Error('der Bild-Prompt ist leer'))
       }
       const seed = Number(recipe?.seed) > 0 ? Number(recipe.seed) : 9931
+      // Files the new picture onto the message the original is on. Shared by the immediate
+      // answer, the ?drawfinish=1 draw and the stopped one's sibling paths, so that the three
+      // cannot describe different results.
+      const fileRedraw = () => {
+        const drawn = {
+          ...IMAGE_ATTACHMENT,
+          id: nextId('att'),
+          filename: uniqueImageName(`${slugify(prompt) || 'bild'}-1-s${seed}.png`),
+          generation: { ...recipe, prompt, seed },
+        }
+        drawnImageIds.add(drawn.id)
+        const host = messages.get(drawn.chatId)?.find((m) => (m.attachments ?? []).some((a) => a.id === id))
+        if (host) {
+          host.attachments = [...host.attachments, drawn]
+          emit('chat:attachments', { chatId: drawn.chatId })
+        } else {
+          console.warn('[harness] RegenerateImage found no message holding', id)
+        }
+        return drawn
+      }
+      const hostChat = [...messages.values()]
+        .flat()
+        .find((m) => (m.attachments ?? []).some((a) => a.id === id))?.chatId
+      const drawChat = hostChat ?? 'chat-image'
+      if (drawFinishes && !slowDraw) {
+        // A draw that ends by itself. Four steps rather than a real draw's forty: this
+        // fixture is about the end, and waiting the real length to reach it would teach
+        // nothing. Stop is *not* what ends it — that shape is ?slowdraw=1.
+        return new Promise((resolve) => {
+          beginDraw({
+            id,
+            chatId: drawChat,
+            steps: 4,
+            finish: () => {
+              // The same order the backend uses: the picture is filed first (that event is
+              // what replaces the progress row) and the `done` follows from releasing the
+              // registration. The window applies the `done` whatever chat is open, which is
+              // the half of that this fixture exists to make visible.
+              const drawn = fileRedraw()
+              emit('image:progress', { drawId: id, chatId: drawChat, done: true })
+              resolve(drawn)
+            },
+          })
+        })
+      }
       if (slowDraw) {
         // ?slowdraw=1 is the shape the Stop button exists for: a 40-step draw on a CPU
         // server is minutes, and a mock that answered instantly would leave the whole
@@ -3032,28 +3092,11 @@ Verfügbare Tools: {{tool_list}}`,
         console.warn('[harness] slowdraw injection active: the draw stays pending until Stop is pressed')
         // The reports go to the picture's own row: a redraw is registered under the
         // attachment it will replace, so the draw is what that row renders while it runs.
-        const host = [...messages.values()]
-          .flat()
-          .find((m) => (m.attachments ?? []).some((a) => a.id === id))
         return new Promise((_resolve, reject) => {
-          beginDraw({ id, chatId: host?.chatId ?? 'chat-image', steps: 40, reject })
+          beginDraw({ id, chatId: drawChat, steps: 40, reject })
         })
       }
-      const drawn = {
-        ...IMAGE_ATTACHMENT,
-        id: nextId('att'),
-        filename: uniqueImageName(`${slugify(prompt) || 'bild'}-1-s${seed}.png`),
-        generation: { ...recipe, prompt, seed },
-      }
-      drawnImageIds.add(drawn.id)
-      const host = messages.get(drawn.chatId)?.find((m) => (m.attachments ?? []).some((a) => a.id === id))
-      if (host) {
-        host.attachments = [...host.attachments, drawn]
-        emit('chat:attachments', { chatId: drawn.chatId })
-      } else {
-        console.warn('[harness] RegenerateImage found no message holding', id)
-      }
-      return Promise.resolve(drawn)
+      return Promise.resolve(fileRedraw())
     },
     // The two answers the UI branches on, and they are not the same sentence: a draw that
     // was running is over (the awaiting call rejects, and the view reports a stop), while

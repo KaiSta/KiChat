@@ -55,6 +55,27 @@ const (
 	MaxCfgScale = 30.0
 )
 
+// MaxPicturesPerDraw bounds how many pictures one draw may file into a chat.
+//
+// A request asks for exactly one (`n: 1` in the payload, see sdRequest.N), but a build that
+// ignores that key, a proxy in front of one, or a WebUI script can answer with a batch, and
+// every picture in one answer becomes an attachment with a base64 document behind it. Four is
+// a batch a person might have configured on purpose; past that the answer is not a draw
+// anybody asked for, and filing it would fill a chat and the database with pictures nobody
+// chose. What is not kept is reported rather than dropped in silence, so the model can say so
+// too.
+const MaxPicturesPerDraw = 4
+
+// Kept returns the pictures to file from one answer, at most MaxPicturesPerDraw of them.
+// Both callers that store a result loop over this rather than over Result.Images, which is
+// what keeps the bound from being a rule one of them remembers.
+func (r Result) Kept() []Image {
+	if len(r.Images) <= MaxPicturesPerDraw {
+		return r.Images
+	}
+	return r.Images[:MaxPicturesPerDraw]
+}
+
 // Normalised returns the request with its numbers inside the bounds every backend here
 // agrees on.
 //

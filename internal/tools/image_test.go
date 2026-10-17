@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -152,6 +153,86 @@ func TestGenerateImageFilesThePictureOnTheCallingMessage(t *testing.T) {
 	}
 	if !strings.Contains(out, "Seed: 4242") {
 		t.Errorf("the seed is missing, so the picture cannot be reproduced:\n%s", out)
+	}
+}
+
+// A server can hand back more pictures than one message should ever show. The client asks for
+// one (`n: 1`, see sdRequest.N), but a build that ignores that key exists, and a WebUI left on
+// a 4×4 batch answers one call with sixteen pictures — sixteen attachments no control in the
+// window was built for, and sixteen pictures already paid for in GPU seconds. The first four
+// are kept and the rest is *said out loud*, because a model told only about the kept ones would
+// answer questions about a batch it cannot see.
+func TestOneAnswerFilesAtMostTheBound(t *testing.T) {
+	mime, ext := images.SniffImage(pictureBytes, images.MimePNG, "png")
+	const extra = 2
+	result := images.Result{Seed: 4242, Model: "sdxl.safetensors", Info: `{"seed":4242}`}
+	for i := 0; i < images.MaxPicturesPerDraw+extra; i++ {
+		result.Images = append(result.Images, images.Image{Data: pictureBytes, Mime: mime, Ext: ext})
+	}
+	provider := &fakeImageProvider{result: result}
+	service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+
+	out, err := service.Execute(WithCallingMessage(context.Background(), "msg-1"), chatID,
+		ToolGenerateImage, `{"prompt":"a batch"}`)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	attachments, err := st.ListAttachments(chatID)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(attachments) != images.MaxPicturesPerDraw {
+		t.Fatalf("attachments = %d, want the bound of %d", len(attachments), images.MaxPicturesPerDraw)
+	}
+	if want := fmt.Sprintf("%d Bild(er) wurden erzeugt", images.MaxPicturesPerDraw); !strings.Contains(out, want) {
+		t.Errorf("the model was not told how many pictures the chat now shows:\n%s", out)
+	}
+	if want := fmt.Sprintf("%d Bild(er) mehr", extra); !strings.Contains(out, want) {
+		t.Errorf("the pictures that were not filed were dropped in silence:\n%s", out)
+	}
+}
+
+// One draw at a time, and the refusal is a sentence rather than a second process. The service
+// asks the app's slot before it registers anything — that ordering is what keeps a refused
+// draw from cancelling the running one's registration — and the slot has to come back out
+// however the draw ended, or one failure would wedge the feature for the rest of the session.
+func TestASecondDrawIsRefusedWhileOneHoldsTheSlot(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, _, chatID := newImageService(t, provider, config.ImageSettings{})
+	busy := false
+	service.TryDraw = func() (func(), bool) {
+		if busy {
+			return nil, false
+		}
+		busy = true
+		return func() { busy = false }, true
+	}
+
+	ctx := WithCallingMessage(context.Background(), "msg-1")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage, `{"prompt":"a fox"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if busy {
+		t.Fatal("the slot was still held after the draw finished")
+	}
+
+	// A failed draw releases it too, which is the half a release guarded by success would get
+	// wrong: one blown request would leave the feature refusing every later picture.
+	provider.err = errors.New("the server is on fire")
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage, `{"prompt":"a fox"}`); !errors.Is(err, provider.err) {
+		t.Fatalf("err = %v, want the provider's own failure", err)
+	}
+	if busy {
+		t.Fatal("a failed draw left the slot held")
+	}
+
+	// Somebody else is drawing: the call is refused, and the provider is never asked.
+	busy = true
+	if _, err := service.Execute(ctx, chatID, ToolGenerateImage, `{"prompt":"a fox"}`); !errors.Is(err, images.ErrDrawInProgress) {
+		t.Fatalf("err = %v, want ErrDrawInProgress", err)
+	}
+	if provider.calls != 2 {
+		t.Errorf("provider calls = %d, want 2: a refused draw must not reach the server", provider.calls)
 	}
 }
 

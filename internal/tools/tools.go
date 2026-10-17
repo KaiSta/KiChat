@@ -48,6 +48,12 @@ type Service struct {
 	// has one, a preview. It is a plain callback rather than an event emitter so this
 	// package goes on knowing nothing about Wails; the app decides what a report becomes.
 	Progress func(id, chatID string, progress images.Progress)
+	// TryDraw takes the app-wide slot a draw needs and reports false when another one holds
+	// it. A callback for the same reason Draws is one: one picture at a time is a property
+	// of the machine — one GPU, one checkpoint — rather than of this service, so the app owns
+	// the slot and the service asks for it. Nil means nothing is coordinating, which is what
+	// a service built without an app (the tests) gets. The release is called once.
+	TryDraw func() (release func(), ok bool)
 	// Settings reads the current configuration. It is a function rather than a
 	// copy so a settings save takes effect on the next tool call, the same way the
 	// engine's own Settings does — a Service outlives one settings blob.

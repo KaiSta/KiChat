@@ -90,6 +90,36 @@ func TestSDWebUIGenerateDecodesImages(t *testing.T) {
 	}
 }
 
+// One request, one picture — asked for rather than inherited. A batch is the one field of this
+// payload that is not left to the server: everything else omitted here is a preference someone
+// set up in their own WebUI, while a batch is a multiplier on the work. A session left on
+// "batch count 4, batch size 4" answers an `n`-less request with sixteen pictures, sixteen
+// minutes of GPU time, and twelve attachments that would have to be thrown away. So the key has
+// to be *present*, and it has to be 1 — omitted would mean "whatever the server was last set
+// to", which is exactly the state this pins against.
+func TestSDWebUIAsksForOnePicture(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		fmt.Fprintf(w, `{"images":["%s"]}`, base64.StdEncoding.EncodeToString(pngBytes))
+	}))
+	defer server.Close()
+
+	client := NewSDWebUI("sd", "Stable Diffusion", server.URL, "")
+	if _, err := client.Generate(context.Background(), Request{Prompt: "a red fox"}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	n, present := gotBody["n"]
+	if !present {
+		t.Fatalf("the request carries no `n`; a WebUI left on a batch answers it with sixteen pictures: %v", gotBody)
+	}
+	if n != float64(1) {
+		t.Errorf("n = %v, want 1", n)
+	}
+}
+
 // An older WebUI prefixed the base64 with a data: URL, and the two shapes cannot
 // both be decoded by the same assumption.
 func TestSDWebUIGenerateAcceptsDataURLPrefix(t *testing.T) {

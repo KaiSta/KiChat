@@ -1823,6 +1823,9 @@ function ImagesTab({
   const [status, setStatus] = useState<main.ImageStatus | null>(null)
   const [checking, setChecking] = useState(false)
   const [testing, setTesting] = useState(false)
+  // Set by the Stop button beside the test, and read by the rejection it causes: a stopped
+  // test rejects like a failed one, and only this flag can tell the two apart.
+  const stoppingTest = useRef(false)
   const images = draft.images ?? ({} as config.ImageSettings)
   // The kind key is stored empty for the server backend, so the selector's two values are
   // this string and the empty one. It is read once here rather than compared at every field:
@@ -2095,6 +2098,7 @@ function ImagesTab({
 
   const test = async () => {
     setTesting(true)
+    stoppingTest.current = false
     try {
       // The app probes what was *saved*, so the draft has to be committed first:
       // testing an address that was just typed would otherwise test the previous
@@ -2108,7 +2112,14 @@ function ImagesTab({
       setStatus(await App.GetImageStatus())
       useStore.getState().toast('info', report)
     } catch (err) {
-      useStore.getState().toast('error', String(err))
+      // A stop is not a failure: the click that ended it is the user's own, and
+      // reporting it in red would describe a working server as a broken one. Same
+      // split as the picture card's Stop.
+      if (stoppingTest.current) {
+        useStore.getState().toast('info', t('images.drawStopped'))
+      } else {
+        useStore.getState().toast('error', String(err))
+      }
       // The row is re-read even so, because what a failed generation needs to be
       // read against is whether the address answers at all: a WebUI that is
       // running with nothing loaded is a different repair from one that is not up.
@@ -2118,7 +2129,29 @@ function ImagesTab({
         useStore.getState().toast('error', String(statusErr))
       }
     } finally {
+      stoppingTest.current = false
       setTesting(false)
+    }
+  }
+
+  /* Stops a test draw. The button says "test" and looks like a listing, but on the one-shot
+   * kind it is a *model load* followed by a draw, and the bound behind it is that
+   * backend's own — up to half an hour — so without this the panel would sit on a running
+   * button with nothing to press. The id is the fixed one the backend registers the test
+   * under (`image-test` in api.go), since a test has no attachment to name it by. Nothing is
+   * stored either way: the picture is discarded when it arrives, so a stopped test leaves
+   * the settings exactly as they were. */
+  const stopTest = async () => {
+    stoppingTest.current = true
+    try {
+      const result = await App.StopImageDraw('image-test')
+      // Nothing was running — a second click, or a draw that finished between the render
+      // and the click. Clearing the flag is what keeps the next rejection reported as the
+      // failure it is, and nothing is toasted for a stop that did not happen.
+      if (!result.wasDrawing) stoppingTest.current = false
+    } catch (err) {
+      stoppingTest.current = false
+      useStore.getState().toast('error', String(err))
     }
   }
 
@@ -2662,6 +2695,20 @@ function ImagesTab({
         >
           {testing ? t('settings.images.testing') : t('settings.images.test')}
         </button>
+        {/* The test is a real draw, and on the one-shot kind that is a model load before
+            anything is drawn — so a Stop belongs beside it rather than only under a
+            picture. It appears only while the test runs: at rest there is nothing to
+            stop, and a permanently visible button would read as a second action. */}
+        {testing ? (
+          <button
+            type="button"
+            className="btn btn-sm btn-danger"
+            title={t('images.stopHint')}
+            onClick={() => void stopTest()}
+          >
+            ⏹ {t('images.stop')}
+          </button>
+        ) : null}
         {/* What the test actually costs, which is different for all three kinds: a WebUI
             answers in seconds, the one-shot program loads the model from disk first (minutes
             on a CPU), and the managed server is already loaded — unless it is stopped, in

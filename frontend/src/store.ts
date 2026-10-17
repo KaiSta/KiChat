@@ -616,24 +616,33 @@ function wireEvents(
    * behind it.
    */
   on<ImageProgressPayload>(EV.imageProgress, (p) => {
+    // A `done` is applied whatever chat is open, which is why it is handled before the guard
+    // below. A draw keeps running while the user reads another chat, and its end used to be
+    // dropped with the rest of that chat's traffic: the entry then stayed in the map, so
+    // opening that chat again rendered a progress row — and a Stop button — for a draw that
+    // had already finished. The preview is gone either way; only the mark is stale.
+    if (p.done) {
+      set((s) => {
+        const draws = { ...s.draws }
+        delete draws[p.drawId]
+        return { draws }
+      })
+      return
+    }
     // A report for a chat that is not open is dropped, the way every chat-scoped event is:
     // the row it belongs to is not mounted, and keeping the entry would only leak it. The
     // next report for the open chat is a few hundred milliseconds away.
     if (p.chatId && p.chatId !== active()) return
     set((s) => {
       const draws = { ...s.draws }
-      if (p.done) {
-        delete draws[p.drawId]
-      } else {
-        draws[p.drawId] = {
-          chatId: p.chatId,
-          step: p.step,
-          steps: p.steps,
-          // The preview is kept from the previous report when this one has none: a server
-          // that sends its fraction and its picture separately, or a poll that landed
-          // between two of them, must not make the thumbnail blink away.
-          preview: p.preview ?? s.draws[p.drawId]?.preview,
-        }
+      draws[p.drawId] = {
+        chatId: p.chatId,
+        step: p.step,
+        steps: p.steps,
+        // The preview is kept from the previous report when this one has none: a server
+        // that sends its fraction and its picture separately, or a poll that landed
+        // between two of them, must not make the thumbnail blink away.
+        preview: p.preview ?? s.draws[p.drawId]?.preview,
       }
       return { draws }
     })

@@ -220,6 +220,17 @@ var ErrNotConfigured = errors.New("no image backend is configured")
 // user's own click reads as a crash.
 var ErrCancelled = errors.New("das Zeichnen wurde abgebrochen")
 
+// ErrDrawInProgress marks a draw refused because this app is already drawing another
+// picture.
+//
+// It is a refusal rather than a queue, and the reason is hardware rather than taste: every
+// backend here draws on the same GPU, the two HTTP kinds queue (or fail) a second request
+// behind the first, and the CLI kind pays a whole model load per draw — two at once is the
+// same checkpoint in memory twice, which is how a working setup becomes an out-of-memory
+// failure. The user's answer is to wait, which is why the message says so and the UI shows
+// it as an ordinary toast rather than as a broken setup.
+var ErrDrawInProgress = errors.New("es wird bereits ein Bild gezeichnet — bitte warten, bis es fertig ist")
+
 // ErrNoModel marks a generation request against a server that has no checkpoint
 // loaded. It is its own error because the fix is specific and the message a bare
 // HTTP failure produces does not name it: a WebUI with no model installed answers

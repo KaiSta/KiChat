@@ -110,6 +110,14 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	// images.Request.Normalised.
 	req = req.Normalised()
 
+	// One picture at a time, and before anything is registered: a second draw under the same
+	// message would otherwise cancel the first one's registration on its way to being refused.
+	releaseSlot, err := s.takeDrawSlot()
+	if err != nil {
+		return "", err
+	}
+	defer releaseSlot()
+
 	// The draw is registered under the message that asked for it, which is the row the view
 	// renders the tool call on — so it is the id a Stop can be pressed next to. Without this
 	// a draw the *model* started had no way of being stopped at all: every Stop in the window
@@ -138,7 +146,7 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	if err != nil {
 		return "", fmt.Errorf("die vergebenen Bildnamen konnten nicht gelesen werden: %w", err)
 	}
-	for i, img := range result.Images {
+	for i, img := range result.Kept() {
 		name := uniqueName(used, imageFilename(prompt, i, img.Ext))
 		if _, err := s.storeGeneratedImage(chatID, messageID, name, img, &recipe); err != nil {
 			// The picture is already drawn and paid for, so an error here loses it
@@ -160,7 +168,14 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 // reads as a broken feature rather than as an absent capability.
 func summarizeGeneration(req images.Request, result images.Result) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%d Bild(er) wurden erzeugt und im Chat angezeigt.\n", len(result.Images))
+	kept := len(result.Kept())
+	fmt.Fprintf(&sb, "%d Bild(er) wurden erzeugt und im Chat angezeigt.\n", kept)
+	if dropped := len(result.Images) - kept; dropped > 0 {
+		// Said out loud rather than dropped in silence: the server drew them, the chat does
+		// not show them, and a model that was told only about the kept ones would answer a
+		// question about a batch it cannot see.
+		fmt.Fprintf(&sb, "Der Server hat %d Bild(er) mehr geliefert; sie wurden nicht übernommen.\n", dropped)
+	}
 	fmt.Fprintf(&sb, "Prompt: %s\n", req.Prompt)
 	if req.NegativePrompt != "" {
 		fmt.Fprintf(&sb, "Negativ-Prompt: %s\n", req.NegativePrompt)
@@ -450,7 +465,7 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 		return store.Attachment{}, err
 	}
 	var first store.Attachment
-	for i, img := range result.Images {
+	for i, img := range result.Kept() {
 		name := uniqueName(used, redrawFilename(req.Prompt, effective.Seed, img.Ext, i))
 		attachment, err := s.storeGeneratedImage(source.ChatID, source.MessageID, name, img, &effective)
 		if err != nil {
@@ -462,6 +477,29 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 		}
 	}
 	return first, nil
+}
+
+// takeDrawSlot takes the app-wide draw slot when one is wired and reports the busy sentinel
+// when another picture is already being drawn.
+//
+// One picture at a time is a property of the hardware rather than politeness: every backend
+// here draws on the same GPU, the two HTTP kinds queue (or refuse) a second request behind
+// the first, and the CLI kind pays a *model load* per draw — two at once is the same
+// checkpoint in memory twice, which turns a working setup into an out-of-memory failure. It
+// also makes Stop unambiguous: with two draws under way, an interrupt meant for one of them
+// is sent to whichever the server happens to be working on.
+//
+// Nil means nothing is coordinating — a service built without an app, which is what the tests
+// do — so the draw runs as it always did rather than waiting for a slot nobody owns.
+func (s *Service) takeDrawSlot() (func(), error) {
+	if s.TryDraw == nil {
+		return func() {}, nil
+	}
+	release, ok := s.TryDraw()
+	if !ok || release == nil {
+		return nil, images.ErrDrawInProgress
+	}
+	return release, nil
 }
 
 // watchDraw registers a draw that is about to start, when somebody is watching. The

@@ -2247,6 +2247,12 @@ func (a *App) GetImageStatus() (ImageStatus, error) {
 	return status, nil
 }
 
+// imageTestDrawID is the id the settings panel's test draw is registered under, and the one
+// its Stop button sends. It is a fixed string rather than a uuid because the draw has no
+// attachment and no message to derive one from — the panel that starts it is the thing that
+// names it, on both sides of the bridge.
+const imageTestDrawID = "image-test"
+
 // TestImageBackend runs one generation and discards the result, so a user can
 // find out that their WebUI is reachable and has a model loaded without spending
 // a chat turn on it.
@@ -2269,7 +2275,19 @@ func (a *App) TestImageBackend() (string, error) {
 		}
 		return "", images.ErrNotConfigured
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), imageDrawTimeout(settings))
+	if a.ctx == nil {
+		return "", errors.New("App ist noch nicht bereit")
+	}
+	// A test draws a real picture, so it queues behind every other draw rather than beside it:
+	// on the CLI and managed kinds it pays a model load, and the picture the *user* asked for
+	// must not wait behind a colour swatch. Refused rather than queued, because the panel's
+	// answer — "already drawing" — is something a user can act on.
+	releaseDraw, ok := a.tryDraw()
+	if !ok {
+		return "", images.ErrDrawInProgress
+	}
+	defer releaseDraw()
+	ctx, cancel := context.WithTimeout(a.ctx, imageDrawTimeout(settings))
 	defer cancel()
 	// The size is the user's own when they chose one, and a small square otherwise:
 	// a setup that only works at its trained size would otherwise fail a test that
@@ -2280,6 +2298,12 @@ func (a *App) TestImageBackend() (string, error) {
 		}
 		return 512
 	}
+	// Registered so the button that started it can also stop it. The id is fixed rather than a
+	// uuid because there is no attachment and no message behind this draw: the panel's Stop
+	// sends the same string, which is the whole contract. No progress callback is wired to it,
+	// so the row never renders a progress line for a draw nobody is watching.
+	release := a.registerDraw(imageTestDrawID, "", cancel)
+	defer release()
 	result, err := provider.Generate(ctx, images.Request{
 		Prompt:         "a simple color test pattern",
 		NegativePrompt: settings.Images.NegativePrompt,
@@ -2291,6 +2315,12 @@ func (a *App) TestImageBackend() (string, error) {
 		Model:          settings.Images.Model,
 	}.Normalised())
 	if err != nil {
+		// The same split a redraw makes: this context is cancelled by the Stop button and by
+		// nothing else, so a cancelled context is the user's own click — unless the app itself
+		// is closing, which reads as what it is.
+		if errors.Is(ctx.Err(), context.Canceled) && a.ctx.Err() == nil {
+			return "", images.ErrCancelled
+		}
 		return "", err
 	}
 	report := fmt.Sprintf("%d Bild(er) erzeugt (%s)", len(result.Images), provider.Name())
@@ -2325,6 +2355,14 @@ func (a *App) RegenerateImage(attachmentID string, recipe store.GenerationRecipe
 	if a.ctx == nil {
 		return store.Attachment{}, errors.New("App ist noch nicht bereit")
 	}
+	// One picture at a time, and taken here rather than inside the service so that a refused
+	// draw never reaches registerDraw — registering would cancel the draw already running
+	// under this attachment, which is exactly the picture the user is waiting for.
+	releaseDraw, ok := a.tryDraw()
+	if !ok {
+		return store.Attachment{}, images.ErrDrawInProgress
+	}
+	defer releaseDraw()
 	// Generous, because a local backend drawing a large picture takes minutes on a CPU, and
 	// present at all so a wedged process cannot hold the click open indefinitely. How
 	// generous is the backend's own answer: a server holds its model in memory and spends
@@ -2475,14 +2513,30 @@ func (a *App) StopImageDraw(drawID string) StopDrawResult {
 	return result
 }
 
+// tryDraw takes the app-wide draw slot, and reports false when another draw already holds
+// it. The release is called exactly once.
+//
+// Every path that starts a picture goes through it — a model-started draw in
+// tools.Service, a redraw and the settings test here — because "one at a time" is a fact
+// about the machine (one GPU; the CLI kind loads a checkpoint per draw) rather than about
+// any one of them. It is a TryLock and not a queue: a second request is answered "one is
+// already running" at once, which a user can act on, instead of being parked for minutes.
+func (a *App) tryDraw() (release func(), ok bool) {
+	if !a.drawSlot.TryLock() {
+		return nil, false
+	}
+	return a.drawSlot.Unlock, true
+}
+
 // registerDraw records a draw so Stop can find it, and returns the function that releases
 // the registration.
 //
-// It is called from two places, and that is the point of it: RegenerateImage registers the
-// attachment a redraw works on, and tools.Service registers the assistant message a
-// model-started draw belongs to. Both ids are uuids, so one map holds both kinds without
-// them colliding, and a single Stop path serves a picture that exists and one that does not
-// yet.
+// It is called from three places, and that is the point of it: RegenerateImage registers the
+// attachment a redraw works on, tools.Service registers the assistant message a
+// model-started draw belongs to, and TestImageBackend registers itself under imageTestDrawID
+// because a test has neither. The two uuid kinds cannot collide, and the fixed third one is a
+// name no uuid takes; a single Stop path serves a picture that exists, one that does not yet,
+// and one that will not.
 //
 // The release is the same token dance as before: it removes the entry only if it is still
 // the one this call made, because a second draw of the same picture must keep its own entry
@@ -2503,9 +2557,10 @@ func (a *App) registerDraw(id, chatID string, cancel context.CancelFunc) func() 
 	if a.draws == nil {
 		a.draws = map[string]inflightDraw{}
 	}
-	// A draw already running for this id is cancelled first. Nothing in the UI can start two
-	// (every control is disabled while one runs), so reaching this means a request arrived
-	// from somewhere else, and the newest recipe is then the one the user is waiting for.
+	// A draw already registered under this id is cancelled first. A *concurrent* one can no
+	// longer reach this point: every path takes the draw slot before it registers, so what is
+	// left is a registration whose release never ran — and the newest recipe is still the one
+	// a user is waiting for.
 	if previous, ok := a.draws[id]; ok {
 		previous.cancel()
 	}

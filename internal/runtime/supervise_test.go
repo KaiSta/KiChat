@@ -210,3 +210,57 @@ func TestADeadServerIsReportedByTheCallersName(t *testing.T) {
 		t.Errorf("error = %q, want the program's name and its own last output", st.Error)
 	}
 }
+
+// A failed row names no address, and the case that made this necessary is a crash *after* the
+// server was ready: the row turned red and kept the URL it had while it was running, so the
+// panel offered a link to a listener that no longer existed. A URL on a failed row is one a
+// user can click and another tool can be pointed at; both answer nothing.
+func TestAFailedServerKeepsNoAddress(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a shell")
+	}
+	// Long enough for readiness to be answered below, so the row really is running before it
+	// dies — otherwise this would pass for a server that never had an address to lose.
+	binary, _ := fakeServer(t, "echo 'Modell geladen'\nsleep 1\nexit 4\n")
+
+	port, err := FreePort()
+	if err != nil {
+		t.Fatalf("FreePort: %v", err)
+	}
+	srv := NewServer("images")
+	srv.readyTimeout = 10 * time.Second
+	srv.probe = func(context.Context, string) error { return nil }
+
+	if err := srv.Start(Options{
+		Binary: binary, Model: writeModel(t),
+		Args: []string{"--listen-port", strconv.Itoa(port)}, Label: "sd-server", Port: port,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return srv.Status().State == StateRunning }) {
+		t.Fatalf("the server never became ready: %+v", srv.Status())
+	}
+	if st := srv.Status(); st.URL == "" {
+		t.Fatal("the running row has no address, so there is nothing for the failure to clear")
+	}
+
+	if !waitFor(t, 10*time.Second, func() bool { return srv.Status().State == StateFailed }) {
+		t.Fatalf("the crash was never reported: %+v", srv.Status())
+	}
+	st := srv.Status()
+	if st.URL != "" || st.Port != 0 {
+		t.Errorf("the failed row still names %q (port %d), and nothing is listening there", st.URL, st.Port)
+	}
+	if st.PID != 0 {
+		t.Errorf("pid = %d on a failed row", st.PID)
+	}
+	// Stop, which is what a cleanup after a failed start does, must not bring either field
+	// back — and must leave the failure's reason in place.
+	if err := srv.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if after := srv.Status(); after.URL != "" || after.Port != 0 || after.State != StateFailed {
+		t.Errorf("after Stop: state = %q, url = %q, port = %d; want the failed row, minus its address",
+			after.State, after.URL, after.Port)
+	}
+}

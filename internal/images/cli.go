@@ -165,7 +165,15 @@ type CLI struct {
 // well under a second — cheap enough to be worth the one call.
 func (c *CLI) help(ctx context.Context, binary string) (string, error) {
 	c.helpOnce.Do(func() {
-		probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Deliberately *not* parented to the caller's context. What this probe learns is
+		// memoised for the life of the client, and the caller may well be a draw the user
+		// stops a moment after it starts: cancelling the probe with it would record "this
+		// build cannot answer" for the whole session, and previewSupport reads a failed
+		// probe as "no preview options" — a feature quietly switching itself off because
+		// somebody pressed Stop during the first picture. WithoutCancel also drops the
+		// caller's deadline, so the ten seconds below are this probe's own bound rather
+		// than whatever was left of the draw's.
+		probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		out, err := exec.CommandContext(probeCtx, binary, "-h").Output()
 		c.helpOut, c.helpErr = string(out), err

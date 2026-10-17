@@ -189,3 +189,48 @@ func TestCLIBoundsTheCommandLineItRuns(t *testing.T) {
 		t.Errorf("a guidance scale nobody chose was passed to the binary:\n%s", line)
 	}
 }
+
+// Kept is the one place the batch bound is applied, and it has to be cheap and harmless for
+// the ordinary answer: a server that returns one picture, or four, must be passed through
+// untouched — the caller loops over the slice it just drew. Only a server that returns more
+// than one message can show is trimmed, and the count of what was trimmed stays readable as
+// len(Result.Images) - len(Result.Kept()), which is what the tool result reports.
+func TestKeptBoundsOneAnswersPictures(t *testing.T) {
+	pictures := func(n int) Result {
+		imgs := make([]Image, n)
+		for i := range imgs {
+			imgs[i] = Image{Data: []byte{byte(i)}, Mime: MimePNG, Ext: "png"}
+		}
+		return Result{Images: imgs}
+	}
+
+	inside := pictures(MaxPicturesPerDraw)
+	kept := inside.Kept()
+	if len(kept) != MaxPicturesPerDraw {
+		t.Fatalf("kept = %d, want all %d", len(kept), MaxPicturesPerDraw)
+	}
+	if &kept[0] != &inside.Images[0] {
+		t.Error("an answer inside the bound was copied rather than passed through")
+	}
+
+	over := pictures(MaxPicturesPerDraw + 3)
+	kept = over.Kept()
+	if len(kept) != MaxPicturesPerDraw {
+		t.Fatalf("kept = %d, want the bound of %d", len(kept), MaxPicturesPerDraw)
+	}
+	if dropped := len(over.Images) - len(kept); dropped != 3 {
+		t.Errorf("dropped = %d, want the 3 the caller has to report", dropped)
+	}
+	// The kept ones are the first ones: the server drew them in order, and the first picture
+	// of a batch is the one its prompt describes.
+	for i := range kept {
+		if kept[i].Data[0] != byte(i) {
+			t.Errorf("kept[%d] is picture %d, want the first ones in order", i, kept[i].Data[0])
+		}
+	}
+
+	var empty Result
+	if got := empty.Kept(); len(got) != 0 {
+		t.Errorf("an empty answer kept %d pictures", len(got))
+	}
+}

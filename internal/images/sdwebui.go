@@ -109,9 +109,9 @@ func (s *SDWebUI) Health(ctx context.Context) error {
 //
 // What it interrupts is the server's current generation, not this request. The state
 // it flips is global to the process — a picture the user is drawing in their own WebUI
-// tab stops too. KiChat draws one picture at a time against a server the user runs for
-// themselves, so the window is narrow, but a caller pressing Stop should know that is
-// what it means.
+// tab stops too. KiChat draws one picture at a time (the app-wide draw slot is what
+// enforces that, not a setting), so the window is narrow, but a caller pressing Stop
+// should know that is what it means.
 //
 // Deliberately not retried, unlike every other route here: by the time this is sent the
 // draw it refers to has already been abandoned by the caller's context, so a second
@@ -207,6 +207,16 @@ type sdRequest struct {
 	CfgScale float64        `json:"cfg_scale,omitempty"`
 	Seed     *int64         `json:"seed,omitempty"`
 	Override map[string]any `json:"override_settings,omitempty"`
+	// N is the batch count, and it is *always* sent rather than omitted like the fields
+	// above. Everything else omitted here is a real "the server's own default" — a size, a
+	// sampler, a step count someone set up in their WebUI. A batch is not: a WebUI left on
+	// "batch count 4, batch size 4" answers one request with sixteen pictures, sixteen
+	// minutes of GPU time nobody asked for, and a tool result that has to explain which
+	// twelve it threw away. One call, one picture is what this client's callers mean —
+	// `generate_image` files what it gets onto one message — so the batch is asked for
+	// explicitly instead of inheriting whatever the server's last session left behind.
+	// stable-diffusion.cpp's `sd-server` parses the same key and draws one picture per `n`.
+	N int `json:"n"`
 }
 
 // sdResponse is the txt2img answer. `images` holds base64 with no data: prefix —
@@ -283,6 +293,8 @@ func (s *SDWebUI) GenerateWithProgress(ctx context.Context, req Request, report 
 		SamplerName:    strings.TrimSpace(req.Sampler),
 		CfgScale:       req.CfgScale,
 		Seed:           seed,
+		// One picture, whatever the server's own batch settings say; see the field's comment.
+		N: 1,
 	}
 	if model := strings.TrimSpace(req.Model); model != "" {
 		payload.Override = map[string]any{"sd_model_checkpoint": model}

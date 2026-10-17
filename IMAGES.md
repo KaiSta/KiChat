@@ -277,6 +277,15 @@ asked on, and the name the messages use. Two consequences are worth naming.
   and takes minutes on a CPU — the very load `DefaultCLITimeout` gives half an hour to, since
   the one-shot kind pays it on *every* picture.
 
+**A row that failed names no address**, and the case that made this a rule is a crash *after*
+the server was ready: the row turned red and kept the URL it had while it was running, so the
+panel offered a link to a listener that no longer existed. `fail()` now clears `Port` and `URL`
+beside the PID and the offload reading, for the reason those two are cleared: the port was
+chosen before the process was spawned, so it survives in the *log* — `sd-server gestartet (PID
+…) auf http://…` is a record of what was attempted — but a URL on the row itself is one a user
+can click and another tool can be pointed at, and nothing answers it. The harness fixture for
+`?server=failed` sends the same shape, so the two cannot disagree.
+
 **Starting is also restarting**, and there is no second call for it. `sd-server` creates its
 context once before it listens and documents no way to replace it, so one pipeline per process
 is the whole of the model-switching story: a different model is a different process. The app
@@ -431,6 +440,31 @@ from the request** rather than sent as a default:
 This is the same instinct as the model picker offering the GGUF files a user already
 has: the app must not quietly substitute its own guess for a decision the user made
 elsewhere. The Settings section says so under the fields.
+
+### One request, one picture — the one field and one bound that are *not* left to the server
+
+A request field and an answer bound go the other way, and both for the same reason: they
+decide how much work one call costs, and the user of this app asked for one picture.
+
+- **`n: 1` is always sent** (`sdRequest.N`, not `omitempty`, unlike every field above). A
+  batch size is not a drawing preference someone tuned in their WebUI, it is a multiplier on
+  the request: a session left on "batch count 4, batch size 4" answers one call with
+  sixteen pictures, sixteen minutes of GPU time, and a chat message that has to explain
+  which twelve it threw away. `n` is the key A1111 and stable-diffusion.cpp both parse for
+  it (`n_iter`/`batch_size` are the same thing under A1111's own names; the client sends the
+  one both routes agree on), so one picture is what is asked for rather than inherited.
+- **`MaxPicturesPerDraw` bounds what comes back anyway** (`internal/images/limits.go`). `n`
+  is a request, and a server that ignores it, a build with different defaults, or a proxy in
+  front of either can still answer with more; every picture in one answer becomes an
+  attachment with a base64 document behind it. Four is a batch a person could have configured
+  on purpose, so four are filed — the first four, in the order the server drew them — and
+  both loops that store a result (`generate_image`'s and `Regenerate`'s) iterate
+  `Result.Kept()` rather than the raw slice, so the bound is one rule and not one per caller.
+  What was not kept is **reported to the model** rather than dropped in silence
+  (`summarizeGeneration`: "Der Server hat N Bild(er) mehr geliefert …"): a model told only
+  about the kept ones would answer questions about a batch it cannot see.
+  `TestOneAnswerFilesAtMostTheBound` and `TestKeptBoundsOneAnswersPictures` pin both halves,
+  and the dropped count stays legible as `len(Result.Images) - len(Result.Kept())`.
 
 ### The model decides first, and a filled field is an instruction
 
@@ -768,6 +802,44 @@ Two consequences worth stating because they are the design rather than an accide
 fields, the source's recipe is unchanged afterwards, a blank prompt never reaches the
 provider, and a step count outside the bound is clamped in both directions.
 
+### One draw at a time — an app-wide slot, not a queue
+
+`App.drawSlot` (`sync.Mutex`, taken with `TryLock`) is the rule that only one picture is
+being drawn at a time, and it is a property of the app rather than of a chat or of a
+backend: the machine has one GPU, and the `cli` and managed kinds *load a checkpoint per
+draw*, so a second draw started beside the first is minutes spent waiting for the card, not
+progress on a second picture.
+
+Three callers take it, and that is all of them (`(*App).tryDraw`):
+
+| caller | why it needs the slot |
+| --- | --- |
+| the `generate_image` tool (`tools.Service.takeDrawSlot`) | a model that calls it twice in one turn |
+| `RegenerateImage` | two clicks on Redraw / Variation / Draw |
+| `TestImageBackend` | the Settings test is a real draw (§8) and must not run beside one the user asked for |
+
+**It is refused, not queued.** A queue would make the second click look like it did
+nothing until the first picture finishes, which on a CPU server is minutes; the answer
+instead is `images.ErrDrawInProgress` and one sentence in the window. A user can act on
+"already drawing"; they cannot act on a spinner.
+
+**The slot is taken *before* the draw is registered, and that ordering is the whole
+point.** `registerDraw` replaces whatever is registered under the same id, cancelling it —
+so a second draw under the same attachment that registered first and was refused afterwards
+would have ended the picture the user is already waiting for: "please wait" costing them
+the thing it asked them to wait for. `TestASecondDrawIsRefusedWithoutEndingTheOneRunning`
+pins exactly that: after the refusal, `StopImageDraw` still finds the *first* draw, and it
+ends as a stop rather than as a failure. The release is deferred on every path — a failed
+draw must not wedge the feature for the rest of the session
+(`TestASecondDrawIsRefusedWhileOneHoldsTheSlot`).
+
+**The test draw has an id that is not a uuid.** It has no attachment and no message to name
+it by, so it registers under the fixed `imageTestDrawID` (`"image-test"` in `api.go`), and
+the Stop button beside the Settings test sends the same string — which is what lets that
+button exist at all. The panel shows it only while the test runs, and a stopped test is
+reported as a stop rather than as a red failure (`TestTheSettingsTestDrawCanBeStopped`).
+No progress callback is wired to that id, so a test draw never paints a progress row.
+
 ### Stopping a draw
 
 A picture a CPU server takes minutes over has to be abandonable, and `StopImageDraw` does
@@ -792,9 +864,9 @@ server has since moved on to.
 Three consequences, each of which is a decision rather than an oversight:
 
 - **`shared.state.interrupt()` is global to the server, not per request.** A picture the
-  user is drawing in their own WebUI tab stops too. KiChat draws one picture at a time
-  against a server the user runs for themselves, so the window is narrow; a caller pressing
-  Stop should still know that is what it means.
+  user is drawing in their own WebUI tab stops too. KiChat itself draws one picture at a time
+  (the slot above is what enforces it), so the window this app can open is its own draws; a
+  caller pressing Stop should still know that the interrupt reaches past them.
 - **The Stop result is three facts, not a bool** (`StopDrawResult`): whether a draw was in
   flight and is now over, whether the server was asked, and — separately — why it could not
   be. A 404 from a server without the route is *reported*, never raised: the wait the button
@@ -1072,10 +1144,14 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
 - `internal/images/limits_test.go` — the bounds, and the proof they reach the wire: a table
   over `Normalised()` (zero, negative, over the maximum, and the rounding in both directions,
   plus idempotence), the `httptest` request body the WebUI client actually sent — where a
-  negative step count has to be **absent**, not clamped — and the command line the stub binary
-  recorded. Four guards, each checked by mutating its own fix: dropping the clamp in either
+  negative step count has to be **absent**, not clamped, and where `n` has to be **present and
+  1** (the batch nobody asked the server's settings about, §3) — and the command line the stub
+  binary recorded. Four guards, each checked by mutating its own fix: dropping the clamp in either
   backend, dropping the tool path's, loosening the locator's ambiguity case, or dropping
-  `uniqueName` makes the matching test fail.
+  `uniqueName` makes the matching test fail. `TestKeptBoundsOneAnswersPictures` holds the
+  answer side of §3's batch rule: an answer inside the bound is passed through untouched, one
+  over it is cut to the first four, and the difference stays readable as the count the tool
+  result reports.
 - `internal/chat/image_tool_test.go` — the tool's visibility contract: with no server
   configured, `generate_image` is absent from the native tool definitions, from the
   rendered `{{tool_list}}` line and from the text-protocol hint, and present in each of
@@ -1096,12 +1172,23 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   not collide; and a picture with no recipe is refused before the provider is called. The
   editor's own contract is pinned there too (§5): an edited recipe changes the request,
   leaves the source's recipe untouched, a blank prompt never reaches the provider, and a
-  step count outside the bound is clamped in both directions.
+  step count outside the bound is clamped in both directions. The batch bound and the slot of
+  §3/§5 live here as well, because both are the *service's* rules rather than the app's:
+  `TestOneAnswerFilesAtMostTheBound` files four of six pictures and checks that the other two
+  reach the model in words, and `TestASecondDrawIsRefusedWhileOneHoldsTheSlot` shows the
+  refusal reaching the caller as `ErrDrawInProgress` with the provider never called — and the
+  slot released afterwards whether the draw succeeded or failed.
 - `image_stop_test.go` (package `main`) — the stop, end to end against a real
   `httptest` WebUI driven through the bound methods: the wait ends and the sentinel comes
   back, the server sees exactly one interrupt, nothing is filed, a server without the
   route still abandons the draw while reporting the refusal, and a Stop with nothing in
   flight says so rather than inventing one.
+- `image_draw_slot_test.go` (package `main`) — the slot of §5, through the bound methods: a
+  second `RegenerateImage` while one is in flight is refused with `images.ErrDrawInProgress`
+  and the first is **still Stop's to end** (the assertion the take-before-register ordering
+  exists for), after which the slot is free again; and `TestImageBackend` — the Settings test,
+  which on the `cli` kind pays a model load — is stoppable at the fixed `image-test` id and
+  answers `ErrCancelled` rather than a red failure.
 - `internal/store/store_test.go` — the recipe round-trips, a corrupt one fails the read
   rather than degrading to "no recipe", and an **older database gains the column**: the
   upgrade path is built by dropping the column and rolling `user_version` back, because a
@@ -1125,6 +1212,10 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
 - `internal/runtime/supervise_test.go` — the supervisor generalisation, on a real process: a
   caller-built `Args` is run *as given* rather than wrapped in llama.cpp's `-m`/`--host`, the
   probe lands on the caller's `ReadyPath`, and the messages carry the caller's `Label`.
+  `TestAFailedServerKeepsNoAddress` is the crash *after* ready: the row is running with an
+  address, the process exits 4, and the failed row has neither a URL nor a port — the state
+  that made a red badge carry a clickable link to a listener that was gone — and a Stop
+  afterwards (what a cleanup does) leaves the failure as it is.
 - `image_server_test.go` (package `main`) — the whole kind through the app, with this test
   binary playing `sd-server` (the same trick `cleanup_running_test.go` uses for llama-server,
   so nothing outside the Go toolchain has to be installed): the folder supplies the program,
@@ -1165,6 +1256,12 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   the one the log *reports* winning. Its stop test is the decisive one: with the process
   group kill removed, the stub's grandchild holds the pipe and the test waits out the
   minute, which is how the `WaitDelay` above was found.
+  `TestTheHelpProbeSurvivesAStoppedDraw` is the memoisation's other half: the `-h` probe is
+  asked once and kept for the client's life, so it must not inherit the *draw's* context — a
+  draw is exactly what a user stops, and a cancelled probe is remembered as "this build cannot
+  answer", which `previewSupport` reads as "no preview options" for the rest of the session.
+  The probe runs under `context.WithoutCancel` for that reason, and the test asks with an
+  already-cancelled context and expects the build's own option table.
 - `image_cli_test.go` (package `main`) — the selection and the whole path through the app:
   `kind: "cli"` builds the CLI provider and anything else the WebUI one, a draw records the
   recipe with the seed the binary reported, a redraw sends that seed back and files beside
@@ -1212,7 +1309,10 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   address and a log, a start still loading — which is what the row's own polling interval is
   for — a start that died, whose log and reason the row shows, and the running row the saved
   settings no longer describe), `?startwithapp=1`, and `?images=cli` / `?images=off` unchanged
-  for the other local kind. `StartImageServer`/`StopImageServer` are modelled as the
+  for the other local kind. The `failed` row deliberately carries **no address**: the port is
+  still in its log, because the start recorded it, but `url` is empty and `port` is `0` — the
+  shape the supervisor's own `fail()` answers now (§2), because a live-looking link beside a
+  red badge points at nothing. `StartImageServer`/`StopImageServer` are modelled as the
   *transitions* they are: a start flips the row to `starting` and settles on a timer, and the
   restart reading is computed from the stored command line rather than stored as a constant,
   so a save that changes the model under a running server really does raise the badge. It
@@ -1232,15 +1332,21 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   arriving as a state rather than as an error — unexercised: `?slowdraw=1` leaves a draw
   pending until Stop is pressed, and `?nointerrupt=1` makes the interrupt route answer 404,
   which is stable-diffusion.cpp. Both print their own `[harness] ... injection active` line
-  to the console. `StopImageDraw` **holds its answer for 150 ms**, the real interrupt
-  request, because that is the interval the view's controls are disabled across — answering
-  at once would make that state unrenderable. Driven with them: the editor's Draw becomes a
-  red Stop in place (the button the click came from is the button that stops it), the
-  caption grows a Stop beside Redraw and Variation while one of those is running, the toast
-  for the abandoned draw appears **while the other controls are still disabled** and they
-  come back once the interrupt has answered, stopping files **no** picture, `wasDrawing`
-  false on a later call produces no toast at all, and the 404 case shows the stop toast
-  rather than an error.
+  to the console. `?drawfinish=1` is the third shape and the one the store used to get wrong:
+  a redraw reports a few steps, files its picture and emits the `done` **by itself** — start
+  it, switch to another chat, and come back. The `done` used to be dropped with the rest of a
+  background chat's traffic, so the entry stayed in the store and the chat painted a progress
+  row, and a Stop button, for a draw that was already over; the fix is that `done` is applied
+  before the open-chat guard (`frontend/src/store.ts`), because it costs one map delete and
+  the alternative is a row that lies. `StopImageDraw` **holds its answer for 150 ms**, the
+  real interrupt request, because that is the interval the view's controls are disabled
+  across — answering at once would make that state unrenderable. Driven with them: the
+  editor's Draw becomes a red Stop in place (the button the click came from is the button
+  that stops it), the caption grows a Stop beside Redraw and Variation while one of those is
+  running, the toast for the abandoned draw appears **while the other controls are still
+  disabled** and they come back once the interrupt has answered, stopping files **no**
+  picture, `wasDrawing` false on a later call produces no toast at all, and the 404 case shows
+  the stop toast rather than an error.
   Its fixture picture is an SVG data URL rather than a PNG because a fixture only has to be
   visible at size; the bytes the real binding returns are asserted in Go.
 - `?images=cli` switches the harness fixture to the second kind and fills its fields, so both

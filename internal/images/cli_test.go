@@ -834,3 +834,32 @@ func TestCLIListsAreNeverNull(t *testing.T) {
 		t.Errorf("an A1111 sampler name leaked into the CLI list, which the binary would reject: %s", raw)
 	}
 }
+
+// The `-h` probe is memoised for the life of the client, so it must not be cancelled with the
+// draw that happened to ask first. A draw is exactly what a user stops, and a probe cancelled
+// by that stop would be remembered as "this build cannot answer" — and previewSupport reads a
+// failed probe as "no preview options", which would quietly switch the progress display off
+// for the whole session on a build that has it.
+func TestTheHelpProbeSurvivesAStoppedDraw(t *testing.T) {
+	binary := fakeCLI(t, `
+if [ "$1" = "-h" ]; then
+  echo "--preview --preview-path PATH"
+  exit 0
+fi
+echo "not a draw"
+`)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+	// A cancelled ancestor, which is what the draw's context looks like the moment Stop is
+	// pressed while the first picture is being asked for.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if !client.previewSupport(ctx, binary) {
+		t.Fatal("a stopped draw's cancelled context was recorded as a build without previews")
+	}
+	// And the memo really holds the answer, rather than the second question having succeeded
+	// where the first failed.
+	if help, err := client.help(context.Background(), binary); err != nil || !strings.Contains(help, "--preview") {
+		t.Fatalf("help = %q, err = %v, want the build's own option table", help, err)
+	}
+}
