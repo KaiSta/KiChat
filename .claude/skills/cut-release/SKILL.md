@@ -19,7 +19,8 @@ One line and a newline. A pre-release is written with `~`, not a dash:
 after it, and `apt upgrade` would happily move a pre-release onto a
 newer-looking final.
 
-## 2. One commit, `build: release x.y.z`, carrying `VERSION` and nothing else
+## 2. One commit, `build: release x.y.z`, carrying `VERSION` and the `wails.json`
+info block it rewrites — nothing else
 
 Its body is the release note: what changed **since the previous bump commit**,
 written as prose from `git log <previous bump>..HEAD` with the measured numbers in
