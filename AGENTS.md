@@ -652,16 +652,26 @@ this, in this order. The number in the request is the number everywhere:
    like any other push — nothing here pushes a tag on its own. What the repo's own config
    changes is what an asked-for push carries: `.git/config` sets `push.followTags = true`,
    so a plain `git push origin master` also sends every *annotated* tag that is missing
-   from the remote and reachable from the branch being pushed. Measured on a scratch
-   remote: the tag arrives even when the branch itself is already up to date (`* [new tag]
-   v1 -> v1` on a push reporting nothing to update), which makes the setting a repair for a
-   tag an earlier push left behind, not only a habit. Lightweight tags are never carried,
-   and four of the early releases are lightweight — `0.1.0`, `0.2.0`, `0.2.1` and `v0.4.0`
-   — so those need `git push origin <tag>` said out loud. The setting lives in `.git/config`,
-   which is not cloned: a fresh checkout elsewhere starts without it and wants
-   `git config push.followTags true`, while fetching needs nothing, because a clone brings
-   every tag. A published tag is never moved or deleted: a mistake is the next patch
-   number.
+   from the remote and reachable from the branch being pushed. Measured here against a
+   scratch remote: a plain push of `master` carried `0.3.0` through `0.5.2` and none of the
+   three lightweight tags, and after deleting `0.5.2` from that remote, pushing the branch
+   that was already current returned it — `* [new tag] 0.5.2 -> 0.5.2`, with no branch line
+   at all. That makes the setting a repair for a tag an earlier push left behind, not only a
+   habit.
+
+   Lightweight tags are never carried, and four of the early releases are lightweight —
+   `0.1.0`, `0.2.0`, `0.2.1` and `v0.4.0` — so those need `git push origin <tag>` said out
+   loud. The last of them is the name to be careful with: `v0.4.0` exists only on the remote,
+   while this checkout's `0.4.0` is a different, annotated tag on the same commit — so a
+   plain push carries `0.4.0` and can never carry `v0.4.0`.
+
+   The setting lives in `.git/config`, which is not cloned: a fresh checkout elsewhere
+   starts without it and wants `git config push.followTags true`, while fetching needs
+   nothing, because a clone brings every tag. It is also one line that can go missing on an
+   existing checkout, which is what `git config --get push.followTags` is for: it printed
+   nothing here until it was restored, so the branch could be current on a remote while its
+   tag was not there at all. A published tag is never moved or deleted: a mistake is the
+   next patch number.
 
 **A tag that went missing is repaired rather than rewritten.** An annotated tag on the bump
 commit, whose message says it is late and why and summarises the changes from `git log` since
