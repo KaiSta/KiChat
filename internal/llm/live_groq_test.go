@@ -198,6 +198,52 @@ func TestLiveGroq(t *testing.T) {
 		t.Errorf("stats = %+v, want the finish reason the API reported", stats)
 	}
 
+	// The per-request budget, read off an ordinary answer rather than out of a
+	// refusal. Every response of this API carries `x-ratelimit-limit-tokens` — the
+	// tokens-per-minute allowance of the model that answered — and reading it is what
+	// lets the *second* oversized turn of a session be folded instead of sent. A zero
+	// here means the header stopped being sent, arrived under another name, or is not
+	// visible on a streamed response, and the app is back to learning the limit only
+	// from a refusal. Reported rather than asserted-with-a-number, because the value
+	// is the account's allowance and not a constant.
+	ceil := p.RequestCeiling(chosen.ID)
+	if ceil.Tokens <= 0 {
+		t.Errorf("no per-request ceiling was learned from a successful answer: %s was not read",
+			rateLimitTokensHeader)
+	} else {
+		t.Logf("ceiling from the answer's own response: %d tokens per request (%s), window %d",
+			ceil.Tokens, ceil.Source, chosen.ContextLimit)
+	}
+	if ceil.Source != "" && ceil.Source != CeilingFromHeader {
+		t.Errorf("ceiling source = %q, want %q after an ordinary answer", ceil.Source, CeilingFromHeader)
+	}
+
+	// And the minute the same response described, which is what a turn is paced
+	// against: what is left of the allowance and how long that lasts. The two names
+	// and the duration format (`7.66s`, `2m59.56s`) are what the documentation shows,
+	// and this is the one place they are read against a real response — so a renamed
+	// header or a reset sent as something other than a duration fails here rather than
+	// quietly restoring the old behaviour of learning the budget from a refusal.
+	// Reported rather than asserted with numbers: the allowance is the account's.
+	if budget, ok := p.budgetFor(chosen.ID); !ok {
+		t.Errorf("no budget was read from a successful answer: %s / %s were not read",
+			rateLimitRemainingTokensHeader, rateLimitResetTokensHeader)
+	} else {
+		t.Logf("minute from the answer's own response: %d of %d tokens left, resetting in %s",
+			budget.Remaining, budget.Limit, budget.Reset)
+		if budget.Limit > 0 && budget.Remaining > budget.Limit {
+			t.Errorf("remaining %d > limit %d, so one of the two was misread",
+				budget.Remaining, budget.Limit)
+		}
+		if budget.Limit > 0 && ceil.Tokens > 0 && budget.Limit != ceil.Tokens {
+			// One header family, one allowance: the tokens-per-minute limit is also the
+			// largest single request, and two readings of it disagreeing means one of
+			// them is wrong — which would make the meter and the fold disagree too.
+			t.Errorf("limit-tokens read as %d for the ceiling and %d for the minute: one header, two answers",
+				ceil.Tokens, budget.Limit)
+		}
+	}
+
 	// The tool claim, which on this API comes from the model's own
 	// `supported_features`. It is only asserted for a model that claims it.
 	if chosen.Has(CapTools) {
@@ -294,6 +340,78 @@ func TestLiveGroq(t *testing.T) {
 		t.Errorf("refusal body = %q, want the vendor's code kept", he.Body)
 	}
 	t.Logf("bad key: %d %s", he.StatusCode, strings.TrimSpace(he.Body))
+}
+
+// TestLiveGroqOversizedRequestIsRecognised asks the one question the offline fixture
+// cannot answer: whether the real envelope for a request that is too big for the
+// account is the shape the classifier reads. Every fact the fixture rests on came from
+// published bug reports rather than from a request made here, so this is the measurement
+// that would turn the fixture into a mistake if it were wrong.
+//
+// The request it sends is deliberately oversized — about 38k tokens against a free-tier
+// allowance of 8k — because a request bigger than the whole per-minute budget is the one
+// thing waiting cannot fix, which is the distinction being measured. One request is sent
+// and no retry follows; whether a *refused* request is counted against the budget is not
+// something the vendor documents, so treat this as up to one minute's allowance spent.
+// An account whose allowance exceeds the probe has nothing to measure, and says so
+// instead of failing.
+func TestLiveGroqOversizedRequestIsRecognised(t *testing.T) {
+	if os.Getenv("KICHAT_LIVE") != "1" {
+		t.Skip("set KICHAT_LIVE=1 to run against a live backend")
+	}
+	key := os.Getenv("KICHAT_GROQ_KEY")
+	if key == "" {
+		t.Skip("set KICHAT_GROQ_KEY to run against the live api.groq.com API")
+	}
+	model := os.Getenv("KICHAT_GROQ_MODEL")
+	if model == "" {
+		model = "openai/gpt-oss-20b"
+	}
+	p := newGroqProvider("groq", "Groq", os.Getenv("KICHAT_GROQ_BASE"), key)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	filler := strings.Repeat("Der Verlauf ist lang. ", 6000)
+	_, err := p.Chat(ctx, ChatRequest{
+		Model:     model,
+		Messages:  []Message{{Role: RoleUser, Content: "Fasse das zusammen: " + filler}},
+		MaxTokens: 16,
+	})
+	if err == nil {
+		t.Skip("this account accepted a ~38k-token request, so its allowance is larger " +
+			"than the probe and there is nothing to measure")
+	}
+	too, ok := RequestTooLarge(err)
+	if !ok {
+		t.Fatalf("an oversized request answered %v, which is not the shape the classifier reads", err)
+	}
+	kept := p.RequestCeiling(model)
+	t.Logf("oversized request refused: status %v, limit %d, requested %d, ceiling kept %d (%s)",
+		err, too.Limit, too.Requested, kept.Tokens, kept.Source)
+
+	// A model with a small window answers this with its context-window refusal
+	// instead, which is classified the same way and states no numbers. Both are facts;
+	// what is asserted is that neither comes back as a throttle.
+	if too.Limit == 0 {
+		t.Log("the refusal stated no limit, which is this model's window rather than its " +
+			"budget: the TPM shape was not exercised")
+		return
+	}
+	if too.Requested <= 0 {
+		t.Errorf("the refusal named a limit of %d but no requested figure: %v", too.Limit, err)
+	}
+	// The kept ceiling is the tighter of the refusal's number and whatever the same
+	// response's budget header said, so it is asserted as never looser than the limit
+	// the refusal named — an equality here would be a claim about which of the two
+	// statements the vendor happens to send for this account's current tier.
+	if kept.Tokens <= 0 || kept.Tokens > too.Limit {
+		t.Errorf("ceiling kept = %d (%s), want a positive number no larger than the %d the refusal named",
+			kept.Tokens, kept.Source, too.Limit)
+	}
+	if retryable(err) {
+		t.Error("the oversized request would be retried, which spends the budget it exceeds")
+	}
 }
 
 // TestLiveGroqShippedEntryReachesTheAPI checks the wiring rather than the mapper: the

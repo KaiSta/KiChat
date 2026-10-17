@@ -71,7 +71,19 @@ type PlanInput struct {
 	Compactions []store.Compaction
 	Budget      ContextBudget
 
-	Threshold        float64
+	// Threshold is the fullness the user asked automatic compaction to happen at, as a
+	// ratio of the effective limit — or 0 when their automatic compaction is off for
+	// this chat. 0 means "no preference" rather than "a default": this bound is the
+	// user's and it can be switched off, so its absence has to be expressible.
+	Threshold float64
+
+	// Ceiling is the backend's own limit on the size of a single request, in tokens, or
+	// 0 when it publishes none (llm.RequestCeiling). Unlike Threshold it is not a
+	// preference: crossing it costs a refused turn, so it folds whether or not the user
+	// asked for automatic compaction. It arrives as a token figure because that is the
+	// form the backend publishes it in; automaticBound converts it into a ratio.
+	Ceiling int
+
 	KeepRecentTurns  int
 	Reserve          int
 	MaxSummaryTokens int
@@ -81,6 +93,13 @@ type PlanInput struct {
 	// as possible".
 	Force  bool
 	Target float64
+
+	// ProtectNewestTurn refuses the escape hatch below, which folds the newest user
+	// turn when there is nothing older to fold. A size fold must never take it: the
+	// message the user just sent is what the next request has to carry, and folding
+	// it would answer the question with a summary of itself while leaving the request
+	// exactly as large.
+	ProtectNewestTurn bool
 
 	// MeasuredTokens is the authoritative used-token figure, used for the
 	// before/after reporting.
@@ -104,6 +123,147 @@ type CompactPlan struct {
 	TokensAfterEstimate int
 }
 
+// foldCause says which of the two automatic bounds made a fold happen. It is a name
+// rather than a bool because the two make different promises to the reader: one is the
+// threshold the user set, the other a limit the backend published.
+type foldCause int
+
+const (
+	// foldCauseNone: no automatic fold — either the projection is below both bounds or
+	// there is no bound at all, which is a chat with automatic compaction switched off
+	// and a backend that publishes no ceiling.
+	foldCauseNone foldCause = iota
+	// foldCauseThreshold: the user's threshold, a preference. It applies while their
+	// automatic compaction is switched on, which is why an absent Threshold (0) leaves
+	// this bound out entirely rather than falling back to a default.
+	foldCauseThreshold
+	// foldCauseCeiling: the backend's per-request ceiling, a bound rather than a
+	// preference — crossing it costs a refused turn, so it folds whether or not the user
+	// asked for automatic compaction.
+	foldCauseCeiling
+)
+
+// automaticBound is the one decision both automatic folds come from, and comparing them
+// here rather than in two callers is the point: the backend's per-request ceiling is
+// expressed as a ratio of the same effective limit the user's threshold is, so the
+// planner asks a single question — "is the next request past the tighter of the two
+// bounds" — instead of two questions whose answers had to be reasoned about together.
+//
+// The caller keeps the cause because the two bounds differ in what crossing them means:
+// the threshold says the context is fuller than the user wants, the ceiling says the
+// next request would be refused. That difference is the target (see atCeiling), not a
+// second decision about whether to fold.
+//
+// bound is 0 with a cause of foldCauseNone; it is otherwise the ratio to compare the
+// projection against.
+func automaticBound(in PlanInput) (float64, foldCause) {
+	switch {
+	case in.Threshold <= 0 && in.Ceiling <= 0:
+		return 0, foldCauseNone
+	case in.Ceiling <= 0:
+		return in.Threshold, foldCauseThreshold
+	case in.Threshold <= 0:
+		if ratio := ceilingRatio(in.Ceiling, effectiveLimit(in)); ratio > 0 {
+			return ratio, foldCauseCeiling
+		}
+		return 0, foldCauseNone
+	default:
+		ratio := ceilingRatio(in.Ceiling, effectiveLimit(in))
+		if ratio <= 0 || ratio >= in.Threshold {
+			return in.Threshold, foldCauseThreshold
+		}
+		return ratio, foldCauseCeiling
+	}
+}
+
+// atCeiling reports whether the projected next request has reached the fold point of a
+// ceiling it has to fit under — i.e. whether sending it as it stands would be refused for
+// its own size. It is asked separately from automaticBound because a fold can be triggered
+// by the user's lower threshold while the request is already at the ceiling, and then the
+// ceiling is what the fold has to reach.
+func atCeiling(in PlanInput) bool {
+	ratio := ceilingRatio(in.Ceiling, effectiveLimit(in))
+	return ratio > 0 && in.Budget.ProjectedRatio >= ratio
+}
+
+// effectiveLimit is what the next request actually has to fit under: the smaller of the
+// model's window and the backend's ceiling. Budget.EffectiveLimit is that number; a budget
+// built without one (a caller filling in only Limit) falls back to Limit, which is the same
+// number whenever no ceiling binds.
+func effectiveLimit(in PlanInput) int {
+	if in.Budget.EffectiveLimit > 0 {
+		return in.Budget.EffectiveLimit
+	}
+	return in.Budget.Limit
+}
+
+// projection is the projected size of the next request in tokens, recovered from the ratio
+// the planner is handed when the budget carries no figure of its own.
+func projection(in PlanInput) int {
+	if in.Budget.Projected > 0 {
+		return in.Budget.Projected
+	}
+	if limit := effectiveLimit(in); limit > 0 {
+		return int(in.Budget.ProjectedRatio*float64(limit) + 0.5)
+	}
+	return 0
+}
+
+// ceilingFoldRatio is how close to a published ceiling a request may come before the
+// history is folded. It is below 1 because the meter's number is partly an estimate (the
+// token counter is a heuristic, deliberately — see llm.EstimateTokens) while the ceiling is
+// exact, and undershooting the fold point costs one summarisation while overshooting it
+// costs a refused turn.
+const ceilingFoldRatio = 0.9
+
+// ceilingRatio is a ceiling expressed against the limit the planner measures with — the
+// effective limit, which is the ceiling itself whenever the ceiling binds — and it is 0 when
+// there is nothing to compare.
+//
+// Expressed this way, a ceiling *larger* than the window grows into a bound above the
+// window's own: 1.1 windows becomes 0.99 of it, so a ceiling nobody could cross cannot fold
+// earlier than the window that already can. More than 1/ceilingFoldRatio windows lands past
+// 1 and is no bound at all: at any projection that reached it the window itself is already
+// over its limit, so the user's threshold is the earlier of the two and the only one worth
+// folding for.
+func ceilingRatio(ceiling, effectiveLimit int) float64 {
+	if ceiling <= 0 || effectiveLimit <= 0 {
+		return 0
+	}
+	return ceilingFoldRatio * float64(ceiling) / float64(effectiveLimit)
+}
+
+// ceilingTarget is the usage ratio of the chat's own window that puts the folded request at
+// the ceiling: the plan prices the turns it keeps against Budget.Limit, so aiming at
+// ceiling/window aims the folded request at the ceiling itself. Without it a "fit the
+// request" fold would fold nothing, because 2 % of a 131k window looks empty to the planner.
+func ceilingTarget(ceiling, limit int) float64 {
+	if ceiling <= 0 || limit <= 0 {
+		return 0
+	}
+	return clampRatio(float64(ceiling) / float64(limit))
+}
+
+// clampRatio keeps a target inside the band the planner can act on.
+//
+// The floor is tiny and still necessary, and the reason is the planner's own convention:
+// `Target: 0` means "fold as much as your cut allows" and *skips* the target walk entirely,
+// so a ceiling so small that the ratio rounded to zero would silently fold only to the
+// keep-turns boundary — the one thing a size fold exists to go past when the limit demands
+// it. Above that, the walk's own limits are the bound: it never folds the turn that started
+// the request, however small the target is. The cap keeps a ceiling larger than the window
+// from asking the planner for no reduction at all.
+func clampRatio(ratio float64) float64 {
+	switch {
+	case ratio < 0.001:
+		return 0.001
+	case ratio > 0.95:
+		return 0.95
+	default:
+		return ratio
+	}
+}
+
 // PlanCompaction decides whether to compact and where to cut. Cut points are
 // always aligned to user-message boundaries so a tool call is never separated
 // from its result — that would produce a request the backend rejects.
@@ -113,20 +273,33 @@ func PlanCompaction(in PlanInput) CompactPlan {
 		keepTurns = 1
 	}
 
+	// target is the usage ratio a fold aims at, 0 for "as far as the cut allows". Both
+	// automatic bounds resolve it here, so the cut and the reason a plan carries always
+	// describe one decision.
 	var plan CompactPlan
+	target := in.Target
 	if !in.Force {
 		if in.Budget.Limit <= 0 {
 			return plan
 		}
-		threshold := in.Threshold
-		if threshold <= 0 {
-			threshold = 0.80
-		}
-		if in.Budget.ProjectedRatio < threshold {
+		bound, cause := automaticBound(in)
+		if cause == foldCauseNone || in.Budget.ProjectedRatio < bound {
 			return plan
 		}
-		plan.Reason = fmt.Sprintf("Kontext bei %.0f%% (Schwelle %.0f%%)",
-			in.Budget.ProjectedRatio*100, threshold*100)
+		if cause == foldCauseCeiling {
+			plan.Reason = fmt.Sprintf("Anfrage bei %d von %d Token des Anfrage-Limits",
+				projection(in), in.Ceiling)
+		} else {
+			plan.Reason = fmt.Sprintf("Kontext bei %.0f%% (Schwelle %.0f%%)",
+				in.Budget.ProjectedRatio*100, bound*100)
+		}
+		// Whatever fired, a request that has reached a ceiling's fold point decides the
+		// aim: sending it would be refused for its own size, and folding only to the
+		// keep-turns boundary can leave it exactly that large. The two coincide in the
+		// ordinary case — the ceiling is the tighter bound, so it is what fired.
+		if atCeiling(in) {
+			target = ceilingTarget(in.Ceiling, in.Budget.Limit)
+		}
 	} else {
 		plan.Reason = "manuell ausgelöst"
 	}
@@ -161,11 +334,18 @@ func PlanCompaction(in PlanInput) CompactPlan {
 	}
 	toSeq := keepFrom - 1
 
-	// A forced manual compaction should still produce a real cut when the chat is
-	// shorter than keepTurns: otherwise the button returns "nothing to compact"
-	// even though there is history that could be summarised.
+	// A fold exists to make a request smaller, so it has to produce a real cut even
+	// when the chat is shorter than keepTurns: otherwise the run reports "nothing to
+	// compact" while there is history that could be summarised.
 	if toSeq < fromSeq {
-		if !in.Force {
+		// A run with a target exists to make the next request fit, and refusing it here
+		// because the chat is shorter than keepRecentTurns would leave exactly the
+		// oversized request it was asked to prevent. It folds what exists — the turns
+		// before the newest, which is as far as a cut can go without splitting the
+		// exchange the user just started. A run without a target keeps the older answer:
+		// nothing older than keepRecentTurns means nothing to fold, and a manual run's
+		// escape hatch below is what keeps its promise instead.
+		if !in.Force && target <= 0 {
 			plan.Needed = false
 			if plan.Reason == "" {
 				plan.Reason = "nichts zu komprimieren"
@@ -182,10 +362,12 @@ func PlanCompaction(in PlanInput) CompactPlan {
 		toSeq = keepFrom - 1
 	}
 
-	// Manual compaction with a target ratio: fold turns until the estimate fits, so
-	// "compact to 50%" means it. The reserve counts towards the target because the
-	// meter's `projected` number, which the auto threshold reads, includes it.
-	if in.Force && in.Target > 0 && in.Budget.Limit > 0 && toSeq >= fromSeq {
+	// Fold turns until the kept history fits the target, so "compact to 50%" and "fit
+	// under the ceiling" both mean it. One walk serves both: the estimate is the same
+	// either way and only the origin of the target differs. The reserve counts towards
+	// the target because the meter's `projected` number, which both bounds read,
+	// includes it.
+	if target > 0 && in.Budget.Limit > 0 && toSeq >= fromSeq {
 		budgetTarget := int(in.Target * float64(in.Budget.Limit))
 		// Attachments are part of the request too and sit inside the region this
 		// cut keeps, so leaving them out prices the kept history too cheaply.
@@ -226,8 +408,10 @@ func PlanCompaction(in PlanInput) CompactPlan {
 	// turn is already folded and only the newest one is left, which the cut above
 	// keeps verbatim. Extending the cut to the end of the chat folds that turn
 	// too, and the end of the chat is always a valid cut point — nothing follows
-	// it, so no tool call is separated from its result.
-	if in.Force && toSeq < fromSeq {
+	// it, so no tool call is separated from its result. Only a forced run takes
+	// it: an automatic fold has nobody to promise anything to, and folding the
+	// message it is about would leave the request exactly as large as it was.
+	if in.Force && toSeq < fromSeq && !in.ProtectNewestTurn {
 		if last := lastMessageSeq(in.Messages); last >= fromSeq {
 			toSeq = last
 			keepFrom = last + 1

@@ -855,6 +855,61 @@ func Load(st *store.Store, ss *secret.Store) (Settings, error) {
 	return s, nil
 }
 
+// Clone returns settings that share nothing with the receiver: every map and every
+// slice is copied, and so is every slice inside one. A value that crosses a lock is
+// therefore private, which is what lets it be marshalled, iterated or turned into a
+// registry while another goroutine writes the live settings.
+//
+// A plain struct copy is not enough, and the difference is not academic. Each setter
+// holds the settings lock, writes one entry of one map, and releases it *before*
+// persisting — and persisting marshals the whole value. A caller that had copied the
+// struct had copied the map header, so `json.Marshal` walked the live map on its own
+// goroutine while the next setter wrote it. Measured with `-race` on a model save
+// crossing a managed server's state callback: three pairs at once, on
+// `Runtime.Models`, on the `Backends` slice the callback writes, and on the registry
+// built from the same map (settings_snapshot_test.go in the root package).
+//
+// A field added here that holds a map, a slice or a pointer needs a line below it, and
+// TestCloneSharesNothingWithTheOriginal fails when it does not.
+func (s Settings) Clone() Settings {
+	out := s
+	out.Backends = cloneSlice(s.Backends)
+	out.PromptPresets = cloneSlice(s.PromptPresets)
+	out.HiddenModels = cloneSlice(s.HiddenModels)
+	out.ImageProfiles = cloneSlice(s.ImageProfiles)
+	out.Search.ProviderOrder = cloneSlice(s.Search.ProviderOrder)
+	out.Runtime.ModelDirs = cloneSlice(s.Runtime.ModelDirs)
+	if s.ModelOverrides != nil {
+		out.ModelOverrides = make(map[string]llm.ModelOverride, len(s.ModelOverrides))
+		for key, ov := range s.ModelOverrides {
+			// The override carries the capabilities the user set, so the element is
+			// copied too: two callers sharing one entry's slice is the same bug one
+			// level down, and it is why the test above walks into map values.
+			ov.Capabilities = cloneSlice(ov.Capabilities)
+			out.ModelOverrides[key] = ov
+		}
+	}
+	if s.Runtime.Models != nil {
+		out.Runtime.Models = make(map[string]ManagedModel, len(s.Runtime.Models))
+		for id, mm := range s.Runtime.Models {
+			out.Runtime.Models[id] = mm
+		}
+	}
+	return out
+}
+
+// cloneSlice copies a slice, keeping a nil one nil rather than turning it into an empty
+// one: the settings blob is JSON, where the two are `null` and `[]`, and a field whose
+// shape changed because it was cloned would be a strange diff in a stored file.
+func cloneSlice[T any](in []T) []T {
+	if in == nil {
+		return nil
+	}
+	out := make([]T, len(in))
+	copy(out, in)
+	return out
+}
+
 // Save writes the settings blob. Secrets are not part of it — SaveSettings
 // commits the keys to the secret store and hands this a sanitised copy — so the
 // blob only ever carries the non-secret shape of the configuration.

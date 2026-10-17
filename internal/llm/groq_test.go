@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -299,6 +300,137 @@ func TestGroqRefusalCarriesTheVendorsOwnWords(t *testing.T) {
 	}
 	if !strings.Contains(he.Body, "invalid_api_key") {
 		t.Errorf("body = %q, want the vendor's code kept", he.Body)
+	}
+}
+
+// TestGroqLearnsTheCeilingFromTheResponsesOwnHeaders is the fact that turns the
+// per-request ceiling from something only a refusal teaches into something an ordinary
+// answer does.
+//
+// Every response of this API carries `x-ratelimit-limit-tokens` — the tokens-per-minute
+// allowance of the model that answered — so the number that bounds one request is
+// published before anything is refused. That is the difference between the first
+// oversized request of a session being sent and folded afterwards and being folded
+// instead, and it is read from a streaming response as much as from a JSON one.
+func TestGroqLearnsTheCeilingFromTheResponsesOwnHeaders(t *testing.T) {
+	var answer atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(rateLimitTokensHeader, "8000")
+		if answer.Load() {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		fmt.Fprint(w, tokensRefusal(groqOversizedMessage))
+	}))
+	defer srv.Close()
+
+	p := newGroqProvider("groq", "Groq", srv.URL+"/openai/v1", "test-key")
+
+	// A refusal whose sentence names 10000 and whose header says 8000. The tighter is
+	// kept: a plan that fits under both is what the next request needs, and nothing
+	// tells the app which of the two statements the account is governed by.
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "moonshotai/kimi-k2-instruct",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if !errors.Is(err, ErrRequestTooLarge) {
+		t.Fatalf("Chat error = %v, want an oversized-request refusal", err)
+	}
+	if got := p.RequestCeiling("moonshotai/kimi-k2-instruct"); got.Tokens != 8000 || got.Source != CeilingFromHeader {
+		t.Errorf("ceiling after a refused response = %+v, want the 8000 its header stated", got)
+	}
+
+	// And the answer that was never refused states it too, which is the case the fix
+	// exists for: the second request of a session is planned against a limit the app
+	// learned from a success.
+	answer.Store(true)
+	stream, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "openai/gpt-oss-20b",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	for range stream {
+	}
+	got := p.RequestCeiling("openai/gpt-oss-20b")
+	if got.Tokens != 8000 || got.Source != CeilingFromHeader {
+		t.Errorf("ceiling after an ordinary answer = %+v, want the 8000 its header stated and %q", got, CeilingFromHeader)
+	}
+	// Per model, like every other ceiling: nothing was learned about a model nobody
+	// asked.
+	if other := p.RequestCeiling("qwen/qwen3.8-27b"); other.Tokens != 0 || other.Source != "" {
+		t.Errorf("ceiling for a model that was never called = %+v, want none", other)
+	}
+}
+
+// TestACeilingOnlyEverTightens pins the rule that makes two writers safe. A response
+// header and a refusal both state one limit, and the smaller of the two becomes the
+// plan, so neither order of arrival can loosen it — which is what keeps a budget
+// header that turned out to be the account's rather than the model's from turning a
+// refused request into a second refused request.
+func TestACeilingOnlyEverTightens(t *testing.T) {
+	const model = "openai/gpt-oss-20b"
+
+	headerFirst := newGroqProvider("groq", "Groq", "", "k")
+	headerFirst.noteRequestCeiling(model, Ceiling{Tokens: 8000, Source: CeilingFromHeader})
+	headerFirst.noteRequestCeiling(model, Ceiling{Tokens: 10000, Source: CeilingFromRefusal})
+	if got := headerFirst.RequestCeiling(model); got.Tokens != 8000 || got.Source != CeilingFromHeader {
+		t.Errorf("after a looser statement = %+v, want the 8000 already known", got)
+	}
+
+	refusalFirst := newGroqProvider("groq", "Groq", "", "k")
+	refusalFirst.noteRequestCeiling(model, Ceiling{Tokens: 10000, Source: CeilingFromRefusal})
+	refusalFirst.noteRequestCeiling(model, Ceiling{Tokens: 8000, Source: CeilingFromHeader})
+	if got := refusalFirst.RequestCeiling(model); got.Tokens != 8000 {
+		t.Errorf("after the same two statements in the other order = %+v, want 8000", got)
+	}
+
+	// A number with no source is not evidence: the source says which of the two places
+	// it came from, and an unattributed number is not something a vendor stated.
+	unattributed := newGroqProvider("groq", "Groq", "", "k")
+	unattributed.noteRequestCeiling(model, Ceiling{Tokens: 8000})
+	if got := unattributed.RequestCeiling(model); got.Tokens != 0 {
+		t.Errorf("ceiling from a statement with no source = %+v, want none", got)
+	}
+}
+
+// TestTheBudgetHeaderIsReadForGroqOnly is the narrowness that keeps this honest. The
+// header is a measurement of one vendor — Groq documents its rate-limit headers as
+// tokens per minute, always, and it was a Groq refusal that showed a per-minute
+// allowance bounding one request. Another service's rate-limit header is not evidence
+// about the largest request it accepts, and folding a chat against a number nothing
+// measured would compact conversations that fit.
+func TestTheBudgetHeaderIsReadForGroqOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(rateLimitTokensHeader, "8000")
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	// A server of the user's own, of another flavour, sending the same header.
+	p := &openAICompatProvider{
+		id:        "custom",
+		name:      "Custom",
+		baseURL:   srv.URL,
+		chatPaths: []string{srv.URL + "/chat/completions"},
+	}
+	stream, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "some-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	for range stream {
+	}
+	if got := p.RequestCeiling("some-model"); got.Tokens != 0 {
+		t.Errorf("ceiling = %+v, want none: one vendor's rate-limit header is not another's evidence", got)
 	}
 }
 

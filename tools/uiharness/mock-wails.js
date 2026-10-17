@@ -1013,12 +1013,40 @@ Verfügbare Tools: {{tool_list}}`,
     nativeTools: true,
   }
 
+  /*
+   * ?ceiling=<tokens> is a backend that caps a *single request* below the model's own
+   * window — Groq, whose per-minute token allowance is also the largest request the
+   * account may send. The row it exists for is the meter's: a percentage of the window
+   * reads as room that does not exist, so the fixture has to be able to show the same
+   * chat against both limits. The number is read from the query rather than fixed,
+   * because both readings matter — a ceiling that merely binds (`?ceiling=8000`) and
+   * one the projected request already exceeds (`?ceiling=1200`).
+   */
+  const budgetCeiling = Number(new URLSearchParams(location.search).get('ceiling')) || 0
+  // Where the ceiling came from is its own row in the inspector, and the two answers
+  // read differently on purpose — "from the backend's own response" means no request
+  // was lost to the number, "from a refused request" means one was. Header is the
+  // default because it is the better of the two and the ordinary case once a session
+  // has had one answer.
+  const ceilingSource =
+    new URLSearchParams(location.search).get('ceilingsource') === 'refusal' ? 'refusal' : 'header'
+  if (budgetCeiling > 0) {
+    console.warn(
+      `[harness] ceiling=${budgetCeiling} (${ceilingSource}) active: one request is capped below the model window`,
+    )
+  }
+
   function budget(used) {
     // The meter and the model switcher have to agree, so the limit is read from
     // the loaded model instead of being a separate constant that could drift.
     const live = models.find((m) => m.state === 'loaded')
     const limit = (live && live.contextLimit) || 0
     const usedTokens = used || 1450
+    // The smaller of the window and the ceiling is what the next request has to fit
+    // under, and the share it is measured against — the same two lines as the real
+    // Assembler, so a fixture percentage cannot disagree with the app's.
+    const effectiveLimit =
+      budgetCeiling > 0 && (limit <= 0 || budgetCeiling < limit) ? budgetCeiling : limit
     // The segments have to add up to `used`. The inspector prints them next to the
     // total, so a breakdown that does not sum to it is indistinguishable from a
     // real accounting bug — which is what a history slice of `used - 1902` produced
@@ -1042,11 +1070,17 @@ Verfügbare Tools: {{tool_list}}`,
       measuredSeq: used ? 3 : 0,
       deltaSince: 0,
       used: usedTokens,
-      percent: limit > 0 ? (usedTokens / limit) * 100 : 0,
+      // The ceiling is the vendor's own number and its source is part of believing it,
+      // so the fixture names one: a header reading is an ordinary answer that taught the
+      // app the limit, a refusal is a request already lost to it.
+      ceiling: budgetCeiling,
+      ceilingSource: budgetCeiling > 0 ? ceilingSource : '',
+      effectiveLimit,
+      percent: effectiveLimit > 0 ? (usedTokens / effectiveLimit) * 100 : 0,
       // Projected adds the whole response reserve, as the real Assembler does.
       projected: usedTokens + reserve,
-      projectedRatio: limit > 0 ? (usedTokens + reserve) / limit : 0,
-      overLimit: false,
+      projectedRatio: effectiveLimit > 0 ? (usedTokens + reserve) / effectiveLimit : 0,
+      overLimit: effectiveLimit > 0 && usedTokens + reserve > effectiveLimit,
       segments: [
         { kind: 'system', label: 'System-Prompt', tokens: system },
         { kind: 'tools', label: 'Tool-Schema', tokens: tools },
@@ -1253,9 +1287,28 @@ Verfügbare Tools: {{tool_list}}`,
   // the phase and the wait while the retry sleeps, and nothing arrives on the wire until it
   // is over. It is a flag because the ordinary fixture has to keep streaming without a pause.
   const throttleFixture = query.get('throttle') === '1'
+  // ?pace=1 is the same pause for the other reason a turn waits: the backend's token
+  // allowance for the minute has no room for the request yet, so it is held back *before* it
+  // is sent (internal/llm/pace.go). The phase reads differently on purpose — nothing was
+  // refused — and one of the two sentences would otherwise never be rendered.
+  const paceFixture = query.get('pace') === '1'
+  // ?spread=1 is the third reason a turn waits, and the one nothing is spent for: the answer
+  // needs more requests than the minute's request rate allows, so the app spreads its rounds
+  // over the minute before the first of them (internal/chat/pace.go). Its sentence differs from
+  // ?pace=1's on purpose — this allowance is not used up, the turn is being paced — and without
+  // the flag the third sentence would never be rendered.
+  const spreadFixture = query.get('spread') === '1'
   // The wait the pretend refusal names, held for real rather than shown and skipped: a number
   // on screen that does not match the pause the viewer sits through is worse than no number.
   const THROTTLE_WAIT_MS = 6000
+  // The paced pause is longer, and that is the honest shape of it: a throttle names the seconds
+  // until one request may be retried, while a spent minute stays spent until its window turns
+  // over — tens of seconds on the allowance this was measured against. Both are held for real.
+  const PACE_WAIT_MS = 20000
+  // The spread pause is one round's share of the minute, and it is short because it is paid
+  // before *each* round rather than once: a thirty-per-minute allowance is one request every
+  // two seconds, and this fixture renders one of those waits.
+  const SPREAD_WAIT_MS = 2000
   // How often a pretending draw reports. Slower than the real single-second poll would be a
   // boring wait; faster would spend the run repainting. It is chosen to make the counter and
   // the thumbnail visibly move, which is the only thing this fixture exists to show.
@@ -1694,17 +1747,24 @@ Verfügbare Tools: {{tool_list}}`,
       emit('chat:reasoning', { chatId, messageId, text: i <= 8 ? REASONING.slice(0, 20) : '' })
       timers.set(chatId, setTimeout(step, 40))
     }
-    if (throttleFixture) {
-      // The sequence the real app produces around a retry: the phase with the wait, then a
-      // retraction, then a reply that streams as usual. It is emitted here rather than at the
-      // top of the turn because the wait sits between the request and its first token.
-      emit('chat:status', { chatId, phase: 'throttled', waitMs: THROTTLE_WAIT_MS })
+    if (throttleFixture || paceFixture || spreadFixture) {
+      // The sequence the real app produces around a retry — or around a request held back for
+      // the minute's allowance, or around a turn spaced against its request rate: the phase
+      // with the wait, then a retraction, then a reply that streams as usual. It is emitted
+      // here rather than at the top of the turn because the wait sits between the request and
+      // its first token.
+      const wait = throttleFixture
+        ? { ms: THROTTLE_WAIT_MS, phase: 'throttled' }
+        : paceFixture
+          ? { ms: PACE_WAIT_MS, phase: 'paced' }
+          : { ms: SPREAD_WAIT_MS, phase: 'spread' }
+      emit('chat:status', { chatId, phase: wait.phase, waitMs: wait.ms })
       timers.set(
         chatId,
         setTimeout(() => {
           emit('chat:status', { chatId, phase: 'idle' })
           timers.set(chatId, setTimeout(step, 60))
-        }, THROTTLE_WAIT_MS),
+        }, wait.ms),
       )
       return
     }

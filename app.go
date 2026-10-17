@@ -468,7 +468,11 @@ func (a *App) onManagedState(backendID string, st rt.Status) {
 			changed = true
 		}
 	}
-	settings := a.settings
+	// Cloned under the lock, and it is the whole point: this function persists the
+	// settings, which marshals the value, and marshalling a shallow copy would walk the
+	// live maps while the next setter writes them — the managed-model map most of all,
+	// since SetManagedModel is what a save does. See config.Settings.Clone.
+	settings := a.settings.Clone()
 	a.settingsMu.Unlock()
 	if !changed {
 		return
@@ -1040,11 +1044,15 @@ func (a *App) emit(name string, payload any) {
 	runtime.EventsEmit(a.ctx, name, payload)
 }
 
-// Settings returns a snapshot of the current settings.
+// Settings returns a snapshot of the current settings — a real one, sharing no map or
+// slice with the live value (config.Settings.Clone). It has to be a copy of the contents
+// and not merely of the struct: callers marshal it (the bridge, the settings blob), iterate
+// its maps and build a registry from it, all on their own goroutines, while a setter under
+// settingsMu writes the next entry.
 func (a *App) Settings() config.Settings {
 	a.settingsMu.RLock()
 	defer a.settingsMu.RUnlock()
-	return a.settings
+	return a.settings.Clone()
 }
 
 // --- chat API --------------------------------------------------------------

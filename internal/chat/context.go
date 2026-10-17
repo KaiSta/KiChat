@@ -33,12 +33,27 @@ type ContextSegment struct {
 type ContextBudget struct {
 	Limit       int    `json:"limit"`
 	LimitSource string `json:"limitSource"` // backend | override | unknown
-	System      int    `json:"system"`
-	Memory      int    `json:"memory"`
-	Attachments int    `json:"attachments"`
-	History     int    `json:"history"`
-	ToolSchemas int    `json:"toolSchemas"`
-	Reserve     int    `json:"reserve"`
+
+	// Ceiling is the backend's own limit on the size of *one request*, when it
+	// publishes one, and CeilingSource says where the number came from (llm's
+	// CeilingFromRefusal / CeilingFromHeader). It is not the window: Groq's
+	// per-minute token allowance bounds a single request from below the 131k window
+	// its listing advertises, which is why a chat at 2 % of that window was already
+	// unable to be sent.
+	Ceiling       int    `json:"ceiling"`
+	CeilingSource string `json:"ceilingSource"`
+	// EffectiveLimit is what the next request actually has to fit under — the smaller
+	// of the window and the ceiling — and it is what Percent, ProjectedRatio and
+	// OverLimit are computed against. Reporting them against the window would show
+	// headroom that does not exist.
+	EffectiveLimit int `json:"effectiveLimit"`
+
+	System      int `json:"system"`
+	Memory      int `json:"memory"`
+	Attachments int `json:"attachments"`
+	History     int `json:"history"`
+	ToolSchemas int `json:"toolSchemas"`
+	Reserve     int `json:"reserve"`
 
 	// Estimated is computed from the assembled prompt with the heuristic.
 	Estimated int `json:"estimated"`
@@ -75,6 +90,9 @@ type AssemblyInput struct {
 	Limit       int
 	LimitSource string
 	Reserve     int
+	// Ceiling is the backend's own per-request limit for this model, or the zero
+	// value when it publishes none.
+	Ceiling llm.Ceiling
 
 	// Measured is the previous turn's reported prompt_tokens; valid only for the
 	// backend/model that produced it.
@@ -109,6 +127,15 @@ func Assemble(in AssemblyInput) Assembly {
 	budget.Limit = in.Limit
 	budget.LimitSource = in.LimitSource
 	budget.Reserve = in.Reserve
+	budget.Ceiling = in.Ceiling.Tokens
+	budget.CeilingSource = in.Ceiling.Source
+	budget.EffectiveLimit = in.Limit
+	// A ceiling below the window is the binding limit, and a window the backend does
+	// not report is not a reason to ignore a ceiling it does: the smaller of the two
+	// known numbers is what one request has to fit under.
+	if budget.Ceiling > 0 && (budget.EffectiveLimit <= 0 || budget.Ceiling < budget.EffectiveLimit) {
+		budget.EffectiveLimit = budget.Ceiling
+	}
 	budget.Measured = in.Measured
 	budget.MeasuredValid = in.MeasuredValid
 
@@ -346,10 +373,16 @@ func Assemble(in AssemblyInput) Assembly {
 		budget.Used = budget.Estimated
 	}
 	budget.Projected = budget.Used + in.Reserve
-	if budget.Limit > 0 {
-		budget.Percent = float64(budget.Used) / float64(budget.Limit) * 100
-		budget.ProjectedRatio = float64(budget.Projected) / float64(budget.Limit)
-		budget.OverLimit = budget.Projected > budget.Limit
+	// Against the effective limit, not the window: the meter exists to say whether the
+	// next request can be sent, and on a backend whose per-request ceiling is smaller
+	// than its window a percentage of the window answers a different question. It is
+	// also what the automatic threshold reads (PlanCompaction compares
+	// ProjectedRatio), so the quiet fold and the meter cannot disagree about how full
+	// the request is.
+	if budget.EffectiveLimit > 0 {
+		budget.Percent = float64(budget.Used) / float64(budget.EffectiveLimit) * 100
+		budget.ProjectedRatio = float64(budget.Projected) / float64(budget.EffectiveLimit)
+		budget.OverLimit = budget.Projected > budget.EffectiveLimit
 	}
 
 	return Assembly{

@@ -25,7 +25,14 @@ export function ContextMeter({ onOpen }: { onOpen: () => void }) {
   const budget = useStore((s) => s.chatState?.budget)
   const phase = useStore((s) => (s.activeChatId ? s.phase[s.activeChatId] : undefined))
 
-  if (!budget || budget.limit <= 0) {
+  // The number the next request has to fit under: the model's window, or a backend's own
+  // smaller cap on one request (Groq), which makes a percentage of the window read as
+  // free room that does not exist. Either number is a reading — a backend that publishes
+  // a per-request budget and no window still bounds the request — so the meter waits for
+  // both to be missing, not for the window alone.
+  const cap = budget ? (budget.effectiveLimit > 0 ? budget.effectiveLimit : budget.limit) : 0
+
+  if (!budget || cap <= 0) {
     return (
       <button type="button" className="btn btn-sm btn-ghost" onClick={onOpen} title={t('context.inspector')}>
         {t('context.title')}: {t('context.unknown')}
@@ -35,6 +42,11 @@ export function ContextMeter({ onOpen }: { onOpen: () => void }) {
 
   const tone = usageTone(budget.percent)
   const remeasuring = !budget.measuredValid && budget.measured > 0
+  const ceilingBinds = budget.ceiling > 0 && budget.ceiling < budget.limit
+  const ceilingNote = t('context.ceilingNote', {
+    tokens: formatNumber(budget.ceiling),
+    window: formatNumber(budget.limit),
+  })
 
   return (
     <button
@@ -44,7 +56,9 @@ export function ContextMeter({ onOpen }: { onOpen: () => void }) {
       title={
         budget.overLimit
           ? t('context.overLimit')
-          : `${formatNumber(budget.used)} / ${formatNumber(budget.limit)} ${t('metrics.tokens')}`
+          : ceilingBinds
+            ? `${formatNumber(budget.used)} / ${formatNumber(cap)} ${t('metrics.tokens')} — ${ceilingNote}`
+            : `${formatNumber(budget.used)} / ${formatNumber(cap)} ${t('metrics.tokens')}`
       }
     >
       <span className="relative block h-2 w-24 overflow-hidden rounded-full" style={{ background: 'var(--surface-3)' }}>
@@ -68,7 +82,7 @@ export function ContextMeter({ onOpen }: { onOpen: () => void }) {
         )}
       </span>
       <span style={{ color: 'var(--text-dim)' }}>
-        {formatNumber(budget.used)}/{formatNumber(budget.limit)}
+        {formatNumber(budget.used)}/{formatNumber(cap)}
       </span>
       <span style={{ color: `var(--${tone})` }}>{formatPercentSafe(budget.percent)}</span>
       {remeasuring && <span className="faint" title={t('context.remeasuring')}>~</span>}
@@ -142,6 +156,8 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
   if (!budget) return null
 
   const blocked = busy || running
+  const cap = budget.effectiveLimit > 0 ? budget.effectiveLimit : budget.limit
+  const ceilingBinds = budget.ceiling > 0 && budget.ceiling < budget.limit
 
   const runCompact = async (target: number) => {
     if (!chatId) return
@@ -175,8 +191,7 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
       <div className="mb-3 flex items-baseline gap-2">
         <span className="text-2xl font-semibold">{formatNumber(budget.used)}</span>
         <span className="muted">
-          {t('context.of')} {budget.limit > 0 ? formatNumber(budget.limit) : t('context.unknown')}{' '}
-          {t('metrics.tokens')}
+          {t('context.of')} {cap > 0 ? formatNumber(cap) : t('context.unknown')} {t('metrics.tokens')}
         </span>
         <span className="ml-auto badge" title={budget.measuredValid ? t('metrics.measured') : t('metrics.estimated')}>
           {budget.measuredValid ? t('metrics.measured') : t('metrics.estimated')}
@@ -189,6 +204,15 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
           style={{ width: `${Math.min(100, budget.percent)}%`, background: `var(--${usageTone(budget.percent)})` }}
         />
       </div>
+
+      {ceilingBinds && (
+        <div className="mb-3 text-[11px]" style={{ color: 'var(--text-dim)' }}>
+          {t('context.ceilingNote', {
+            tokens: formatNumber(budget.ceiling),
+            window: formatNumber(budget.limit),
+          })}
+        </div>
+      )}
 
       <div className="mb-3 space-y-1 text-[12px]">
         {(budget.segments ?? []).map((seg, i) => (
@@ -207,6 +231,18 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
       <dl className="mb-3 grid grid-cols-2 gap-x-3 text-[11px]">
         <dt className="faint">{t('context.limitSource')}</dt>
         <dd>{limitSourceLabel(budget.limitSource, t)}</dd>
+        {/* Where the per-request limit came from is part of believing it: a number
+            learned from a refusal means a request was already lost to it, and one
+            read off an ordinary answer means none was. */}
+        {budget.ceiling > 0 && (
+          <>
+            <dt className="faint">{t('context.ceiling')}</dt>
+            <dd className="mono">
+              {formatNumber(budget.ceiling)}{' '}
+              <span className="faint">({ceilingSourceLabel(budget.ceilingSource, t)})</span>
+            </dd>
+          </>
+        )}
         <dt className="faint">{t('context.reserve')}</dt>
         <dd className="mono">{formatNumber(budget.reserve)}</dd>
         <dt className="faint">{t('context.projected')}</dt>
@@ -300,6 +336,24 @@ function limitSourceLabel(source: string, t: (k: string) => string): string {
       return 'Backend'
     case 'override':
       return t('model.overrides')
+    default:
+      return t('context.unknown')
+  }
+}
+
+/**
+ * The two places a per-request limit can come from, in the backend's own words.
+ *
+ * The distinction is not decoration: a ceiling learned from a refusal cost a request
+ * that could not be sent, while one a response published cost nothing — and only the
+ * second makes the first oversized turn of a session avoidable.
+ */
+function ceilingSourceLabel(source: string, t: (k: string) => string): string {
+  switch (source) {
+    case 'header':
+      return t('context.ceilingFrom.header')
+    case 'refusal':
+      return t('context.ceilingFrom.refusal')
     default:
       return t('context.unknown')
   }
@@ -627,7 +681,11 @@ export function ModelSwitcher() {
       if (chatId) {
         budget = await App.GetBudget(chatId, backendID, path).catch(() => null)
       }
-      if (budget && budget.limit > 0 && budget.projected > budget.limit) {
+      // overLimit is the server's own verdict, which is measured against whatever the
+      // next request really has to fit under — the window, or a backend's smaller
+      // per-request limit — so a start is not committed on a reading the numbers on
+      // screen would contradict.
+      if (budget && budget.overLimit) {
         setCandidate(model)
         setPreview(budget)
         return
@@ -923,10 +981,11 @@ export function ModelSwitcher() {
               {preview && preview.limit > 0 ? (
                 <>
                   <div className="muted">
-                    {formatNumber(preview.used)} / {formatNumber(preview.limit)} {t('metrics.tokens')} (
-                    {formatPercentSafe(preview.percent)})
+                    {formatNumber(preview.used)} /{' '}
+                    {formatNumber(preview.effectiveLimit > 0 ? preview.effectiveLimit : preview.limit)}{' '}
+                    {t('metrics.tokens')} ({formatPercentSafe(preview.percent)})
                   </div>
-                  {preview.projected > preview.limit ? (
+                  {preview.overLimit ? (
                     <div className="mt-2" style={{ color: 'var(--warn)' }}>
                       {t('model.switchWarning')}
                     </div>
@@ -936,7 +995,7 @@ export function ModelSwitcher() {
                 <div className="faint">{t('model.overrideHint')}</div>
               )}
               <div className="mt-2 flex flex-wrap gap-2">
-                {preview && preview.projected > preview.limit ? (
+                {preview && preview.overLimit ? (
                   <button type="button" className="btn btn-sm btn-primary" onClick={() => void commit(candidate, true)}>
                     {t('model.switchAndCompact')}
                   </button>

@@ -904,10 +904,27 @@ program's stdout, so EOF means "it and everything it started are done writing": 
 close the watcher, then a **bounded drain** of the tail. The bound now costs a truncated
 diagnosis in the pathological case and never a report.
 
+**A second trap in the same place: the watcher is waited for, not only stopped.** `close(stopWatch)`
+asks the goroutine to stop; it does not make it stop, so a report already being delivered finished
+*after* `GenerateWithProgress` had returned. That is a visible bug on this backend and not only a
+test's problem — the callback the app passes emits `image:progress`, so a finished draw kept
+repainting its own progress row — and it is a data race for any caller that accumulates the
+reports in a plain variable, which is how `-race` found it. The stopper is therefore
+`close(stopWatch)` **and** `<-watcherDone`, the shape the WebUI backend's watcher already had
+(`sdwebui.go`, `watchProgress`): no report outlives the result it belongs to, and the return does
+not happen while one is half-delivered. It is pinned by
+`TestCLIDoesNotReportAfterTheDrawIsOver`, which is a test of the reported behaviour rather than a
+`-race`-only one: it ends the fake draw while a report is held open, and against the previous code
+it fails in an ordinary `go test` run — 0.73 s, *"1 progress report(s) were still running when the
+draw returned"* — where only the race detector had noticed before.
+
 `internal/images/cli_test.go` drives a fake `sd-cli` that answers `-h`, rewrites a preview file
 and prints step bars: two reports arrive, the first carries the step and a real PNG preview,
 the last carries the second step, and the seed line is still read — the draw is unaffected by
-having been watched. Two more tests hold the negative side, which is the one that costs a user
+having been watched. A third holds the watcher's other half — that no report is still running, or
+arrives at all, once the draw's caller has its result — and the fake draw it needs is the same stub
+with its sleeps replaced by a wait the test releases, so the window is chosen rather than awaited.
+Two more tests hold the negative side, which is the one that costs a user
 a picture: no `--preview` flags are passed to a build whose help does not list them, and none
 when the user's own arguments already decide the preview.
 `internal/images/sdwebui_test.go` does the same for the HTTP route, including that a 404 is
