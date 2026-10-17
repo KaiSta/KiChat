@@ -3102,7 +3102,21 @@ Verfügbare Tools: {{tool_list}}`,
     GetDocument: () => Promise.resolve(null),
     ListChunks: () => Promise.resolve([]),
 
-    SetModelOverride: () => Promise.resolve(null),
+    // Mirrors api.SetModelOverride: an override is content when any of its three
+    // fields is set, and it replaces the stored one whole rather than merging. Modelled
+    // rather than a no-op because the panel re-reads the settings after a save, and a
+    // mock that forgot the write would show an empty field where the app shows the
+    // number the user just typed.
+    SetModelOverride: (backend, model, ov) => {
+      const key = `${backend}/${model}`
+      const next = ov || {}
+      if (!next.contextLimit && !next.requestCeiling && !(next.capabilities || []).length) {
+        delete settings.modelOverrides[key]
+      } else {
+        settings.modelOverrides[key] = { ...next }
+      }
+      return Promise.resolve(null)
+    },
     // The sweep is polled rather than pushed, the same way a download is: it
     // outlives the call that starts it, and polling cannot miss the end of one.
     StartModelCheck: (backend) => {

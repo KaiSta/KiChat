@@ -407,7 +407,11 @@ turn. `internal/chat/oversize.go`:
    request-ceiling field, offered for this backend's models only, and `Engine.ceilingFor` merges
    it with whatever the provider learned, keeping the smaller of the two: the typed number fills
    a silence and never overrules a measurement, so a stale entry costs an extra fold rather than
-   a refused request. `TestTheUsersOwnCeilingFoldsBeforeTheRequestGoesOut` pins that it drives the
+   a refused request. It is written by `SetModelOverride`, which sits outside the settings form, so
+   `SaveSettings` re-reads the recorded overrides rather than the draft's — the same rule the
+   hidden-model list follows, and the reason a Save of an unrelated setting cannot drop a ceiling
+   that was typed a moment earlier (`TestAnUnrelatedSaveKeepsAModelOverride`).
+   `TestTheUsersOwnCeilingFoldsBeforeTheRequestGoesOut` pins that it drives the
    same preventive fold (one summary, no refusal, before the first request),
    `TestATypedCeilingNeverLoosensWhatTheBackendStated` the direction of the merge, and
    `TestTheMeterShowsTheTypedCeiling` that the meter paints it with the source `manual`.

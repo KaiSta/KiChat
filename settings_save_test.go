@@ -6,6 +6,7 @@ import (
 
 	"kichat/internal/config"
 	"kichat/internal/ingest"
+	"kichat/internal/llm"
 	"kichat/internal/secret"
 	"kichat/internal/store"
 )
@@ -99,4 +100,39 @@ func newSettingsTestApp(t *testing.T, settings config.Settings, runtimeDir strin
 	}
 	a.store, a.extractor, a.secrets = st, ingest.New(), sec
 	return a
+}
+
+// The per-model overrides are written by SetModelOverride, which sits outside the
+// settings form, so no draft carries them as they stand. SaveSettings re-reads the
+// recorded map instead; without that, the next unrelated Save put back the map from
+// before the override — silently losing a request ceiling the user had typed after
+// reading their backend's limits page.
+func TestAnUnrelatedSaveKeepsAModelOverride(t *testing.T) {
+	a := newSettingsTestApp(t, config.Default(), t.TempDir())
+	// A save first, the way the panel is used: it is what builds the services a
+	// SetModelOverride call invalidates.
+	if _, err := a.SaveSettings(a.Settings()); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+	if err := a.SetModelOverride("groq", "openai/gpt-oss-20b",
+		llm.ModelOverride{RequestCeiling: 8000}); err != nil {
+		t.Fatalf("SetModelOverride: %v", err)
+	}
+
+	// A draft as the bridge hands it out and takes it back, read before the override
+	// was written.
+	draft, err := a.GetSettings()
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	draft.ModelOverrides = map[string]llm.ModelOverride{}
+	draft.AutoTitle = !draft.AutoTitle
+	if _, err := a.SaveSettings(draft); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+
+	got := a.Settings().ModelOverrides["groq/openai/gpt-oss-20b"]
+	if got.RequestCeiling != 8000 {
+		t.Fatalf("ceiling after an unrelated save = %d, want the 8000 that was stored", got.RequestCeiling)
+	}
 }

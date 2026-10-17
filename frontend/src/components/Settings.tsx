@@ -1663,7 +1663,24 @@ function BackendsTab({
         </div>
       </Section>
 
-      <ModelOverridesTab />
+      <ModelOverridesTab
+        overrides={draft.modelOverrides ?? {}}
+        backends={draft.backends}
+        onSaved={(key, ov) => {
+          // The tab writes through the backend, not through this form, so its result
+          // has to reach the draft by hand: otherwise the next Save of an unrelated
+          // setting would put back the map that predates the override. The backend
+          // keeps its own copy as well (SaveSettings re-reads it), so this is what the
+          // panel shows, not the only thing that survives.
+          const next = { ...(draft.modelOverrides ?? {}) }
+          if (!ov.contextLimit && !ov.requestCeiling && !(ov.capabilities?.length ?? 0)) {
+            delete next[key]
+          } else {
+            next[key] = ov
+          }
+          patch({ modelOverrides: next })
+        }}
+      />
     </>
   )
 }
@@ -2939,16 +2956,22 @@ function PictureStore() {
   )
 }
 
-function ModelOverridesTab() {
+function ModelOverridesTab({
+  overrides,
+  backends,
+  onSaved,
+}: {
+  // The panel's own draft, rather than the store's snapshot: this tab is the one
+  // control that writes outside the form, and a row that read the snapshot would show
+  // "not set" for every value it had just saved.
+  overrides: Record<string, llm.ModelOverride>
+  backends: llm.BackendConfig[]
+  onSaved: (key: string, ov: llm.ModelOverride) => void
+}) {
   const t = useStore((s) => s.t)
   const models = useStore((s) => s.models)
-  const draft = useStore((s) => s.settings)
   const [editing, setEditing] = useState<string | null>(null)
   const [value, setValue] = useState('')
-  // What has just been saved, so a row shows its new number without waiting for a
-  // settings reload: SetModelOverride writes the snapshot, not the draft this tab
-  // reads.
-  const [saved, setSaved] = useState<Record<string, number>>({})
 
   // Groq is the one backend whose per-request budget cannot be fetched before the
   // first request: the listing publishes windows only, the Rate Limits and Models
@@ -2963,8 +2986,8 @@ function ModelOverridesTab() {
   // the settings row rather than on what is on screen — and a switched-off backend has
   // no models to show it for anyway.
   const groqBackends = useMemo(
-    () => new Set((draft?.backends ?? []).filter((b) => b.kind === 'groq').map((b) => b.id)),
-    [draft?.backends],
+    () => new Set(backends.filter((b) => b.kind === 'groq').map((b) => b.id)),
+    [backends],
   )
 
   // A model needs a row when its window is unknown (the case this tab was built for)
@@ -2980,7 +3003,9 @@ function ModelOverridesTab() {
     patch: { contextLimit?: number; requestCeiling?: number },
   ) => {
     const key = `${backend}/${id}`
-    const current = draft?.modelOverrides?.[key]
+    const current = overrides[key]
+    // The other field is carried over from the row's own state, so saving the window of
+    // a model whose ceiling was saved a moment ago cannot send a 0 and clear it.
     const next = {
       contextLimit: current?.contextLimit ?? 0,
       capabilities: current?.capabilities ?? [],
@@ -2988,9 +3013,13 @@ function ModelOverridesTab() {
       ...patch,
     } as llm.ModelOverride
     await App.SetModelOverride(backend, id, next)
-    setSaved((prev) => ({ ...prev, [key]: next.requestCeiling ?? 0 }))
+    onSaved(key, next)
     setEditing(null)
-    await useStore.getState().refreshModels(true)
+    // Only the window is part of a model's listed metadata, so only a window save asks
+    // for a re-listing — and on a metered backend a listing is a request.
+    if (patch.contextLimit !== undefined) {
+      await useStore.getState().refreshModels(true)
+    }
   }
 
   return (
@@ -3001,7 +3030,7 @@ function ModelOverridesTab() {
         <div className="space-y-3">
           {rows.map((m) => {
             const key = `${m.backend}/${m.id}`
-            const ceiling = saved[key] ?? draft?.modelOverrides?.[key]?.requestCeiling ?? 0
+            const ceiling = overrides[key]?.requestCeiling ?? 0
             const needsWindow = !m.contextLimit
             const needsCeiling = groqBackends.has(m.backend)
             return (
@@ -3036,7 +3065,7 @@ function ModelOverridesTab() {
                           className="btn btn-sm"
                           onClick={() => {
                             setEditing(`window:${key}`)
-                            setValue(String(draft?.modelOverrides?.[key]?.contextLimit ?? 32768))
+                            setValue(String(overrides[key]?.contextLimit ?? 32768))
                           }}
                         >
                           {t('model.overrides')}
@@ -3079,7 +3108,10 @@ function ModelOverridesTab() {
                           title={t('model.ceilingHint')}
                           onClick={() => {
                             setEditing(`ceiling:${key}`)
-                            setValue(String(ceiling || 8000))
+                            // Empty when nothing is set: the placeholder shows what a
+                            // typical figure looks like, but an untouched field must
+                            // not save a number nobody measured.
+                            setValue(ceiling > 0 ? String(ceiling) : '')
                           }}
                         >
                           {t('model.ceiling')}

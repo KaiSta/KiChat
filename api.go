@@ -103,6 +103,11 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	// last sweep would otherwise put every hidden model back into the picker on the
 	// next unrelated save.
 	s.HiddenModels = recorded.HiddenModels
+	// The per-model overrides are written by SetModelOverride, which is also outside
+	// this form, so the same rule applies: a draft read before the last override save
+	// would put the older map back — silently losing a per-request ceiling the user
+	// typed a moment ago — on the next unrelated save.
+	s.ModelOverrides = recorded.Clone().ModelOverrides
 	// Moving the untouched prompts to the new language, and repairing an empty
 	// default prompt, happen here as well as on load: clearing the textarea and
 	// switching the language in the same save must not leave either undone.
