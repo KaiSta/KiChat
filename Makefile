@@ -394,7 +394,7 @@ dmg: check-darwin-host darwin
 # Comments, which is free text. And the rewrite is a pipeline rather than `sed -i`,
 # because BSD sed wants an argument after -i and GNU sed does not.
 VERSION_NUMERIC = $(firstword $(subst ~, ,$(VERSION)))
-VERSION_INFO_COMMENT = KiChat $(VERSION) - local-first LLM research chat, all rights reserved
+VERSION_INFO_COMMENT = KiChat $(VERSION) - local-first AI workspace, Apache-2.0
 version-info:
 	@if grep -q '"productVersion": "$(VERSION_NUMERIC)"' wails.json && \
 	    grep -q '"comments": "$(VERSION_INFO_COMMENT)"' wails.json; then \
@@ -569,6 +569,7 @@ uninstall:
 	      $(DESTDIR)$(PREFIX)/share/pixmaps/$(APP).png \
 	      $(DESTDIR)$(PREFIX)/share/lintian/overrides/$(APP) \
 	      $(DESTDIR)$(PREFIX)/share/doc/$(APP)/copyright \
+	      $(DESTDIR)$(PREFIX)/share/doc/$(APP)/THIRD-PARTY-NOTICES.md \
 	      $(DESTDIR)$(PREFIX)/share/doc/$(APP)/changelog.gz
 
 # The .deb is the same install, staged. Depends is not guessed: it is the set of
@@ -581,6 +582,9 @@ deb: build
 	$(call INSTALL_FILES,$(CURDIR)/$(DEB_STAGE))
 	@mkdir -p $(DEB_STAGE)/DEBIAN
 	@install -D -m 0644 packaging/debian/copyright $(DEB_STAGE)$(PREFIX)/share/doc/$(APP)/copyright
+	@# The MIT and BSD components linked into the binary require their notices
+	@# to travel with it; this is the one file that carries all of them.
+	@install -D -m 0644 THIRD-PARTY-NOTICES.md $(DEB_STAGE)$(PREFIX)/share/doc/$(APP)/THIRD-PARTY-NOTICES.md
 	@# Justifications for the info tags this package would otherwise re-report on
 	@# every check. Only a .deb ships it: it is a fact about the package, not
 	@# something a plain `make install` of a working tree should spray into
