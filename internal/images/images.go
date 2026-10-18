@@ -198,6 +198,12 @@ type Progress struct {
 // sampling. It travels through Progress.Phase and reaches the window as its own sentence.
 const PhaseCaptioning = "captioning"
 
+// PhaseUpscaling is the phase reported while Real-ESRGAN walks a picture in tiles, for the
+// same reason and through the same field as PhaseCaptioning: the program prints a bar per
+// tile and nothing that a client may parse, so a step counter would be invented. The window
+// shows a sentence and a Stop, which is the honest pair for a wait of unknown length.
+const PhaseUpscaling = "upscaling"
+
 // Progressive is a provider that can report a draw's progress while it runs.
 //
 // It is a separate interface rather than a method on Provider for the same reason
