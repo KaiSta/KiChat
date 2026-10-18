@@ -108,7 +108,19 @@ type Attachment struct {
 // why images.Result spells "not reported" the same way, and why a redraw of such a
 // picture lets the server choose again.
 type GenerationRecipe struct {
-	Prompt         string `json:"prompt"`
+	// Prompt is the words the picture was drawn from. For a caption-trained model that is
+	// the caption rather than the request, which is why a redraw replays it instead of
+	// asking for a new one.
+	Prompt string `json:"prompt"`
+	// SourcePrompt is what the user asked for when a caption was drawn from instead of it,
+	// empty when the two are the same. A picture has two true descriptions — the request,
+	// and the words the model was really given — and recording only one of them makes
+	// either the card or the redraw lie.
+	SourcePrompt string `json:"sourcePrompt,omitempty"`
+	// CaptionModel is the model that wrote the caption, empty when none did. Without it a
+	// card cannot answer "why does this look nothing like my prompt?", which is the
+	// question a caption is most often the answer to.
+	CaptionModel   string `json:"captionModel,omitempty"`
 	NegativePrompt string `json:"negativePrompt,omitempty"`
 	Width          int    `json:"width,omitempty"`
 	Height         int    `json:"height,omitempty"`

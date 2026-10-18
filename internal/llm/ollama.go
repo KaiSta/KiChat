@@ -339,11 +339,15 @@ func toOllamaMessages(in []Message) []ollamaMessage {
 	return msgs
 }
 
-func (p *ollamaProvider) Chat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error) {
-	msgs := toOllamaMessages(req.Messages)
-
+// ollamaOptions is the options block of a request. It is a function rather than a few
+// lines inside Chat so the one rule here that is easy to get wrong can be tested without
+// a server: a temperature of zero goes on the wire only when the caller said it meant
+// zero. Ollama reads a missing key as "use the model's own", and for greedy decoding
+// that is the wrong answer — the modelfile's temperature applies instead, which makes two
+// captions of one request differ for no reason the caller can see.
+func ollamaOptions(req ChatRequest) map[string]any {
 	options := map[string]any{}
-	if req.Temperature > 0 {
+	if req.Temperature > 0 || req.TemperatureSet {
 		options["temperature"] = req.Temperature
 	}
 	if req.TopP > 0 {
@@ -358,6 +362,13 @@ func (p *ollamaProvider) Chat(ctx context.Context, req ChatRequest) (<-chan Stre
 	if req.Seed != nil {
 		options["seed"] = *req.Seed
 	}
+	return options
+}
+
+func (p *ollamaProvider) Chat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error) {
+	msgs := toOllamaMessages(req.Messages)
+
+	options := ollamaOptions(req)
 
 	body := map[string]any{
 		"model":    req.Model,

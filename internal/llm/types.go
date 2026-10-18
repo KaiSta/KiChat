@@ -160,8 +160,14 @@ type ChatRequest struct {
 	Messages    []Message
 	Tools       []ToolDefinition
 	Temperature float64
-	TopP        float64
-	MaxTokens   int
+	// TemperatureSet says the caller meant the temperature, zero included. Zero on
+	// its own means "nobody chose one", because a backend's default is not this app's
+	// to overwrite — but greedy decoding *is* zero, and a backend that drops a zero
+	// leaves the model's own sampling in place. Ollama is that backend: it sends the
+	// key only above zero, so a caller asking for greedy has to say so here as well.
+	TemperatureSet bool
+	TopP           float64
+	MaxTokens      int
 	// NumCtx overrides the context window for backends where it is a per-request
 	// option (Ollama). Zero means "let the backend/modelfile decide".
 	NumCtx    int

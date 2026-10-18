@@ -288,7 +288,7 @@ func (s *SDWebUI) GenerateWithProgress(ctx context.Context, req Request, report 
 	if s.baseURL == "" {
 		return Result{}, ErrNotConfigured
 	}
-	prompt := strings.TrimSpace(req.Prompt)
+	prompt := req.EffectivePrompt()
 	if prompt == "" {
 		return Result{}, errors.New("der Bild-Prompt ist leer")
 	}

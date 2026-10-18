@@ -23,6 +23,7 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"strings"
 )
 
 // Request is one text-to-image generation, normalised across servers.
@@ -59,6 +60,22 @@ type Request struct {
 	// Hires asks for a second sampling pass that enlarges the first picture and
 	// repaints it. The zero value is one ordinary pass; see Hires and OutputSize.
 	Hires Hires
+	// Caption is the prompt a model wrote for this request, empty when nobody wrote
+	// one. FLUX 3 was trained on captions rather than requests (see caption.go), and
+	// the words it draws from are therefore not the words the user typed. It sits
+	// beside Prompt rather than replacing it so a picture can record both: what was
+	// asked for, and what the model was really drawn from.
+	Caption string
+}
+
+// EffectivePrompt is what a backend should draw from: the caption when there is one,
+// the user's own request otherwise. Every backend sends this rather than Prompt, which
+// is what keeps a caption from being a feature of one client.
+func (r Request) EffectivePrompt() string {
+	if caption := strings.TrimSpace(r.Caption); caption != "" {
+		return caption
+	}
+	return strings.TrimSpace(r.Prompt)
 }
 
 // Image is one generated picture together with the format it arrived in.
@@ -170,7 +187,16 @@ type Progress struct {
 	// rather than a constant because the sources differ: the HTTP route answers with JPEG,
 	// and the file the binary writes is whatever its own encoder produced.
 	PreviewMime string
+	// Phase names a part of the draw that is not sampling — PhaseCaptioning, or empty for
+	// an ordinary step report. It exists because a caption-trained model does something
+	// before its first step: the caption costs seconds, and a window that shows nothing
+	// until step 1 is indistinguishable from a draw that has hung.
+	Phase string
 }
+
+// PhaseCaptioning is the phase reported while the caption is being written, before any
+// sampling. It travels through Progress.Phase and reaches the window as its own sentence.
+const PhaseCaptioning = "captioning"
 
 // Progressive is a provider that can report a draw's progress while it runs.
 //
