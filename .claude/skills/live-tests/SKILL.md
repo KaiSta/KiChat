@@ -69,6 +69,15 @@ KICHAT_LIVE=1 go test ./internal/images/ -run TestLiveSDWebUI -v
 KICHAT_LIVE=1 KICHAT_SD_FOLDER=~/Downloads/sd go test ./internal/images/ -run TestLiveSDServer -v
 #   optional: KICHAT_SD_DIFFUSION_MODEL, KICHAT_SD_MODEL, KICHAT_SD_VAE, KICHAT_SD_LLM,
 #   KICHAT_SD_CLIP_L, KICHAT_SD_CLIP_G, KICHAT_SD_T5XXL — the model set to load
+
+# A real FLUX 3 Klein draw: the whole set is required, no default, because the profile is
+# read from the diffusion file itself. Three draws, ~30 s: one 512² at the profile's own
+# 16 steps / CFG 1.0, then the same seed twice, with and without a negative prompt.
+KICHAT_LIVE=1 KICHAT_SD_CLI=~/sdMaster/buildVulkan/sd-cli \
+  KICHAT_SD_DIFFUSION_MODEL=~/sdMaster/models/flux3/flux-3-image-klein-UD-Q4_K_XL.gguf \
+  KICHAT_SD_LLM=~/sdMaster/models/flux3/Qwen3VL-4B-Instruct-Q4_K_M.gguf \
+  KICHAT_SD_VAE=~/sdMaster/models/flux2/flux2-vae.safetensors \
+  go test ./internal/images/ -run TestLiveFlux3KleinProfile -v
 ```
 
 ## What each one buys
@@ -85,6 +94,7 @@ KICHAT_LIVE=1 KICHAT_SD_FOLDER=~/Downloads/sd go test ./internal/images/ -run Te
 | `TestLivePrismForkRunsAModel` | the fork's release list, tag scheme, archive, ternary kernels and a real GGUF loaded |
 | `TestLiveSDWebUI` | the sampler the client sends is one the server knows, the guidance scale echoed back, and real PNG bytes |
 | `TestLiveSDServer` | `sd-server` really ships beside `sd-cli`, the listener flag exists, the readiness route answers, `cfg_scale` parses, and the time to ready plus two draws is printed |
+| `TestLiveFlux3KleinProfile` | the profile is identified from the checkpoint's own tensors, `Health` names a missing VAE before a multi-gigabyte load, 16 steps at CFG 1.0 really draw, and the negative prompt the profile drops really is inert |
 
 ## Rules
 
