@@ -722,6 +722,7 @@ func (a *App) rebuildServices(settings config.Settings) {
 	// a picture that does not exist yet as well as for one that does.
 	toolService.Draws = a.registerDraw
 	toolService.Progress = a.reportDrawProgress
+	toolService.Caption = a.captionImage
 	toolService.TryDraw = a.tryDraw
 	// A nil turns is only possible before init has run; NewEngineWithState makes its
 	// own in that case, so a half-initialised app cannot panic here.
@@ -826,6 +827,9 @@ func imageCLI(settings config.Settings) *images.CLI {
 			// with the other load-time options rather than in the extra arguments.
 			VaeTiling:   settings.Images.CLIVaeTiling,
 			VaeTileSize: settings.Images.CLIVaeTileSize,
+			// The profile of the configured model set, so Health can name a missing part by
+			// role instead of failing on the first draw with the model already loaded.
+			Pipeline: images.PipelineFor(settings.Images.Pipeline, settings.Images.CLIDiffusionModel),
 		})
 }
 
@@ -835,6 +839,29 @@ func imageCLI(settings config.Settings) *images.CLI {
 // id, and nothing that iterates Backends sees it; the map is keyed by string only
 // because one supervisor per thing is all the app ever needs.
 const imageServerID = "images"
+
+// captionImage asks the turn's own model for the caption a caption-trained image model
+// draws from.
+//
+// The backend and model come from the tool context rather than from a field on the app,
+// because two chats can be drawing at once and the service outlives a turn. The provider
+// is resolved through the registry that is current at call time for the same reason the
+// image backend is rebuilt on every settings change: a save takes effect on the next call,
+// not on the next start.
+//
+// A failure here is never a failed draw — the tool falls back to the user's own request —
+// so the errors are plain and meant to be read in a tool result.
+func (a *App) captionImage(ctx context.Context, req images.CaptionRequest) (images.CaptionResult, error) {
+	turn, ok := tools.TurnFrom(ctx)
+	if !ok {
+		return images.CaptionResult{}, errors.New("kein Modell für die Bildbeschreibung verfügbar")
+	}
+	provider, ok := a.currentRegistry().Provider(turn.BackendID)
+	if !ok {
+		return images.CaptionResult{}, fmt.Errorf("Backend %q ist nicht verfügbar", turn.BackendID)
+	}
+	return chat.Caption(ctx, provider, turn.ModelID, req)
+}
 
 // imageServerFor returns the supervisor of the managed picture server, creating it if
 // this is the first time it is needed.

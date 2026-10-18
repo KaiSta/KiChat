@@ -2117,6 +2117,22 @@ type ImageStatus struct {
 	// `sd-cli` or `sd-server` — so the panel can name the file it is reporting about
 	// instead of hard-coding one of the two.
 	Program string `json:"program"`
+	// Pipeline is the *resolved* profile id and PipelineName its model family. Both are
+	// reported rather than left to the view to derive, because the resolution is the one
+	// place a renamed file changes what the app does: showing the result is what turns a
+	// silent miss (no caption, wrong step count) into something the reader can see.
+	Pipeline     string `json:"pipeline"`
+	PipelineName string `json:"pipelineName"`
+	// PipelineSource is where that profile came from — "chosen", "weights" for the
+	// tensor layout inside the model file, or "name" for its file name, which is only
+	// consulted when the weights cannot be read. Empty means nothing identified the model.
+	// The panel prints it because the three are different claims: a name that lost the
+	// `klein` marker still resolves from the weights, and saying which evidence was used
+	// keeps a misidentification diagnosable.
+	PipelineSource string `json:"pipelineSource"`
+	// Captioning is the mode in force after the profile's default, so the panel can say
+	// what will really happen when the user has left the switch on "follow the pipeline".
+	Captioning string `json:"captioning"`
 	// Server is the managed picture server's process row. It is always present and never
 	// null, for the reason Models is: the panel reads its fields, and a null on a fresh
 	// install would be a shape mistake in the one state every installation passes
@@ -2202,6 +2218,14 @@ func (a *App) GetImageStatus() (ImageStatus, error) {
 
 		ReleasePage: images.ReleasePage,
 	}
+	// The profile is resolved here rather than in the window: it reads the diffusion model's
+	// file name, and a second copy of that rule would be a second answer to one question.
+	pipeline := images.PipelineFor(settings.Images.Pipeline, settings.Images.CLIDiffusionModel)
+	status.Pipeline = pipeline.ID
+	status.PipelineName = pipeline.Name
+	status.PipelineSource = pipeline.Source
+	status.Captioning = pipeline.CaptioningMode(settings.Images.Captioning)
+
 	// Which of the archive's two programs this kind runs, and what the folder really
 	// holds for it. A folder supplies one executable or the other: the one-shot kind
 	// runs sd-cli, the managed kind runs sd-server, and the resolved path is the one a
@@ -2486,6 +2510,12 @@ func drawProgressPayload(id, chatID string, progress images.Progress, done bool)
 		"pass":   pass,
 		"passes": passes,
 		"done":   done,
+	}
+	// A phase is a part of the draw that is not sampling. It is a key of its own rather
+	// than a step with a magic number: the window has a sentence to show for captioning,
+	// and "step 0 of 0" would be a progress bar pretending to have started.
+	if progress.Phase != "" {
+		payload["phase"] = progress.Phase
 	}
 	if len(progress.Preview) > 0 && progress.PreviewMime != "" {
 		payload["preview"] = "data:" + progress.PreviewMime + ";base64," +
