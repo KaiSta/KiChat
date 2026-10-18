@@ -161,6 +161,28 @@ type ImageSettings struct {
 	// that makes a feature unused.
 	SaveFolder string `json:"saveFolder"`
 
+	// UpscalerEnabled turns on the Real-ESRGAN path. It is off by default and nothing is
+	// downloaded or run until it is on: the binary is tens of megabytes, needs a Vulkan
+	// driver, and is a second program to keep working. The classical resampler needs no
+	// switch because it needs no installation.
+	UpscalerEnabled bool `json:"upscalerEnabled"`
+	// UpscaleDefaultMethod is what the Enlarge panel starts with: "lanczos" or "esrgan".
+	// Empty means lanczos, which is what an installation predating this field has.
+	UpscaleDefaultMethod string `json:"upscaleDefaultMethod"`
+	// UpscaleSharpen is the unsharp amount applied after a classical resize, 0–1. Zero is
+	// a real choice (no sharpening), not "nobody chose", which is why the default is a
+	// number instead of the zero value: an enlarged picture without it looks softer than
+	// the one it came from, and a user should not have to discover the slider to fix that.
+	UpscaleSharpen float64 `json:"upscaleSharpen"`
+	// ESRGANBinary is the realesrgan-ncnn-vulkan executable, or empty to look for it on
+	// PATH. The portable release is a folder with the program and its models beside it.
+	ESRGANBinary string `json:"esrganBinary"`
+	// ESRGANModel is the weights to load, e.g. realesrgan-x4plus or
+	// realesrgan-x4plus-anime. Empty uses x4plus.
+	ESRGANModel string `json:"esrganModel"`
+	// ESRGANTile bounds the program's VRAM use; zero is its own automatic choice.
+	ESRGANTile int `json:"esrganTile"`
+
 	// Kind is which backend draws. Empty is the server kind, which is what every
 	// installation that predates this field is, so an old settings blob keeps
 	// working without a migration — the same rule the other fields follow.
@@ -475,6 +497,40 @@ func NormaliseImageClamps(s *ImageSettings) bool {
 		s.Captioning = captioning
 		changed = true
 	}
+	// Enlarging. The method has two spellings and the empty string, and an unknown value
+	// folds to the classical one: a typo must not leave the panel with no method selected.
+	// The sharpen amount is the one field where zero is a real choice, so it is clamped
+	// rather than defaulted; a NaN would reach a JSON payload that cannot marshal one.
+	method := strings.TrimSpace(s.UpscaleDefaultMethod)
+	if method != images.MethodESRGAN {
+		method = images.MethodLanczos
+	}
+	if method != s.UpscaleDefaultMethod {
+		s.UpscaleDefaultMethod = method
+		changed = true
+	}
+	if math.IsNaN(s.UpscaleSharpen) || s.UpscaleSharpen < 0 {
+		s.UpscaleSharpen = 0
+		changed = true
+	} else if s.UpscaleSharpen > MaxUpscaleSharpen {
+		s.UpscaleSharpen = MaxUpscaleSharpen
+		changed = true
+	}
+	if s.ESRGANTile != 0 && (s.ESRGANTile < MinESRGANTile || s.ESRGANTile > MaxESRGANTile) {
+		// Out of range means "the program's own", not a number to clamp to a tile the
+		// user never chose; the same reading the empty size boxes get.
+		s.ESRGANTile = 0
+		changed = true
+	}
+	model := strings.TrimSpace(s.ESRGANModel)
+	if model != images.ESRGANDefaultModel && model != images.ESRGANAnimeModel {
+		model = images.ESRGANDefaultModel
+	}
+	if model != s.ESRGANModel {
+		s.ESRGANModel = model
+		changed = true
+	}
+
 	// The pipeline has four spellings and one of them is the empty string, so an unknown
 	// value folds to it: the file name is then inferred, which is the behaviour a user
 	// with a typo would have had anyway.
@@ -944,9 +1000,23 @@ func Default() Settings {
 		// offering an address and probing it would report a failure for a feature
 		// nobody asked for yet, which is the same reason the hosted chat backends
 		// ship disabled.
-		Images: ImageSettings{BaseURL: DefaultImageBaseURL},
+		Images: ImageSettings{
+			BaseURL:              DefaultImageBaseURL,
+			UpscaleDefaultMethod: images.MethodLanczos,
+			UpscaleSharpen:       DefaultUpscaleSharpen,
+			ESRGANModel:          images.ESRGANDefaultModel,
+		},
 	}
 }
+
+// Enlarging defaults. The sharpen amount is deliberately small: it recovers the
+// perceived crispness Lanczos gives up without the halos a larger amount produces.
+const (
+	DefaultUpscaleSharpen = 0.25
+	MaxUpscaleSharpen     = 1.0
+	MinESRGANTile         = 64
+	MaxESRGANTile         = 4096
+)
 
 // Built-in preset identifiers. They are stable because a chat stores the one it
 // was created with, and because the frontend translates a built-in's name by
