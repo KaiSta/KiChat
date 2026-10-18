@@ -44,6 +44,32 @@ func callingMessage(ctx context.Context) string {
 	return id
 }
 
+// turnKey carries the backend and model that own the turn a tool call belongs to.
+//
+// It travels in the context for the same reason the message id does: the service is one
+// value for the whole app and two chats can run a turn at once, so a field on the service
+// would be a race rather than a setting. The caption request needs both — the provider is
+// resolved from the backend id, and the model id is what the caption is written by.
+type turnKey struct{}
+
+// TurnRef names the backend and model a tool call is running on.
+type TurnRef struct {
+	BackendID string
+	ModelID   string
+}
+
+// WithTurn attaches the turn's backend and model to a tool call.
+func WithTurn(ctx context.Context, turn TurnRef) context.Context {
+	return context.WithValue(ctx, turnKey{}, turn)
+}
+
+// TurnFrom reads the turn a tool call belongs to, false when nobody attached one — which is
+// what a service exercised without an engine sees.
+func TurnFrom(ctx context.Context) (TurnRef, bool) {
+	turn, ok := ctx.Value(turnKey{}).(TurnRef)
+	return turn, ok && turn.BackendID != ""
+}
+
 // generateImageArgs is what the model may send. Every field but the prompt is
 // optional and tolerates a string where a number belongs, which is what
 // decodeLoose plus the `any` type is for: small local models emit "512" as often
@@ -118,6 +144,13 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	// exist, so the clamp happens here rather than only at the backend; see
 	// images.Request.Normalised.
 	req = req.Normalised()
+	// The profile of the configured model fills what nobody chose and takes away what that
+	// model cannot use. It runs after the clamp and before anything is drawn, so the recipe
+	// records the numbers really used rather than the empty fields that produced them — and
+	// so a FLUX 3 draw is 16 steps at CFG 1.0 without the user typing either.
+	pipeline := images.PipelineFor(cfg.Pipeline, cfg.CLIDiffusionModel)
+	var adjusted images.Adjustments
+	req, adjusted = pipeline.Adjusted(req)
 
 	// One picture at a time, and before anything is registered: a second draw under the same
 	// message would otherwise cancel the first one's registration on its way to being refused.
@@ -136,6 +169,17 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	release := s.watchDraw(callingMessage(ctx), chatID, cancel)
 	defer release()
 
+	// The caption, before a single sampling step and after the draw is registered — so a
+	// Stop pressed during it ends the draw before any GPU time is spent, which is the
+	// cheapest cancel there is. A failed or empty caption does not fail the draw: the
+	// request is drawn as typed and the tool result says the caption did not happen,
+	// because refusing a picture the user asked for over a second model's stumble is the
+	// worse answer.
+	caption, captionErr := s.caption(ctx, chatID, pipeline.CaptioningMode(cfg.Captioning), req)
+	if captionErr == nil {
+		req.Caption = caption.Text
+	}
+
 	result, err := s.draw(ctx, callingMessage(ctx), chatID, req)
 	if err != nil {
 		return "", err
@@ -143,7 +187,7 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 
 	// The recipe is recorded beside the picture, so "draw that again" needs no model turn
 	// and no parsing of the prose summary below.
-	recipe := recipeFrom(req, result)
+	recipe := recipeFrom(req, result, caption.Model)
 	messageID := callingMessage(ctx)
 	// The names this chat already shows, so a second draw of one prompt does not land under
 	// the name the first one took. Redrawing has guarded this from the start (uniqueName);
@@ -167,7 +211,33 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 		used[name] = true
 	}
 
-	return summarizeGeneration(req, result), nil
+	return summarizeGeneration(req, result, caption, captionErr, pipeline, adjusted), nil
+}
+
+// caption asks the loaded model for the caption the backend will draw from, when the
+// settings ask for one.
+//
+// Three things are deliberately not a caption: no callback (a service without an engine),
+// the switch off, and a request that is already a caption. The last one is the drift guard —
+// BFL's prompt asks for 100-350 words, so a request that long has been written by a model
+// already, and expanding an expansion moves the picture away from what was asked for.
+func (s *Service) caption(ctx context.Context, chatID, mode string, req images.Request) (images.CaptionResult, error) {
+	if s.Caption == nil || mode != images.CaptioningAuto {
+		return images.CaptionResult{}, nil
+	}
+	if images.IsCaption(req.Prompt) {
+		return images.CaptionResult{}, nil
+	}
+	if s.Progress != nil {
+		// Reported before the call rather than during it: the wait belongs to the model,
+		// and a row that says so is what keeps seconds of silence from reading as a hang.
+		s.Progress(callingMessage(ctx), chatID, images.Progress{Phase: images.PhaseCaptioning})
+	}
+	return s.Caption(ctx, images.CaptionRequest{
+		Prompt: req.Prompt,
+		Width:  req.Width,
+		Height: req.Height,
+	})
 }
 
 // summarizeGeneration is what the model reads back. It is written for the model,
@@ -175,7 +245,7 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 // above all: stopping the model from describing what it drew. The chat model that
 // called this tool has not seen the picture, and a reply that invents its contents
 // reads as a broken feature rather than as an absent capability.
-func summarizeGeneration(req images.Request, result images.Result) string {
+func summarizeGeneration(req images.Request, result images.Result, caption images.CaptionResult, captionErr error, pipeline images.Pipeline, adjusted images.Adjustments) string {
 	var sb strings.Builder
 	kept := len(result.Kept())
 	fmt.Fprintf(&sb, "%d Bild(er) wurden erzeugt und im Chat angezeigt.\n", kept)
@@ -186,6 +256,27 @@ func summarizeGeneration(req images.Request, result images.Result) string {
 		fmt.Fprintf(&sb, "Der Server hat %d Bild(er) mehr geliefert; sie wurden nicht übernommen.\n", dropped)
 	}
 	fmt.Fprintf(&sb, "Prompt: %s\n", req.Prompt)
+	// Named by model and length rather than quoted: a 350-word caption is not something the
+	// model needs to read back, and putting it in the result would replay it on every later
+	// turn. What the model does need is to know that the picture was drawn from words
+	// somebody else wrote, so it does not promise the user that it drew their sentence.
+	if req.Caption != "" {
+		fmt.Fprintf(&sb, "Bildbeschreibung: von %s, %d Wörter — gezeichnet wurde die Beschreibung, nicht der Prompt\n",
+			firstNonEmptyString(caption.Model, "dem geladenen Modell"), images.WordCount(req.Caption))
+	} else if captionErr != nil {
+		fmt.Fprintf(&sb, "Bildbeschreibung fehlgeschlagen (%s) — gezeichnet wurde der Prompt wie eingegeben\n", captionErr)
+	}
+	// What the profile removed is said out loud: a negative prompt that is sent and then
+	// ignored looks like a broken setting, and a second pass that quietly did not run
+	// looks like a worse picture for no reason. Both lines appear only when the request
+	// really carried the field, because "this model has no negative prompt" is noise on a
+	// draw that never asked for one.
+	if adjusted.DroppedNegative {
+		fmt.Fprintf(&sb, "Negativ-Prompt: von %s nicht unterstützt — nicht gesendet\n", pipeline.Name)
+	}
+	if adjusted.DroppedHires {
+		fmt.Fprintf(&sb, "Zweite Stufe: für %s nicht freigegeben — nicht gezeichnet\n", pipeline.Name)
+	}
 	if req.NegativePrompt != "" {
 		fmt.Fprintf(&sb, "Negativ-Prompt: %s\n", req.NegativePrompt)
 	}
@@ -369,9 +460,12 @@ func seedFromValue(value any) *int64 {
 // picture — the requested value was "none". The checkpoint follows the same rule, because
 // the server knows which one it really loaded, and a recipe that named the wrong one would
 // draw something else while claiming to repeat.
-func recipeFrom(req images.Request, result images.Result) store.GenerationRecipe {
+func recipeFrom(req images.Request, result images.Result, captionModel string) store.GenerationRecipe {
 	recipe := store.GenerationRecipe{
-		Prompt:         req.Prompt,
+		// The effective prompt is what reproduces the picture: with a caption, that is the
+		// caption. The user's own words are recorded beside it so the card can say what was
+		// asked for, and a redraw replays the caption at no extra model call.
+		Prompt:         req.EffectivePrompt(),
 		NegativePrompt: req.NegativePrompt,
 		Width:          req.Width,
 		Height:         req.Height,
@@ -380,6 +474,10 @@ func recipeFrom(req images.Request, result images.Result) store.GenerationRecipe
 		CfgScale:       req.CfgScale,
 		Model:          firstNonEmptyString(result.Model, req.Model),
 		DurationMs:     result.DurationMs,
+	}
+	if req.Caption != "" {
+		recipe.SourcePrompt = req.Prompt
+		recipe.CaptionModel = captionModel
 	}
 	if req.Hires.Enabled {
 		recipe.Hires = true
@@ -472,6 +570,10 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 		return store.Attachment{}, errors.New("der Bild-Prompt ist leer")
 	}
 	req := requestFromRecipe(recipe)
+	// A redraw is drawn by the pipeline too: a stored recipe that asked for a second pass
+	// under a model that has none would otherwise draw it once here and never again.
+	pipeline := images.PipelineFor(s.imageSettings().Pipeline, s.imageSettings().CLIDiffusionModel)
+	req, _ = pipeline.Adjusted(req)
 
 	// This draw is *not* registered here, and that is deliberate: its caller is the bound
 	// RegenerateImage, which has already registered it under this same attachment. Both
@@ -490,7 +592,9 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 	// What the *server* used, which becomes the new picture's own recipe — not the recipe
 	// that was asked for, since only the server's seed reproduces the result and an editor
 	// may well have left the seed open.
-	effective := recipeFrom(req, result)
+	// No caption here: a redraw replays the stored prompt, which for a captioned picture is
+	// the caption itself. Asking for a new one would expand an expansion on every redraw.
+	effective := recipeFrom(req, result, "")
 	// The names this chat already shows, so a second redraw of the same seed does not land
 	// under the name the first one took.
 	used, err := s.usedFilenames(source.ChatID)

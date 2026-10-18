@@ -48,6 +48,14 @@ type Service struct {
 	// has one, a preview. It is a plain callback rather than an event emitter so this
 	// package goes on knowing nothing about Wails; the app decides what a report becomes.
 	Progress func(id, chatID string, progress images.Progress)
+	// Caption asks the turn's own model for the caption a caption-trained image model
+	// draws from (internal/images/caption.go). A callback for the same reason Draws is
+	// one: the request needs the engine's provider and its non-streaming completion, and
+	// this package must never import chat — chat imports tools.
+	//
+	// Nil means no caption is possible, which is how a service built without an app
+	// behaves (the tests), and what the setting has to check before promising one.
+	Caption func(ctx context.Context, req images.CaptionRequest) (images.CaptionResult, error)
 	// TryDraw takes the app-wide slot a draw needs and reports false when another one holds
 	// it. A callback for the same reason Draws is one: one picture at a time is a property
 	// of the machine — one GPU, one checkpoint — rather than of this service, so the app owns
@@ -617,6 +625,24 @@ const ImageProtocolHint = "Zusätzlich verfügbar: generate_image ({\"prompt\": 
 const ImageUseHint = "Bilder: generate_image nur auf ausdrückliche Bitte des Nutzers (auch als " +
 	"Änderungswunsch zu einem erzeugten Bild). Diagramme, Charts, Tabellen, UML und Schaubilder " +
 	"gehören als Text oder Markdown in die Antwort, nicht in ein Bild."
+
+// ImageCaptionHint is the contract for a pipeline that was trained on captions rather
+// than on requests, sent only while `Captioning` is "model" — the mode where the chat
+// model writes the caption itself.
+//
+// It is a separate constant from the description because the description is read once,
+// while choosing a tool, and this rule has to be in force while writing the argument. It
+// must not travel in `auto` mode: there the tool asks the same model for a caption after
+// the call, and telling the model to expand its own prompt would expand it twice.
+//
+// The length range and the fields are BFL's, from the t2i prompt in
+// internal/images/caption.go, restated for a model that is writing a tool argument rather
+// than a caption for a second model.
+const ImageCaptionHint = "Bilder: Diese Bild-Pipeline wurde auf ausführlichen Beschreibungen " +
+	"trainiert. Schreibe den Prompt deshalb als eine in sich geschlossene Beschreibung von 100 " +
+	"bis 350 Wörtern — Motiv, Umgebung, Licht, Perspektive, Material, Stil — angepasst an das " +
+	"Zielformat, statt einen kurzen Wunsch zu senden. Ist der Prompt bereits so ausführlich, " +
+	"gib ihn unverändert weiter."
 
 func firstNonEmptyString(values ...string) string {
 	for _, v := range values {

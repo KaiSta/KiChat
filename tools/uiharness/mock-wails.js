@@ -730,6 +730,64 @@ Verfügbare Tools: {{tool_list}}`,
   }
   const typedBinary =
     imagesLocal && new URLSearchParams(location.search).get('typedbinary') === '1'
+  // The caption switch has three states and only one row, so the fixture offers the two
+  // that render differently: `?caption=auto` and `?caption=model`.
+  const captionMode = new URLSearchParams(location.search).get('caption')
+  const captioning = imagesLocal && (captionMode === 'auto' || captionMode === 'model' || captionMode === 'off')
+    ? captionMode
+    : ''
+  // `?pipeline=flux3|base|generic` selects the profile, and the mock resolves it the way
+  // images.PipelineFor does: an explicit id wins, then the diffusion model's own header,
+  // then its file name. The panel's resolved line is therefore a reading of this, not an
+  // echo of the setting — which is what makes a renamed file visible.
+  const pipelineParam = new URLSearchParams(location.search).get('pipeline')
+  const pipelineId = pipelineParam === 'flux3'
+    ? 'flux3-klein'
+    : pipelineParam === 'base'
+      ? 'flux3-klein-base'
+      : pipelineParam === 'generic'
+        ? 'generic'
+        : ''
+  // `?file=renamed` is the case this feature exists for: the configured file's name carries
+  // no marker at all, and the profile comes from the tensor layout its header really holds.
+  // `?file=klein` is the weaker path — a file name, used because the weights could not be
+  // read — and the panel has to say which of the two it did. `?file=qwen` with an explicit
+  // profile is the third: a choice outranks both.
+  const fileParam = new URLSearchParams(location.search).get('file')
+  const diffusionModel = pipelineId === 'flux3-klein' || pipelineId === 'flux3-klein-base'
+    ? `/home/user/models/flux-3-image-klein${pipelineId === 'flux3-klein-base' ? '-base' : ''}.safetensors`
+    : fileParam === 'renamed'
+      ? '/home/user/models/weights.gguf'
+      : fileParam === 'renamed-base'
+        ? '/home/user/models/f3-image-small.safetensors'
+        : fileParam === 'klein'
+          ? '/home/user/models/flux-3-image-klein.safetensors'
+          : fileParam === 'klein-base'
+            ? '/home/user/models/flux-3-image-klein-base.safetensors'
+            : '/home/user/models/qwen-image-2.1-Q5_K_M.gguf'
+  const resolvedPipelineId = pipelineId ||
+    (fileParam === 'renamed'
+      ? 'flux3-klein'
+      : fileParam === 'renamed-base'
+        ? 'flux3-klein-base'
+        : /klein/.test(diffusionModel)
+          ? (/-base\./.test(diffusionModel) ? 'flux3-klein-base' : 'flux3-klein')
+          : 'generic')
+  // Where that came from, the way images.Pipeline.Source reports it: a choice, the weights
+  // themselves, or — only when the weights cannot be read — the name.
+  const pipelineSource = pipelineId
+    ? 'chosen'
+    : fileParam === 'renamed' || fileParam === 'renamed-base'
+      ? 'weights'
+      : /klein/.test(diffusionModel)
+        ? 'name'
+        : ''
+  const pipelineNames = {
+    'flux3-klein': 'FLUX 3 Image Klein',
+    'flux3-klein-base': 'FLUX 3 Image Klein Base',
+    generic: 'Generic',
+  }
+  const effectiveCaptioning = captioning || (resolvedPipelineId === 'flux3-klein' || resolvedPipelineId === 'flux3-klein-base' ? 'auto' : '')
   if (imagesCLI) {
     console.warn(
       imagesOff
@@ -873,12 +931,16 @@ Verfügbare Tools: {{tool_list}}`,
       cliBinary: typedBinary ? '/home/user/Downloads/sd-old/sd-cli' : '',
       cliFolder: imagesLocal ? '/home/user/Downloads/sd' : '',
       cliModel: '',
-      cliDiffusionModel: imagesLocal ? '/home/user/models/qwen-image-2.1-Q5_K_M.gguf' : '',
+      cliDiffusionModel: imagesLocal ? diffusionModel : '',
       cliVae: imagesLocal ? '/home/user/models/qwen_image_2.1_vae_bf16.safetensors' : '',
       cliLlm: imagesLocal ? '/home/user/models/Qwen3-VL-8B-Instruct-Q5_K_M.gguf' : '',
       cliClipL: '',
       cliClipG: '',
       cliT5xxl: '',
+      // Off in every fixture but `?images=caption`, which is the state worth seeing: the
+      // row exists always, so the off hint is what most users read.
+      captioning,
+      pipeline: pipelineId,
       // The one mode the panel has a switch of its own for: Flux on a card too small to
       // hold it. On for the CLI fixture, because a checkbox that only ever renders
       // unchecked cannot show whether its `checked` binding is wired at all.
@@ -1501,8 +1563,7 @@ Verfügbare Tools: {{tool_list}}`,
         passes,
         preview: IMAGE_DATA_URL,
       })
-    report()
-    state.timer = setInterval(() => {
+    const tick = () => {
       // A closure that outlives its draw must not keep reporting: the row it belongs to is
       // about to be repainted with the real picture.
       if (pendingDraw !== state) return
@@ -1519,7 +1580,25 @@ Verfügbare Tools: {{tool_list}}`,
       clearDraw(state)
       pendingDraw = null
       finish()
-    }, DRAW_REPORT_MS)
+    }
+    // The caption is the one report with no steps: it comes before any sampling, which is
+    // why it is a phase of its own rather than "step 0 of 40". `?caption=auto` is the state
+    // in which the backend sends it, so the fixture sends it there and nowhere else — and
+    // holds it, because in a real draw the caption costs seconds and a fixture that
+    // replaced it in one frame could not show the state at all.
+    if (captioning === 'auto') {
+      emit('image:progress', { drawId: id, chatId, step: 0, steps: 0, pass: 1, passes, phase: 'captioning' })
+      // Six seconds, like the throttle fixture: a caption on a CPU really does cost
+      // seconds, and this one has to outlast a glance at the row.
+      state.timer = setTimeout(() => {
+        if (pendingDraw !== state) return
+        report()
+        state.timer = setInterval(tick, DRAW_REPORT_MS)
+      }, 6000)
+      return state
+    }
+    report()
+    state.timer = setInterval(tick, DRAW_REPORT_MS)
     return state
   }
 
@@ -2916,10 +2995,15 @@ Verfügbare Tools: {{tool_list}}`,
               builds: sdBuilds,
               releasePage: sdReleasePage,
               files: [
-                '/home/user/models/qwen-image-2.1-Q5_K_M.gguf',
+                diffusionModel,
                 '/home/user/models/qwen_image_2.1_vae_bf16.safetensors',
                 '/home/user/models/Qwen3-VL-8B-Instruct-Q5_K_M.gguf',
               ],
+              pipeline: resolvedPipelineId,
+              pipelineName: pipelineNames[resolvedPipelineId],
+              pipelineSource,
+
+              captioning: effectiveCaptioning,
             }
           : {
               enabled: true,
