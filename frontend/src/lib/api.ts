@@ -257,6 +257,12 @@ export interface ImageProgressPayload {
   pass: number
   /** How many passes the whole draw runs: 1 for an ordinary draw, 2 for a hires fix. */
   passes: number
+  /**
+   * A part of the draw that is not sampling — `captioning` — or absent for an ordinary step
+   * report. It is its own field rather than a step with a magic number: the counter has not
+   * started, and `0 of 0` is a progress bar pretending to have begun.
+   */
+  phase?: string
   preview?: string
   /** True for the report that ends a draw, which exists so a progress row cannot outlive it. */
   done?: boolean

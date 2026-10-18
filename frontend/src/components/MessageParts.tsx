@@ -152,6 +152,7 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
           steps={draw.steps}
           pass={draw.pass}
           passes={draw.passes}
+          phase={draw.phase}
           className="mt-2"
         />
       )}
@@ -220,8 +221,11 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
  */
 function drawProgressText(
   t: (key: string, vars?: Record<string, string | number>) => string,
-  draw: { step: number; steps: number; pass: number; passes: number },
+  draw: { step: number; steps: number; pass: number; passes: number; phase?: string },
 ): string {
+  // A phase comes before any sampling: a caption-trained model spends seconds on its
+  // caption, and a row that only said "step 0" there would look stalled.
+  if (draw.phase === 'captioning') return t('images.captioning')
   const pass = draw.pass || 1
   const passes = draw.passes || 1
   if (draw.steps > 0) {
@@ -256,6 +260,7 @@ function LiveDraw({
   steps,
   pass,
   passes,
+  phase,
   className,
 }: {
   preview?: string
@@ -263,6 +268,8 @@ function LiveDraw({
   steps: number
   pass: number
   passes: number
+  /** A non-sampling part of the draw (`captioning`), absent for an ordinary step report. */
+  phase?: string
   className?: string
 }) {
   const t = useStore((s) => s.t)
@@ -277,7 +284,7 @@ function LiveDraw({
           style={{ maxWidth: 160, maxHeight: 160, border: '1px solid var(--border)' }}
         />
       ) : null}
-      <span className="faint text-[11px]">{drawProgressText(t, { step, steps, pass, passes })}</span>
+      <span className="faint text-[11px]">{drawProgressText(t, { step, steps, pass, passes, phase })}</span>
     </div>
   )
 }

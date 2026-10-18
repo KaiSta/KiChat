@@ -73,6 +73,8 @@ export interface DrawProgress {
   /** Which sampling pass this step belongs to, and how many the draw runs in total. */
   pass: number
   passes: number
+  /** A non-sampling part of the draw in progress (`captioning`), absent for a step report. */
+  phase?: string
   preview?: string
 }
 
@@ -647,6 +649,9 @@ function wireEvents(
         // the same shape instead of rendering "pass undefined of undefined".
         pass: p.pass || 1,
         passes: p.passes || 1,
+        // Carried as it arrives: a caption report has no steps and would otherwise look
+        // like a draw that has not started, and the next step report clears it.
+        phase: p.phase,
         // The preview is kept from the previous report when this one has none: a server
         // that sends its fraction and its picture separately, or a poll that landed
         // between two of them, must not make the thumbnail blink away.

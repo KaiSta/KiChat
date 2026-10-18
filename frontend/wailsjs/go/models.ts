@@ -180,6 +180,8 @@ export namespace config {
 	    height: number;
 	    negativePrompt: string;
 	    cfgScale: number;
+	    captioning: string;
+	    pipeline: string;
 	    hiresEnabled: boolean;
 	    hiresScale: number;
 	    hiresDenoise: number;
@@ -216,6 +218,8 @@ export namespace config {
 	        this.height = source["height"];
 	        this.negativePrompt = source["negativePrompt"];
 	        this.cfgScale = source["cfgScale"];
+	        this.captioning = source["captioning"];
+	        this.pipeline = source["pipeline"];
 	        this.hiresEnabled = source["hiresEnabled"];
 	        this.hiresScale = source["hiresScale"];
 	        this.hiresDenoise = source["hiresDenoise"];
@@ -801,6 +805,10 @@ export namespace main {
 	    releasePage: string;
 	    files: string[];
 	    program: string;
+	    pipeline: string;
+	    pipelineName: string;
+	    pipelineSource: string;
+	    captioning: string;
 	    server: ImageServerStatus;
 	
 	    static createFrom(source: any = {}) {
@@ -824,6 +832,10 @@ export namespace main {
 	        this.releasePage = source["releasePage"];
 	        this.files = source["files"];
 	        this.program = source["program"];
+	        this.pipeline = source["pipeline"];
+	        this.pipelineName = source["pipelineName"];
+	        this.pipelineSource = source["pipelineSource"];
+	        this.captioning = source["captioning"];
 	        this.server = this.convertValues(source["server"], ImageServerStatus);
 	    }
 	
@@ -1334,6 +1346,8 @@ export namespace store {
 	
 	export class GenerationRecipe {
 	    prompt: string;
+	    sourcePrompt?: string;
+	    captionModel?: string;
 	    negativePrompt?: string;
 	    width?: number;
 	    height?: number;
@@ -1354,6 +1368,8 @@ export namespace store {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.prompt = source["prompt"];
+	        this.sourcePrompt = source["sourcePrompt"];
+	        this.captionModel = source["captionModel"];
 	        this.negativePrompt = source["negativePrompt"];
 	        this.width = source["width"];
 	        this.height = source["height"];

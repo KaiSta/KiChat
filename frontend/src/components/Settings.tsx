@@ -1853,6 +1853,18 @@ function ImagesTab({
   // user has just finished typing would be a reading of some other folder.
   const foundProgram =
     folderSet && status?.folder === images.cliFolder ? status.binary ?? '' : ''
+  // The resolved profile is a reading of the *saved* settings, like the found program: it
+  // comes from the diffusion model's own header — its tensor layout — or, when that cannot
+  // be read, from its file name. Printing it under a path the user is still typing would
+  // describe a different model, so it is shown only while the setting is automatic and the
+  // saved file list really holds the draft's path.
+  const resolvedPipeline =
+    !images.pipeline &&
+    status?.files?.includes((images.cliDiffusionModel ?? '').trim()) &&
+    status.pipeline &&
+    status.pipeline !== 'generic'
+      ? { name: status.pipelineName ?? '', source: status.pipelineSource ?? '' }
+      : null
   // The third kind: the *same* local build, run as a server KiChat starts and stops. It is
   // not a variant of the one-shot kind in the UI either — the fields are shared because the
   // flags are, but the process, the port and the lifetime are the server's own.
@@ -2337,6 +2349,71 @@ function ImagesTab({
             : isCLI
               ? t('settings.images.kindCLIHint')
               : t('settings.images.kindServerHint')}
+        </span>
+      </div>
+
+      {/* The pipeline of the configured model set. It is a profile rather than a list of
+          flags: steps, guidance, whether a negative prompt means anything, whether a second
+          pass was ever measured, and whether the model wants a caption all travel with it.
+          Automatic reads the diffusion model's own header, falling back to its file name only
+          when that cannot be read, and the resolved name is shown here because a miss is
+          otherwise silent — a generic profile captions nothing and draws at the build's
+          defaults. */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="text-[12px]">{t('settings.images.pipeline')}</span>
+        <select
+          className="input"
+          aria-label={t('settings.images.pipeline')}
+          value={images.pipeline ?? ''}
+          onChange={(e) => update({ pipeline: e.target.value })}
+        >
+          <option value="">{t('settings.images.pipelineAuto')}</option>
+          <option value="flux3-klein">{t('settings.images.pipelineFlux3')}</option>
+          <option value="flux3-klein-base">{t('settings.images.pipelineFlux3Base')}</option>
+          <option value="generic">{t('settings.images.pipelineGeneric')}</option>
+        </select>
+        <span className="faint flex-1 text-[11px]">
+          {images.pipeline === 'generic'
+            ? t('settings.images.pipelineGenericHint')
+            : images.pipeline !== ''
+              ? t('settings.images.pipelineChosen')
+              : resolvedPipeline
+                ? // Which evidence resolved it, because the two are different claims: the
+                  // tensors are the model's own, the file name is a label somebody chose.
+                  t(
+                    resolvedPipeline.source === 'weights'
+                      ? 'settings.images.pipelineResolvedWeights'
+                      : 'settings.images.pipelineResolved',
+                    { name: resolvedPipeline.name },
+                  )
+                : t('settings.images.pipelineHint')}
+        </span>
+      </div>
+
+      {/* Who writes the caption a caption-trained model is drawn from. Empty is "the
+          pipeline decides", which is how a FLUX 3 model gets one without the user finding
+          this row; "off" is the explicit no that overrides it. */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="text-[12px]">{t('settings.images.captioning')}</span>
+        <select
+          className="input"
+          aria-label={t('settings.images.captioning')}
+          value={images.captioning ?? ''}
+          onChange={(e) => update({ captioning: e.target.value })}
+        >
+          <option value="">{t('settings.images.captioningPipeline')}</option>
+          <option value="off">{t('settings.images.captioningOff')}</option>
+          <option value="auto">{t('settings.images.captioningAuto')}</option>
+          <option value="model">{t('settings.images.captioningModel')}</option>
+        </select>
+        <span className="faint flex-1 text-[11px]">
+          {images.captioning === 'off'
+            ? t('settings.images.captioningOffHint')
+            : images.captioning === 'auto'
+              ? t('settings.images.captioningAutoHint')
+              : images.captioning === 'model'
+                ? t('settings.images.captioningModelHint')
+                : t('settings.images.captioningPipelineHint')}
         </span>
       </div>
 
