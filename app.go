@@ -74,6 +74,27 @@ type App struct {
 	// are shared by every managed entry.
 	installer *rt.Installer
 
+	// upscalerInstaller fetches Real-ESRGAN into a directory of its own, not into
+	// the runtime directory: ListLlamaBuilds walks that one and would list the
+	// upscaler as a llama.cpp build that cannot be started. It is the same
+	// Installer because what it does — verify a digest, unpack, make the archive's
+	// launcher executable, move it into place — is the same job; only the asset's
+	// tagged directory and its launcher's name differ.
+	upscalerInstaller *rt.Installer
+	// upscalerBuild is the pinned archive for one platform. It is a field rather
+	// than a direct call so a test can serve a small fixture archive instead of
+	// 46 MB from GitHub; nothing but a test ever replaces it.
+	upscalerBuild func(goos, goarch string) (images.UpscalerBuild, error)
+	// upscalerMu guards the one download and the progress the panel polls through
+	// GetUpscalerInstall. It is separate from installMu so a llama.cpp download and
+	// an upscaler download cannot overwrite each other's phase or error.
+	upscalerMu    sync.Mutex
+	upscalerBusy  bool
+	upscalerPhase string
+	upscalerDone  int64
+	upscalerTotal int64
+	upscalerErr   string
+
 	serversMu sync.Mutex
 	servers   map[string]*rt.Server
 
@@ -161,6 +182,12 @@ type App struct {
 	// moment it starts, so a test that sets a.ctx to run a bound call would otherwise
 	// die as soon as a picture began. A test helper installs a no-op.
 	emitFn func(name string, payload any)
+
+	// logfFn, when set, replaces the Wails logger in logInfo. It is here for the same
+	// reason emitFn is: the runtime's logger calls log.Fatalf when the context did not
+	// come from the Wails lifecycle hooks, and a test that runs a bound call sets a.ctx
+	// itself. A test helper installs a no-op.
+	logfFn func(format string, args ...any)
 }
 
 // inflightDraw is one image draw this app is waiting for.
@@ -258,6 +285,9 @@ func (a *App) init() error {
 	a.extractor = ingest.New()
 	a.installer = rt.NewInstaller(filepath.Join(a.dataDir, "runtime"))
 	a.installer.OnProgress = a.recordInstallProgress
+	a.upscalerInstaller = rt.NewInstaller(filepath.Join(a.dataDir, "upscalers", "realesrgan-ncnn-vulkan"))
+	a.upscalerInstaller.OnProgress = a.recordUpscalerProgress
+	a.upscalerBuild = images.UpscalerBuildFor
 	a.servers = map[string]*rt.Server{}
 	a.turns = chat.NewTurnState()
 	a.rebuildServices(settings)
@@ -1079,6 +1109,15 @@ func (a *App) currentScraper() *research.Scraper {
 	a.servicesMu.RLock()
 	defer a.servicesMu.RUnlock()
 	return a.scraper
+}
+
+// logInfo writes one line to the Wails log, or to whatever a test put in logfFn.
+func (a *App) logInfo(format string, args ...any) {
+	if a.logfFn != nil {
+		a.logfFn(format, args...)
+		return
+	}
+	runtime.LogInfof(a.ctx, format, args...)
 }
 
 func (a *App) emit(name string, payload any) {

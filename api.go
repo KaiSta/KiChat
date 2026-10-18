@@ -24,6 +24,7 @@ import (
 	rt "kichat/internal/runtime"
 	"kichat/internal/secret"
 	"kichat/internal/store"
+	"kichat/internal/tools"
 	"kichat/internal/version"
 )
 
@@ -2554,9 +2555,11 @@ func (a *App) StopImageDraw(drawID string) StopDrawResult {
 	}
 	result.WasDrawing = true
 	draw.cancel()
-	// A draw registered before the tool service existed — or by a path that never
-	// filled the field — has nothing to ask. The wait it was pressed to end is over
-	// either way, so this is the same answer as a backend that cannot be interrupted.
+	// Cancelling is the half that always works, and for an upscale it is the whole of it:
+	// nothing is registered with a service, because there is no server-side work to abandon
+	// (see registerUpscale). A draw registered before the tool service existed — or by a path
+	// that never filled the field — is in the same position: the wait it was pressed to end is
+	// over either way, which is the answer a backend that cannot be interrupted gives too.
 	if draw.service == nil {
 		return result
 	}
@@ -2588,7 +2591,7 @@ func (a *App) tryDraw() (release func(), ok bool) {
 }
 
 // registerDraw records a draw so Stop can find it, and returns the function that releases
-// the registration.
+// the registration. The body is registerPicture; this is the draw-shaped way in.
 //
 // It is called from three places, and that is the point of it: RegenerateImage registers the
 // attachment a redraw works on, tools.Service registers the assistant message a
@@ -2608,10 +2611,27 @@ func (a *App) tryDraw() (release func(), ok bool) {
 // user is watching under the picture — leaves no row behind, and an event that fires for
 // every silent draw is one the window has to handle for no reason at all.
 func (a *App) registerDraw(id, chatID string, cancel context.CancelFunc) func() {
+	return a.registerPicture(id, chatID, cancel, a.currentToolService())
+}
+
+// registerUpscale records an enlargement so that the same Stop finds it, and registers no
+// service on purpose.
+//
+// Stop has two halves: cancelling the request, which is what ends the wait, and asking the
+// backend to abandon the work behind it. An upscale has no backend to ask — the classical
+// pass is local arithmetic and the neural one is a child process this app starts and kills
+// through its own cancellation. Asking an image server to interrupt here would abandon
+// whatever *it* is drawing, which is a different picture from the one the user stopped.
+func (a *App) registerUpscale(id string, cancel context.CancelFunc) func() {
+	return a.registerPicture(id, "", cancel, nil)
+}
+
+// registerPicture is the one token dance behind both registrations: it records a picture
+// operation so Stop can find it, and returns the function that releases the registration.
+func (a *App) registerPicture(id, chatID string, cancel context.CancelFunc, service *tools.Service) func() {
 	if a.ctx == nil || id == "" {
 		return func() {}
 	}
-	service := a.currentToolService()
 	a.drawsMu.Lock()
 	if a.draws == nil {
 		a.draws = map[string]inflightDraw{}
