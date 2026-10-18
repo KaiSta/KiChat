@@ -124,6 +124,24 @@ type ImageSettings struct {
 	// field is the model's per picture, and one filled in here is a value the model
 	// cannot overrule (see internal/tools/image.go).
 	CfgScale float64 `json:"cfgScale"`
+	// Captioning decides who writes the prompt a caption-trained model is drawn from.
+	// Empty is off: the request goes to the backend as the user typed it, which is what
+	// every pipeline that was not trained on captions wants and what every install that
+	// predates this field has.
+	//
+	// "auto" is KiChat asking the model that is already loaded for one detailed caption
+	// (see internal/images/caption.go); "model" is the chat model writing it into the
+	// tool's own prompt argument. They are exclusive and never chained: expanding an
+	// expansion drifts away from what the user asked for. A pipeline profile turns this
+	// on by itself for the model that was trained this way, so the field is an override
+	// rather than the switch a user has to find.
+	Captioning string `json:"captioning"`
+	// Pipeline names the model family the local kinds are configured for, so its numbers
+	// and restrictions apply without the user typing them. Empty is "infer from the
+	// diffusion model's own header, and from its file name only when that cannot be read",
+	// which is the default and what every install that predates this field carries; an
+	// explicit value overrides a wrong guess, and `generic` is the deliberate "no profile".
+	Pipeline string `json:"pipeline"`
 	// HiresEnabled asks for a second sampling pass: the picture is drawn at Width×Height,
 	// enlarged, and repainted at HiresDenoise. It is off by default because it costs
 	// roughly one more draw's time for the same picture at a larger size.
@@ -241,6 +259,37 @@ type ImageSettings struct {
 	CLIVaeTiling   bool `json:"cliVaeTiling"`
 	CLIVaeTileSize int  `json:"cliVaeTileSize"`
 }
+
+// Who writes the caption a caption-trained image model is drawn from, as stored in
+// ImageSettings.Captioning. Empty is off, and is the meaning of every value this app
+// does not recognise: a typo in a hand-edited blob must degrade to the behaviour that
+// used to exist rather than to a feature nobody asked for.
+const (
+	// ImageCaptioningPipeline is the empty value: the pipeline profile decides, because
+	// the model knows whether it was trained on captions and the user does not.
+	ImageCaptioningPipeline = images.CaptioningPipeline
+	// ImageCaptioningOff is an explicit no, and the only value that can override a
+	// profile that wants a caption.
+	ImageCaptioningOff = images.CaptioningOff
+	// ImageCaptioningAuto asks the model that is already loaded for a caption before
+	// the draw. One non-streaming completion on the turn's own backend, never streamed
+	// and never shown in the transcript.
+	ImageCaptioningAuto = images.CaptioningAuto
+	// ImageCaptioningModel leaves the writing to the chat model, which fills the tool's
+	// prompt argument with a caption. No second call, at the cost of a long argument
+	// that is replayed on every later turn.
+	ImageCaptioningModel = images.CaptioningModel
+)
+
+// Image pipeline ids, as stored in ImageSettings.Pipeline. They are the images package's
+// own ids rather than a second spelling: the profile table is the one place that decides
+// what a pipeline is.
+const (
+	ImagePipelineAuto           = images.PipelineAuto
+	ImagePipelineGeneric        = images.PipelineGeneric
+	ImagePipelineFlux3Klein     = images.PipelineFlux3Klein
+	ImagePipelineFlux3KleinBase = images.PipelineFlux3KleinBase
+)
 
 // Image backend kinds, as stored in ImageSettings.Kind.
 const (
@@ -410,6 +459,33 @@ func NormaliseImageClamps(s *ImageSettings) bool {
 	// tile the program documents; anything below it is a decode in more pieces than pixels.
 	if next := clamp(s.CLIVaeTileSize, MinImageDimension, MaxImageDimension); next != s.CLIVaeTileSize {
 		s.CLIVaeTileSize = next
+		changed = true
+	}
+	// The caption switch has two spellings, and everything else — including the empty
+	// string a fresh install carries — falls back to off. It is folded here rather than
+	// refused so a hand-edited blob degrades to the behaviour the user already had,
+	// which is the same rule the kind below follows.
+	captioning := strings.TrimSpace(s.Captioning)
+	switch captioning {
+	case ImageCaptioningOff, ImageCaptioningAuto, ImageCaptioningModel:
+	default:
+		captioning = ImageCaptioningPipeline
+	}
+	if captioning != s.Captioning {
+		s.Captioning = captioning
+		changed = true
+	}
+	// The pipeline has four spellings and one of them is the empty string, so an unknown
+	// value folds to it: the file name is then inferred, which is the behaviour a user
+	// with a typo would have had anyway.
+	pipeline := strings.TrimSpace(s.Pipeline)
+	switch pipeline {
+	case ImagePipelineGeneric, ImagePipelineFlux3Klein, ImagePipelineFlux3KleinBase:
+	default:
+		pipeline = ImagePipelineAuto
+	}
+	if pipeline != s.Pipeline {
+		s.Pipeline = pipeline
 		changed = true
 	}
 	// Three kinds have a spelling. The HTTP server is the empty string, which is what

@@ -991,6 +991,58 @@ func TestNormaliseClampsTheVaeTileSize(t *testing.T) {
 	}
 }
 
+// TestNormaliseFoldsAnUnknownCaptionSwitch pins the same rule the image kind follows: a
+// value this app does not know means the behaviour that used to exist — nothing — rather
+// than a feature nobody asked for, and the two spellings it does know survive untouched.
+func TestNormaliseFoldsAnUnknownCaptionSwitch(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty follows the pipeline", "", ""},
+		{"off survives", ImageCaptioningOff, ImageCaptioningOff},
+		{"auto survives", ImageCaptioningAuto, ImageCaptioningAuto},
+		{"model survives", ImageCaptioningModel, ImageCaptioningModel},
+		{"a typo follows the pipeline", "atou", ""},
+		{"an old boolean follows the pipeline", "true", ""},
+		{"surrounding space is trimmed", "  auto  ", ImageCaptioningAuto},
+	}
+	for _, tc := range cases {
+		s := Default()
+		s.Images.Captioning = tc.in
+		s.normalise()
+		if s.Images.Captioning != tc.want {
+			t.Errorf("%s: %q normalised to %q, want %q", tc.name, tc.in, s.Images.Captioning, tc.want)
+		}
+	}
+}
+
+// TestNormaliseFoldsAnUnknownPipeline is the same rule again: the file name is inferred
+// when the value means nothing, which is the behaviour a typo would have had anyway.
+func TestNormaliseFoldsAnUnknownPipeline(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty infers", "", ""},
+		{"generic survives", ImagePipelineGeneric, ImagePipelineGeneric},
+		{"klein survives", ImagePipelineFlux3Klein, ImagePipelineFlux3Klein},
+		{"klein base survives", ImagePipelineFlux3KleinBase, ImagePipelineFlux3KleinBase},
+		{"a typo infers", "flux3", ""},
+		{"surrounding space is trimmed", "  generic  ", ImagePipelineGeneric},
+	}
+	for _, tc := range cases {
+		s := Default()
+		s.Images.Pipeline = tc.in
+		s.normalise()
+		if s.Images.Pipeline != tc.want {
+			t.Errorf("%s: %q normalised to %q, want %q", tc.name, tc.in, s.Images.Pipeline, tc.want)
+		}
+	}
+}
+
 // TestNormaliseRestoresTheImageAddress keeps an emptied field from hiding the
 // address the app would really use, exactly as the shipped backends do.
 func TestNormaliseRestoresTheImageAddress(t *testing.T) {
