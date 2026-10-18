@@ -96,6 +96,30 @@ type Asset struct {
 	// as a separate `cudart-llama-…` asset. Nil for the families whose runtime is
 	// the system's (ROCm, Vulkan, SYCL, OpenVINO).
 	Companion *Asset
+	// Binary is the launcher this archive carries, without the platform's
+	// extension, when it is not `llama-server`. Empty means llama-server, which is
+	// what every llama.cpp archive holds. It is a field rather than an argument to
+	// Install because the path an install returns has to be the file it made
+	// executable, and a caller that named one thing and got another back would
+	// configure a program that is not the one on disk. The neural upscaler is
+	// installed through this same machinery (see internal/images), and its archive
+	// holds `realesrgan-ncnn-vulkan` beside a `models/` folder.
+	Binary string
+}
+
+// launcher is the executable this archive carries, with the extension the platform
+// needs. On Windows the archive itself holds `realesrgan-ncnn-vulkan.exe` and the
+// llama.cpp builds hold `llama-server.exe`, so the suffix is added to whichever name
+// the asset gives.
+func (a Asset) launcher() string {
+	name := strings.TrimSpace(a.Binary)
+	if name == "" {
+		return launcherName()
+	}
+	if os.PathSeparator == '\\' && !strings.HasSuffix(strings.ToLower(name), ".exe") {
+		name += ".exe"
+	}
+	return name
 }
 
 // Dir is the folder this build installs into.
@@ -424,7 +448,7 @@ func (i *Installer) Find(dist Distribution) (tag, binary string) {
 		if dist.TagOfDir(e.Name()) == "" {
 			continue
 		}
-		bin, info := i.launcherUnder(filepath.Join(i.Dir, e.Name()))
+		bin, info := i.launcherUnder(filepath.Join(i.Dir, e.Name()), launcherName())
 		if bin == "" {
 			continue
 		}
@@ -460,9 +484,9 @@ func (i *Installer) Launcher(dir string) (string, bool) {
 // top-level entries instead of one — leaves the launcher a level deeper, and a
 // build that lists its models but cannot be started would be a poor trade for
 // tidiness.
-func (i *Installer) launcherUnder(buildDir string) (string, os.FileInfo) {
-	if info, err := os.Stat(filepath.Join(buildDir, launcherName())); err == nil && !info.IsDir() {
-		return filepath.Join(buildDir, launcherName()), info
+func (i *Installer) launcherUnder(buildDir, launcher string) (string, os.FileInfo) {
+	if info, err := os.Stat(filepath.Join(buildDir, launcher)); err == nil && !info.IsDir() {
+		return filepath.Join(buildDir, launcher), info
 	}
 	entries, err := os.ReadDir(buildDir)
 	if err != nil {
@@ -472,7 +496,7 @@ func (i *Installer) launcherUnder(buildDir string) (string, os.FileInfo) {
 		if !e.IsDir() {
 			continue
 		}
-		path := filepath.Join(buildDir, e.Name(), launcherName())
+		path := filepath.Join(buildDir, e.Name(), launcher)
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			return path, info
 		}
@@ -712,10 +736,15 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 	// failed on the renamed directory would leave a complete build on disk while
 	// the install reported an error and recorded nothing, so the next start would
 	// use it without the app ever having said it was installed.
-	if launcher, _ := i.launcherUnder(staging); launcher != "" {
-		if err := os.Chmod(launcher, 0o755); err != nil {
+	// The name is the asset's own, so an archive that carries another program is
+	// made runnable by the same code: the published upscaler zips are written by
+	// Windows and carry mode 0 on every entry (measured on all three 20220424
+	// archives), so without this the program would not be executable at all.
+	launcher := asset.launcher()
+	if path, _ := i.launcherUnder(staging, launcher); path != "" {
+		if err := os.Chmod(path, 0o755); err != nil {
 			os.RemoveAll(staging)
-			return "", fmt.Errorf("llama-server ausführbar machen: %w", err)
+			return "", fmt.Errorf("%s ausführbar machen: %w", launcher, err)
 		}
 	}
 	// A previous install of the same build is replaced wholesale: mixing files
@@ -729,7 +758,7 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 	}
 
 	i.report(Progress{Phase: "done"})
-	return i.BinaryPath(asset.Dir()), nil
+	return filepath.Join(final, launcher), nil
 }
 
 // addRuntimeBundle unpacks a companion archive into the build directory itself.

@@ -56,7 +56,7 @@ func (i *Installer) Builds() []Build {
 		}
 		name := entry.Name()
 		build := Build{Dir: name}
-		binary, info := i.launcherUnder(filepath.Join(i.Dir, name))
+		binary, info := i.launcherUnder(filepath.Join(i.Dir, name), launcherName())
 		switch {
 		// The leftover is asked about first, because it is the leftover whatever is
 		// in it: a crash after the archive was flattened leaves a launcher in the
@@ -124,7 +124,7 @@ func (i *Installer) RemoveBuild(dir string) error {
 		return fmt.Errorf("kein Build-Verzeichnisname: %s", dir)
 	}
 	path := filepath.Join(i.Dir, dir)
-	if launcher, _ := i.launcherUnder(path); launcher == "" && !isInstallLeftover(dir) {
+	if launcher, _ := i.launcherUnder(path, launcherName()); launcher == "" && !isInstallLeftover(dir) {
 		return fmt.Errorf("in %s liegt kein llama.cpp-Build", dir)
 	}
 	if err := os.RemoveAll(path); err != nil {
