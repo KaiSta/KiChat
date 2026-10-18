@@ -468,8 +468,8 @@ section as evidence it did not gather.
   scheme while the app's text stayed near-white — the settings dropdowns rendered as
   empty boxes. WebKitGTK ignores a `background` on a `<select>`, so no amount of control
   styling fixed this; `color-scheme` per theme does. Verified by rendering the built
-  bundle in WebKitGTK 4.1 itself (`.freebuff/webkit_check.py`), which is also the only
-  way to catch a fault that does not reproduce in the Chromium harness.
+  bundle in WebKitGTK 4.1 itself (a throwaway script in the ignored scratch directory),
+  which is also the only way to catch a fault that does not reproduce in the harness.
 
 ### Testing notes worth keeping
 
@@ -573,8 +573,8 @@ wails build                    # when webkit2gtk-4.0 is available
   tracking `origin/master` configured in repo-local git config only.
 - 84 tracked files (85 once this document is committed, since it is not in the commit
   that number was measured against). `frontend/node_modules`, `frontend/dist`, `build/bin`,
-  `frontend/package.json.md5`, `.freebuff/` and stray `*.db` are ignored — a clone was
-  checked to confirm all sources arrive and no build artefacts do.
+  `frontend/package.json.md5`, the scratch directory and stray `*.db` are ignored — a clone
+  was checked to confirm all sources arrive and no build artefacts do.
 - No credentials are committed; keys live in `~/.config/kichat/secrets`.
 
 ---

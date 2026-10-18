@@ -80,8 +80,8 @@ table mapping "to add X, touch Y" to the right skill.
   doc comment, which is the same thing nearer the code). Not here, and not twice.
 - **Comments explain why**, and a comment that states a measurement says where it
   came from.
-- **`.freebuff/` is gitignored scratch**; `frontend/dist`, `build/bin` and
-  `node_modules` are build output.
+- **The scratch directory at the repo root is gitignored**; `frontend/dist`,
+  `build/bin` and `node_modules` are build output.
 
 ## Environment (verified, not assumed)
 
