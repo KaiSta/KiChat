@@ -1691,14 +1691,60 @@ function BackendsTab({
 const MODEL_PATTERNS = ['*.gguf', '*.safetensors', '*']
 
 /**
- * The square sizes diffusion work actually starts from.
+ * A base size the draw buttons can fill in, and — for the two 16:9 entries — the second
+ * pass that lands on the screen size its label names.
  *
- * Three rather than a picker of everything: these are the widths the models in the
- * wild were trained at or near, and the point of them is to spare a user typing the
- * same number into two boxes. Anything else is still typed, so this adds a shortcut
- * and takes nothing away.
+ * `labelKey` null renders the base as a square (`512²`). `hintKey` is the tooltip; an
+ * empty one uses the generic square-size sentence. `scale` 0 leaves the stored
+ * enlargement alone, which is what a square does: it names a base, not an output.
  */
-const SIZE_PRESETS = [512, 768, 1024]
+type SizePreset = {
+  labelKey: string | null
+  hintKey: string
+  width: number
+  height: number
+  scale: number
+}
+
+/**
+ * The sizes diffusion work actually starts from: the three trained-at squares, plus the
+ * two 16:9 bases whose second pass lands exactly on a screen size.
+ *
+ * Three squares rather than a picker of everything: these are the widths the models in
+ * the wild were trained at or near, and the point of them is to spare a user typing the
+ * same number into two boxes. Anything else is still typed, so this adds shortcuts and
+ * takes nothing away.
+ *
+ * The 16:9 pair is arithmetic, not taste. 1280×720 × 1.5 = 1920×1080 (FHD) and
+ * 1920×1080 × 2 = 3840×2160 (4K); both bases are multiples of the 8-pixel latent grid
+ * and inside MaxDimension (2048 a side), and both outputs are inside
+ * MaxOutputDimension (4096), so `images.Request.OutputSize` predicts the same numbers
+ * the backend is asked for. 4K cannot be reached at the default 1.5× — 3840/1.5 is
+ * 2560, past the base bound — which is why that entry carries its own 2.
+ *
+ * The switch stays the user's: the preset stores the enlargement but does not turn the
+ * second pass on, so someone whose card cannot afford it still gets the base picture,
+ * and the tooltip says what the pass would make of it.
+ */
+const SIZE_PRESETS: SizePreset[] = [
+  { labelKey: null, hintKey: '', width: 512, height: 512, scale: 0 },
+  { labelKey: null, hintKey: '', width: 768, height: 768, scale: 0 },
+  { labelKey: null, hintKey: '', width: 1024, height: 1024, scale: 0 },
+  {
+    labelKey: 'settings.images.sizePresetFhd',
+    hintKey: 'settings.images.sizePresetFhdHint',
+    width: 1280,
+    height: 720,
+    scale: 1.5,
+  },
+  {
+    labelKey: 'settings.images.sizePresetUhd',
+    hintKey: 'settings.images.sizePresetUhdHint',
+    width: 1920,
+    height: 1080,
+    scale: 2,
+  },
+]
 
 // The second-pass bounds, mirrored from internal/images/limits.go. They are not bridge
 // constants — Go's exported names do not reach JavaScript — so the panel states its own
@@ -2757,22 +2803,35 @@ function ImagesTab({
               placeholder="512"
             />
           </div>
-          {/* The trained-at squares, one click each. Setting both numbers is the whole
-              of what a preset does, so a size that is not square — or not one of these
-              three — is still typed into the boxes above. */}
-          <div className="mt-1 flex items-center gap-1">
-            {SIZE_PRESETS.map((n) => (
-              <button
-                key={n}
-                type="button"
-                className="btn btn-sm"
-                aria-label={`${t('settings.images.sizePreset')} ${n}`}
-                title={`${t('settings.images.sizePreset')} ${n}×${n}`}
-                onClick={() => update({ width: n, height: n })}
-              >
-                {n}²
-              </button>
-            ))}
+          {/* The trained-at squares and the two 16:9 bases, one click each. Setting both
+              numbers is the whole of what a preset does — plus, for the 16:9 pair, the
+              enlargement that lands on the size its label names. A size this row does
+              not offer is still typed into the boxes above. */}
+          <div className="mt-1 flex flex-wrap items-center gap-1">
+            {SIZE_PRESETS.map((preset) => {
+              const label = preset.labelKey ? t(preset.labelKey) : `${preset.width}²`
+              const title = preset.hintKey
+                ? t(preset.hintKey)
+                : `${t('settings.images.sizePreset')} ${preset.width}×${preset.height}`
+              return (
+                <button
+                  key={`${preset.width}x${preset.height}`}
+                  type="button"
+                  className="btn btn-sm"
+                  aria-label={title}
+                  title={title}
+                  onClick={() =>
+                    update(
+                      preset.scale
+                        ? { width: preset.width, height: preset.height, hiresScale: preset.scale }
+                        : { width: preset.width, height: preset.height },
+                    )
+                  }
+                >
+                  {label}
+                </button>
+              )
+            })}
           </div>
         </label>
         <label className="text-[12px] sm:col-span-2" title={t('settings.images.pinHint')}>

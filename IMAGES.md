@@ -155,10 +155,17 @@ Size and Negative prompt are the *shared* fields — the same controls the serve
 and they reach `--sampling-method`, `--steps` and `-W`/`-H` on the same command line. They
 are labelled in the selected backend's own words, which is not a nicety: an empty field means
 "the backend's own default", and on a one-shot program that is the program's default, not a
-server's. Under the size boxes sit three buttons — 512², 768², 1024² — because they are the
-square sizes diffusion models are trained at or near and the alternative is typing the same
-number into two fields. Anything else is still typed, so the presets add a shortcut and take
-nothing away.
+server's. Under the size boxes sit five buttons — 512², 768², 1024², FHD 16:9 and 4K 16:9 — because
+they are the square sizes diffusion models are trained at or near, and the alternative is
+typing the same number into two fields. The two 16:9 entries are bases whose second pass lands
+*exactly* on a screen size rather than near one: 1280×720 at 1.5× is 1920×1080, and
+1920×1080 at 2× is 3840×2160. Both bases are inside `MaxDimension` and on the latent grid and
+both outputs inside `MaxOutputDimension`, so `Request.OutputSize` predicts the numbers the
+backend is asked for (pinned in `limits_test.go`). 4K is the reason the preset carries a scale
+of its own: 3840/1.5 is 2560, past the base bound, so the default 1.5× cannot reach it from any
+legal base. A preset stores the enlargement but does **not** turn the second pass on — the
+switch stays the user's, and the tooltip says what the pass would make of the base. Anything
+else is still typed, so the presets add shortcuts and take nothing away.
 
 A second working line shows the other shape — a Flux pipeline with one part passed as
 `--diffusion-model`, and the mode switch this section ends on:

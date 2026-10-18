@@ -138,6 +138,13 @@ func TestOutputSizeIsTheProductOfBaseAndScale(t *testing.T) {
 	}{
 		{"no second pass is the base size", Request{Width: 768, Height: 512}, 768, 512},
 		{"one and a half times", Request{Width: 768, Height: 512, Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4}}, 1152, 768},
+		// The two 16:9 bases the Settings presets fill in (SIZE_PRESETS in
+		// frontend/src/components/Settings.tsx). Both land exactly on the screen size
+		// their label names, which is what lets a preset carry a fixed enlargement; a
+		// change to MaxDimension or MaxHiresScale breaks this table before it breaks a
+		// preset in silence.
+		{"the FHD preset is exactly FHD", Request{Width: 1280, Height: 720, Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4}}, 1920, 1080},
+		{"the 4K preset is exactly 4K", Request{Width: 1920, Height: 1080, Hires: Hires{Enabled: true, Scale: 2, Denoise: 0.4}}, 3840, 2160},
 		// The base is normalised first, because that is the size the first pass really
 		// draws: 700x500 becomes 704x504 on the latent grid, and 704x504 × 1.5 is
 		// 1056x756, which the second pass then rounds up to 1056x760.

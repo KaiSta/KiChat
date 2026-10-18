@@ -484,6 +484,15 @@ const de = {
     'Wie stark der Prompt das Bild bestimmt (1–30, üblich 7). Niedrig malt mehr aus dem Modell selbst, hoch hält sich streng an den Prompt; destillierte bzw. Turbo-/Flow-Modelle (Flux, Qwen-Image, SDXL-Turbo) laufen mit 1, wo es keine Führung gibt.',
   'settings.images.size': 'Größe',
   'settings.images.sizePreset': 'Quadratische Größe',
+  // The two 16:9 bases. The label names the screen size; the hint gives the arithmetic
+  // that reaches it, because 4K has to start at 1920 — a pass is capped at 2×, so 2560
+  // was never an option.
+  'settings.images.sizePresetFhd': 'FHD 16:9',
+  'settings.images.sizePresetFhdHint':
+    '1280×720 als Grundgröße; der zweite Durchgang mit 1,5× ergibt genau 1920×1080 (FHD). Beide Seiten liegen auf dem 8er-Raster.',
+  'settings.images.sizePresetUhd': '4K 16:9',
+  'settings.images.sizePresetUhdHint':
+    '1920×1080 als Grundgröße; der zweite Durchgang mit 2× ergibt genau 3840×2160 (4K). 1,5× reicht dafür nicht — 3840/1,5 liegt über der Obergrenze einer Grundgröße.',
   'settings.images.negative': 'Negativ-Prompt',
   // The second pass is fixed in Settings rather than chosen by the model: it doubles the
   // time a draw costs, which is a decision for the person whose card pays for it.
@@ -1130,6 +1139,15 @@ const en: Record<keyof typeof de, string> = {
     'How hard the prompt drives the picture (1–30, usually 7). Low paints more out of the model itself, high holds closely to the prompt; a distilled or turbo/flow-matching model (Flux, Qwen-Image, SDXL-Turbo) runs at 1, where there is no guidance at all.',
   'settings.images.size': 'Size',
   'settings.images.sizePreset': 'Square size',
+  // The two 16:9 bases. The label names the screen size; the hint gives the arithmetic
+  // that reaches it, because 4K has to start at 1920 — a pass is capped at 2×, so 2560
+  // was never an option.
+  'settings.images.sizePresetFhd': 'FHD 16:9',
+  'settings.images.sizePresetFhdHint':
+    '1280×720 base; the 1.5× second pass lands on exactly 1920×1080 (FHD). Both sides sit on the 8-pixel grid.',
+  'settings.images.sizePresetUhd': '4K 16:9',
+  'settings.images.sizePresetUhdHint':
+    '1920×1080 base; the 2× second pass lands on exactly 3840×2160 (4K). 1.5× cannot reach it — 3840/1.5 is past the base bound.',
   'settings.images.negative': 'Negative prompt',
   // The second pass is fixed in Settings rather than chosen by the model: it doubles the
   // time a draw costs, which is a decision for the person whose card pays for it.
@@ -1748,6 +1766,15 @@ const zh: Record<keyof typeof de, string> = {
     '提示词对画面的约束强度（1–30，通常为 7）。数值低更依赖模型自身的发挥，数值高则严格遵循提示词；蒸馏模型或 Turbo/Flow 模型（Flux、Qwen-Image、SDXL-Turbo）使用 1，此时不存在引导。',
   'settings.images.size': '尺寸',
   'settings.images.sizePreset': '正方形尺寸',
+  // The two 16:9 bases. The label names the screen size; the hint gives the arithmetic
+  // that reaches it, because 4K has to start at 1920 — a pass is capped at 2×, so 2560
+  // was never an option.
+  'settings.images.sizePresetFhd': 'FHD 16:9',
+  'settings.images.sizePresetFhdHint':
+    '基础尺寸 1280×720；第二遍以 1.5 倍放大，恰好得到 1920×1080（FHD）。两边都落在 8 像素网格上。',
+  'settings.images.sizePresetUhd': '4K 16:9',
+  'settings.images.sizePresetUhdHint':
+    '基础尺寸 1920×1080；第二遍以 2 倍放大，恰好得到 3840×2160（4K）。1.5 倍无法达到——3840/1.5 超出基础尺寸上限。',
   'settings.images.negative': '负面提示词',
   // The second pass is fixed in Settings rather than chosen by the model: it doubles the
   // time a draw costs, which is a decision for the person whose card pays for it.
