@@ -12,6 +12,7 @@ import {
   type llm,
   type main,
   type runtime,
+  type tools,
 } from '../lib/api'
 import { useStore } from '../store'
 import { asLang, LANGS } from '../lib/i18n'
@@ -1881,6 +1882,18 @@ function ImagesTab({
   const [status, setStatus] = useState<main.ImageStatus | null>(null)
   const [checking, setChecking] = useState(false)
   const [testing, setTesting] = useState(false)
+  // The neural upscaler's setup. It is read from the *saved* settings, like every other
+  // status on this screen, so the Test button commits the draft first and the reading
+  // describes what was tested rather than what is still being typed.
+  const [upscaler, setUpscaler] = useState<tools.UpscalerStatus | null>(null)
+  const [upscalerBusy, setUpscalerBusy] = useState(false)
+  // The download this panel can do itself: what the backend would fetch for this machine,
+  // and its progress while it does. It is read from the backend rather than hard-coded
+  // because the archive and its size differ per platform — 46.9 MB on Linux, 51.8 MB on
+  // macOS — and a row that named one of them would be wrong on the others. `installing`
+  // covers the moment between the press and the first reading.
+  const [upscalerInstall, setUpscalerInstall] = useState<main.UpscalerInstall | null>(null)
+  const [installing, setInstalling] = useState(false)
   // Set by the Stop button beside the test, and read by the rejection it causes: a stopped
   // test rejects like a failed one, and only this flag can tell the two apart.
   const stoppingTest = useRef(false)
@@ -1950,6 +1963,92 @@ function ImagesTab({
 
   const update = (changes: Partial<config.ImageSettings>) =>
     patch({ images: { ...images, ...changes } as config.ImageSettings })
+
+  useEffect(() => {
+    let cancelled = false
+    App.GetUpscalerStatus()
+      .then((value) => {
+        if (!cancelled) setUpscaler(value)
+      })
+      .catch(() => {
+        if (!cancelled) setUpscaler(null)
+      })
+    App.GetUpscalerInstall()
+      .then((value) => {
+        if (!cancelled) setUpscalerInstall(value)
+      })
+      .catch(() => {
+        if (!cancelled) setUpscalerInstall(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  /* The setup test is a real 16×16 upscale, which is the only check that covers the
+   * Vulkan driver as well as the executable. The draft is committed first for the same
+   * reason the backend test is: the saved settings are what a run reads, and testing
+   * yesterday's path would report a failure about a mistake already corrected. */
+  const testUpscaler = async () => {
+    setUpscalerBusy(true)
+    try {
+      await onApply({ ...draft, images })
+      const path = await App.TestUpscaler()
+      setUpscaler(await App.GetUpscalerStatus())
+      useStore.getState().toast('info', `${t('settings.images.upscalerTestOk')} ${path}`)
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    } finally {
+      setUpscalerBusy(false)
+    }
+  }
+
+  const pickUpscaler = async () => {
+    try {
+      const path = await App.PickUpscalerBinary(t('settings.images.upscalerPickTitle'))
+      if (path) update({ esrganBinary: path })
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    }
+  }
+
+  /*
+   * The download the app can do itself.
+   *
+   * It waits here rather than in a mount effect, because the thing being waited for is one
+   * press of one button: the loop ends when the backend says the download is over, and a
+   * user who leaves this tab mid-download loses only the progress row — the install
+   * finishes on the backend either way, and coming back reads the same state.
+   *
+   * The switch and the path are taken from the backend's own status afterwards rather than
+   * from the press: the install writes them into the *saved* settings, so the draft would
+   * otherwise disagree with what the app is really configured with.
+   */
+  const downloadUpscaler = async () => {
+    setInstalling(true)
+    try {
+      await App.InstallUpscaler()
+      for (;;) {
+        await new Promise((done) => setTimeout(() => done(null), 500))
+        const next = await App.GetUpscalerInstall()
+        setUpscalerInstall(next)
+        if (next.busy) continue
+        if (next.error) {
+          useStore.getState().toast('error', next.error)
+          return
+        }
+        const status = await App.GetUpscalerStatus()
+        setUpscaler(status)
+        update({ esrganBinary: status.path ?? '', upscalerEnabled: true })
+        useStore.getState().toast('info', t('settings.images.upscalerInstalled'))
+        return
+      }
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    } finally {
+      setInstalling(false)
+    }
+  }
 
   // Read again without the mount's "checking" dance: the server row polls this while a
   // model loads, and a spinner that reappears every 1.2 s would be noise rather than a
@@ -2887,6 +2986,152 @@ function ImagesTab({
                   placeholder={String(IMAGE_HIRES_LIMITS.defaultDenoise)}
                 />
               </label>
+            </div>
+          ) : null}
+        </div>
+        {/* Enlarging. It is deliberately not gated on `enabled`: resampling an attached
+            picture needs no image server at all, and a user who only wants that should not
+            have to switch on a diffusion backend to get it. */}
+        <div className="mt-1 border-t pt-2 sm:col-span-2" style={{ borderColor: 'var(--border)' }}>
+          <div className="text-[12px] font-medium">{t('settings.images.upscaling')}</div>
+          <label className="mt-1 flex items-center gap-2 text-[12px]">
+            <input
+              type="checkbox"
+              checked={images.upscalerEnabled ?? false}
+              aria-label={t('settings.images.upscalerEnabled')}
+              onChange={(e) => update({ upscalerEnabled: e.target.checked })}
+            />
+            <span>{t('settings.images.upscalerEnabled')}</span>
+            <span className="faint flex-1 text-[11px]">{t('settings.images.upscalerHint')}</span>
+          </label>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <label className="text-[12px]">
+              {t('settings.images.upscaleDefaultMethod')}
+              <select
+                className="input mt-1"
+                value={images.upscaleDefaultMethod || 'lanczos'}
+                onChange={(e) => update({ upscaleDefaultMethod: e.target.value })}
+              >
+                <option value="lanczos">{t('settings.images.upscaleResample')}</option>
+                <option value="esrgan" disabled={!images.upscalerEnabled}>
+                  {t('settings.images.upscaleNeural')}
+                </option>
+              </select>
+            </label>
+            <label className="text-[12px]">
+              {t('settings.images.upscaleSharpen')}
+              <input
+                className="input mono mt-1"
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={images.upscaleSharpen ?? ''}
+                onChange={(e) => update({ upscaleSharpen: Number(e.target.value) || 0 })}
+                placeholder="0.25"
+              />
+            </label>
+          </div>
+          {/* The download the app can do itself. It is deliberately outside the block the
+              switch gates: a user who has not switched the neural method on yet is exactly
+              the user who needs the program, and the switch then appears as a consequence of
+              installing rather than as a condition of it. A platform with no archive is told
+              so here, where the button would have been, instead of after a failed fetch. */}
+          {upscalerInstall?.unsupported ? (
+            <p className="faint mt-2 text-[11px]">
+              {t('settings.images.upscalerNoArchive', { platform: upscalerInstall.unsupported })}
+            </p>
+          ) : (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={installing}
+                onClick={() => void downloadUpscaler()}
+              >
+                {t('settings.images.upscalerInstall')}
+              </button>
+              {installing ? (
+                <span className="text-[11px] faint">
+                  {upscalerInstall?.phase === 'extracting'
+                    ? t('settings.images.upscalerExtracting')
+                    : upscalerInstall?.phase === 'verifying'
+                      ? t('settings.images.upscalerVerifying')
+                      : t('settings.images.upscalerInstalling')}
+                  {upscalerInstall?.phase === 'downloading' && upscalerInstall.total > 0
+                    ? ` ${Math.min(100, Math.round((upscalerInstall.done / upscalerInstall.total) * 100))}%`
+                    : '…'}
+                </span>
+              ) : (
+                <span className="faint flex-1 text-[11px]">
+                  {t('settings.images.upscalerInstallHint', {
+                    size: formatBytes(upscalerInstall?.size ?? 0),
+                  })}
+                </span>
+              )}
+            </div>
+          )}
+          {images.upscalerEnabled ? (
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              <label className="text-[12px] sm:col-span-2">
+                {t('settings.images.upscalerBinary')}
+                <div className="mt-1 flex items-center gap-2">
+                  <input
+                    className="input mono flex-1"
+                    value={images.esrganBinary ?? ''}
+                    onChange={(e) => update({ esrganBinary: e.target.value })}
+                    placeholder={t('settings.images.upscalerPathHint')}
+                  />
+                  <button type="button" className="btn btn-sm" onClick={() => void pickUpscaler()}>
+                    {t('settings.images.upscalerPick')}
+                  </button>
+                </div>
+              </label>
+              <label className="text-[12px]">
+                {t('settings.images.upscalerModel')}
+                <select
+                  className="input mt-1"
+                  value={images.esrganModel || 'realesrgan-x4plus'}
+                  onChange={(e) => update({ esrganModel: e.target.value })}
+                >
+                  {(upscaler?.models?.length
+                    ? upscaler.models
+                    : ['realesrgan-x4plus', 'realesrgan-x4plus-anime']
+                  ).map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-[12px]" title={t('settings.images.upscalerTileHint')}>
+                {t('settings.images.upscalerTile')}
+                <input
+                  className="input mono mt-1"
+                  type="number"
+                  min={0}
+                  max={4096}
+                  step={64}
+                  value={images.esrganTile || ''}
+                  onChange={(e) => update({ esrganTile: Number(e.target.value) || 0 })}
+                  placeholder="0"
+                />
+              </label>
+              <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={upscalerBusy}
+                  onClick={() => void testUpscaler()}
+                >
+                  {upscalerBusy ? t('settings.images.testing') : t('settings.images.upscalerTest')}
+                </button>
+                <span className="faint text-[11px]">
+                  {upscaler?.available
+                    ? `${t('settings.images.upscalerReady')}: ${upscaler.path}`
+                    : upscaler?.error || t('settings.images.upscalerNotReady')}
+                </span>
+              </div>
             </div>
           ) : null}
         </div>

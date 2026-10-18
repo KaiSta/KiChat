@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { App, formatDuration, formatNumber, formatSpeed } from '../lib/api'
-import type { store as storeTypes } from '../lib/api'
+import type { store as storeTypes, tools as toolTypes } from '../lib/api'
 import { useThrottled } from '../lib/stream'
 import { useStore } from '../store'
 
@@ -226,6 +226,10 @@ function drawProgressText(
   // A phase comes before any sampling: a caption-trained model spends seconds on its
   // caption, and a row that only said "step 0" there would look stalled.
   if (draw.phase === 'captioning') return t('images.captioning')
+  // And one wait has no counter to report at all: the neural upscale's program prints a bar
+  // per tile and nothing a client may parse, so the sentence is the whole report — which is
+  // why the Stop beside it is the control that matters.
+  if (draw.phase === 'upscaling') return t('images.upscaling')
   const pass = draw.pass || 1
   const passes = draw.passes || 1
   if (draw.steps > 0) {
@@ -599,6 +603,10 @@ const MAX_IMAGE_HIRES_DENOISE = 0.6
  */
 const FHD_LONG_SIDE = 1920
 const UHD_LONG_SIDE = 3840
+// The backend's own bound (images.MaxUpscaleLongSide): a resize has no latent grid and
+// no 4096 cap, only the memory a 64 MP buffer costs.
+const MAX_UPSCALE_LONG_SIDE = 8192
+const MAX_UPSCALE_PIXELS = 64_000_000
 
 /** What an enlargement button draws, and the size it will come out at.
  *
@@ -652,6 +660,44 @@ function enlargedRecipe(
     width: outWidth,
     height: outHeight,
   }
+}
+
+type EnlargeTarget = 'fhd' | 'uhd' | 'custom'
+type EnlargeMethod = 'lanczos' | 'esrgan' | 'redraw'
+
+type EnlargeDraft = {
+  target: EnlargeTarget
+  longSide: number
+  method: EnlargeMethod
+  model: string
+  sharpen: number
+}
+
+/** Where a long-side target lands for a picture of any aspect ratio.
+ *
+ * This duplicates images.Fit deliberately: the panel has to show the size before the
+ * request is sent, and showing a size the backend would not produce would be worse than
+ * the duplication. The bounds are the same two numbers — 8192 px and 64 MP — because a
+ * preview that promises more than the backend will write is not a preview.
+ */
+function fitLongSide(
+  width: number,
+  height: number,
+  longSide: number,
+): { width: number; height: number } {
+  if (width <= 0 || height <= 0 || longSide <= 0) return { width: 0, height: 0 }
+  const long = Math.min(longSide, MAX_UPSCALE_LONG_SIDE)
+  const scale = long / Math.max(width, height)
+  let w = Math.max(1, Math.round(width * scale))
+  let h = Math.max(1, Math.round(height * scale))
+  if (width >= height) w = long
+  else h = long
+  if (w * h > MAX_UPSCALE_PIXELS) {
+    const shrink = Math.sqrt(MAX_UPSCALE_PIXELS / (w * h))
+    w = Math.max(1, Math.floor(w * shrink))
+    h = Math.max(1, Math.floor(h * shrink))
+  }
+  return { width: w, height: h }
 }
 
 /** The recipe fields as the strings a form holds.
@@ -735,6 +781,240 @@ function recipeFromDraft(draft: RecipeDraft): storeTypes.GenerationRecipe {
   }
 }
 
+/**
+ * The Enlarge form: a target and a method, in that order.
+ *
+ * It is a panel rather than a menu because the cost of the three methods spans four
+ * orders of magnitude — a second, ten seconds, several minutes — and a user should see
+ * the size and the cost before the expensive one starts. The presets on the card open
+ * this panel with the target already chosen; none of them starts work on its own.
+ *
+ * The neural row has three states because it has three failure modes that are not the
+ * same sentence: the switch is off, the switch is on but no program was found, and the
+ * program is there. A disabled radio with "not set up" is what makes the first two
+ * fixable; leaving the row out would hide the feature, and enabling it silently would
+ * make Lanczos look like a lie.
+ */
+function EnlargePanel({
+  width,
+  height,
+  recipe,
+  status,
+  defaultMethod,
+  defaultSharpen,
+  initialTarget,
+  busy,
+  onClose,
+  onRun,
+  onStop,
+}: {
+  width: number
+  height: number
+  recipe?: storeTypes.GenerationRecipe
+  status: toolTypes.UpscalerStatus | null
+  defaultMethod: string
+  defaultSharpen: number
+  initialTarget: EnlargeTarget
+  busy: boolean
+  onClose: () => void
+  onRun: (draft: EnlargeDraft) => void
+  /**
+   * Ends the run in flight, and only passed for a method that can act on it: a redraw is a
+   * draw the app already knows how to stop, and the neural pass is a program it started.
+   * The classical resampler has no cancellation point inside a pass, so it gets no button
+   * rather than one that does nothing for a second.
+   */
+  onStop?: () => void
+}) {
+  const t = useStore((s) => s.t)
+  const [target, setTarget] = useState<EnlargeTarget>(initialTarget)
+  const [longSide, setLongSide] = useState(() =>
+    String(Math.min(MAX_UPSCALE_LONG_SIDE, Math.max(width, height) * 2)),
+  )
+  const [method, setMethod] = useState<EnlargeMethod>(() =>
+    defaultMethod === 'esrgan' && status?.enabled && status?.available ? 'esrgan' : 'lanczos',
+  )
+  const [model, setModel] = useState(status?.models?.[0] ?? 'realesrgan-x4plus')
+  const [sharpen, setSharpen] = useState(String(defaultSharpen))
+
+  const requested =
+    target === 'fhd'
+      ? FHD_LONG_SIDE
+      : target === 'uhd'
+        ? UHD_LONG_SIDE
+        : Math.floor(Number(longSide)) || 0
+  const out = fitLongSide(width, height, requested)
+  const scale = width > 0 && out.width > 0 ? out.width / width : 0
+  const neuralReady = Boolean(status?.enabled && status?.available)
+  const canRedraw = Boolean(recipe) && target !== 'custom'
+  const ready =
+    out.width > 0 &&
+    !busy &&
+    (method !== 'redraw' || canRedraw) &&
+    (method !== 'esrgan' || neuralReady)
+
+  const run = () =>
+    onRun({
+      target,
+      longSide: target === 'custom' ? Math.floor(Number(longSide)) || 0 : 0,
+      method,
+      model,
+      sharpen:
+        method === 'lanczos'
+          ? Math.min(1, Math.max(0, Number(sharpen) || 0))
+          : 0,
+    })
+
+  return (
+    <div
+      className="mt-1 flex flex-col gap-2 rounded p-2 text-[11px]"
+      style={{ border: '1px solid var(--border)', background: 'var(--code-bg)', maxWidth: 460 }}
+    >
+      <span className="faint">{t('images.enlargeTitle')}</span>
+      <div>
+        <span className="faint">{t('images.enlargeTarget')}</span>
+        <div className="mt-1 flex flex-wrap items-center gap-1">
+          {(['fhd', 'uhd', 'custom'] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              className={target === value ? 'btn btn-sm btn-primary' : 'btn btn-sm'}
+              aria-pressed={target === value}
+              onClick={() => setTarget(value)}
+            >
+              {value === 'fhd'
+                ? t('images.fhd')
+                : value === 'uhd'
+                  ? t('images.uhd')
+                  : t('images.enlargeCustom')}
+            </button>
+          ))}
+          {target === 'custom' ? (
+            <input
+              className="input mono w-24"
+              type="number"
+              min={64}
+              max={MAX_UPSCALE_LONG_SIDE}
+              step={8}
+              value={longSide}
+              aria-label={t('images.enlargeCustom')}
+              onChange={(e) => setLongSide(e.target.value)}
+            />
+          ) : null}
+        </div>
+        <div className="faint mt-1">
+          {t('images.enlargeResult', {
+            width: formatNumber(out.width),
+            height: formatNumber(out.height),
+          })}
+          {scale > 8 ? ` — ${t('images.enlargeWarning')}` : ''}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <span className="faint">{t('images.enlargeMethod')}</span>
+        <label className="flex items-center gap-2">
+          <input
+            type="radio"
+            checked={method === 'lanczos'}
+            onChange={() => setMethod('lanczos')}
+          />
+          <span>{t('images.enlargeResample')}</span>
+          <span className="faint flex-1">{t('images.enlargeResampleHint')}</span>
+        </label>
+        <label className="flex items-center gap-2" title={status?.error ?? ''}>
+          <input
+            type="radio"
+            disabled={!neuralReady}
+            checked={method === 'esrgan'}
+            onChange={() => setMethod('esrgan')}
+          />
+          <span>{t('images.enlargeNeural')}</span>
+          <span className="faint flex-1">
+            {neuralReady
+              ? t('images.enlargeNeuralHint')
+              : status?.enabled
+                ? t('images.enlargeNeuralMissing')
+                : t('images.enlargeNeuralOff')}
+          </span>
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="radio"
+            disabled={!canRedraw}
+            checked={method === 'redraw'}
+            onChange={() => setMethod('redraw')}
+          />
+          <span>{t('images.enlargeRedraw')}</span>
+          <span className="faint flex-1">
+            {!recipe
+              ? t('images.enlargeRedrawNeedsRecipe')
+              : target === 'custom'
+                ? t('images.enlargeRedrawCustom')
+                : t('images.enlargeRedrawHint')}
+          </span>
+        </label>
+      </div>
+
+      {method === 'lanczos' ? (
+        <label className="flex items-center gap-2">
+          {t('images.enlargeSharpen')}
+          <input
+            className="input mono w-20"
+            type="number"
+            min={0}
+            max={1}
+            step={0.05}
+            value={sharpen}
+            onChange={(e) => setSharpen(e.target.value)}
+          />
+        </label>
+      ) : null}
+      {method === 'esrgan' ? (
+        <label className="flex items-center gap-2">
+          {t('images.enlargeModel')}
+          <select className="input" value={model} onChange={(e) => setModel(e.target.value)}>
+            {(status?.models?.length ? status.models : ['realesrgan-x4plus']).map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          disabled={!ready}
+          onClick={run}
+        >
+          {busy
+            ? t('images.enlarging')
+            : t('images.enlargeTo', {
+                width: formatNumber(out.width),
+                height: formatNumber(out.height),
+              })}
+        </button>
+        {busy && onStop ? (
+          <button
+            type="button"
+            className="btn btn-sm btn-danger"
+            title={t('images.enlargeStopHint')}
+            onClick={onStop}
+          >
+            ⏹ {t('images.stop')}
+          </button>
+        ) : null}
+        <button type="button" className="btn btn-sm btn-ghost" onClick={onClose}>
+          {t('images.editClose')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   const t = useStore((s) => s.t)
   const [src, setSrc] = useState<string | null>(null)
@@ -746,11 +1026,26 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   const [expanded, setExpanded] = useState(false)
   // Which draw is in flight, if any. Every control here spends GPU seconds, so they are
   // mutually disabled while one runs — otherwise a second click draws a second picture.
-  const [busy, setBusy] = useState<'same' | 'new' | 'edit' | 'fhd' | 'uhd' | null>(null)
+  const [busy, setBusy] = useState<'same' | 'new' | 'edit' | null>(null)
   // The editor is closed until the user opens it: a chat full of pictures would
   // otherwise be a chat full of forms.
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<RecipeDraft | null>(null)
+  // The Enlarge panel and the work it may be doing. It is separate from `busy` because
+  // the two are different calls — one draws from a recipe, the other resizes the bytes
+  // that are already here — and they share only the rule that neither may run twice.
+  const [enlarge, setEnlarge] = useState<EnlargeTarget | null>(null)
+  const [enlarging, setEnlarging] = useState(false)
+  // Which method the run in flight is using, because only two of the three can be stopped:
+  // a redraw is a draw the backend already knows how to cancel, and the neural pass is a
+  // program this app started. The resampler has no cancellation point inside a pass, so it
+  // is offered no Stop rather than a button that does nothing.
+  const [enlargingMethod, setEnlargingMethod] = useState<EnlargeMethod | null>(null)
+  const [upscaler, setUpscaler] = useState<toolTypes.UpscalerStatus | null>(null)
+  // The stored picture's own size, read from the decoded image rather than from the
+  // recipe: an uploaded photo has no recipe, and a recipe's numbers describe the draw
+  // rather than a picture that may have been replaced since.
+  const [pixels, setPixels] = useState<{ width: number; height: number } | null>(null)
   // Whether a draw in flight is one the user has asked to stop. The rejection that
   // follows is that cancellation rather than a failure, and this is what tells the two
   // apart: a red error toast for the user's own click reads as a crash, and the picture
@@ -765,15 +1060,15 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
   const [stoppingUi, setStoppingUi] = useState(false)
   // What the backend knows about a draw running under *this* picture. A redraw is registered
   // under the attachment it will replace, so this is the row's own draw and nothing else's.
-  const live = useStore((s) => s.draws[attachment.id])
-
-  // Only a picture KiChat drew carries a recipe. An uploaded photo has none, and
+  const live = useStore((s) => s.draws[attachment.id])  // Only a picture KiChat drew carries a recipe. An uploaded photo has none, and
   // offering to redraw one would offer to draw something unrelated to it.
   const recipe = attachment.generation
-  // The FHD shortcut is read from the recipe rather than stored, so it disappears on a
-  // picture that is already that large and follows the size the recipe really used.
-  const fhd = recipe ? enlargedRecipe(recipe, FHD_LONG_SIDE) : null
-  const uhd = recipe ? enlargedRecipe(recipe, UHD_LONG_SIDE) : null
+  const imageSettings = useStore((s) => s.settings?.images)
+  // The presets are read from the picture's real size, not from a recipe, so they are
+  // offered for an uploaded photo too — which is the whole point of the fast path.
+  const longSide = pixels ? Math.max(pixels.width, pixels.height) : 0
+  const fhdSize = pixels ? fitLongSide(pixels.width, pixels.height, FHD_LONG_SIDE) : null
+  const uhdSize = pixels ? fitLongSide(pixels.width, pixels.height, UHD_LONG_SIDE) : null
 
   useEffect(() => {
     let cancelled = false
@@ -787,8 +1082,25 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
       })
     return () => {
       cancelled = true
+    }    }, [attachment.id])
+
+  // The neural row's three states are read when the panel opens, not on every render.
+  // A status call only stats a file, but doing it for every picture in a chat would be
+  // a bridge round trip per card.
+  useEffect(() => {
+    if (!enlarge) return
+    let cancelled = false
+    App.GetUpscalerStatus()
+      .then((value) => {
+        if (!cancelled) setUpscaler(value)
+      })
+      .catch(() => {
+        if (!cancelled) setUpscaler(null)
+      })
+    return () => {
+      cancelled = true
     }
-  }, [attachment.id])
+  }, [enlarge])
 
   const save = async () => {
     setSaving(true)
@@ -815,11 +1127,11 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
    * original; the backend's attachments event is what makes this component see it. */
   // One condition for every control that spends GPU seconds, so a state where some of them
   // are live cannot be reached by editing one of them alone.
-  const blocked = busy !== null || stoppingUi
+  const blocked = busy !== null || stoppingUi || enlarging
 
   const draw = async (
     next: storeTypes.GenerationRecipe,
-    mode: 'same' | 'new' | 'edit' | 'fhd' | 'uhd',
+    mode: 'same' | 'new' | 'edit',
   ) => {
     setBusy(mode)
     stopping.current = false
@@ -858,6 +1170,50 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
       useStore.getState().toast('error', String(err))
     } finally {
       setStoppingUi(false)
+    }
+  }
+
+  /* Enlarges this picture by the chosen method. The redraw branch is the existing
+   * RegenerateImage call with a recipe whose second pass lands on the target — the
+   * expensive path keeps its own code and its own progress reporting. The two fast
+   * paths file a derived copy and leave this picture untouched. */
+  const runEnlarge = async (next: EnlargeDraft) => {
+    setEnlarging(true)
+    setEnlargingMethod(next.method)
+    stopping.current = false
+    try {
+      if (next.method === 'redraw') {
+        if (!recipe) throw new Error(t('images.enlargeRedrawNeedsRecipe'))
+        const target = next.target === 'fhd' ? FHD_LONG_SIDE : UHD_LONG_SIDE
+        const plan = enlargedRecipe(recipe, target)
+        if (!plan) throw new Error(t('images.enlargeRedrawCustom'))
+        const drawn = await App.RegenerateImage(attachment.id, plan.recipe)
+        useStore.getState().toast('info', `${t('images.redrawn')}: ${drawn.filename}`)
+      } else {
+        const made = await App.UpscaleAttachment(attachment.id, {
+          target: next.target,
+          longSide: next.longSide,
+          method: next.method,
+          model: next.model,
+          sharpen: next.sharpen,
+        })
+        useStore.getState().toast('info', `${t('images.enlarged')}: ${made.filename}`)
+      }
+      setEnlarge(null)
+    } catch (err) {
+      // A stop is the user's own click, not a failure: the wait they asked to end did end,
+      // and a red error toast for it reads as a crash. Which sentence it gets depends on
+      // what was stopped — a redraw is a draw, and the neural pass is not.
+      if (stopping.current) {
+        const key = next.method === 'redraw' ? 'images.drawStopped' : 'images.enlargeStopped'
+        useStore.getState().toast('info', t(key))
+      } else {
+        useStore.getState().toast('error', String(err))
+      }
+    } finally {
+      stopping.current = false
+      setEnlarging(false)
+      setEnlargingMethod(null)
     }
   }
 
@@ -912,8 +1268,14 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
           cursor: 'zoom-in',
         }}
         title={live ? t('images.preview') : t('images.zoom')}
-        onClick={() => setExpanded((v) => !v)}
-      />
+        onLoad={(e) =>
+            setPixels({
+              width: e.currentTarget.naturalWidth,
+              height: e.currentTarget.naturalHeight,
+            })
+          }
+          onClick={() => setExpanded((v) => !v)}
+        />
       {live && (
         <span className="faint text-[11px]" title={t('images.preview')}>
           {drawProgressText(t, live)}
@@ -941,6 +1303,14 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
             {recipe.hiresScale ? `${recipe.hiresScale}×` : t('settings.images.hires')}
           </span>
         ) : null}
+        {/* An enlarged copy says what it is: which method and scale, so two copies of
+            one picture can be told apart without opening either. */}
+        {attachment.derivation ? (
+          <span className="faint" title={t('images.derivedHint')}>
+            {attachment.derivation.method === 'esrgan' ? 'Real-ESRGAN' : 'Lanczos'}
+            {attachment.derivation.scale ? ` ${attachment.derivation.scale.toFixed(2)}×` : ''}
+          </span>
+        ) : null}
         {/* The time the draw cost, recorded rather than guessed — both passes included,
             which is what makes it a better predictor of a redraw than the step count. */}
         {recipe?.durationMs ? (
@@ -951,6 +1321,42 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
         <button type="button" className="btn btn-sm btn-ghost" disabled={saving} onClick={() => void save()}>
           {saving ? t('images.saving') : t('images.save')}
         </button>
+        {/* Every picture, drawn or uploaded, can be enlarged. The two presets are
+            shortcuts into the same panel, and none of them starts work on its own: the
+            expensive method deserves the size and the cost in front of it. */}
+        {fhdSize && longSide < FHD_LONG_SIDE ? (
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            disabled={blocked || !pixels}
+            title={t('images.fhdHint', { width: fhdSize.width, height: fhdSize.height })}
+            onClick={() => setEnlarge('fhd')}
+          >
+            {`${t('images.fhd')} ${formatNumber(fhdSize.width)}×${formatNumber(fhdSize.height)}`}
+          </button>
+        ) : null}
+        {uhdSize && longSide < UHD_LONG_SIDE ? (
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            disabled={blocked || !pixels}
+            title={t('images.uhdHint', { width: uhdSize.width, height: uhdSize.height })}
+            onClick={() => setEnlarge('uhd')}
+          >
+            {`${t('images.uhd')} ${formatNumber(uhdSize.width)}×${formatNumber(uhdSize.height)}`}
+          </button>
+        ) : null}
+        {pixels ? (
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            disabled={blocked}
+            title={t('images.enlargeHint')}
+            onClick={() => setEnlarge('custom')}
+          >
+            {t('images.enlarge')}
+          </button>
+        ) : null}
         {recipe && (
           <>
             <button
@@ -971,41 +1377,6 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
             >
               {busy === 'new' ? t('images.redrawing') : t('images.variation')}
             </button>
-            {/* The shortcut the user asked for: the same picture at full-HD size, with
-                the second pass switched on and its scale chosen to land there. It is a
-                recipe edit with one click rather than a second concept — the picture it
-                files is an ordinary hires picture, redrawn from its own recipe later. */}
-            {fhd && (
-              <button
-                type="button"
-                className="btn btn-sm btn-ghost"
-                disabled={blocked}
-                title={t('images.fhdHint', { width: fhd.width, height: fhd.height })}
-                onClick={() => void draw(fhd.recipe, 'fhd')}
-              >
-                {busy === 'fhd'
-                  ? t('images.redrawing')
-                  : `${t('images.fhd')} ${formatNumber(fhd.width)}×${formatNumber(fhd.height)}`}
-              </button>
-            )}
-            {/* The same shortcut at four times the pixels, and deliberately a separate
-                button rather than a menu: a 4K pass is minutes of GPU time, so it is a
-                choice a user makes with the size in front of them. When the card cannot
-                hold the buffers the backend continues on the CPU — slow, but the picture
-                arrives, which is what the button promises. */}
-            {uhd && (
-              <button
-                type="button"
-                className="btn btn-sm btn-ghost"
-                disabled={blocked}
-                title={t('images.uhdHint', { width: uhd.width, height: uhd.height })}
-                onClick={() => void draw(uhd.recipe, 'uhd')}
-              >
-                {busy === 'uhd'
-                  ? t('images.redrawing')
-                  : `${t('images.uhd')} ${formatNumber(uhd.width)}×${formatNumber(uhd.height)}`}
-              </button>
-            )}
             <button
               type="button"
               className="btn btn-sm btn-ghost"
@@ -1018,7 +1389,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
             {/* Stop appears beside the buttons it stops, and only while one is running: a
                 draw from the editor gets its Stop on the editor's own button instead, so
                 there is never a Stop for a draw it cannot reach. */}
-            {(busy === 'same' || busy === 'new' || busy === 'fhd' || busy === 'uhd') && (
+            {(busy === 'same' || busy === 'new') && (
               <button
                 type="button"
                 className="btn btn-sm btn-danger"
@@ -1031,6 +1402,27 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
           </>
         )}
       </figcaption>
+      {/* The Enlarge form, under the caption it belongs to. It is a form about *this*
+          picture, and what it produces lands beside it on the same message. */}
+      {enlarge && pixels ? (
+        <EnlargePanel
+          width={pixels.width}
+          height={pixels.height}
+          recipe={recipe}
+          status={upscaler}
+          defaultMethod={imageSettings?.upscaleDefaultMethod ?? 'lanczos'}
+          defaultSharpen={imageSettings?.upscaleSharpen ?? 0.25}
+          initialTarget={enlarge}
+          busy={enlarging}
+          onClose={() => setEnlarge(null)}
+          onRun={(next) => void runEnlarge(next)}
+          onStop={
+            enlargingMethod === 'redraw' || enlargingMethod === 'esrgan'
+              ? () => void stop()
+              : undefined
+          }
+        />
+      ) : null}
       {/* The editor sits inside the figure, under the caption it belongs to: it is a form
           about *this* picture, and a variation or a Draw from it lands beside it. */}
       {editing && draft && (

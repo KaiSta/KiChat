@@ -186,6 +186,12 @@ export namespace config {
 	    hiresScale: number;
 	    hiresDenoise: number;
 	    saveFolder: string;
+	    upscalerEnabled: boolean;
+	    upscaleDefaultMethod: string;
+	    upscaleSharpen: number;
+	    esrganBinary: string;
+	    esrganModel: string;
+	    esrganTile: number;
 	    kind: string;
 	    startWithApp: boolean;
 	    cliBinary: string;
@@ -224,6 +230,12 @@ export namespace config {
 	        this.hiresScale = source["hiresScale"];
 	        this.hiresDenoise = source["hiresDenoise"];
 	        this.saveFolder = source["saveFolder"];
+	        this.upscalerEnabled = source["upscalerEnabled"];
+	        this.upscaleDefaultMethod = source["upscaleDefaultMethod"];
+	        this.upscaleSharpen = source["upscaleSharpen"];
+	        this.esrganBinary = source["esrganBinary"];
+	        this.esrganModel = source["esrganModel"];
+	        this.esrganTile = source["esrganTile"];
 	        this.kind = source["kind"];
 	        this.startWithApp = source["startWithApp"];
 	        this.cliBinary = source["cliBinary"];
@@ -507,6 +519,26 @@ export namespace images {
 	        this.accelerator = source["accelerator"];
 	        this.asset = source["asset"];
 	        this.noteKey = source["noteKey"];
+	    }
+	}
+	export class UpscaleRequest {
+	    target: string;
+	    longSide: number;
+	    method: string;
+	    model: string;
+	    sharpen: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpscaleRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.target = source["target"];
+	        this.longSide = source["longSide"];
+	        this.method = source["method"];
+	        this.model = source["model"];
+	        this.sharpen = source["sharpen"];
 	    }
 	}
 
@@ -1171,6 +1203,32 @@ export namespace main {
 	        this.interruptError = source["interruptError"];
 	    }
 	}
+	export class UpscalerInstall {
+	    busy: boolean;
+	    phase: string;
+	    done: number;
+	    total: number;
+	    error: string;
+	    unsupported: string;
+	    size: number;
+	    version: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpscalerInstall(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.busy = source["busy"];
+	        this.phase = source["phase"];
+	        this.done = source["done"];
+	        this.total = source["total"];
+	        this.error = source["error"];
+	        this.unsupported = source["unsupported"];
+	        this.size = source["size"];
+	        this.version = source["version"];
+	    }
+	}
 
 }
 
@@ -1344,6 +1402,32 @@ export namespace runtime {
 
 export namespace store {
 	
+	export class Derivation {
+	    sourceAttachmentId: string;
+	    sourceWidth?: number;
+	    sourceHeight?: number;
+	    method: string;
+	    model?: string;
+	    scale?: number;
+	    sharpen?: number;
+	    durationMs?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Derivation(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceAttachmentId = source["sourceAttachmentId"];
+	        this.sourceWidth = source["sourceWidth"];
+	        this.sourceHeight = source["sourceHeight"];
+	        this.method = source["method"];
+	        this.model = source["model"];
+	        this.scale = source["scale"];
+	        this.sharpen = source["sharpen"];
+	        this.durationMs = source["durationMs"];
+	    }
+	}
 	export class GenerationRecipe {
 	    prompt: string;
 	    sourcePrompt?: string;
@@ -1402,6 +1486,7 @@ export namespace store {
 	    createdAt: any;
 	    savedPath?: string;
 	    generation?: GenerationRecipe;
+	    derivation?: Derivation;
 	
 	    static createFrom(source: any = {}) {
 	        return new Attachment(source);
@@ -1425,6 +1510,7 @@ export namespace store {
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	        this.savedPath = source["savedPath"];
 	        this.generation = this.convertValues(source["generation"], GenerationRecipe);
+	        this.derivation = this.convertValues(source["derivation"], Derivation);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1586,6 +1672,7 @@ export namespace store {
 		    return a;
 		}
 	}
+	
 	export class Document {
 	    id: string;
 	    attachmentId: string;
@@ -1757,6 +1844,31 @@ export namespace store {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace tools {
+	
+	export class UpscalerStatus {
+	    enabled: boolean;
+	    available: boolean;
+	    path: string;
+	    models: string[];
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpscalerStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.available = source["available"];
+	        this.path = source["path"];
+	        this.models = source["models"];
+	        this.error = source["error"];
+	    }
 	}
 
 }

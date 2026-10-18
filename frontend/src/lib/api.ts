@@ -104,6 +104,12 @@ export namespace main {
   export type ImageCache = Plain<Gen.main.ImageCache>
   /** What clearing the unsaved pictures removed. */
   export type ImageCacheClear = Plain<Gen.main.ImageCacheClear>
+  /**
+   * The state of the one download the app can do for the neural upscaler: which archive
+   * this machine would fetch (size, version), why there is none when there is none, and the
+   * progress while one is running.
+   */
+  export type UpscalerInstall = Plain<Gen.main.UpscalerInstall>
 }
 
 export namespace research {
@@ -112,10 +118,17 @@ export namespace research {
   export type ScrapeResult = Plain<Gen.research.ScrapeResult>
 }
 
+export namespace tools {
+  /** Whether the neural upscaler is switched on and where its program is. */
+  export type UpscalerStatus = Plain<Gen.tools.UpscalerStatus>
+}
+
 export namespace store {
   export type Attachment = Plain<Gen.store.Attachment>
   /** What a picture this app drew was made with, so it can be drawn again. */
   export type GenerationRecipe = Plain<Gen.store.GenerationRecipe>
+  /** How an enlarged copy was derived from another attachment. */
+  export type Derivation = Plain<Gen.store.Derivation>
   export type Chat = Plain<Gen.store.Chat>
   export type Chunk = Plain<Gen.store.Chunk>
   export type Compaction = Plain<Gen.store.Compaction>

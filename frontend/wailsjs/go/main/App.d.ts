@@ -5,8 +5,10 @@ import {store} from '../models';
 import {chat} from '../models';
 import {llm} from '../models';
 import {config} from '../models';
+import {tools} from '../models';
 import {runtime} from '../models';
 import {research} from '../models';
+import {images} from '../models';
 
 export function ActiveGenerations():Promise<Array<string>>;
 
@@ -56,7 +58,13 @@ export function GetSecretStatus():Promise<main.SecretStatus>;
 
 export function GetSettings():Promise<config.Settings>;
 
+export function GetUpscalerInstall():Promise<main.UpscalerInstall>;
+
+export function GetUpscalerStatus():Promise<tools.UpscalerStatus>;
+
 export function InstallLlamaRuntime(arg1:string,arg2:string):Promise<void>;
+
+export function InstallUpscaler():Promise<void>;
 
 export function ListChats(arg1:boolean):Promise<Array<store.Chat>>;
 
@@ -83,6 +91,8 @@ export function PickManagedModelFile(arg1:string):Promise<string>;
 export function PickModelFolder(arg1:string):Promise<string>;
 
 export function PickSaveFolder():Promise<string>;
+
+export function PickUpscalerBinary(arg1:string):Promise<string>;
 
 export function PreviewSystemPrompt(arg1:string):Promise<string>;
 
@@ -146,6 +156,10 @@ export function TestBraveKey(arg1:string):Promise<research.SearchOutcome>;
 
 export function TestImageBackend():Promise<string>;
 
+export function TestUpscaler():Promise<string>;
+
 export function UnresolvedPromptVars(arg1:string):Promise<Array<string>>;
 
 export function UpdateChat(arg1:store.Chat):Promise<store.Chat>;
+
+export function UpscaleAttachment(arg1:string,arg2:images.UpscaleRequest):Promise<store.Attachment>;

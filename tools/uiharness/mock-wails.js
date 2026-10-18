@@ -733,6 +733,40 @@ Verfügbare Tools: {{tool_list}}`,
   // The caption switch has three states and only one row, so the fixture offers the two
   // that render differently: `?caption=auto` and `?caption=model`.
   const captionMode = new URLSearchParams(location.search).get('caption')
+  // `?upscale=esrgan` renders the neural method as usable; `?upscale=esrgan&missing=1`
+  // (or `?upscaler=missing`) is the state that matters most in the panel — switched on,
+  // no program found — because it is the one a user can actually fix. Two spellings of
+  // the same switch, because the flag is written one way in the docs and was first
+  // implemented the other; reading both is cheaper than making a reader discover which.
+  const search = new URLSearchParams(location.search)
+  const upscaleMethod = search.get('upscale')
+  const upscalerParam = search.get('upscaler')
+  // `let`, not `const`: the download the panel can do itself ends with the switch on and a
+  // program in place, and the mock follows that — otherwise the state right after installing
+  // would be the one state the harness could never show.
+  let upscalerEnabled =
+    upscaleMethod === 'esrgan' || upscalerParam === 'on' || upscalerParam === 'missing'
+  let upscalerMissing =
+    upscalerParam === 'missing' || (upscaleMethod === 'esrgan' && search.get('missing') === '1')
+  // The two states of the download row that render differently: `?upscaler=install` is a
+  // machine the archive can be fetched for (button, size, progress), and
+  // `?upscaler=noarchive` is one where upstream publishes nothing, so the row says so where
+  // the button would be. Neither switches the neural method on: that is the point of the
+  // button, and `?upscaler=on` remains the fixture for an installation that already works.
+  const upscalerNoArchive = upscalerParam === 'noarchive'
+  let upscalerInstall = {
+    busy: false,
+    phase: '',
+    done: 0,
+    total: 46931474,
+    error: '',
+    unsupported: upscalerNoArchive ? 'linux/arm64' : '',
+    size: upscalerNoArchive ? 0 : 46931474,
+    version: '20220424',
+  }
+  // `&upscalehold=1` is the run that has to be stopped: minutes on a small card, a row with
+  // no counter in it, and a Stop that is the only control on offer.
+  const upscaleHold = search.get('upscalehold') === '1'
   const captioning = imagesLocal && (captionMode === 'auto' || captionMode === 'model' || captionMode === 'off')
     ? captionMode
     : ''
@@ -914,6 +948,14 @@ Verfügbare Tools: {{tool_list}}`,
       hiresEnabled: imagesPinned,
       hiresScale: imagesPinned ? 1.5 : 0,
       hiresDenoise: imagesPinned ? 0.4 : 0,
+      // Enlarging. The resampler needs no setup; `?upscaler=on` is the neural state,
+      // and `?upscaler=missing` is the one a user can fix.
+      upscalerEnabled,
+      upscaleDefaultMethod: 'lanczos',
+      upscaleSharpen: 0.25,
+      esrganBinary: upscalerEnabled && !upscalerMissing ? '/opt/realesrgan-ncnn-vulkan' : '',
+      esrganModel: 'realesrgan-x4plus',
+      esrganTile: 0,
       saveFolder: '/home/user/Pictures',
       // The CLI kind's own fields. Empty here, because this fixture is the server
       // backend; `?images=cli` fills them in and switches the kind, which is what
@@ -1549,6 +1591,31 @@ Verfügbare Tools: {{tool_list}}`,
    * hires draw runs its step bar once per pass, numbered from 1 again, which is why the row
    * says "Pass 2 of 2" rather than looking like it lost ground.
    */
+  /**
+   * Pretends a neural enlargement is under way: one phase report, no counter, and a row
+   * that stays until Stop.
+   *
+   * It shares `pendingDraw` with a draw on purpose — that is the real shape of it. One
+   * picture operation at a time, found by the source attachment's id, ended by the same
+   * Stop. Nothing is filed when it is stopped, which is what the real one does too: the
+   * copy only exists once the program has answered.
+   */
+  function beginUpscale({ id, chatId, reject }) {
+    clearDraw(pendingDraw)
+    const state = { id, chatId, reject, timer: null }
+    pendingDraw = state
+    emit('image:progress', {
+      drawId: id,
+      chatId,
+      step: 0,
+      steps: 0,
+      pass: 1,
+      passes: 1,
+      phase: 'upscaling',
+    })
+    return state
+  }
+
   function beginDraw({ id, chatId, steps, passes = 1, reject, toolCall, finish }) {
     clearDraw(pendingDraw)
     const state = { id, chatId, steps, pass: 1, passes, step: 0, reject, toolCall, timer: null }
@@ -3216,6 +3283,99 @@ Verfügbare Tools: {{tool_list}}`,
         })
       }
       return Promise.resolve(fileRedraw())
+    },
+    // The fast path. It files a derived copy rather than a draw, and it says so in the
+    // attachment's own `derivation`, which is what the card reads to print the method and
+    // the scale. The source is deliberately left untouched: an enlargement is a second
+    // picture, not a replacement.
+    //
+    // `?upscalehold=1` is the other half of that: a neural run that is still going. It
+    // reports the one phase the backend reports — the program's own output is unreadable,
+    // so there is no step counter to fake — and then stays pending until StopImageDraw,
+    // which is the only way to see the row and the Stop beside it at all.
+    UpscaleAttachment: (id, request) => {
+      console.log('[harness] UpscaleAttachment', id, JSON.stringify(request))
+      const target =
+        request?.target === 'fhd'
+          ? 1920
+          : request?.target === 'uhd'
+            ? 3840
+            : Number(request?.longSide) || 2048
+      const source = [...messages.values()]
+        .flat()
+        .flatMap((m) => m.attachments ?? [])
+        .find((a) => a.id === id)
+      if (!source) return Promise.reject(new Error('Anhang nicht gefunden'))
+      if (upscaleHold) {
+        console.warn('[harness] upscalehold injection active: the enlargement stays pending until Stop is pressed')
+        return new Promise((_resolve, reject) => {
+          beginUpscale({ id, chatId: source.chatId, reject })
+        })
+      }
+      const made = {
+        ...source,
+        id: nextId('att'),
+        filename: uniqueImageName(`enlarged-${target}w.png`),
+        generation: undefined,
+        derivation: {
+          sourceAttachmentId: id,
+          sourceWidth: 512,
+          sourceHeight: 512,
+          method: request?.method || 'lanczos',
+          model: request?.model || '',
+          scale: target / 512,
+          sharpen: request?.sharpen || 0,
+          durationMs: 900,
+        },
+      }
+      drawnImageIds.add(made.id)
+      const host = messages.get(made.chatId)?.find((m) => (m.attachments ?? []).some((a) => a.id === id))
+      if (host) {
+        host.attachments = [...host.attachments, made]
+        emit('chat:attachments', { chatId: made.chatId })
+      } else {
+        console.warn('[harness] UpscaleAttachment found no message holding', id)
+      }
+      return Promise.resolve(made)
+    },
+    GetUpscalerStatus: () =>
+      Promise.resolve({
+        enabled: upscalerEnabled,
+        available: upscalerEnabled && !upscalerMissing,
+        path: upscalerEnabled && !upscalerMissing ? '/opt/realesrgan-ncnn-vulkan' : '',
+        models: ['realesrgan-x4plus', 'realesrgan-x4plus-anime'],
+        error:
+          upscalerEnabled && upscalerMissing
+            ? 'Real-ESRGAN ist nicht eingerichtet — Pfad in den Einstellungen wählen'
+            : '',
+      }),
+    TestUpscaler: () =>
+      upscalerEnabled && !upscalerMissing
+        ? Promise.resolve('/opt/realesrgan-ncnn-vulkan')
+        : Promise.reject(new Error('Real-ESRGAN ist nicht eingerichtet')),
+    PickUpscalerBinary: () => Promise.resolve('/opt/realesrgan-ncnn-vulkan'),
+    GetUpscalerInstall: () => Promise.resolve({ ...upscalerInstall }),
+    // Four ticks of a quarter of the archive, then the state a real install leaves: the
+    // switch on and the program found. Slow enough (400 ms a tick) that the progress row is
+    // readable, and it ends by itself so no fixture has to be told when to stop.
+    InstallUpscaler: () => {
+      if (upscalerInstall.unsupported) {
+        return Promise.reject(new Error(upscalerInstall.unsupported))
+      }
+      upscalerInstall = { ...upscalerInstall, busy: true, phase: 'downloading', done: 0, error: '' }
+      let step = 0
+      const timer = setInterval(() => {
+        step += 1
+        if (step < 4) {
+          upscalerInstall = { ...upscalerInstall, done: (upscalerInstall.total * step) / 4 }
+          return
+        }
+        clearInterval(timer)
+        upscalerInstall = { ...upscalerInstall, busy: false, phase: 'done', done: upscalerInstall.total }
+        upscalerEnabled = true
+        upscalerMissing = false
+      }, 400)
+      return Promise.resolve()
     },
     // The two answers the UI branches on, and they are not the same sentence: a draw that
     // was running is over (the awaiting call rejects, and the view reports a stop), while

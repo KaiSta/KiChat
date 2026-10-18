@@ -98,8 +98,20 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetUpscalerInstall() {
+  return window['go']['main']['App']['GetUpscalerInstall']();
+}
+
+export function GetUpscalerStatus() {
+  return window['go']['main']['App']['GetUpscalerStatus']();
+}
+
 export function InstallLlamaRuntime(arg1, arg2) {
   return window['go']['main']['App']['InstallLlamaRuntime'](arg1, arg2);
+}
+
+export function InstallUpscaler() {
+  return window['go']['main']['App']['InstallUpscaler']();
 }
 
 export function ListChats(arg1) {
@@ -152,6 +164,10 @@ export function PickModelFolder(arg1) {
 
 export function PickSaveFolder() {
   return window['go']['main']['App']['PickSaveFolder']();
+}
+
+export function PickUpscalerBinary(arg1) {
+  return window['go']['main']['App']['PickUpscalerBinary'](arg1);
 }
 
 export function PreviewSystemPrompt(arg1) {
@@ -278,10 +294,18 @@ export function TestImageBackend() {
   return window['go']['main']['App']['TestImageBackend']();
 }
 
+export function TestUpscaler() {
+  return window['go']['main']['App']['TestUpscaler']();
+}
+
 export function UnresolvedPromptVars(arg1) {
   return window['go']['main']['App']['UnresolvedPromptVars'](arg1);
 }
 
 export function UpdateChat(arg1) {
   return window['go']['main']['App']['UpdateChat'](arg1);
+}
+
+export function UpscaleAttachment(arg1, arg2) {
+  return window['go']['main']['App']['UpscaleAttachment'](arg1, arg2);
 }
