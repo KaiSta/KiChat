@@ -391,14 +391,32 @@ func (s *Store) CreateAttachment(a Attachment) error {
 	if err != nil {
 		return fmt.Errorf("Rezept von %s ablegen: %w", a.Filename, err)
 	}
+	derivation, err := marshalDerivation(a.Derivation)
+	if err != nil {
+		return fmt.Errorf("Herkunft von %s ablegen: %w", a.Filename, err)
+	}
 	_, err = s.db.Exec(`
 INSERT INTO attachments (id,chat_id,message_id,kind,filename,mime,size_bytes,
-  sha256,pages,token_estimate,placement,document_id,warning,created_at,generation_json)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  sha256,pages,token_estimate,placement,document_id,warning,created_at,generation_json,
+  derivation_json)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.ChatID, a.MessageID, a.Kind, a.Filename, a.Mime, a.SizeBytes,
 		a.SHA256, a.Pages, a.TokenEstimate, a.Placement, a.DocumentID,
-		a.Warning, millis(a.CreatedAt), generation)
+		a.Warning, millis(a.CreatedAt), generation, derivation)
 	return err
+}
+
+// marshalDerivation encodes an optional derivation, with the same empty-string spelling
+// marshalRecipe uses: a nil pointer is "this picture was not derived from anything".
+func marshalDerivation(d *Derivation) (string, error) {
+	if d == nil {
+		return "", nil
+	}
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 // marshalRecipe encodes an optional generation recipe. An empty string is "there is
@@ -488,15 +506,15 @@ func (s *Store) PruneExpiredCaches() (int64, error) {
 
 const attachmentColumns = `id,chat_id,message_id,kind,filename,mime,size_bytes,
   sha256,pages,token_estimate,placement,document_id,warning,created_at,generation_json,
-  saved_path`
+  saved_path,derivation_json`
 
 func scanAttachment(row interface{ Scan(...any) error }) (Attachment, error) {
 	var a Attachment
 	var created int64
-	var generation string
+	var generation, derivation string
 	err := row.Scan(&a.ID, &a.ChatID, &a.MessageID, &a.Kind, &a.Filename, &a.Mime,
 		&a.SizeBytes, &a.SHA256, &a.Pages, &a.TokenEstimate, &a.Placement,
-		&a.DocumentID, &a.Warning, &created, &generation, &a.SavedPath)
+		&a.DocumentID, &a.Warning, &created, &generation, &a.SavedPath, &derivation)
 	if err != nil {
 		return Attachment{}, err
 	}
@@ -512,6 +530,16 @@ func scanAttachment(row interface{ Scan(...any) error }) (Attachment, error) {
 			return Attachment{}, fmt.Errorf("Rezept von Anhang %s lesen: %w", a.ID, err)
 		}
 		a.Generation = &recipe
+	}
+	// A derivation is decoded by the same rule, and for the same reason: a value this
+	// app wrote that no longer parses means the row was edited elsewhere, and reporting
+	// the picture as "not derived" would lose the only record of where it came from.
+	if strings.TrimSpace(derivation) != "" {
+		var derived Derivation
+		if err := json.Unmarshal([]byte(derivation), &derived); err != nil {
+			return Attachment{}, fmt.Errorf("Herkunft von Anhang %s lesen: %w", a.ID, err)
+		}
+		a.Derivation = &derived
 	}
 	return a, nil
 }

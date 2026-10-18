@@ -718,7 +718,7 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 	// dropping only one leaves an `ALTER TABLE ... ADD COLUMN` in the runner failing on a
 	// column that is already there, which is how this test broke when the second one
 	// arrived. A column added by migration N is dropped here in the same commit that adds it.
-	for _, column := range []string{"generation_json", "saved_path"} {
+	for _, column := range []string{"generation_json", "saved_path", "derivation_json"} {
 		if _, err := st.DB().Exec(`ALTER TABLE attachments DROP COLUMN ` + column); err != nil {
 			t.Fatalf("drop %s to build the older schema: %v", column, err)
 		}

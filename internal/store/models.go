@@ -91,6 +91,34 @@ type Attachment struct {
 	// prompt, and offering to redraw one would be offering to draw something
 	// unrelated to it.
 	Generation *GenerationRecipe `json:"generation,omitempty"`
+	// Derivation records that this picture was enlarged from another attachment. It is
+	// not a generation recipe: an upscaled copy has no prompt of its own, and giving it
+	// one would make Redraw offer to invent a different picture. Keeping the two apart
+	// is what lets an upscaled photo say where it came from without pretending it was
+	// drawn.
+	Derivation *Derivation `json:"derivation,omitempty"`
+}
+
+// Derivation is how a derived picture was made: which attachment it came from, by
+// which method, and at what scale.
+//
+// It is stored rather than inferred so the card can answer "what is this, and why is
+// it larger?" after a restart, and so two enlargements of one picture can be told
+// apart. The source id is the attachment, not a filename: names are made unique per
+// chat and a file may have been renamed since.
+type Derivation struct {
+	SourceAttachmentID string `json:"sourceAttachmentId"`
+	SourceWidth        int    `json:"sourceWidth,omitempty"`
+	SourceHeight       int    `json:"sourceHeight,omitempty"`
+	// Method is "lanczos" or "esrgan".
+	Method string `json:"method"`
+	// Model is the Real-ESRGAN weights, empty for a resample.
+	Model string `json:"model,omitempty"`
+	// Scale is the enlargement per side, recorded from the pixels rather than from the
+	// request so a capped target reports what really happened.
+	Scale      float64 `json:"scale,omitempty"`
+	Sharpen    float64 `json:"sharpen,omitempty"`
+	DurationMs int64   `json:"durationMs,omitempty"`
 }
 
 // GenerationRecipe is what one text-to-image generation was made with, recorded so the

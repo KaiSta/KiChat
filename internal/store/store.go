@@ -260,6 +260,13 @@ CREATE TABLE IF NOT EXISTS counters (
 	// a database is already at, so an existing installation runs this entry and nothing
 	// earlier.
 	`ALTER TABLE attachments ADD COLUMN saved_path TEXT NOT NULL DEFAULT ''`,
+	// 6: how an enlarged picture was derived from another one.
+	//
+	// A separate column rather than a field in generation_json, because the two answer
+	// different questions: generation_json is a prompt a redraw replays, and an upscale has
+	// no prompt of its own. Its own migration for the same reason 4 and 5 are: an existing
+	// database resumes here and only runs this entry.
+	`ALTER TABLE attachments ADD COLUMN derivation_json TEXT NOT NULL DEFAULT ''`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a
