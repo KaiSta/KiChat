@@ -201,7 +201,7 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	}
 	for i, img := range result.Kept() {
 		name := uniqueName(used, imageFilename(prompt, i, img.Ext))
-		if _, err := s.storeGeneratedImage(chatID, messageID, name, img, &recipe); err != nil {
+		if _, err := s.storeGeneratedImage(chatID, messageID, name, img, &recipe, nil); err != nil {
 			// The picture is already drawn and paid for, so an error here loses it
 			// entirely. Reporting the failure is still right: silently returning a
 			// cheerful result would leave the user with a tool card claiming a
@@ -382,7 +382,7 @@ func (s *Service) imageSettings() config.ImageSettings {
 // image attachment back into an image part of the request, so a picture KiChat
 // generated can be handed to a vision model on a later turn without a single line
 // of new plumbing — and the frontend already renders a message's attachments.
-func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img images.Image, recipe *store.GenerationRecipe) (store.Attachment, error) {
+func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img images.Image, recipe *store.GenerationRecipe, derivation *store.Derivation) (store.Attachment, error) {
 	if s.Store == nil {
 		return store.Attachment{}, fmt.Errorf("kein Speicher verfügbar")
 	}
@@ -404,6 +404,9 @@ func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img im
 		// Nil for a picture with no recorded recipe, which is what keeps an uploaded
 		// photo from offering to redraw itself.
 		Generation: recipe,
+		// Nil for a picture that was not enlarged from another one. The two fields are
+		// exclusive in practice: an upscale has provenance, a draw has a prompt.
+		Derivation: derivation,
 	}
 	document := store.Document{
 		ID:           uuid.NewString(),
@@ -604,7 +607,7 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 	var first store.Attachment
 	for i, img := range result.Kept() {
 		name := uniqueName(used, redrawFilename(req.Prompt, effective.Seed, img.Ext, i))
-		attachment, err := s.storeGeneratedImage(source.ChatID, source.MessageID, name, img, &effective)
+		attachment, err := s.storeGeneratedImage(source.ChatID, source.MessageID, name, img, &effective, nil)
 		if err != nil {
 			return store.Attachment{}, err
 		}
