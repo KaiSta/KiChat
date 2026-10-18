@@ -453,6 +453,40 @@ func TestCLIHealthNamesWhatIsMissing(t *testing.T) {
 		}
 	})
 
+	t.Run("the pipeline needs a text encoder", func(t *testing.T) {
+		binary := fakeCLI(t, cliRecorder)
+		diffusion := filepath.Join(dir, "klein.safetensors")
+		vae := filepath.Join(dir, "flux2_ae.safetensors")
+		for _, path := range []string{diffusion, vae} {
+			if err := os.WriteFile(path, []byte("weights"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := NewCLI("images", "sd-cli", binary,
+			ModelFiles{DiffusionModel: diffusion, VAE: vae},
+			Options{Pipeline: PipelineFor(PipelineFlux3Klein, "")}).Health(t.Context())
+		if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "Text-Encoder") {
+			t.Errorf("err = %v, want the missing text encoder named", err)
+		}
+	})
+
+	t.Run("the pipeline needs a VAE", func(t *testing.T) {
+		binary := fakeCLI(t, cliRecorder)
+		diffusion := filepath.Join(dir, "klein-2.safetensors")
+		llm := filepath.Join(dir, "qwen3-vl-4b.gguf")
+		for _, path := range []string{diffusion, llm} {
+			if err := os.WriteFile(path, []byte("weights"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := NewCLI("images", "sd-cli", binary,
+			ModelFiles{DiffusionModel: diffusion, LLM: llm},
+			Options{Pipeline: PipelineFor(PipelineFlux3Klein, "")}).Health(t.Context())
+		if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "VAE") {
+			t.Errorf("err = %v, want the missing VAE named", err)
+		}
+	})
+
 	t.Run("a working setup", func(t *testing.T) {
 		binary := fakeCLI(t, cliRecorder)
 		model := filepath.Join(dir, "fox.gguf")
@@ -808,6 +842,7 @@ if [ "$1" = "-h" ]; then
   echo "  --hires-width <n>         target width of the second pass"
   echo "  --hires-height <n>        target height of the second pass"
   echo "  --hires-denoising-strength <n>  denoise strength of the second pass"
+  echo "  --hires-upscaler <s>      highres fix upscaler"
   echo "  --vae-tiling              decode the latent in tiles"
   echo "  --vae-tile-size <n>       tile size for the VAE"
   exit 0
@@ -896,11 +931,73 @@ func TestCLIAsksForTheSecondPassAndTheVaeSwitches(t *testing.T) {
 	for _, want := range []string{
 		"--hires", "--hires-scale 1.5", "--hires-denoising-strength 0.4",
 		"--hires-width 1152", "--hires-height 768",
+		// A pixel-space resample rather than the program's latent default, which decodes to
+		// ghosted edges on Qwen-Image 2.1 (IMAGES.md, "The upscaler is not the latent").
+		"--hires-upscaler Lanczos",
 		"--vae-tiling", "--vae-tile-size 512",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("the command line lacks %q:\n%s", want, args)
 		}
+	}
+}
+
+// TestTheUsersOwnUpscalerWins: the second pass asks for Lanczos by default, and a user who
+// wrote their own choice into Extra gets theirs — once, with their value. Appending ours
+// after it would silently overrule a decision this app has no control for.
+func TestTheUsersOwnUpscalerWins(t *testing.T) {
+	binary := fakeCLI(t, cliWithHires)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"},
+		Options{Extra: []string{"--hires-upscaler", "Latent (bicubic)"}})
+
+	if _, err := client.Generate(t.Context(), Request{
+		Prompt: "a red fox",
+		Width:  768, Height: 512,
+		Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	args := strings.Join(argsOf(t, binary), " ")
+	if !strings.Contains(args, "--hires-upscaler Latent (bicubic)") {
+		t.Errorf("the user's own upscaler is missing:\n%s", args)
+	}
+	if strings.Contains(args, "--hires-upscaler Lanczos") || strings.Count(args, "--hires-upscaler") != 1 {
+		t.Errorf("the client added an upscaler beside the user's:\n%s", args)
+	}
+}
+
+// TestABuildWithoutTheUpscalerStillDraws: the flag is newer than the second pass itself, and
+// an unknown option fails the whole run on this backend — so it is asked for, not assumed.
+// A build that does not list it keeps the program's own default and still draws.
+func TestABuildWithoutTheUpscalerStillDraws(t *testing.T) {
+	binary := fakeCLI(t, `
+if [ "$1" = "-h" ]; then
+  echo "usage: sd-cli [options]"
+  echo "  --hires                   enable a second sampling pass"
+  echo "  --hires-scale <n>         how much larger the output is"
+  echo "  --hires-width <n>         target width of the second pass"
+  echo "  --hires-height <n>        target height of the second pass"
+  echo "  --hires-denoising-strength <n>  denoise strength of the second pass"
+  exit 0
+fi
+`+cliRecorder)
+	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+
+	if _, err := client.Generate(t.Context(), Request{
+		Prompt: "a red fox",
+		Width:  768, Height: 512,
+		Hires: Hires{Enabled: true, Scale: 1.5, Denoise: 0.4},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	args := strings.Join(argsOf(t, binary), " ")
+	if strings.Contains(args, "--hires-upscaler") {
+		t.Errorf("the command line names an upscaler this build does not list:\n%s", args)
+	}
+	if !strings.Contains(args, "--hires") {
+		t.Errorf("the second pass was dropped with the upscaler:\n%s", args)
 	}
 }
 

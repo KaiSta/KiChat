@@ -190,6 +190,10 @@ type Options struct {
 	// it is a property of the picture, not of the setup.
 	VaeTiling   bool
 	VaeTileSize int
+	// Pipeline is the profile of the model set, resolved by the caller. Health reads it to
+	// name a missing part by role — a FLUX 3 set with no `--llm` is a text encoder away
+	// from working, and "kein Modell angegeben" would send the user to the wrong field.
+	Pipeline Pipeline
 }
 
 // CLI draws one picture per process through a local `sd-cli`.
@@ -368,6 +372,11 @@ func (c *CLI) vaeArgsConfigured() []string {
 	return args
 }
 
+// cliHiresUpscaler is what the second pass enlarges with: a picture resample, not the
+// latent one `sd-cli` defaults to. The name is the program's own spelling; see hiresArgs for
+// why it is not left to the default.
+const cliHiresUpscaler = "Lanczos"
+
 // hiresArgs is the second sampling pass, passed only when this build's help lists it.
 //
 // Unlike the VAE switches this is *refused* rather than dropped when the build cannot do it:
@@ -397,6 +406,14 @@ func (c *CLI) hiresArgs(ctx context.Context, binary string, req Request) ([]stri
 	// help also invented it would notice.
 	if c.supports(ctx, binary, "--hires-denoising-strength") {
 		args = append(args, "--hires-denoising-strength", strconv.FormatFloat(h.Denoise, 'f', -1, 64))
+	}
+	// What the second pass enlarges. The program's own default is `Latent`, which resamples
+	// the latent and decodes it; on Qwen-Image 2.1 at this app's 0.4 denoise that decodes to
+	// translucent ghosts of every high-contrast edge, and a pixel-space resample does not
+	// (IMAGES.md, "The upscaler is not the latent"). The user's own `--hires-upscaler` wins, as every
+	// other choice in Extra does.
+	if !c.userPicksHiresUpscaler() && c.supports(ctx, binary, "--hires-upscaler") {
+		args = append(args, "--hires-upscaler", cliHiresUpscaler)
 	}
 	// The target, when the base size is known and the build lists both options. Without it
 	// `--hires-scale` leaves the rounding to the program, while `Request.OutputSize` has
@@ -438,6 +455,18 @@ func (c *CLI) previewSupport(ctx context.Context, binary string) bool {
 		return false
 	}
 	return helpLists(help, "--preview")
+}
+
+// userPicksHiresUpscaler reports whether the user's own arguments already choose the
+// upscaler. Their choice stays theirs: this app has no control for it, and appending ours
+// after theirs would silently overrule the command line they wrote.
+func (c *CLI) userPicksHiresUpscaler() bool {
+	for _, arg := range c.opts.Extra {
+		if arg == "--hires-upscaler" || strings.HasPrefix(arg, "--hires-upscaler=") {
+			return true
+		}
+	}
+	return false
 }
 
 // userPicksPreview reports whether the user's own arguments already decide the preview.
@@ -511,6 +540,20 @@ func (c *CLI) Health(ctx context.Context) error {
 	}
 	if c.files.Empty() {
 		return fmt.Errorf("%w: kein Modell angegeben", ErrUnavailable)
+	}
+	// The pipeline names the parts it needs, so the failure names the part rather than the
+	// option: a user who filled in `--diffusion-model` and stopped gets "a text encoder"
+	// instead of a draw that fails after the model has loaded.
+	if p := c.opts.Pipeline; p.Encoder != EncoderAny {
+		if strings.TrimSpace(c.files.DiffusionModel) == "" && strings.TrimSpace(c.files.Model) == "" {
+			return fmt.Errorf("%w: %s braucht ein Diffusionsmodell (--diffusion-model)", ErrUnavailable, p.Name)
+		}
+		if strings.TrimSpace(c.files.DiffusionModel) != "" && p.Encoder == EncoderLLM && strings.TrimSpace(c.files.LLM) == "" {
+			return fmt.Errorf("%w: %s braucht einen Text-Encoder (--llm)", ErrUnavailable, p.Name)
+		}
+		if strings.TrimSpace(c.files.DiffusionModel) != "" && p.RequiresVAE && strings.TrimSpace(c.files.VAE) == "" {
+			return fmt.Errorf("%w: %s braucht einen VAE (--vae)", ErrUnavailable, p.Name)
+		}
 	}
 	if err := c.modelContradiction(); err != nil {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
@@ -603,7 +646,7 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	if err != nil {
 		return Result{}, err
 	}
-	prompt := strings.TrimSpace(req.Prompt)
+	prompt := req.EffectivePrompt()
 	if prompt == "" {
 		return Result{}, errors.New("der Bild-Prompt ist leer")
 	}

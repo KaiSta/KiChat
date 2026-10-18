@@ -648,8 +648,9 @@ Each backend spells the pass its own way:
   `hr_second_pass_steps` is deliberately not sent (its own default of 0 means "as many as the
   first pass", which is what this app wants) and neither is the upscaler, so the server keeps
   the one its user configured.
-- **`sd-cli`** gets `--hires`, `--hires-scale`, `--hires-denoising-strength`, and
-  `--hires-width`/`--hires-height` when its `-h` lists them. The denoise option is spelled
+- **`sd-cli`** gets `--hires`, `--hires-scale`, `--hires-denoising-strength`,
+  `--hires-upscaler Lanczos` and `--hires-width`/`--hires-height` when its `-h` lists them
+  (the upscaler is the one below, and the user's own `--hires-upscaler` in Extra wins). The denoise option is spelled
   `--hires-denoising-strength` in the program's own option table, not `--hires-denoise`: an
   unknown flag fails the whole run, so a short invention here would turn every second-pass
   draw into an error. The width/height pair is the same `OutputSize` target as the HTTP route,
@@ -737,6 +738,31 @@ arguments, which keep the last word. Nothing is stored: it is a property of the 
 draw that fits keeps the build's own defaults. The managed server cannot do it — its flags
 are fixed at start and belong to `ServerKey` — so a large picture there still needs the
 stored switch, and the row still says a change is a restart.
+
+**The upscaler is not the latent.** The second pass starts from an enlarged first picture,
+and *where* that enlargement happens decides whether the pass is clean or ghosted.
+`sd-cli`'s own default is `--hires-upscaler Latent`: the latent is interpolated and then
+decoded, so the second pass begins from an image that never existed. Measured on 2026-10-18
+with Qwen-Image 2.1 (`qwen-image-2.1-UC-Q5_K_M.gguf`, its own VAE, `Qwen3-VL-8B-Instruct`),
+480² → 960², 30 steps at the app's 0.4 denoise, one seed:
+
+| Upscaler | What the edges look like |
+| --- | --- |
+| `Latent` (the program's default) | translucent copies of the ear tip, the outline and the bolt, offset by a few pixels, with soft scalloped shells across the sky |
+| `Latent (bicubic antialiased)` | the same ghosting, a little softer — the filter is not the problem, the latent is |
+| `Lanczos` | one crisp contour, no halo, no shell |
+
+The base draw alone (960², 30 steps, no second pass, same seed) is clean, so this is not the
+checkpoint's own output: it is the second pass starting from an interpolated latent. That is
+why the app asks for `Lanczos` rather than leaving the program's default in force — a
+pixel-space resample, re-encoded and repainted, which is also what A1111-shaped front-ends
+do. The argument is not added when the user's own `--hires-upscaler` is already there, and a
+build whose `-h` does not list the option keeps its own default and still draws.
+
+**Not covered.** The HTTP kind sends neither an upscaler nor a second-pass step count —
+that is deliberate, and documented above in the A1111 bullet: the server keeps the one its
+user configured. No WebUI was running to measure whether A1111's own default has the same
+problem, so that payload is unchanged.
 
 ### Profiles: the same fields, saved under a name
 
@@ -1600,7 +1626,230 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   delete asked once with the profile's name in the sentence, let Cancel put the plain button
   back, and on the second press removed the row and cleared the selection and the name box.
 
-## 9. What it does not do yet
+## 9. The caption, because FLUX 3 was trained on one
+
+A FLUX 3 draw does not take the sentence a user typed. BFL trained the model on captions
+written by a prompt upsampler — a 9 B vision-language model they call the PUP — and their
+README says not to run the model without it: a raw prompt gives "noticeably weaker" results,
+and `--no-pup` is how their CLI spells that weaker path. The PUP's own model card says the
+model is replaceable — *"Any other LLM can do the job with the system prompts in
+`system_prompts.json`"* — and that sentence is the whole feature here: **the chat model that
+already called `generate_image` writes the caption**, so the 18.8 GB upsampler is never
+downloaded and no second model is configured.
+
+### 9.1 The prompt is BFL's, verbatim
+
+`internal/images/caption.go` holds the `t2i` prompt from
+`src/flux3/pup_prompts.json` (also published as `system_prompts.json` beside the PUP
+weights), Apache-2.0. Measured from that file: **506 words**, no backtick and no brace, so it
+lives in one raw string literal. A test pins the structural invariants — the opening sentence,
+`TARGET CANVAS`, `Output only the caption.` — rather than a hash, which any whitespace edit
+would break. Paraphrasing it is not an option: a paraphrase is a different prompt with
+different behaviour, and calling it BFL's would be a lie.
+
+The `i2i` prompt (420 words) is deliberately absent: it captions an *edit*, and a request
+has no reference image to attach until §10's `img2img` work exists. The same file's
+`t2i_bbox`/`i2i_bbox` are absent for a sharper reason — a bounding box is a **separate JSON
+file** of `[y_min, x_min, y_max, x_max]` in 0–1 in the reference CLI, not prompt syntax, and
+`sd.cpp` documents neither. A box prompt today would be a caption with coordinates in it.
+
+### 9.2 Who writes it
+
+`ImageSettings.Captioning`, four values. The empty one is **"the profile decides"**, not
+"off": a checkpoint that was trained on captions knows it, and the user should not have to.
+
+| Value | Who writes the caption | Cost |
+| --- | --- | --- |
+| `""` | the pipeline (§9.5) — `auto` for FLUX 3, nobody for every other profile | as below, per pipeline |
+| `off` | nobody, even where the profile wants one | none, and BFL's weak path |
+| `auto` | KiChat asks the turn's own model before drawing | one non-streaming completion |
+| `model` | the chat model, as the `prompt` argument of its own tool call | none, but a long argument replayed on later turns |
+
+`off` exists because it is the only value that can override a profile: "nobody chose" and "the
+user chose nothing" looked identical in the first version, which made a profile's default
+impossible to refuse.
+
+The two are exclusive and never chained: `model` after `auto` would expand an expansion. A
+request that is already caption-length (120 words, BFL's own lower bound) is passed through
+untouched in either mode, for the same reason.
+
+### 9.3 The call
+
+`generate_image` → `tools.Service.Caption` (a callback, because `tools` must not import
+`chat`) → `app.captionImage` → `chat.Caption` → `chat.Complete`. The turn's backend and model
+travel in the tool context (`tools.WithTurn`), written by the engine when it executes the call,
+because two chats can draw at once and the service outlives a turn.
+
+- Messages: system = the prompt verbatim; user = `TARGET CANVAS: W:H` and then the request.
+  The canvas line is a t2i convention — the `i2i` prompt has none.
+- Decoding: **greedy**, thinking off, **3,584** new tokens, no tools, no streaming. Greedy is a
+  zero *and* `TemperatureSet`, because `ollama.go` drops a temperature of zero unless the
+  caller said it meant it — otherwise the modelfile's temperature samples the caption.
+- `chat.Complete` returns the text channel only, so a reasoning model's analysis cannot reach
+  the backend. A model that thinks its whole budget away returns an error, not an empty prompt.
+- `CleanCaption` strips code fences, wrapping quotes, a JSON wrapper and a "Here is the
+  caption:" line, collapses newlines to one block, and refuses an empty result or more than
+  800 words. Bounds: 120 words is "already a caption"; 800 is a runaway generation, refused
+  rather than trimmed mid-sentence.
+
+Why this cannot deadlock a single-slot server: tool calls run **after** the provider's stream
+has been consumed (`generate.go`), so the caption request reaches an idle backend. That is a
+property of this loop, and it is why the same model can be both.
+
+### 9.4 What happens around the draw
+
+- A failed or empty caption **does not fail the draw**. The request is drawn as typed and the
+  tool result says the caption did not happen.
+- The recipe records the caption as `Prompt` (it is what reproduces the picture), the user's
+  words as `SourcePrompt`, and the model as `CaptionModel`. A redraw replays the caption with
+  no completion at all — and no re-expansion.
+- The caption never enters the transcript: it is a request field, not a message.
+- A `captioning` phase goes out on the draw's progress channel before step 1, so seconds of
+  silence are not read as a hang. It is a `phase` key in the `image:progress` payload, pinned by
+  `image_progress_test.go` on both sides of the bridge.
+
+**Not measured here**: how much the caption buys on a real Klein build at 16 steps. That A/B
+(one seed, raw request versus caption) is `FLUX3Plan.md`'s Phase 0, and nothing above claims a
+quality result — only the mechanism BFL says the model needs.
+
+### 9.5 The pipeline profile
+
+`internal/images/pipelines.go` turns "which model is configured" into the numbers and
+restrictions that model wants, so a FLUX 3 draw is right the moment the diffusion file is
+chosen. It is a table, not a set of branches: `Pipeline` carries `Steps`, `CFG`, `Sampler`,
+`SupportsNegative`, `SupportsHires`, `Captioning`, the `Encoder` arrangement and
+`RequiresVAE`, and nothing outside it asks whether a model is FLUX 3.
+
+| Profile | Steps / CFG / sampler | Negative | Second pass | Caption |
+| --- | --- | --- | --- | --- |
+| `flux3-klein` | 16 / 1.0 / euler | dropped *(measured inert)* | kept *(measured)* | on |
+| `flux3-klein-base` | 20 / 3.5 / euler | kept | dropped *(unmeasured)* | on |
+| `generic` (and every unrecognised file) | the build's own | kept | kept | off |
+
+The numbers are stable-diffusion.cpp's own (`docs/flux3.md`: 16 / 1.0 for the distilled
+model, 20 / 3.5 for base). `SupportsNegative: false` is the distilled checkpoint's CFG 1.0:
+a negative prompt there is sent, recorded and ignored, which reads as a broken setting rather
+than as one the model does not have — and that "ignored" is now a measurement, not an
+inference: at CFG 1.0 the same seed draws **byte-identical pixels** with and without `-n`,
+while at CFG 7 the same pair differs (the control that proves the flag was honoured at all).
+
+`SupportsHires` is where measurement changed the table. It was `false` on both FLUX 3
+profiles because a second pass had never been drawn here; the distilled one has now been
+drawn, so it is `true`. Base keeps the refusal, because no Base checkpoint exists on this
+machine and "like the other checkpoint" is exactly the assumption this field exists to
+refuse.
+
+**Resolution.** `ImageSettings.Pipeline` is empty by default: the profile is read from the
+diffusion model's own header — the tensor layout, which a rename, a re-quantisation and a
+folder name all leave alone — and the file name is consulted only when that header cannot be
+read at all. An explicit id overrides both, and `generic` is the deliberate "no profile".
+`GetImageStatus` reports the **resolved** id, name and source, and the panel prints them —
+because a miss is otherwise silent: a generic profile captions nothing and draws at the
+build's defaults, which looks like a broken feature rather than an unread file.
+
+#### How a checkpoint identifies itself
+
+`internal/images/modelmeta.go` reads the header of the file that is about to be loaded: GGUF's
+tensor table (after its key/value table) and safetensors' length-prefixed JSON keys. What was
+measured on 2026-10-18, by fetching the first megabyte of each published file with a ranged
+request and running the shipped reader over it — every row below is reproducible with
+`inspectModel` on a partial download:
+
+| File | Format | Metadata that names the model | Tensors | `ref_time_in.*` |
+| --- | --- | --- | --- | --- |
+| `flux-3-image-klein-comfy` → `flux3-image-klein-bf16.safetensors` | safetensors | `model=f3-image-small`, `dtype=bfloat16` | 359 | present |
+| … → `flux3-image-klein-base-bf16.safetensors` | safetensors | the same three keys | 357 | absent |
+| `unsloth/flux-3-image-klein-GGUF` → `flux-3-image-klein-BF16.gguf` | GGUF | `general.architecture=flux`, `model=f3-image-small` | 359 | present |
+| `unsloth/flux-3-image-klein-base-GGUF` → `…-base-BF16.gguf` | GGUF | the same two | 357 | absent |
+| `unsloth/flux-3-image-klein-base` → `model.safetensors` | safetensors | `model=f3-image-small` | 357 | absent |
+| `Abiray/flux-3-image-klein-sd-GGUF` → `flux3_image_klein_sd_Q2_K.gguf` | GGUF | **none** — 0 key/value pairs | 359 | present |
+| `webmp3/Sakura-FLUX.3-Image-Klein-GGUF` (a fine-tune) | GGUF | `general.architecture=flux` | 359 | present |
+
+Three consequences, all load-bearing:
+
+- **No metadata value says "klein".** BFL's own repack names the model `f3-image-small` in
+a distilled and a base file alike, and one community conversion carries no values. A reader
+searching the key/value table for the word would recognise almost nothing.
+- **The architecture is legible from the tensor names.** `content_mode_blocks.*` and
+`txt_mode_blocks.*` appear in FLUX 3 and in neither FLUX 1 (`double_blocks.*`) nor
+Qwen-Image, so a family test needs no metadata at all.
+- **The distilled checkpoint carries two tensors base does not** — `ref_time_in.in_layer.weight`
+and `ref_time_in.out_layer.weight`, 359 entries against 357. That is the only difference
+observed between the variants, and it is what separates the profiles.
+
+So `Pipeline.Tensors` lists prefixes that must appear and `Pipeline.NotTensors` those that
+must not: base requires the FLUX 3 pair **and** the absence of `ref_time_in.`, so the
+distilled layout cannot be mistaken for it whatever order the table is read in.
+
+**The header outranks the name in both directions.** A file named `…klein…` whose tensors are
+FLUX 1 draws generically — no 16 steps, no caption — and a file called `weights.gguf` with
+Klein's tensors draws as Klein. The name is the fallback only when nothing could be read (a
+path absent on this machine, a truncated download, an unknown format), and `Pipeline.Source`
+(`chosen`, `weights`, `name`) travels to the panel so the line under the select says which
+claim it is: "Recognised from the tensors in the model file: …" or "Detected from the file
+name: …".
+
+**Cost and limits.** One bounded read per file: 256 KiB for GGUF, retried at 8 MiB if the
+key/value table runs past that; for safetensors the header's own stated length, capped at
+16 MiB. The tables above end at 26,274–26,502 bytes as GGUF and 40,328–40,536 bytes as
+safetensors. The result is cached by path, size and modification time, because the profile
+is resolved on each settings change and on several paths inside one draw.
+
+**The weak spot is the base variant**, which is identified by *absence* — a FLUX 3 layout
+without `ref_time_in.` resolves to Base, including a hypothetical future FLUX 3 checkpoint
+that has the same shape. A fine-tune that strips those two tensors would be drawn at 20 /
+3.5 instead of 16 / 1.0, and the panel would say it came from the weights. No published file
+that was measured has that shape.
+
+**What it may change.** Only zeros are filled: a step count the model asked for or the user
+fixed wins, exactly as `pinInt`'s rule. What a profile cannot use is removed rather than
+refused, because those switches are global and a user who set one for another model would
+otherwise be unable to draw at all; the tool result and the recipe both record that it did not
+happen. Today that is the negative prompt on the distilled checkpoint and the second pass on
+Base — the distilled profile's second pass is *kept*, now that it has been drawn. A redraw
+goes through the same adjustment, so a stored recipe cannot draw a second pass under a model
+that has none.
+
+**Health names the part, not the option.** With a profiled model the CLI backend reports
+"FLUX 3 Image Klein braucht einen Text-Encoder (`--llm`)" (or the VAE, or the diffusion
+model) instead of the generic "kein Modell angegeben", which would send the user to the
+wrong field and fail after a multi-gigabyte load. That message was checked against the real
+binary: with the diffusion model and the encoder set and no `--vae`, `Health` returns
+"FLUX 3 Image Klein braucht einen VAE (--vae)", and the draw it pre-empts fails in 0.8 s with
+`model metadata validation failed — first_stage_model.*` (below).
+
+#### Measured on a real build
+
+Until 2026-10-18 the profile's numbers were documentation. They have now been drawn on a
+machine that has the checkpoint: `sd-cli` commit `95b3090` (Vulkan) on an RX 7900 XT, with
+`flux-3-image-klein-UD-Q4_K_XL.gguf` (3.9 GB), `Qwen3VL-4B-Instruct-Q4_K_M.gguf` as `--llm`
+and — see below — a FLUX 2 VAE.
+
+| What | Measurement |
+| --- | --- |
+| Reading the checkpoint | 359 tensors, `general.architecture=flux`, `model=f3-image-small`; 3.2 ms, 2.8 µs cached |
+| A renamed copy | a hard link named `weights.gguf`, with no marker anywhere in its path, resolves to `flux3-klein` from `weights` and draws |
+| 512², 16 steps, CFG 1.0, euler | 549,661-byte PNG in **10.9 s** through `images.CLI` (17.1 s for a cold run outside the app), 3.57 it/s, 6.3 GB in VRAM (2.4 GB encoder, 3.7 GB diffusion, 0.16 GB VAE) |
+| The negative prompt at CFG 1.0 | byte-identical pixels with and without; *different* at CFG 7 |
+| A second pass, 512² → 768² at 1.5 / 0.4 | a clean 768² in 18.4 s, against 7.3 s for the base draw alone |
+| A direct 768² draw at 16 steps | 13.3 s — 5 s less than enlarging into the same size |
+| Progress reports | 12 from the sampler, the last at 14 of 16: no report ever names the final step |
+
+**The VAE is not optional, and a FLUX 2 one works.** With no `--vae` the draw is refused
+before any sampling — `model metadata validation failed`, after listing the
+`first_stage_model.*` tensors it could not find — which is exactly the state a Klein folder
+holding only a diffusion model and an encoder is in, and exactly what the Health message
+above pre-empts. `flux2-vae.safetensors` from the FLUX 2 set then drew correctly with no
+`--vae-format`: sd.cpp's log calls it `Using 'flux2' preset`. BFL's own `ae.safetensors` was
+not tried, so what is measured is that a FLUX 2 VAE is accepted, not that the two files are
+the same.
+
+**Still unmeasured.** The caption A/B below (no chat backend was running), a Base checkpoint
+(none on this machine), and whether enlarging is *better* than sampling at the target size
+directly — it costs 5 s more here, and nothing about quality was judged beyond the picture
+being coherent.
+
+## 10. What it does not do yet
 
 - **ComfyUI** (§2), and any hosted image API (OpenAI's `/v1/images/generations` with
   `b64_image`, Stability, fal, Replicate) behind the same `images.Provider` interface.
