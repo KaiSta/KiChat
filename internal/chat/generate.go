@@ -9,6 +9,7 @@ import (
 
 	"kichat/internal/config"
 	"kichat/internal/events"
+	"kichat/internal/images"
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/tools"
@@ -112,13 +113,32 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		}
 
 		extraSystem := ""
+		imageToolOffered := e.Tools != nil && e.Tools.Images != nil
+		// In `model` mode the chat model writes the caption itself, so the contract has
+		// to be in force where it decides the argument. In `auto` mode it must not be: the
+		// tool asks the same model for a caption afterwards, and instructing it to expand
+		// its own prompt would expand it twice.
+		captionRule := ""
+		if imageToolOffered {
+			// Resolved through the pipeline: an empty setting means "the model decides", and
+			// a FLUX 3 profile says the model is drawn from captions. An explicit "off" is
+			// the user overriding that, so it never becomes a rule.
+			imageSettings := in.Settings.Images
+			pipeline := images.PipelineFor(imageSettings.Pipeline, imageSettings.CLIDiffusionModel)
+			if pipeline.CaptioningMode(imageSettings.Captioning) == images.CaptioningModel {
+				captionRule = tools.ImageCaptionHint
+			}
+		}
 		if !in.UseNative {
 			extraSystem = tools.TextProtocolHint
 			// The image tool is only listed when a picture server is configured, so
 			// the hint that describes it travels with it rather than always being
 			// part of the text protocol.
-			if e.Tools != nil && e.Tools.Images != nil {
+			if imageToolOffered {
 				extraSystem += "\n\n" + tools.ImageProtocolHint
+				if captionRule != "" {
+					extraSystem += "\n\n" + captionRule
+				}
 			}
 		}
 		// A native-tool model reads the tool description once and then chooses; a
@@ -126,11 +146,14 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// sounds like drawing even when a diagram was meant. One rule beside the
 		// prompt's own tool rules is what kept that from happening in the measured
 		// case (see tools.ImageUseHint), and it travels only while the tool does.
-		if in.UseNative && e.Tools != nil && e.Tools.Images != nil {
+		if in.UseNative && imageToolOffered {
 			if extraSystem != "" {
 				extraSystem += "\n\n"
 			}
 			extraSystem += tools.ImageUseHint
+			if captionRule != "" {
+				extraSystem += "\n\n" + captionRule
+			}
 		}
 		assembly, toolDefs, err := e.buildAssembly(ctx, &in.Chat,
 			in.BackendID, in.ModelID, in.Settings, in.Model, extraSystem)
@@ -261,7 +284,10 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 				e.cancelRemainingCalls(in.Chat.ID, row, calls, i)
 				return result, ctx.Err()
 			}
-			e.runTool(ctx, in.Chat.ID, row, call, toolBudget)
+			e.runTool(ctx, in.Chat.ID, row, call, toolBudget, tools.TurnRef{
+				BackendID: in.BackendID,
+				ModelID:   in.ModelID,
+			})
 		}
 		e.emitStatus(in.Chat.ID, "idle")
 	}
@@ -288,7 +314,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 // budget is written into the tool message the model reads. The stored message is
 // what is replayed on every later turn, so bounding it here is what actually
 // keeps a large scrape out of the window.
-func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, budget *toolOutputBudget) {
+func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, budget *toolOutputBudget, turn tools.TurnRef) {
 	record := store.ToolCallRecord{
 		ID:        call.ID,
 		MessageID: row.ID,
@@ -302,7 +328,7 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 	e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 
 	start := time.Now()
-	output, execErr := e.executeTool(ctx, chatID, row.ID, call)
+	output, execErr := e.executeTool(ctx, chatID, row.ID, call, turn)
 	record.DurationMs = time.Since(start).Milliseconds()
 
 	// A tool that produced a picture filed it as an attachment of the message
@@ -371,11 +397,15 @@ func (b *toolOutputBudget) take(output string) string {
 // attachment — generate_image is the only one — link it to the turn that asked
 // for it. A field on the shared Service would be wrong: two chats can run turns
 // at once, and the tool service is one value for the whole app.
-func (e *Engine) executeTool(ctx context.Context, chatID, messageID string, call llm.ToolCall) (string, error) {
+func (e *Engine) executeTool(ctx context.Context, chatID, messageID string, call llm.ToolCall, turn tools.TurnRef) (string, error) {
 	if e.Tools == nil {
 		return "", fmt.Errorf("keine Tools verfügbar")
 	}
-	return e.Tools.Execute(tools.WithCallingMessage(ctx, messageID), chatID, call.Name, call.Arguments)
+	// The turn's backend and model travel with the call beside the message id: a tool that
+	// needs the model that asked for it — the captioner is the first — must not read them
+	// from a field that two concurrent chats would share.
+	ctx = tools.WithTurn(tools.WithCallingMessage(ctx, messageID), turn)
+	return e.Tools.Execute(ctx, chatID, call.Name, call.Arguments)
 }
 
 // cancelRemainingCalls writes a cancelled tool result for every call from index

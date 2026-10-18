@@ -62,6 +62,18 @@ func TestTheProgressEventCarriesWhatTheWindowReads(t *testing.T) {
 		t.Errorf("a preview without a format was sent as a data URL: %+v", noMime)
 	}
 
+	// A caption is a phase rather than a step: the counter has not started, so "step 0 of
+	// 0" would be a progress bar pretending to have begun. The phase is a key of its own,
+	// and an ordinary report must not carry one — a stale value would leave the row saying
+	// "captioning" through the whole draw.
+	captioning := drawProgressPayload("att-1", "chat-1", images.Progress{Phase: images.PhaseCaptioning}, false)
+	if captioning["phase"] != images.PhaseCaptioning {
+		t.Errorf("the captioning phase did not survive: %+v", captioning)
+	}
+	if _, ok := stepsOnly["phase"]; ok {
+		t.Errorf("an ordinary step report carries a phase: %+v", stepsOnly)
+	}
+
 	// The end of a draw is the same event with `done` set, and nothing else in it: it exists
 	// so a progress row cannot outlive the draw it describes.
 	end := drawProgressPayload("att-1", "chat-1", images.Progress{}, true)

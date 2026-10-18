@@ -135,6 +135,60 @@ func toolDefinitionNames(defs []llm.ToolDefinition) []string {
 	return names
 }
 
+// TestTheCaptionRuleTravelsOnlyInModelMode pins the one instruction the caption modes
+// differ by. `model` has to be in force while the model writes the tool argument; `auto`
+// must not be, or the tool would ask for a caption on top of one the model already wrote;
+// off must not be either, because that pipeline was not trained this way.
+//
+// Both paths are covered because they carry rules in different places: a model without
+// native tool calling reads only the text-protocol hint, while a native one gets the rule
+// as a system line beside `ImageUseHint`.
+func TestTheCaptionRuleTravelsOnlyInModelMode(t *testing.T) {
+	paths := []struct {
+		name         string
+		capabilities []string
+	}{
+		{name: "native tools", capabilities: []string{llm.CapTools}},
+		{name: "text protocol", capabilities: nil},
+	}
+	// Five states, because the switch has four values and the empty one is resolved by the
+	// profile: a FLUX 3 profile captions in `auto` mode, which must not also put the writing
+	// rule in the system prompt.
+	modes := []struct {
+		name string
+		cfg  config.ImageSettings
+		want bool
+	}{
+		{name: "off", cfg: config.ImageSettings{}},
+		{name: "auto", cfg: config.ImageSettings{Captioning: config.ImageCaptioningAuto}},
+		{name: "model", cfg: config.ImageSettings{Captioning: config.ImageCaptioningModel}, want: true},
+		{name: "profile captions", cfg: config.ImageSettings{Pipeline: config.ImagePipelineFlux3Klein}},
+		{name: "profile overridden to model", cfg: config.ImageSettings{
+			Pipeline: config.ImagePipelineFlux3Klein, Captioning: config.ImageCaptioningModel,
+		}, want: true},
+	}
+	for _, path := range paths {
+		for _, mode := range modes {
+			t.Run(path.name+", "+mode.name, func(t *testing.T) {
+				provider, engine := imageToolEngineWith(t, path.capabilities, stubImageProvider{}, mode.cfg)
+
+				if err := engine.Send(TurnRequest{ChatID: chatImageToolID, Text: "Hallo"}); err != nil {
+					t.Fatalf("Send: %v", err)
+				}
+				if !waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning(chatImageToolID) }) {
+					t.Fatal("the turn did not finish")
+				}
+
+				system := string(provider.lastRequest().Messages[0].Content)
+				want := mode.want
+				if got := strings.Contains(system, tools.ImageCaptionHint); got != want {
+					t.Errorf("the caption rule is in the system prompt = %v, want %v:\n%s", got, want, system)
+				}
+			})
+		}
+	}
+}
+
 // imageToolEngine builds a real store, a chat whose system prompt carries
 // `{{tool_list}}`, and an engine wired to those services.
 //
@@ -142,6 +196,13 @@ func toolDefinitionNames(defs []llm.ToolDefinition) []string {
 // prompt carries no tool list at all, and "the tool is absent" would pass without
 // proving anything — which is why the test also asserts the list was rendered.
 func imageToolEngine(t *testing.T, capabilities []string, imageProvider images.Provider) (*fakeProvider, *Engine) {
+	t.Helper()
+	return imageToolEngineWith(t, capabilities, imageProvider, config.ImageSettings{})
+}
+
+// imageToolEngineWith is the same fixture with the picture settings spelled out, which is
+// how a test reaches the caption modes.
+func imageToolEngineWith(t *testing.T, capabilities []string, imageProvider images.Provider, imageCfg config.ImageSettings) (*fakeProvider, *Engine) {
 	t.Helper()
 	st := newTestStore(t)
 	chat := store.Chat{
@@ -167,6 +228,7 @@ func imageToolEngine(t *testing.T, capabilities []string, imageProvider images.P
 	settings := config.Default()
 	settings.AutoTitle = false
 	settings.ToolIterations = 3
+	settings.Images = imageCfg
 
 	// Only the store and the picture provider: the search and scrape tools filter
 	// themselves out on their own missing dependencies, which keeps the rendered list
