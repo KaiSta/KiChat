@@ -38,6 +38,10 @@ Query flags, each of which exists because the state is otherwise unreachable:
 | `?ceiling=1200` | the projected request already over that ceiling (red row, danger badge) |
 | `?ceilingsource=refusal` | the inspector's other ceiling row — from a refused request |
 | `?images=sdserver&server=running\|starting\|failed\|restart` | the picture-server rows |
+| `?upscale=esrgan` | the neural method switched on and found; add `&missing=1` for switched on but not installed |
+| `?upscale=esrgan&upscalehold=1` | a neural enlargement still running: the phase row and the Stop that ends it |
+| `?upscaler=install` | the Real-ESRGAN download row with its button and its size; pressing it runs a four‑step fake download and ends with the switch on (see `UPSCALING.md` §6) |
+| `?upscaler=noarchive` | a platform with nothing published: the row says so where the button would be |
 | `?startwithapp=1` | the start-with-app switch |
 
 `?server=restart` is computed from the stored command line rather than stored,

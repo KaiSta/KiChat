@@ -2,7 +2,9 @@
 
 Text-to-image generation: the tool the chat model calls, the server behind it, and
 how a picture reaches the window and the user's disk. `AGENTS.md` points here; the
-measured detail lives here and nowhere else.
+measured detail lives here and nowhere else. Making an existing picture larger is a
+different operation with no server and no model in the default case:
+[`UPSCALING.md`](UPSCALING.md).
 
 ---
 

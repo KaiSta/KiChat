@@ -40,7 +40,7 @@ Linux build needs `-tags webkit2_41`** because only webkit2gtk-4.1 is installed.
 | `app.go`, `api.go` | the bridge: every method the window can call |
 | `internal/chat` | context assembly, the model/tool loop, compaction, pacing |
 | `internal/llm` | the provider interface and every chat backend |
-| `internal/images` | picture generation: WebUI, `sd-cli`, managed `sd-server` |
+| `internal/images` | picture generation: WebUI, `sd-cli`, managed `sd-server`; and enlarging: Lanczos, optional Real-ESRGAN |
 | `internal/runtime` | llama.cpp install and supervision, GPU placement, model folders |
 | `internal/research`, `internal/tools`, `internal/ingest` | search/scrape, model tools, attachments |
 | `internal/store`, `internal/config`, `internal/secret`, `internal/events` | state, settings, keys, event names |
@@ -211,6 +211,7 @@ instead of the result.
 | [`COMPACT.md`](COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
 | [`RESEARCH.md`](RESEARCH.md) | search and scraping: providers, refusals, guards, budgets |
 | [`IMAGES.md`](IMAGES.md) | picture generation: three server kinds, parameters, profiles, verification |
+| [`UPSCALING.md`](UPSCALING.md) | enlarging a picture: the resampler, Real-ESRGAN, targets, the Enlarge panel |
 | [`LLAMACPP.md`](LLAMACPP.md) | the llama.cpp provider and managed runtime, projectors, ternary models |
 | [`GROQ.md`](GROQ.md) | the Groq backend: listing, ceiling, pacing, refusals |
 | [`NVIDIA.md`](NVIDIA.md) | the build.nvidia.com backend and its availability check |

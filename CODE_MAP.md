@@ -32,6 +32,7 @@ Two rules keep this useful:
 | `main.go` | Wails bootstrap, window/menu options, `go:embed all:frontend/dist`, `--version` |
 | `app.go` | The `App` struct and the chat lifecycle: send, regenerate, stop, chats CRUD, `GetBudget` |
 | `api.go` | The rest of the bridge: settings, backends and keys, runtime, images, attachments, search, prompts, compaction |
+| `api_upscale.go` | The enlarging bridge: `UpscaleAttachment`, the upscaler status/test/dialog/install (`InstallUpscaler`, `GetUpscalerInstall`), the upscale bound |
 | `internal/` | All logic, one package per subsystem (below) |
 | `frontend/` | React 19 + TypeScript; `frontend/dist` is embedded by the Go build |
 | `tools/` | `uiharness` (mock-bridge browser UI), `streamcheck` (renderer pin), `notices` (third-party notices) |
@@ -48,7 +49,7 @@ Two rules keep this useful:
 | `internal/llm` | The provider abstraction and every backend that speaks it | `types.go` (`Provider`, `ChatRequest`, `StreamEvent`), `registry.go` (`DefaultBackendConfigs`, `NewRegistry`), `openai.go` (shared compatible path) | one `<vendor>_test.go` per backend + `live_*_test.go` |
 | `internal/config` | `Settings`, its defaults, normalisation, prompts and presets | `config.go` (`Default`, `Load`, `Save`, `normalise`, `Clone`), `prompts.go` | `config_test.go`, `clone_test.go` |
 | `internal/store` | SQLite: schema and migrations, chats/messages/attachments/documents, FTS5 search, caches | `store.go` (schema + `Open`), `models.go` (types), `queries.go` (every query) | `store` tests |
-| `internal/images` | Picture generation: the `Provider` interface, the WebUI client, `sd-cli`, the managed `sd-server` | `images.go` (`Provider`), `sdwebui.go`, `cli.go`, `sdserver.go`, `locate.go`, `limits.go` | `*_test.go` + `live_test.go`, `live_sdserver_test.go` |
+| `internal/images` | Picture generation: the `Provider` interface, the WebUI client, `sd-cli`, the managed `sd-server`. Enlarging: the Lanczos kernel, EXIF orientation, Real-ESRGAN | `images.go` (`Provider`), `sdwebui.go`, `cli.go`, `sdserver.go`, `locate.go`, `limits.go`, `upscale.go` (`Upscale`, `Fit`), `resample.go`, `exif.go`, `esrgan.go`, `upscaler_install.go` (the pinned archives) | `*_test.go` + `live_test.go`, `live_sdserver_test.go`, `live_esrgan_test.go` |
 | `internal/runtime` | llama.cpp as a thing KiChat installs and supervises: releases, GPU families, model folders, projector pairing, offload reading | `install.go`, `builds.go`/`distribution.go`, `supervise.go`, `discover.go`, `libs.go`, `offload.go` | `*_test.go` + `live_prism_test.go` |
 | `internal/research` | Brave and DuckDuckGo, the search-first context route, the scraper and its guards | `search.go`, `chain.go`, `brave.go`, `brave_context.go`, `duckduckgo.go`, `scrape.go` | `*_test.go` + `live_test.go` |
 | `internal/ingest` | Attachments to text: PDF, office, chunking | `ingest.go` (dispatch), `pdf.go`, `office.go`, `chunk.go` | `ingest_test.go` |
@@ -105,6 +106,7 @@ progress uses a name from `internal/events`.
 | A chat backend (hosted API) | `internal/llm/<name>.go`, `registry.go`, `DefaultBackendConfigs`, `Settings.tsx` kind lists, docs | [`add-llm-backend`](.claude/skills/add-llm-backend/SKILL.md) |
 | An image backend | `internal/images/<name>.go` implementing `Provider`, `images.Provider` construction in `app.go`, settings | [`add-image-backend`](.claude/skills/add-image-backend/SKILL.md) |
 | A setting | `internal/config/config.go` (+ `clone_test.go`), the settings UI, i18n | [`change-settings`](.claude/skills/change-settings/SKILL.md) |
+| An enlarging method | `internal/images/upscale.go` (`Method*`, the switch in `Upscale`), the Enlarge panel, i18n | [`UPSCALING.md`](UPSCALING.md) |
 | A tool the model can call | `internal/tools/tools.go` (`Definitions` + execution), `internal/chat` if it needs a round | — |
 | A Wails event | `internal/events/events.go`, the emitter, the frontend listener | — |
 | A user-visible string | `frontend/src/lib/i18n.ts`, all three languages | — |

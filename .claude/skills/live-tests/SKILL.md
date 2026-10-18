@@ -54,6 +54,11 @@ KICHAT_LIVE=1 KICHAT_VISION_MODEL=~/…/Qwen3-VL-8B-Instruct-Q4_K_M.gguf \
 #   optional: KICHAT_VISION_TAG pins the installed build to start,
 #   KICHAT_RUNTIME_DIR the folder the builds are installed in
 
+# The Real-ESRGAN download: 45–52 MB from GitHub, then a real unpack and
+# verification. It is what keeps the pinned digests honest, since upstream
+# publishes none. No key, no GPU needed — nothing is executed.
+KICHAT_LIVE=1 go test ./ -run TestLiveUpscalerInstall -v
+
 # PrismML's fork: one release lookup, a 17 MB download and a real model load
 KICHAT_LIVE=1 go test ./internal/runtime/ -run TestLivePrism -v
 #   optional: KICHAT_PRISM_MODEL=<path.gguf>, otherwise the smallest model in
@@ -78,6 +83,12 @@ KICHAT_LIVE=1 KICHAT_SD_CLI=~/sdMaster/buildVulkan/sd-cli \
   KICHAT_SD_LLM=~/sdMaster/models/flux3/Qwen3VL-4B-Instruct-Q4_K_M.gguf \
   KICHAT_SD_VAE=~/sdMaster/models/flux2/flux2-vae.safetensors \
   go test ./internal/images/ -run TestLiveFlux3KleinProfile -v
+
+# Real-ESRGAN: the portable program, its weights, and the Vulkan driver behind them.
+# The path is required, no default: it is only ever installed by hand today. Two runs of
+# a 64x64 source, seconds each — a probe and a real 4x — and the log line says how long.
+KICHAT_LIVE=1 KICHAT_ESRGAN=~/Downloads/realesrgan-ncnn-vulkan/realesrgan-ncnn-vulkan \
+  go test ./internal/images/ -run TestLiveESRGAN -v
 ```
 
 ## What each one buys
@@ -95,6 +106,7 @@ KICHAT_LIVE=1 KICHAT_SD_CLI=~/sdMaster/buildVulkan/sd-cli \
 | `TestLiveSDWebUI` | the sampler the client sends is one the server knows, the guidance scale echoed back, and real PNG bytes |
 | `TestLiveSDServer` | `sd-server` really ships beside `sd-cli`, the listener flag exists, the readiness route answers, `cfg_scale` parses, and the time to ready plus two draws is printed |
 | `TestLiveFlux3KleinProfile` | the profile is identified from the checkpoint's own tensors, `Health` names a missing VAE before a multi-gigabyte load, 16 steps at CFG 1.0 really draw, and the negative prompt the profile drops really is inert |
+| `TestLiveESRGAN` | the released Vulkan build starts on this machine, its weights load, and a real 4× comes back — the three things a stand-in program cannot say, and the one archive trap (a build with no `models/` that exits 0 writing a black picture) reported as `ErrUpscalerNoModels` |
 
 ## Rules
 
