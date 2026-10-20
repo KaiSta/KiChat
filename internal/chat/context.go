@@ -87,6 +87,14 @@ type AssemblyInput struct {
 	Tools       []llm.ToolDefinition
 	Location    string
 
+	// KnownTools are the tool names the app can execute, whether or not they are
+	// offered in this request. A history call that names none of them is not a call
+	// anybody can answer, and Assemble demotes it to text (see toolhistory.go). Nil
+	// leaves the history alone, so a caller that does not know the tool set — a
+	// preview, a test building an assembly by hand — is never rewritten behind its
+	// back; the engine always passes the full set.
+	KnownTools []string
+
 	Limit       int
 	LimitSource string
 	Reserve     int
@@ -311,6 +319,17 @@ func Assemble(in AssemblyInput) Assembly {
 		budget.History += historyTokens
 		historyCount++
 		msgs = append(msgs, lm)
+	}
+
+	// A stored call can name a tool the app does not have — a model that mangled the
+	// name on a backend that does not validate calls is the way that happens. It is
+	// demoted to text here rather than replayed as a tool call nobody can answer, and
+	// the cost of the rewrite is added to the history segment so the meter still
+	// describes the request that is sent.
+	if in.KnownTools != nil {
+		var rewriteDelta int
+		msgs, rewriteDelta = sanitiseToolHistory(msgs, toolNameSet(in.KnownTools))
+		budget.History += rewriteDelta
 	}
 
 	budget.ToolSchemas = toolTokens

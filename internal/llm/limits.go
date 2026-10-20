@@ -89,6 +89,39 @@ var (
 	requestedInBody = regexp.MustCompile(`(?i)\brequested:?\s*([0-9]+)`)
 )
 
+// malformedToolCallPhrase matches the refusal a backend returns when the call the
+// *model* generated names a tool the request did not declare. Groq's wording, measured
+// through this app on `qwen/qwen3.8-27b`:
+//
+//	tool call validation failed: attempted to call tool 'scr scrape_url' which was not
+//	in request.tools
+//
+// The name in the sentence is the model's own — the app sends `scrape_url` verbatim —
+// and the request is refused before a token streams, so there is nothing to repair on
+// this side. What is worth doing is telling the user that, instead of quoting a sentence
+// that reads as though the app had offered a tool list it never offered.
+var (
+	malformedToolCallPhrase = regexp.MustCompile(`(?i)tool call validation failed`)
+	notInRequestTools       = regexp.MustCompile(`(?i)which was not in request\.tools`)
+)
+
+// MalformedToolCall reports whether err is a backend refusing a tool call the model
+// generated with a name the request never declared.
+//
+// Narrow on purpose: a 400 whose body carries one of the two phrases Groq uses for this
+// one failure. Both are read because the sentence has been seen with and without the
+// prefix, and a 5xx is a different matter entirely.
+func MalformedToolCall(err error) bool {
+	if err == nil {
+		return false
+	}
+	var he *HTTPError
+	if !errors.As(err, &he) || he.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	return malformedToolCallPhrase.MatchString(he.Body) || notInRequestTools.MatchString(he.Body)
+}
+
 // classifyRequestTooLarge turns a refusal caused by the request's own size into a
 // RequestTooLargeError and leaves every other failure exactly as it was.
 //

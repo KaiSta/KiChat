@@ -460,6 +460,27 @@ turn. `internal/chat/oversize.go`:
    warning that names the cause, so the two sentences describe one event instead of
    contradicting each other.
 
+6. **A malformed tool call is refused before a token streams.** The vendor validates the call
+   the *model generated* against the request's own `tools` array, and answers
+   `400 invalid_request_error` with "tool call validation failed: attempted to call tool 'X'
+   which was not in request.tools". It is a class of its own, distinct from the oversized
+   request of §6.1: the body is small, and the name in the sentence is one the app never sent.
+   Qwen and Llama builds on this backend have been seen folding an extra word into
+   `function.name` — the observed
+   failure quotes `scr scrape_url`, where the request declared `scrape_url` — so the sentence
+   names a tool the app never sent. Nothing of the turn survives it: the refusal arrives before
+   the first token, and a 400 is not retryable (`HTTPError.Retryable` is 429 and 5xx), so the
+   row is stored failed and the chat is otherwise intact.
+   What the app can control is the other side of the same event: a backend that does **not**
+   validate names (a local llama.cpp, LM Studio, Ollama) lets the call through, and there the
+   app is the only check. It repairs a name that differs only by case, whitespace or words
+   (exactly one known tool name among them) and runs that tool, dropping a native call no tool
+   answers rather than executing a guess — a text-protocol call is kept and answered with the
+   executor's own `unbekanntes Tool`, because no vendor sees that name and the model can
+   correct itself on the next round. A stored history that already holds an unresolvable name is
+   demoted to text when it is assembled, so replaying it cannot repeat the vendor's refusal
+   (`internal/chat/toolhistory.go`, pinned by `toolhistory_test.go`).
+
 The fold is forced, which puts it beside the Compact button rather than beside the automatic
 threshold: `settings.Compact.Enabled` and a chat's `AutoCompact` decide whether compaction
 happens *quietly*, and a refusal has already happened. Its card says `too_large` rather than

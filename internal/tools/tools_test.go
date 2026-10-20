@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"kichat/internal/llm"
 )
 
 // TestParseTextToolCallsHandlesBothProtocols covers the fallback used by models
@@ -201,13 +203,57 @@ func TestDefinitionsAreValidJSONSchemaShaped(t *testing.T) {
 	}
 }
 
-func TestTextProtocolHintMentionsEveryTool(t *testing.T) {
-	for _, name := range []string{ToolSearchWeb, ToolScrapeURL, ToolSearchDocs, ToolReadPages} {
-		if !strings.Contains(TextProtocolHint, name) {
-			t.Errorf("the fallback hint does not mention %q", name)
-		}
-	}
+// TestTextProtocolHintIsSyntaxOnly pins the split that the withheld-tool bug needed:
+// the constant carries the block syntax and nothing about which tools exist, because
+// that is a property of the request (`TextProtocolTools`).
+func TestTextProtocolHintIsSyntaxOnly(t *testing.T) {
 	if !strings.Contains(TextProtocolHint, "```tool_call") {
 		t.Error("the hint must show the exact block syntax the parser expects")
+	}
+	for _, name := range []string{ToolSearchWeb, ToolScrapeURL, ToolSearchDocs, ToolReadPages} {
+		if strings.Contains(TextProtocolHint, name) {
+			t.Errorf("the syntax hint names %q; which tools exist is the request's answer", name)
+		}
+	}
+}
+
+// TestTextProtocolToolsListsOnlyWhatIsOffered is the fix for a hint that promised tools
+// the engine had withheld: the model called one, and the only possible answer was an
+// error. The list is rendered from the definitions the request declares, so a tool that
+// was filtered out cannot appear.
+func TestTextProtocolToolsListsOnlyWhatIsOffered(t *testing.T) {
+	service := &Service{}
+	all := TextProtocolTools(service.Definitions())
+	for _, name := range []string{ToolSearchWeb, ToolScrapeURL, ToolSearchDocs, ToolReadPages} {
+		if !strings.Contains(all, name) {
+			t.Errorf("the rendered hint does not mention %q:\n%s", name, all)
+		}
+	}
+	// The arguments come from the schema, required first and optional marked.
+	if !strings.Contains(all, `"query": string`) {
+		t.Errorf("required arguments are not rendered:\n%s", all)
+	}
+	if !strings.Contains(all, `"count"?: integer`) {
+		t.Errorf("optional arguments are not marked with ?:\n%s", all)
+	}
+
+	// The withheld case: the same renderer, one tool fewer, and the missing one is absent.
+	filtered := make([]llm.ToolDefinition, 0, len(service.Definitions()))
+	for _, def := range service.Definitions() {
+		if def.Name != ToolSearchDocs {
+			filtered = append(filtered, def)
+		}
+	}
+	without := TextProtocolTools(filtered)
+	if strings.Contains(without, ToolSearchDocs) {
+		t.Errorf("a tool that is not offered is still promised:\n%s", without)
+	}
+	if !strings.Contains(without, ToolSearchWeb) {
+		t.Errorf("the remaining tools are not listed:\n%s", without)
+	}
+
+	// No tools at all: no line, so the prompt does not promise a capability it lacks.
+	if got := TextProtocolTools(nil); got != "" {
+		t.Errorf("an empty tool set rendered %q, want no line at all", got)
 	}
 }

@@ -136,6 +136,13 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		}
 		if !in.UseNative {
 			extraSystem = tools.TextProtocolHint
+			// Only the tools this request actually declares. The definitions are what the
+			// engine filtered for this turn — no search provider, no index, no picture
+			// server each remove a tool — and a hint that names one of those is a call
+			// that can only come back as an error.
+			if list := tools.TextProtocolTools(e.toolDefinitions(ctx, &in.Chat, in.Model, in.Settings)); list != "" {
+				extraSystem += "\n\n" + list
+			}
 			// The image tool is only listed when a picture server is configured, so
 			// the hint that describes it travels with it rather than always being
 			// part of the text protocol.
@@ -219,6 +226,30 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			if parsed, visible := tools.ParseTextToolCalls(text); len(parsed) > 0 {
 				calls = parsed
 				text = visible
+			}
+		}
+
+		// Whatever the model named has to be a tool somebody can execute, before it is
+		// written into the row every later turn replays. A mangled name is repaired
+		// where the intent is unambiguous — `scr scrape_url` is the shape that reached
+		// this app once — because the alternative is a chat that records a call it will
+		// answer with `unbekanntes Tool` for the rest of its life.
+		//
+		// A native call no tool answers is dropped; a text-protocol call is kept and
+		// answered with the executor's error, because no vendor validates a name the
+		// model wrote in prose and the model can correct itself on the next round. The
+		// reasoning is in toolhistory.go. A nil name list means there is no tool service
+		// at all: no declared set to check against, so the executor's own error stands.
+		if known := engineKnownTools(e); len(calls) > 0 && known != nil {
+			var notes, dropped []string
+			calls, notes, dropped = resolveToolCalls(calls, known, in.UseNative)
+			for _, note := range notes {
+				e.warn(in.Chat.ID, note)
+			}
+			// Nothing left to execute: say it in the transcript rather than ending the
+			// turn on an empty answer nobody can explain.
+			if len(calls) == 0 && len(dropped) > 0 && strings.TrimSpace(text) == "" {
+				text = fmt.Sprintf(droppedToolText, strings.Join(dropped, ", "))
 			}
 		}
 

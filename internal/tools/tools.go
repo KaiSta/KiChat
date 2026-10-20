@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -579,16 +580,98 @@ func ParseTextToolCalls(text string) ([]llm.ToolCall, string) {
 }
 
 // TextProtocolHint is appended to the system prompt when a model cannot call
-// tools natively, so it knows how to ask for one.
+// tools natively, so it knows how to ask for one. It carries the syntax only: which
+// tools exist is a property of the request, not of the protocol, and listing them here
+// would promise the ones the engine deliberately withheld (see TextProtocolTools).
+//
+// The same rule applies inside the sample: its name is the placeholder `TOOL_NAME`, not
+// a real tool. It used to read `search_web`, which is the one name this hint then
+// promised even in a request that had withheld it — the list below is the only place a
+// tool may be named.
 const TextProtocolHint = `Wenn du ein Tool nutzen willst, gib AUSSCHLIESSLICH einen Codeblock in genau dieser Form aus und warte auf das Ergebnis:
 
 ` + "```tool_call" + `
-{"name": "search_web", "arguments": {"query": "suchbegriffe"}}
+{"name": "TOOL_NAME", "arguments": {}}
 ` + "```" + `
 
-Verfügbare Tools: search_web ({"query": string, "freshness"?: "pd|pw|pm|py"}), ` +
-	`scrape_url ({"url": string}), search_documents ({"query": string}), ` +
-	`read_pages ({"document": string, "from": number, "to": number}).`
+Setze TOOL_NAME auf einen der unten genannten Namen und arguments auf die dort angegebenen Felder.`
+
+// TextProtocolTools renders the tools a request actually offers, for the text
+// protocol's prompt.
+//
+// It is built from the same filtered definitions the request declares, which is the
+// whole point: `toolDefinitions` withholds `search_web` when no search provider is
+// available, the two document tools when the index is not there and `generate_image`
+// when no picture server is configured — and a hint that names a tool the model cannot
+// see is an invitation to a call that can only be answered with an error. The image
+// hint has travelled conditionally for exactly this reason since it was added; this is
+// the same rule for the rest.
+//
+// The arguments are rendered from the schema so the two cannot drift apart: required
+// fields first, then optional ones marked with `?`, each group alphabetically so the
+// hint is stable from one turn to the next.
+func TextProtocolTools(defs []llm.ToolDefinition) string {
+	if len(defs) == 0 {
+		return ""
+	}
+	rendered := make([]string, 0, len(defs))
+	for _, def := range defs {
+		rendered = append(rendered, def.Name+" ("+renderSchemaArguments(def.Schema)+")")
+	}
+	return "Verfügbare Tools: " + strings.Join(rendered, ", ") + "."
+}
+
+// renderSchemaArguments renders a tool's object schema as the argument summary the
+// hint shows, e.g. `{"query": string, "count"?: integer}`.
+func renderSchemaArguments(schema map[string]any) string {
+	properties, _ := schema["properties"].(map[string]any)
+	if len(properties) == 0 {
+		return ""
+	}
+	required := map[string]bool{}
+	switch list := schema["required"].(type) {
+	case []string:
+		for _, name := range list {
+			required[name] = true
+		}
+	case []any:
+		for _, raw := range list {
+			if name, ok := raw.(string); ok {
+				required[name] = true
+			}
+		}
+	}
+	var mandatory, optional []string
+	for name := range properties {
+		if required[name] {
+			mandatory = append(mandatory, name)
+		} else {
+			optional = append(optional, name)
+		}
+	}
+	sort.Strings(mandatory)
+	sort.Strings(optional)
+	parts := make([]string, 0, len(properties))
+	for _, name := range mandatory {
+		parts = append(parts, fmt.Sprintf("%q: %s", name, schemaTypeName(properties[name])))
+	}
+	for _, name := range optional {
+		parts = append(parts, fmt.Sprintf("%q?: %s", name, schemaTypeName(properties[name])))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// schemaTypeName is a property's JSON-schema type, or `any` when it names none.
+func schemaTypeName(property any) string {
+	spec, ok := property.(map[string]any)
+	if !ok {
+		return "any"
+	}
+	if name, ok := spec["type"].(string); ok && name != "" {
+		return name
+	}
+	return "any"
+}
 
 // ImageProtocolHint describes generate_image to a model without native tool
 // calling. It is separate from TextProtocolHint rather than folded into it

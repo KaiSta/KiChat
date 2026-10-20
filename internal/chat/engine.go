@@ -286,6 +286,16 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	}
 	result, genErr := e.generate(ctx, in)
 
+	// A model that named a tool the request never declared is refused by the vendor
+	// before a token streams, and its sentence — "attempted to call tool 'scr scrape_url'
+	// which was not in request.tools" — names a tool the app never sent. Quoted, it reads
+	// as a bug in the app's tool list; explained, it says what happened and what helps.
+	// The call itself never reaches the app, so there is nothing to repair here — only
+	// something to say (see llm.MalformedToolCall).
+	if llm.MalformedToolCall(genErr) {
+		genErr = errMalformedToolCall
+	}
+
 	// A request the backend refused for its own size is a verdict rather than a
 	// hiccup — the same body produces the same answer — so the history is folded and
 	// the turn is sent once more. This is what keeps a long chat from becoming an
@@ -459,12 +469,18 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 	measuredValid := hasMeasurement && measurement.Backend == backendID && measurement.Model == modelID
 
 	in := AssemblyInput{
-		Chat:          working,
-		Messages:      messages,
-		Compactions:   compactions,
-		Documents:     fullDocs,
-		Tools:         toolDefs,
-		Location:      settings.Location,
+		Chat:        working,
+		Messages:    messages,
+		Compactions: compactions,
+		Documents:   fullDocs,
+		Tools:       toolDefs,
+		Location:    settings.Location,
+		// Every tool the app can execute, so a stored call that names none of them is
+		// demoted rather than replayed (see toolhistory.go). Deliberately not the
+		// offered list: a tool that is momentarily unavailable — search with both
+		// providers down, the index disabled — is still a tool the app can answer.
+		KnownTools: engineKnownTools(e),
+
 		Limit:         limit,
 		LimitSource:   limitSource,
 		Reserve:       reserve,
@@ -517,6 +533,33 @@ func (e *Engine) ceilingFor(backendID, modelID string) llm.Ceiling {
 		return published
 	}
 	return llm.Ceiling{}
+}
+
+// errMalformedToolCall is what a user reads instead of the vendor's validation sentence.
+//
+// It names the cause, says where it came from (the model, not the tool list) and gives
+// the two things that help: send it again, or pick a different model for this chat. A
+// malformed generation is not a fact about the conversation, so nothing is repaired or
+// dropped behind the user's back.
+var errMalformedToolCall = errors.New("das Modell hat einen Tool-Aufruf mit einem Namen erzeugt, " +
+	"den die Anfrage nicht deklariert hat — der Anbieter hat die Anfrage deshalb abgelehnt. " +
+	"Sende die Nachricht erneut; geschieht es wieder, wähle für diesen Chat ein anderes Modell.")
+
+// warn reports something the user should know without failing the turn. It exists as
+// a method because `generate` holds the stream in a variable called `events`, which
+// shadows the events package for the whole loop body.
+func (e *Engine) warn(chatID, warning string) {
+	e.emit(events.Warning, map[string]any{"chatId": chatID, "warning": warning})
+}
+
+// engineKnownTools is every tool name this engine can execute, or nil when it has no
+// tool service at all — which is what leaves a history untouched in the preview
+// engines a test builds (see AssemblyInput.KnownTools).
+func engineKnownTools(e *Engine) []string {
+	if e == nil || e.Tools == nil {
+		return nil
+	}
+	return definitionNames(e.Tools.Definitions())
 }
 
 // toolDefinitions decides which tools to advertise for this model and chat.
