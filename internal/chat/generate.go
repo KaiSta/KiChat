@@ -290,7 +290,15 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// few thousand tokens while the tool budget defaults to 25000, so one scraped page
 		// was enough to make the round that reads it unsendable — and no fold can take it
 		// back, because the result belongs to the turn being answered.
-		if room, bounded := roomForToolResults(assembly.Budget, text); bounded {
+		//
+		// The prompt the backend just described is its own count when it reports one, and
+		// that is worth more than the assembly's estimate here: an estimate that runs low
+		// leaves too much room, and the room is the whole point.
+		promptTokens := 0
+		if usage != nil {
+			promptTokens = usage.PromptTokens
+		}
+		if room, bounded := roomForToolResults(assembly.Budget, promptTokens, text); bounded {
 			toolBudget.capTo(room)
 		}
 
@@ -417,18 +425,28 @@ func (b *toolOutputBudget) capTo(room int) {
 // It is the request's own arithmetic rather than a second estimate: the assembly in
 // hand priced everything the next request will carry except the reply this round just
 // wrote and the results it asks for, so subtracting the first sizes the second. The
-// reserve is already inside Projected, which is what keeps room for the answer the
-// next round has to produce.
+// reserve keeps room for the answer the next round has to produce.
+//
+// promptTokens is the backend's own count of the request that just went out, and it is
+// used in place of the assembly's figure whenever it is reported. The assembly's number
+// is a heuristic, and the error points the dangerous way here: an estimate that runs low
+// leaves room that is not there, so the result is cut too late and the request is
+// refused for its size — the failure this budget exists to prevent. Zero means the
+// backend stated nothing, which is the case of a local server that reports no usage.
 //
 // bounded is false when no limit is known — a model whose window nobody reported,
 // which is also the only case in which the tool budget is left alone. There is nothing
 // to aim at then, and a bare 0 would mean "no room" rather than "nobody said", which
 // is the difference between a withheld result and an untouched budget.
-func roomForToolResults(budget ContextBudget, replyText string) (room int, bounded bool) {
+func roomForToolResults(budget ContextBudget, promptTokens int, replyText string) (room int, bounded bool) {
 	if budget.EffectiveLimit <= 0 {
 		return 0, false
 	}
-	room = budget.EffectiveLimit - budget.Projected - llm.EstimateTokens(replyText)
+	base := budget.Projected
+	if promptTokens > 0 {
+		base = promptTokens + budget.Reserve
+	}
+	room = budget.EffectiveLimit - base - llm.EstimateTokens(replyText)
 	if room < 0 {
 		room = 0
 	}

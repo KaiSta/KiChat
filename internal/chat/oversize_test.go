@@ -1459,6 +1459,94 @@ func TestAToolResultIsCutToWhatTheRequestCanCarry(t *testing.T) {
 	}
 }
 
+// TestTheCutFollowsTheBackendsOwnPromptCount is the end-to-end half of the room's
+// arithmetic. A backend that states what the request cost must be believed over the
+// assembly's estimate, because the estimate runs low in the direction that lets a tool
+// result through that the request cannot carry — the same error §6.2 item 1 of GROQ.md
+// corrects when it aims a fold.
+//
+// The stated count is placed where the two answers differ by a lot: the estimate prices
+// this prompt at a few hundred tokens, so a room taken from it would be over a thousand
+// tokens larger than the one the backend's own number allows.
+func TestTheCutFollowsTheBackendsOwnPromptCount(t *testing.T) {
+	const (
+		ceiling        = 6000
+		reportedPrompt = 1200
+	)
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	body := strings.Repeat("Ein langer Absatz mit Inhalt. ", 1600)
+	if tokens := llm.EstimateTokens(body); tokens < 2*ceiling {
+		t.Fatalf("the fixture's chunk is %d tokens; it has to exceed the %d-token ceiling by a wide margin",
+			tokens, ceiling)
+	}
+	if err := st.CreateDocument(store.Document{
+		ID: "doc-1", ChatID: "chat-1", Title: "bericht", Text: body,
+		TokenCount: llm.EstimateTokens(body),
+	}); err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if err := st.InsertChunks([]store.Chunk{{
+		DocumentID: "doc-1", ChatID: "chat-1", Ordinal: 0, Text: body,
+		Tokens: llm.EstimateTokens(body),
+	}}); err != nil {
+		t.Fatalf("insert chunk: %v", err)
+	}
+
+	call := "```tool_call\n{\"name\": \"read_pages\", \"arguments\": " +
+		"{\"document\": \"bericht\", \"from\": 0, \"to\": 0}}\n```"
+	provider := &fakeProvider{
+		model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		ceiling: ceiling,
+		replies: [][]llm.StreamEvent{
+			{
+				{Type: llm.EventDelta, Text: call},
+				{Type: llm.EventUsage, Usage: &llm.Usage{PromptTokens: reportedPrompt}},
+				{Type: llm.EventDone},
+			},
+			{{Type: llm.EventDelta, Text: "Antwort"}, {Type: llm.EventDone}},
+		},
+	}
+
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.ToolIterations = 3
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+	log := &eventLog{}
+	engine := NewEngine(st, registry, tools.New(st, nil, nil),
+		func() config.Settings { return settings }, log.emit)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Lies den Bericht."}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the turn did not finish")
+	}
+	// The round and the answer after it: a summarisation here would mean the tool result
+	// was never read, and the assertion below would be about the wrong request.
+	if got := provider.requestCount(); got != 2 {
+		t.Fatalf("backend calls = %d, want the round and the answer after it", got)
+	}
+
+	carried := ""
+	for _, m := range provider.requestAt(1).Messages {
+		if m.Role == llm.RoleTool {
+			carried = m.Content
+		}
+	}
+	if carried == "" {
+		t.Fatal("the second request carried no tool result")
+	}
+	// The limit, less the count the backend gave, less the reserve for the answer.
+	want := ceiling - reportedPrompt - settings.Compact.ReserveForResponse
+	if got := llm.EstimateTokens(carried); got > want {
+		t.Fatalf("the tool result is %d tokens; with the backend's own count of %d the %d-token "+
+			"ceiling leaves %d", got, reportedPrompt, ceiling, want)
+	}
+}
+
 // TestTheBetweenRoundFoldAsksTheThresholdOnlyWhenTheUserSaidSo pins the two calls to
 // autoFold. Before a turn both bounds are the planner's — the user's threshold as much as
 // a published ceiling. Between rounds the ceiling is always asked, because crossing it

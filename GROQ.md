@@ -430,12 +430,18 @@ turn. `internal/chat/oversize.go`:
    **25000** tokens, three times an 8K allowance, and one `scrape_url` may ask for **12000** on
    its own. So `generate` budgets the result against what the next request can actually carry —
    `roomForToolResults` is the effective limit less what the assembly already priced, the
-   reserve for the answer and the reply this round wrote — and `toolOutputBudget.capTo` only
-   ever tightens, so a backend that publishes no ceiling keeps the behaviour it had. A result
-   cut this way carries the shared `…[gekürzt]` marker, so the model can read a narrower page
-   range instead of re-scraping the same URL. Measured: a 13 480-token document read back
-   through `read_pages` under a 6000-token ceiling reaches the model cut, and the second request
-   fits (`TestAToolResultIsCutToWhatTheRequestCanCarry`).
+   reserve for the answer and the reply this round wrote, and the backend's **own count** of the
+   prompt in place of the estimate as soon as it reports one: the estimate is a heuristic, and an
+   underestimate is exactly what leaves a result cut too late (item 1 above corrects the same
+   error for a fold). `toolOutputBudget.capTo` only ever tightens, so a model whose window is
+   larger than its spare tool budget behaves as before; a window *smaller* than it caps too,
+   because a request there was already unsendable and the fold that answers a refusal cannot
+   touch the result. A result cut this way carries the shared `…[gekürzt]` marker, so the model
+   can read a narrower page range instead of re-scraping the same URL. Measured: a 13 480-token
+   document read back through `read_pages` under a 6000-token ceiling reaches the model cut, and
+   the second request fits (`TestAToolResultIsCutToWhatTheRequestCanCarry`); a backend that states
+   the same prompt at 1200 tokens gets its result cut to 3776 of that ceiling, where the estimate
+   alone would have allowed 4527 (`TestTheCutFollowsTheBackendsOwnPromptCount`).
 5. **A refusal that survives all that is explained rather than quoted.** The vendor's sentence
    names an organization, a service tier and a billing page; what the user is shown is which
    limit was hit, what the app did about it, and what reduces the request — *"Kürze die

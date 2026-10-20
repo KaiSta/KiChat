@@ -888,7 +888,7 @@ func TestToolOutputBudgetNeverLoosens(t *testing.T) {
 func TestRoomForToolResultsIsTheRequestsOwnArithmetic(t *testing.T) {
 	// A model whose limit nobody reported has no room to report, which is not the same
 	// as zero room: the budget must stay untouched rather than withhold every result.
-	if room, bounded := roomForToolResults(ContextBudget{}, "x"); bounded {
+	if room, bounded := roomForToolResults(ContextBudget{}, 0, "x"); bounded {
 		t.Fatalf("a budget with no known limit reported room %d as bounded", room)
 	}
 	// A window with no ceiling beside it is still a limit: the smaller of the two is
@@ -896,13 +896,13 @@ func TestRoomForToolResultsIsTheRequestsOwnArithmetic(t *testing.T) {
 	// no fold can shrink.
 	if room, bounded := roomForToolResults(ContextBudget{
 		Limit: 8192, EffectiveLimit: 8192, Projected: 4000,
-	}, ""); !bounded || room != 4192 {
+	}, 0, ""); !bounded || room != 4192 {
 		t.Fatalf("room = %d (bounded %v) for a window with 4192 tokens left, want 4192", room, bounded)
 	}
 
 	reply := strings.Repeat("wort ", 300)
 	budget := ContextBudget{Limit: 131072, Ceiling: 8000, EffectiveLimit: 8000, Projected: 5000}
-	room, bounded := roomForToolResults(budget, reply)
+	room, bounded := roomForToolResults(budget, 0, reply)
 	if !bounded {
 		t.Fatal("a budget with a ceiling reported no room")
 	}
@@ -912,7 +912,34 @@ func TestRoomForToolResultsIsTheRequestsOwnArithmetic(t *testing.T) {
 	// The reply can be larger than what is left; a negative room is zero room.
 	if room, _ := roomForToolResults(ContextBudget{
 		Limit: 131072, EffectiveLimit: 1000, Projected: 900,
-	}, strings.Repeat("wort ", 300)); room != 0 {
+	}, 0, strings.Repeat("wort ", 300)); room != 0 {
 		t.Fatalf("room = %d for a reply that does not fit, want 0", room)
+	}
+}
+
+// TestRoomForToolResultsPrefersTheBackendsOwnCount pins the one number that can make a
+// room too large. The assembly's figure is an estimate, and its error points the
+// dangerous way: where it counts low the room is too big, the result is cut too late,
+// and the request is refused for its size — which is the failure this budget exists to
+// prevent. So a prompt size the backend states is what the room is computed from, with
+// the reserve still held back for the answer the next round has to write.
+func TestRoomForToolResultsPrefersTheBackendsOwnCount(t *testing.T) {
+	reply := strings.Repeat("wort ", 100)
+	budget := ContextBudget{
+		Limit: 131072, Ceiling: 8000, EffectiveLimit: 8000,
+		Used: 400, Projected: 1424, Reserve: 1024,
+	}
+
+	estimated, bounded := roomForToolResults(budget, 0, reply)
+	if !bounded {
+		t.Fatal("a budget with a ceiling reported no room")
+	}
+	measured, _ := roomForToolResults(budget, 5000, reply)
+	if measured >= estimated {
+		t.Fatalf("room from the backend's own count = %d, from the estimate = %d; the count has to tighten",
+			measured, estimated)
+	}
+	if want := 8000 - 5000 - 1024 - llm.EstimateTokens(reply); measured != want {
+		t.Fatalf("room = %d, want %d (limit - stated prompt - reserve - reply)", measured, want)
 	}
 }
