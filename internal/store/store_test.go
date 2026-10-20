@@ -722,13 +722,21 @@ func TestAToolCallKeepsWhatItCostAndWhatWasRead(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// And the outcome that has no size of its own: the model was handed the notice.
+	if err := st.UpsertToolCall(ToolCallRecord{
+		ID: "call-c", MessageID: "m1", ChatID: "c1", Name: "search_web",
+		Status: ToolOK, SourceTokens: 4374, ContextTokens: 41, Withheld: true,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	records, err := st.ListToolCalls("c1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 {
-		t.Fatalf("tool calls = %d, want two", len(records))
+	if len(records) != 3 {
+		t.Fatalf("tool calls = %d, want three", len(records))
 	}
 	byID := map[string]ToolCallRecord{}
 	for _, record := range records {
@@ -739,8 +747,63 @@ func TestAToolCallKeepsWhatItCostAndWhatWasRead(t *testing.T) {
 		t.Errorf("the condensation was not stored: %+v", condensed)
 	}
 	plain := byID["call-b"]
-	if plain.SourceTokens != 0 || plain.ContextTokens != 0 || plain.Condensed {
+	if plain.SourceTokens != 0 || plain.ContextTokens != 0 || plain.Condensed || plain.Withheld {
 		t.Errorf("an unmeasured call reports a size: %+v", plain)
+	}
+	withheld := byID["call-c"]
+	if !withheld.Withheld || withheld.SourceTokens != 4374 {
+		t.Errorf("the withheld result was not stored as one: %+v", withheld)
+	}
+}
+
+// TestAnAnswerKeepsItsSources is what a citation in a reopened chat resolves against:
+// the numbers are written once the turn is over, and the streaming updates that rewrite
+// the same row afterwards must not take them away again.
+func TestAnAnswerKeepsItsSources(t *testing.T) {
+	st := newStore(t)
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := st.AppendMessage(Message{
+		ID: "m1", ChatID: "c1", Role: "assistant", Content: "laut Quelle [1] …",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := []Source{
+		{Index: 1, Title: "Wärmespeicher", URL: "https://example.de/a"},
+		{Index: 2, Title: "Preise", URL: "https://example.de/b"},
+	}
+	if err := st.SetMessageSources(msg.ID, sources); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stream writes the row again as the answer finishes; that update carries no
+	// sources and must leave the stored list alone.
+	msg.Content = "laut Quelle [1] … fertig"
+	if err := st.UpdateMessage(msg); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.GetMessage(msg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sources) != 2 {
+		t.Fatalf("sources = %+v, want the two written after the turn", got.Sources)
+	}
+	if got.Sources[1].Index != 2 || got.Sources[1].URL != "https://example.de/b" ||
+		got.Sources[1].Title != "Preise" {
+		t.Errorf("source 2 was not stored as written: %+v", got.Sources[1])
+	}
+
+	// A message from before citations existed reads as having none.
+	plain, err := st.AppendMessage(Message{ID: "m2", ChatID: "c1", Role: "assistant", Content: "alt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := st.GetMessage(plain.ID); err != nil || len(again.Sources) != 0 {
+		t.Errorf("a message without sources reports %+v (%v)", again.Sources, err)
 	}
 }
 
@@ -815,6 +878,8 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 		{"tool_calls", "source_tokens"},
 		{"tool_calls", "context_tokens"},
 		{"tool_calls", "condensed"},
+		{"tool_calls", "withheld"},
+		{"messages", "sources_json"},
 	} {
 		if _, err := st.DB().Exec(`ALTER TABLE ` + column.table + ` DROP COLUMN ` + column.name); err != nil {
 			t.Fatalf("drop %s.%s to build the older schema: %v", column.table, column.name, err)

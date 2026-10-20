@@ -62,6 +62,22 @@ type Message struct {
 	Attachments []Attachment `json:"attachments,omitempty"`
 	// ToolCalls are populated when a message is loaded.
 	ToolCalls []ToolCallRecord `json:"toolCalls,omitempty"`
+	// Sources is what an answer's citations number refer to: every web source the
+	// turn consulted, numbered the way the model saw them. It is written once, when
+	// the turn ends, because a turn's searches happen while its answer is being
+	// written — an answer persisted before its last search would be numbered against
+	// a list that is still growing.
+	Sources []Source `json:"sources,omitempty"`
+}
+
+// Source is one numbered web source a turn consulted, as the model saw it: the
+// numbering is the one in the search result it read, which is what makes a `[3]` in
+// an answer point at one site rather than at the third hit of every search the turn
+// made. Sources without a number are pages that were read directly.
+type Source struct {
+	Index int    `json:"index"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
 }
 
 // Attachment is a file the user added to a chat.
@@ -259,12 +275,19 @@ type ToolCallRecord struct {
 	// condensed the result or when the answer's tool budget cut it, and Condensed
 	// says which — a number the user cannot attribute is worse than no number.
 	//
+	// Withheld is the third outcome, and the only one whose ContextTokens is not a
+	// size of the result at all: the budget had nothing left, so the model received
+	// the exhausted notice and none of the text. Without this flag the card showed
+	// "4,374 → 41 tokens" for a search whose results never arrived, which reads as a
+	// summary the model wrote.
+	//
 	// They are 0 on a record written before migration 8, and on a call that failed,
 	// which is the honest reading of a row that never measured anything: a card
 	// shows nothing rather than a zero.
 	SourceTokens  int       `json:"sourceTokens"`
 	ContextTokens int       `json:"contextTokens"`
 	Condensed     bool      `json:"condensed"`
+	Withheld      bool      `json:"withheld"`
 	CreatedAt     time.Time `json:"createdAt"`
 }
 

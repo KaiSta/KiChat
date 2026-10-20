@@ -230,6 +230,9 @@ func TestTheToolCardIsToldHowMuchWasCut(t *testing.T) {
 				if record.Condensed != tc.condensed {
 					t.Errorf("%s condensed = %v, want %v", name, record.Condensed, tc.condensed)
 				}
+				if record.Withheld {
+					t.Errorf("%s withheld the result, but the page fitted", name)
+				}
 				if tc.condensed {
 					if record.ContextTokens >= record.SourceTokens {
 						t.Errorf("%s claims a cut that saved nothing: %d -> %d", name,
@@ -248,6 +251,75 @@ func TestTheToolCardIsToldHowMuchWasCut(t *testing.T) {
 					digester.requestCount())
 			}
 		})
+	}
+}
+
+// TestAWithheldResultIsNotReportedAsASize is the case a reader hit: a search whose
+// results never reached the model, because the answer's tool budget was already spent.
+// The card used to print "4,374 → 41 tokens" for it — the 41 were the exhausted notice —
+// which reads as a summary the second model wrote. The record must say the result was
+// withheld, and the size the model actually read must not be the one it is compared to.
+func TestAWithheldResultIsNotReportedAsASize(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<html><body><article><p>`+strings.Repeat("Ein Absatz mit Inhalt. ", 400)+
+			`</p></article></body></html>`)
+	}))
+	t.Cleanup(srv.Close)
+
+	settings := digestSettings()
+	// No summary model: this is the budget alone, which is what a spent budget looks
+	// like in a chat that never switched the condensation on.
+	settings.Digest.Model = llm.Ref{}
+	scraper := research.NewScraper(st, research.ScrapeOptions{
+		AllowPrivateHosts: true, RespectRobots: false, Timeout: 5 * time.Second,
+	}, nil)
+	log := &eventLog{}
+	engine := NewEngine(st, llm.NewRegistry(nil), tools.New(st, nil, scraper),
+		func() config.Settings { return settings }, log.emit)
+
+	// One token of budget: nothing of the page can fit, so the model gets the notice.
+	budget := &toolOutputBudget{remaining: 1}
+	engine.runTool(context.Background(), "chat-1", store.Message{ID: "m1", ChatID: "chat-1"},
+		scrapeCall(srv.URL), budget, tools.TurnRef{BackendID: "fake"})
+
+	record := persistedToolCall(t, st)
+	if record.SourceTokens == 0 {
+		t.Fatal("the page's own size was not recorded, so the card has nothing to say")
+	}
+	if !record.Withheld {
+		t.Errorf("a withheld result is reported as a size: %+v", record)
+	}
+	if record.Condensed {
+		t.Error("a withheld result claims a condensation nobody wrote")
+	}
+	if record.ContextTokens >= record.SourceTokens {
+		t.Errorf("a withheld result reports the page as its context size: %d >= %d",
+			record.ContextTokens, record.SourceTokens)
+	}
+	// And the event the live card renders, not only the row.
+	last := store.ToolCallRecord{}
+	for _, ev := range log.snapshot() {
+		if ev.name == "chat:tool" {
+			if reported, ok := ev.payload["toolCall"].(store.ToolCallRecord); ok {
+				last = reported
+			}
+		}
+	}
+	if !last.Withheld {
+		t.Errorf("the emitted card does not know the result was withheld: %+v", last)
+	}
+	// The model was told the budget was spent, rather than handed a fragment of the
+	// page that would read as the whole of it.
+	msgs, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != exhaustedNotice {
+		t.Fatalf("the model received %q, want the exhausted notice", msgs[0].Content)
 	}
 }
 

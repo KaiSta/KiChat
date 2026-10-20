@@ -56,6 +56,10 @@ type turnKey struct{}
 type TurnRef struct {
 	BackendID string
 	ModelID   string
+	// Sources is the turn's numbering of the web sources it has read, so a search
+	// result continues the numbering of the search before it instead of restarting at
+	// [1]. Nil is a call outside a turn, which keeps the old per-list numbering.
+	Sources *SourceList
 }
 
 // WithTurn attaches the turn's backend and model to a tool call.

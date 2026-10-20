@@ -10,6 +10,7 @@ import (
 	"kichat/internal/events"
 	"kichat/internal/research"
 	"kichat/internal/store"
+	"kichat/internal/tools"
 )
 
 // seedSearch runs a search before generation when the chat has "search first"
@@ -21,7 +22,12 @@ import (
 // headlines, which removes the scrape round trip that used to be needed before
 // the model could read anything. contextLimit (0 when unknown) bounds how much
 // of the model's window the search payload is allowed to occupy.
-func (e *Engine) seedSearch(ctx context.Context, chat *store.Chat, query string, settings config.Settings, contextLimit int) error {
+//
+// sources is the turn's numbering: the seeded list takes numbers from it, so a search
+// the model runs afterwards continues the sequence rather than restarting at [1] — which
+// is what lets a citation name one site.
+func (e *Engine) seedSearch(ctx context.Context, chat *store.Chat, query string, settings config.Settings,
+	contextLimit int, sources *tools.SourceList) error {
 	if !chat.SearchFirst {
 		return nil
 	}
@@ -56,13 +62,13 @@ func (e *Engine) seedSearch(ctx context.Context, chat *store.Chat, query string,
 		if err != nil {
 			return err
 		}
-		content = renderGroundedContext(grounded)
+		content = renderGroundedContext(grounded, sources)
 	} else {
 		outcome, err := e.Tools.Chain.Search(searchCtx, query, req)
 		if err != nil {
 			return err
 		}
-		content = renderResultListing(outcome)
+		content = renderResultListing(outcome, sources)
 	}
 	if strings.TrimSpace(content) == "" {
 		return nil
@@ -109,7 +115,7 @@ func searchTokenBudget(settings config.Settings, contextLimit int) int {
 
 // renderGroundedContext formats page chunks for the prompt, keeping the source
 // numbering stable so the model can cite what it read.
-func renderGroundedContext(g research.GroundedContext) string {
+func renderGroundedContext(g research.GroundedContext, sources *tools.SourceList) string {
 	if g.Empty() {
 		return ""
 	}
@@ -129,7 +135,11 @@ func renderGroundedContext(g research.GroundedContext) string {
 		if label == "" {
 			label = src.URL
 		}
-		fmt.Fprintf(&sb, "[%d] %s\n", i+1, label)
+		index := i + 1
+		if sources != nil {
+			index = sources.Add(src.Title, src.URL)
+		}
+		fmt.Fprintf(&sb, "[%d] %s\n", index, label)
 		if src.URL != "" {
 			fmt.Fprintf(&sb, "    URL: %s\n", src.URL)
 		}
@@ -144,7 +154,7 @@ func renderGroundedContext(g research.GroundedContext) string {
 
 // renderResultListing keeps the original headline-only format, used when LLM
 // context is switched off.
-func renderResultListing(outcome research.SearchOutcome) string {
+func renderResultListing(outcome research.SearchOutcome, sources *tools.SourceList) string {
 	if len(outcome.Results) == 0 {
 		return ""
 	}
@@ -154,7 +164,11 @@ func renderResultListing(outcome research.SearchOutcome) string {
 		fmt.Fprintf(&sb, "Hinweis: %s\n\n", outcome.Warning)
 	}
 	for i, r := range outcome.Results {
-		fmt.Fprintf(&sb, "[%d] %s\n", i+1, r.Title)
+		index := i + 1
+		if sources != nil {
+			index = sources.Add(r.Title, r.URL)
+		}
+		fmt.Fprintf(&sb, "[%d] %s\n", index, r.Title)
 		if r.URL != "" {
 			fmt.Fprintf(&sb, "    URL: %s\n", r.URL)
 		}

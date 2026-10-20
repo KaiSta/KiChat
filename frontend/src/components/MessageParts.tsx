@@ -145,19 +145,24 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
         {/* What the result cost and what of it the model reads. One number when they
             are the same; two when they are not, because a reader who is told the page
             cost 12,000 tokens and then sees the turn fit has to be told where the rest
-            went. The cause lives in the tooltip: the same drop is a second model's
-            condensation or this answer's tool budget, and the two call for different
-            fixes. A zero is a record that measured nothing, so it renders nothing. */}
-        {call.status === 'ok' && call.sourceTokens > 0 && (
-          <span className="faint mono shrink-0" title={tokenHint(t, call)}>
-            {call.contextTokens > 0 && call.contextTokens < call.sourceTokens
-              ? t('tool.tokensCut', {
-                  source: formatNumber(call.sourceTokens),
-                  context: formatNumber(call.contextTokens),
-                })
-              : t('tool.tokensOne', { tokens: formatNumber(call.sourceTokens) })}
-          </span>
-        )}
+            went. A withheld result is neither: the model got a notice rather than a
+            prefix, so its size is not 41 tokens of anything and the card says so in
+            words. A zero is a record that measured nothing, so it renders nothing. */}
+        {call.status === 'ok' && call.sourceTokens > 0 &&
+          (call.withheld ? (
+            <span className="mono shrink-0" style={{ color: 'var(--warn)' }} title={tokenHint(t, call)}>
+              {t('tool.tokensWithheld', { tokens: formatNumber(call.sourceTokens) })}
+            </span>
+          ) : (
+            <span className="faint mono shrink-0" title={tokenHint(t, call)}>
+              {call.contextTokens > 0 && call.contextTokens < call.sourceTokens
+                ? t('tool.tokensCut', {
+                    source: formatNumber(call.sourceTokens),
+                    context: formatNumber(call.contextTokens),
+                  }) + (call.condensed ? '' : ` (${t('tool.tokensBudgetTag')})`)
+                : t('tool.tokensOne', { tokens: formatNumber(call.sourceTokens) })}
+            </span>
+          ))}
         <span className="ml-auto faint">{formatDuration(call.durationMs)}</span>
       </button>
 
@@ -240,6 +245,7 @@ function tokenHint(
 ): string {
   const source = formatNumber(call.sourceTokens)
   const context = formatNumber(call.contextTokens)
+  if (call.withheld) return t('tool.tokensWithheldHint', { tokens: source })
   if (call.condensed) return t('tool.tokensCondensedHint', { source, context })
   if (call.contextTokens > 0 && call.contextTokens < call.sourceTokens) {
     return t('tool.tokensBudgetHint', { source, context })

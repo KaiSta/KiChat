@@ -55,6 +55,7 @@ const de = {
   'chat.regenerate': 'Neu generieren',
   'chat.copy': 'Kopieren',
   'chat.copied': 'Kopiert',
+  'chat.sources': 'Quellen',
   'chat.interrupted': 'Abgebrochen',
   'chat.failed': 'Unvollständig',
   'chat.failedHint': 'Die Verbindung zum Backend brach ab, bevor die Antwort fertig war. Der bisherige Text ist erhalten — einfach erneut senden oder neu generieren.',
@@ -765,6 +766,10 @@ const de = {
   'tool.result': 'Ergebnis',
   'tool.tokensOne': '{{tokens}} Tokens',
   'tool.tokensCut': '{{source}} → {{context}} Tokens',
+  'tool.tokensBudgetTag': 'Budget',
+  'tool.tokensWithheld': '{{tokens}} Tokens verworfen',
+  'tool.tokensWithheldHint':
+    'Das Tool hat {{tokens}} Tokens zurückgegeben; das Token-Budget dieser Antwort war bereits aufgebraucht, deshalb hat das Modell sie nie gelesen. Frage noch einmal, um das Ergebnis in einer neuen Antwort zu bekommen.',
   'tool.tokensHint': 'Das Tool hat {{tokens}} Tokens zurückgegeben; sie stehen unverändert im Kontext.',
   'tool.tokensCondensedHint':
     'Das Tool hat {{source}} Tokens zurückgegeben; ein zweites Modell hat sie auf {{context}} Tokens gekürzt, und so stehen sie im Kontext.',
@@ -811,6 +816,7 @@ const en: Record<keyof typeof de, string> = {
   'chat.regenerate': 'Regenerate',
   'chat.copy': 'Copy',
   'chat.copied': 'Copied',
+  'chat.sources': 'Sources',
   'chat.interrupted': 'Stopped',
   'chat.failed': 'Incomplete',
   'chat.failedHint': 'The connection to the backend dropped before the answer was finished. The text received so far is kept — send again or regenerate.',
@@ -1502,6 +1508,10 @@ const en: Record<keyof typeof de, string> = {
   'tool.result': 'Result',
   'tool.tokensOne': '{{tokens}} tokens',
   'tool.tokensCut': '{{source}} → {{context}} tokens',
+  'tool.tokensBudgetTag': 'budget',
+  'tool.tokensWithheld': '{{tokens}} tokens discarded',
+  'tool.tokensWithheldHint':
+    'The tool returned {{tokens}} tokens; this answer’s tool budget was already spent, so the model never read them. Ask again to get the result in a fresh answer.',
   'tool.tokensHint': 'The tool returned {{tokens}} tokens; they stand in the context unchanged.',
   'tool.tokensCondensedHint':
     'The tool returned {{source}} tokens; a second model condensed them to {{context}}, which is what stands in the context.',
@@ -1545,6 +1555,7 @@ const zh: Record<keyof typeof de, string> = {
   'chat.regenerate': '重新生成',
   'chat.copy': '复制',
   'chat.copied': '已复制',
+  'chat.sources': '来源',
   'chat.interrupted': '已中断',
   'chat.failed': '不完整',
   'chat.failedHint': '后端连接在回答完成前中断。已收到的文本会保留——请重新发送或重新生成。',
@@ -2188,6 +2199,10 @@ const zh: Record<keyof typeof de, string> = {
   'tool.result': '结果',
   'tool.tokensOne': '{{tokens}} 个令牌',
   'tool.tokensCut': '{{source}} → {{context}} 个令牌',
+  'tool.tokensBudgetTag': '预算',
+  'tool.tokensWithheld': '{{tokens}} 个令牌未采用',
+  'tool.tokensWithheldHint':
+    '工具返回了 {{tokens}} 个令牌，但本回答的工具预算已经用完，模型从未读到它们。再次提问可在新的回答中获得结果。',
   'tool.tokensHint': '工具返回了 {{tokens}} 个令牌，原样进入上下文。',
   'tool.tokensCondensedHint':
     '工具返回了 {{source}} 个令牌；第二个模型将其压缩为 {{context}} 个，并以此进入上下文。',

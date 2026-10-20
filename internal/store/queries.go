@@ -145,20 +145,49 @@ func (s *Store) ListChats(includeArchived bool) ([]Chat, error) {
 
 const messageColumns = `id,chat_id,seq,role,content,reasoning,name,tool_calls_json,
   tool_call_id,status,created_at,backend,model,prompt_tokens,completion_tokens,
-  tokens_per_second,ttft_ms,generation_ms,stop_reason,stats_source`
+  tokens_per_second,ttft_ms,generation_ms,stop_reason,stats_source,sources_json`
 
 func scanMessage(row interface{ Scan(...any) error }) (Message, error) {
 	var m Message
 	var created int64
+	var sources string
 	err := row.Scan(&m.ID, &m.ChatID, &m.Seq, &m.Role, &m.Content, &m.Reasoning,
 		&m.Name, &m.ToolCallsJSON, &m.ToolCallID, &m.Status, &created, &m.Backend,
 		&m.Model, &m.PromptTokens, &m.CompletionTokens, &m.TokensPerSecond,
-		&m.TTFTMs, &m.GenerationMs, &m.StopReason, &m.StatsSource)
+		&m.TTFTMs, &m.GenerationMs, &m.StopReason, &m.StatsSource, &sources)
 	if err != nil {
 		return Message{}, err
 	}
 	m.CreatedAt = fromMillis(created)
+	m.Sources = parseSources(sources)
 	return m, nil
+}
+
+// sourcesJSON is how a message's sources are stored: one small JSON array, empty when
+// there are none — which is every message but a researched answer.
+func sourcesJSON(sources []Source) string {
+	if len(sources) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(sources)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// parseSources reads that array back. A row that cannot be parsed reports no sources
+// rather than failing the message: a citation list is a display aid, and a chat that
+// cannot be opened is worse than one whose list is missing.
+func parseSources(raw string) []Source {
+	if raw == "" {
+		return nil
+	}
+	var sources []Source
+	if err := json.Unmarshal([]byte(raw), &sources); err != nil {
+		return nil
+	}
+	return sources
 }
 
 // CreateMessage inserts a message at the sequence number the caller assigned.
@@ -172,11 +201,11 @@ func (s *Store) CreateMessage(m Message) error {
 	}
 	_, err := s.db.Exec(`
 INSERT INTO messages (`+messageColumns+`)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.ID, m.ChatID, m.Seq, m.Role, m.Content, m.Reasoning, m.Name,
 		m.ToolCallsJSON, m.ToolCallID, m.Status, millis(m.CreatedAt), m.Backend,
 		m.Model, m.PromptTokens, m.CompletionTokens, m.TokensPerSecond, m.TTFTMs,
-		m.GenerationMs, m.StopReason, m.StatsSource)
+		m.GenerationMs, m.StopReason, m.StatsSource, sourcesJSON(m.Sources))
 	if err != nil {
 		return err
 	}
@@ -221,11 +250,11 @@ func (s *Store) AppendMessage(m Message) (Message, error) {
 
 	if _, err := tx.Exec(`
 INSERT INTO messages (`+messageColumns+`)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.ID, m.ChatID, m.Seq, m.Role, m.Content, m.Reasoning, m.Name,
 		m.ToolCallsJSON, m.ToolCallID, m.Status, millis(m.CreatedAt), m.Backend,
 		m.Model, m.PromptTokens, m.CompletionTokens, m.TokensPerSecond, m.TTFTMs,
-		m.GenerationMs, m.StopReason, m.StatsSource); err != nil {
+		m.GenerationMs, m.StopReason, m.StatsSource, sourcesJSON(m.Sources)); err != nil {
 		return m, err
 	}
 	if _, err := tx.Exec(`UPDATE chats SET updated_at=? WHERE id=?`, millis(time.Now()), m.ChatID); err != nil {
@@ -247,6 +276,17 @@ UPDATE messages SET content=?,reasoning=?,tool_calls_json=?,status=?,
 		m.Content, m.Reasoning, m.ToolCallsJSON, m.Status, m.PromptTokens,
 		m.CompletionTokens, m.TokensPerSecond, m.TTFTMs, m.GenerationMs,
 		m.StopReason, m.StatsSource, m.Backend, m.Model, m.ID)
+	return err
+}
+
+// SetMessageSources stores the numbered sources an answer cites.
+//
+// Its own statement rather than a field on UpdateMessage, which is the streaming write:
+// the sources are not known while the answer is being written, and every streamed update
+// would otherwise erase the list with the empty one it carries.
+func (s *Store) SetMessageSources(messageID string, sources []Source) error {
+	_, err := s.db.Exec(`UPDATE messages SET sources_json=? WHERE id=?`,
+		sourcesJSON(sources), messageID)
 	return err
 }
 
@@ -893,22 +933,22 @@ func (s *Store) UpsertToolCall(tc ToolCallRecord) error {
 	}
 	_, err := s.db.Exec(`
 INSERT INTO tool_calls (id,message_id,chat_id,name,args_json,result_json,status,duration_ms,error,
-  source_tokens,context_tokens,condensed,created_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+  source_tokens,context_tokens,condensed,withheld,created_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET result_json=excluded.result_json,status=excluded.status,
   duration_ms=excluded.duration_ms,error=excluded.error,
   source_tokens=excluded.source_tokens,context_tokens=excluded.context_tokens,
-  condensed=excluded.condensed`,
+  condensed=excluded.condensed,withheld=excluded.withheld`,
 		tc.ID, tc.MessageID, tc.ChatID, tc.Name, tc.ArgsJSON, tc.ResultJSON,
 		tc.Status, tc.DurationMs, tc.Error, tc.SourceTokens, tc.ContextTokens,
-		boolToInt(tc.Condensed), millis(tc.CreatedAt))
+		boolToInt(tc.Condensed), boolToInt(tc.Withheld), millis(tc.CreatedAt))
 	return err
 }
 
 // ListToolCalls returns a chat's tool calls oldest first.
 func (s *Store) ListToolCalls(chatID string) ([]ToolCallRecord, error) {
 	rows, err := s.db.Query(`SELECT id,message_id,chat_id,name,args_json,result_json,
-  status,duration_ms,error,source_tokens,context_tokens,condensed,created_at
+  status,duration_ms,error,source_tokens,context_tokens,condensed,withheld,created_at
 FROM tool_calls WHERE chat_id=? ORDER BY created_at`, chatID)
 	if err != nil {
 		return nil, err
@@ -918,13 +958,14 @@ FROM tool_calls WHERE chat_id=? ORDER BY created_at`, chatID)
 	for rows.Next() {
 		var tc ToolCallRecord
 		var created int64
-		var condensed int
+		var condensed, withheld int
 		if err := rows.Scan(&tc.ID, &tc.MessageID, &tc.ChatID, &tc.Name, &tc.ArgsJSON,
 			&tc.ResultJSON, &tc.Status, &tc.DurationMs, &tc.Error, &tc.SourceTokens,
-			&tc.ContextTokens, &condensed, &created); err != nil {
+			&tc.ContextTokens, &condensed, &withheld, &created); err != nil {
 			return nil, err
 		}
 		tc.Condensed = condensed != 0
+		tc.Withheld = withheld != 0
 		tc.CreatedAt = fromMillis(created)
 		out = append(out, tc)
 	}

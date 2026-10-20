@@ -286,8 +286,15 @@ func (s *Service) searchWeb(ctx context.Context, argsJSON string) (string, error
 	if outcome.Warning != "" {
 		fmt.Fprintf(&sb, "Hinweis: %s\n\n", outcome.Warning)
 	}
+	// The turn's own numbering, continued across searches: [1] in the answer has to mean
+	// one site, and it cannot if this list starts at 1 for the third time.
+	sources := SourcesFrom(ctx)
 	for i, r := range outcome.Results {
-		fmt.Fprintf(&sb, "[%d] %s\n", i+1, r.Title)
+		index := i + 1
+		if sources != nil {
+			index = sources.Add(r.Title, r.URL)
+		}
+		fmt.Fprintf(&sb, "[%d] %s\n", index, r.Title)
 		if r.URL != "" {
 			fmt.Fprintf(&sb, "    URL: %s\n", r.URL)
 		}
@@ -336,7 +343,16 @@ func (s *Service) scrapeURL(ctx context.Context, argsJSON string) (string, error
 	if result.Title != "" {
 		fmt.Fprintf(&sb, "# %s\n\n", result.Title)
 	}
-	fmt.Fprintf(&sb, "Quelle: %s\n", result.FinalURL)
+	// A page is a source too, and it takes the turn's next number — or the one it
+	// already had when the model followed a search result here, because the URL it
+	// asked for is the identity, not wherever that URL redirected to. The number is
+	// printed so the model can cite the page itself; before this the header named the
+	// URL and nothing else, which left a read page uncitable.
+	if sources := SourcesFrom(ctx); sources != nil {
+		fmt.Fprintf(&sb, "Quelle [%d]: %s\n", sources.Add(result.Title, args.URL), result.FinalURL)
+	} else {
+		fmt.Fprintf(&sb, "Quelle: %s\n", result.FinalURL)
+	}
 	if result.Cached {
 		sb.WriteString("(aus dem Zwischenspeicher)\n")
 	}

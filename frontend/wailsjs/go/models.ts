@@ -1763,6 +1763,22 @@ export namespace store {
 		}
 	}
 	
+	export class Source {
+	    index: number;
+	    title: string;
+	    url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Source(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	    }
+	}
 	export class ToolCallRecord {
 	    id: string;
 	    messageId: string;
@@ -1776,6 +1792,7 @@ export namespace store {
 	    sourceTokens: number;
 	    contextTokens: number;
 	    condensed: boolean;
+	    withheld: boolean;
 	    // Go type: time
 	    createdAt: any;
 	
@@ -1797,6 +1814,7 @@ export namespace store {
 	        this.sourceTokens = source["sourceTokens"];
 	        this.contextTokens = source["contextTokens"];
 	        this.condensed = source["condensed"];
+	        this.withheld = source["withheld"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	    }
 	
@@ -1842,6 +1860,7 @@ export namespace store {
 	    statsSource: string;
 	    attachments?: Attachment[];
 	    toolCalls?: ToolCallRecord[];
+	    sources?: Source[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Message(source);
@@ -1871,6 +1890,7 @@ export namespace store {
 	        this.statsSource = source["statsSource"];
 	        this.attachments = this.convertValues(source["attachments"], Attachment);
 	        this.toolCalls = this.convertValues(source["toolCalls"], ToolCallRecord);
+	        this.sources = this.convertValues(source["sources"], Source);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1891,6 +1911,7 @@ export namespace store {
 		    return a;
 		}
 	}
+	
 
 }
 

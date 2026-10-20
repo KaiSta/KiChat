@@ -377,6 +377,49 @@ The same notice, and the same "cite each source" instruction, closes the model-i
 `search_web` result ([internal/tools/tools.go:160](internal/tools/tools.go#L160)). With LLM
 context switched off, `renderResultListing` keeps the original headline-only format.
 
+### 7.1 Citations: one numbering per turn
+
+Asking the model to cite was not enough, and the gap was visible in a real transcript: an
+answer after **three** searches carried a "Quelle" column reading `2, 3, 4, 5, 6`, and
+nothing in the window said which site `2` was. Two things were wrong, and only the second
+one is a research problem:
+
+- **Every list numbered from `[1]`.** A turn's second search renumbered the same sites,
+  so a citation could not identify one page even if the reader opened every tool result.
+- **The answer kept no list.** The numbers existed in tool results the model may not
+  quote, and the transcript showed only the markers.
+
+Both are fixed by one list per turn. `tools.SourceList`
+([internal/tools/sources.go](internal/tools/sources.go)) is created in `Send` and travels
+with `tools.TurnRef` into every tool call, so the pre-flight seed and each `search_web`
+continue one sequence: the first search of a turn numbers `[1]…[10]`, the second `[11]…`,
+and a page read directly takes the next number — or, when it came from a result list, the
+number it already had, because the URL is the identity. A result seen twice keeps its
+first number: one page is one source.
+
+The numbering is written onto the answer when the turn ends (`messages.sources_json`,
+migration 10, via `SetMessageSources`), because the answer's own row is streamed before
+the turn's last search returns. `ChatView` renders it as a **Quellen (n)** list under the
+reply — open for up to four sources, collapsed beyond that — and `Markdown`'s
+`remarkCitations` plugin turns `[3]` into a link to the third entry. A number with no
+source behind it is left exactly as the model wrote it: a link to the wrong page is worse
+than a dead marker.
+
+Only the **bracketed** form links. The observed answer above wrote a bare `2, 3, 4` in a
+table cell, and rewriting bare digits would hit dates, prices and 40 W/m²; the source list
+is what resolves those, now that the number means one page.
+
+Messages stored before this have no list and their markers stay plain text — the numbers
+those answers cite were ambiguous when they were written, and inventing a mapping after
+the fact would be guessing which search the model meant.
+
+Pinned by `TestSourceNumbersAreOneSequencePerTurn` and
+`TestSearchResultsContinueTheTurnsNumbering` (`internal/tools/sources_test.go`, the second
+against a stubbed Brave endpoint), `TestTheAnswerKeepsTheSourcesItCited` and
+`TestASearchContinuesTheSeededNumbering` (`internal/chat/citations_test.go`), and
+`TestAnAnswerKeepsItsSources` (`internal/store/store_test.go`) — which also pins that the
+streaming update does not erase the list.
+
 ---
 
 ## 8. Where the code is

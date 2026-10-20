@@ -24,6 +24,9 @@ type generateInput struct {
 	Settings    config.Settings
 	UseNative   bool
 	MaxToolIter int
+	// Sources is the turn's numbering of the web sources, shared with the pre-flight
+	// search so every list the model reads continues one sequence.
+	Sources *tools.SourceList
 }
 
 type generateResult struct {
@@ -342,6 +345,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			e.runTool(ctx, in.Chat.ID, row, call, toolBudget, tools.TurnRef{
 				BackendID: in.BackendID,
 				ModelID:   in.ModelID,
+				Sources:   in.Sources,
 			})
 		}
 		e.emitStatus(in.Chat.ID, "idle")
@@ -419,12 +423,17 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 	if budget.remaining > 0 {
 		condensed, condensedByModel = e.condenseToolOutput(ctx, chatID, call, output, turn)
 	}
-	delivered := budget.take(condensed)
+	delivered, withheld := budget.take(condensed)
 	// What the result cost and what of it the model actually reads is what makes the
 	// condensation visible: without it the feature is indistinguishable from a page
 	// that happened to be short. Both numbers are measured on the strings that travel
 	// — the tool's own output and the exact text `take` returns — so a result cut by
 	// the answer's budget, by the second model, or by neither is reported as it is.
+	//
+	// One outcome has no size to report: a budget with nothing left answers with the
+	// notice rather than with a prefix of the result, and a card that printed both sizes
+	// anyway would say the model read 41 tokens of a search it never saw. `withheld`
+	// records that, so the card can say so.
 	//
 	// The card is re-emitted rather than only stored: it was drawn before the second
 	// model ran, and a count that appeared only after reopening the chat would be a
@@ -433,6 +442,7 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 		record.SourceTokens = llm.EstimateTokens(output)
 		record.ContextTokens = llm.EstimateTokens(delivered)
 		record.Condensed = condensedByModel
+		record.Withheld = withheld
 		e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
 		e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 	}
@@ -522,20 +532,26 @@ const exhaustedNotice = "Das Token-Budget für Tool-Ergebnisse in dieser Antwort
 // take returns the part of a tool result the model may see and charges it
 // against the budget. A result that does not fit is cut with the shared
 // truncation marker, so the model can tell a short result from a shortened one.
-func (b *toolOutputBudget) take(output string) string {
+//
+// The second return value says the model got none of it and the notice instead. It is
+// reported rather than left to be recognised from the text, because it is the one
+// outcome a tool card must not render as a size: "4,374 → 41 tokens" is what a spent
+// budget looked like on the card, and it reads as a summary the model wrote when in
+// fact the search results never arrived.
+func (b *toolOutputBudget) take(output string) (string, bool) {
 	if b.remaining <= 0 {
-		return exhaustedNotice
+		return exhaustedNotice, true
 	}
 	if tokens := llm.EstimateTokens(output); tokens <= b.remaining {
 		b.remaining -= tokens
-		return output
+		return output, false
 	}
 	cut := cutToTokens(output, b.remaining)
 	b.remaining = 0
 	if cut == "" {
-		return exhaustedNotice
+		return exhaustedNotice, true
 	}
-	return cut
+	return cut, false
 }
 
 // executeTool runs one tool call. The requesting message id travels with the

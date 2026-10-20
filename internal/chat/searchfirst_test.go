@@ -51,7 +51,7 @@ func TestRenderGroundedContext(t *testing.T) {
 			{URL: "https://example.de/b", Title: "", Snippets: []string{"Ohne Titel."}, Kind: "place"},
 		},
 	}
-	got := renderGroundedContext(grounded)
+	got := renderGroundedContext(grounded, nil)
 
 	for _, want := range []string{
 		"brave-context",
@@ -79,12 +79,12 @@ func TestRenderGroundedContext(t *testing.T) {
 	fallback := renderGroundedContext(research.GroundedContext{
 		Provider: "duckduckgo",
 		Sources:  []research.GroundedSource{{URL: "https://a.example", Title: "T", Snippets: []string{"kurz"}}},
-	})
+	}, nil)
 	if !strings.Contains(fallback, "nur Kurzbeschreibungen") {
 		t.Errorf("fallback without a budget does not advertise it:\n%s", fallback)
 	}
 
-	if out := renderGroundedContext(research.GroundedContext{}); out != "" {
+	if out := renderGroundedContext(research.GroundedContext{}, nil); out != "" {
 		t.Errorf("an empty context rendered %q, want nothing", out)
 	}
 
@@ -93,7 +93,7 @@ func TestRenderGroundedContext(t *testing.T) {
 		Provider: "brave-context",
 		Warning:  "Suchanfrage auf 75 Wörter gekürzt (API-Limit)",
 		Sources:  []research.GroundedSource{{URL: "https://a.example", Title: "T", Snippets: []string{"x"}}},
-	})
+	}, nil)
 	if !strings.Contains(withWarning, "Hinweis: Suchanfrage") {
 		t.Errorf("warning missing from the seeded message:\n%s", withWarning)
 	}
@@ -108,7 +108,7 @@ func TestRenderResultListing(t *testing.T) {
 		Results: []research.SearchResult{
 			{Title: "Erster Treffer", URL: "https://example.org/1", Snippet: "Beschreibung eins.", Age: "3 Tage", Rank: 1},
 		},
-	})
+	}, nil)
 	for _, want := range []string{"duckduckgo", "[1] Erster Treffer", "URL: https://example.org/1", "Beschreibung eins.", "Datum: 3 Tage", "Hinweis: brave war nicht verfügbar", "unvertrauenswürdige"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("listing is missing %q:\n%s", want, out)
@@ -117,7 +117,7 @@ func TestRenderResultListing(t *testing.T) {
 	if strings.Contains(out, "Budget:") {
 		t.Error("the headline listing claims a token budget it does not have")
 	}
-	if got := renderResultListing(research.SearchOutcome{}); got != "" {
+	if got := renderResultListing(research.SearchOutcome{}, nil); got != "" {
 		t.Errorf("an empty outcome rendered %q, want nothing", got)
 	}
 }

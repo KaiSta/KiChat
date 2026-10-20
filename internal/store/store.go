@@ -303,6 +303,21 @@ ALTER TABLE tool_calls ADD COLUMN source_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tool_calls ADD COLUMN context_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tool_calls ADD COLUMN condensed INTEGER NOT NULL DEFAULT 0;
 `,
+	// 9: the result the budget refused entirely.
+	//
+	// Its own migration rather than a fourth column in 8: 8 has already run on the
+	// installations that built between the two, so folding this in would leave them
+	// without the column while the runner reports the schema up to date — the exact
+	// silent failure §4 of the migration comment describes.
+	`ALTER TABLE tool_calls ADD COLUMN withheld INTEGER NOT NULL DEFAULT 0`,
+	// 10: the numbered sources an answer cites.
+	//
+	// A column on the message rather than a derivation: the numbers come from the
+	// turn's searches, which are over by the time the answer is stored, and a client
+	// that rebuilt them from the tool texts would be re-deriving the numbering from
+	// text this app no longer keeps in that shape. An empty string is every row
+	// written before citations existed, and renders no list.
+	`ALTER TABLE messages ADD COLUMN sources_json TEXT NOT NULL DEFAULT ''`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

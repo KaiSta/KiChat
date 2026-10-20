@@ -826,20 +826,25 @@ func TestToolOutputBudgetCapsPerAnswer(t *testing.T) {
 	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: 100})
 
 	small := strings.Repeat("wort ", 5)
-	if got := budget.take(small); got != small {
-		t.Fatalf("a result inside the budget should pass through, got %q", got)
+	if got, withheld := budget.take(small); got != small || withheld {
+		t.Fatalf("a result inside the budget should pass through, got %q (withheld %v)", got, withheld)
 	}
 
 	big := strings.Repeat("wort ", 5000)
-	got := budget.take(big)
+	got, withheld := budget.take(big)
 	if tokens := llm.EstimateTokens(got); tokens > 100 {
 		t.Errorf("truncated result is over budget: %d tokens", tokens)
 	}
 	if !strings.Contains(got, "gekürzt") {
 		t.Errorf("a shortened result must say so, got %q", got)
 	}
-	if next := budget.take("kurz"); next != exhaustedNotice {
-		t.Errorf("after the budget is spent got %q, want the notice", next)
+	if withheld {
+		t.Error("a cut result was reported as withheld: the model reads a prefix of it")
+	}
+	// The distinction the tool card renders: a spent budget is not a short result.
+	if next, withheld := budget.take("kurz"); next != exhaustedNotice || !withheld {
+		t.Errorf("after the budget is spent got %q (withheld %v), want the notice and true",
+			next, withheld)
 	}
 }
 
@@ -860,7 +865,7 @@ func TestToolOutputBudgetFollowsTheRoomARequestHasLeft(t *testing.T) {
 	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: 25000})
 	budget.capTo(400)
 
-	got := budget.take(strings.Repeat("wort ", 5000))
+	got, _ := budget.take(strings.Repeat("wort ", 5000))
 	if tokens := llm.EstimateTokens(got); tokens > 400 {
 		t.Fatalf("a result cut to the room left is %d tokens, want at most 400", tokens)
 	}
@@ -876,7 +881,7 @@ func TestToolOutputBudgetNeverLoosens(t *testing.T) {
 	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: 100})
 	budget.capTo(5000)
 
-	got := budget.take(strings.Repeat("wort ", 5000))
+	got, _ := budget.take(strings.Repeat("wort ", 5000))
 	if tokens := llm.EstimateTokens(got); tokens > 100 {
 		t.Fatalf("a cap of 5000 loosened the 100-token budget: %d tokens", tokens)
 	}

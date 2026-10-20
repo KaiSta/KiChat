@@ -505,17 +505,69 @@ function MessageRow({
         )}
 
         {live.text ? (
-          <Markdown text={live.text} streaming={live.streaming} />
+          <Markdown text={live.text} streaming={live.streaming} sources={message.sources} />
         ) : live.streaming ? (
           <span className="streaming-cursor" />
         ) : (
           <span className="faint">—</span>
         )}
+        <SourcesList sources={message.sources} />
       </div>
 
       <MessageStats message={message} />
     </div>
   )
+}
+
+/** The sites an answer's citations number, in the order the model read them.
+ *
+ * The numbering is the turn's, not this component's: the backend continues the sequence
+ * across the searches of one turn, so `[7]` in the text and the seventh row here are the
+ * same page. That is why the list is stored with the answer rather than rebuilt here —
+ * a client that numbered its own rows would be a second opinion about what `[7]` means.
+ *
+ * A short list is open, because it is the thing the reader came for. A long one starts
+ * collapsed: a twenty-source answer should not push its own text off the screen, and the
+ * markers in the text are links anyway.
+ */
+function SourcesList({ sources }: { sources?: storeTypes.Source[] }) {
+  const t = useStore((s) => s.t)
+  if (!sources || sources.length === 0) return null
+
+  return (
+    <details className="collapsible mt-2 text-[12px]" open={sources.length <= 4}>
+      <summary className="faint">
+        {t('chat.sources')} ({formatNumber(sources.length)})
+      </summary>
+      <ol className="mt-1 space-y-0.5">
+        {sources.map((source) => (
+          <li key={`${source.index}-${source.url}`} className="flex gap-1.5">
+            <span className="faint mono shrink-0">[{source.index}]</span>
+            <button
+              type="button"
+              className="min-w-0 truncate text-left underline decoration-dotted"
+              title={source.url}
+              onClick={() => source.url && void App.OpenExternal(source.url)}
+            >
+              {source.title || source.url}
+            </button>
+            <span className="faint shrink-0">{domainOf(source.url)}</span>
+          </li>
+        ))}
+      </ol>
+    </details>
+  )
+}
+
+/** The host a source lives on, without `www.` — the part that tells two similar titles
+ * apart when the list is scanned rather than read. */
+function domainOf(url?: string): string {
+  if (!url) return ''
+  try {
+    return new URL(url).hostname.replace(/^www\./, '')
+  } catch {
+    return ''
+  }
 }
 
 function CopyButton({ text }: { text: string }) {

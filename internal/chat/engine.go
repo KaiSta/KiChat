@@ -236,8 +236,14 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		}
 	}
 
+	// One numbering for the whole turn. The pre-flight search and every tool call that
+	// follows it number their results from this one list, so [7] in the answer is one
+	// site rather than the seventh hit of each search; the list is written onto the
+	// answer when the turn ends, which is what the transcript's source list renders.
+	sources := tools.NewSourceList()
+
 	// Optionally seed the turn with web results before the model sees it.
-	if err := e.seedSearch(ctx, &chat, req.Text, settings, modelInfo.ContextLimit); err != nil {
+	if err := e.seedSearch(ctx, &chat, req.Text, settings, modelInfo.ContextLimit, sources); err != nil {
 		e.emit(events.Warning, map[string]any{
 			"chatId":  req.ChatID,
 			"warning": fmt.Sprintf("Vorab-Recherche fehlgeschlagen: %s", err.Error()),
@@ -283,8 +289,17 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		Settings:    settings,
 		UseNative:   useNativeTools,
 		MaxToolIter: settings.ToolIterations,
+		Sources:     sources,
 	}
 	result, genErr := e.generate(ctx, in)
+
+	// The answer carries the numbering it was written against. Only a reply with text gets
+	// the list: a row that only asked for tools has no citations to resolve, and a list
+	// under it would be a source panel for a message that says nothing.
+	if result.LastMessageID != "" && result.Text != "" {
+		e.persist(req.ChatID, "Die Quellen",
+			e.Store.SetMessageSources(result.LastMessageID, sources.All()))
+	}
 
 	// A model that named a tool the request never declared is refused by the vendor
 	// before a token streams, and its sentence — "attempted to call tool 'scr scrape_url'

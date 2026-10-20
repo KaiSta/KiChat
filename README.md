@@ -104,6 +104,10 @@ A research-first chat is what KiChat was built for:
   fallback that needs no key.
 - **Page scraping** with an SSRF guard and robots.txt handling, so a model reading a
   URL cannot be talked into reading your router's admin page.
+- **Citations that resolve.** Sources are numbered once per answer — the second search of
+  a turn continues at [11], it does not start again at [1] — and the reply carries a
+  **Sources** list plus clickable `[3]` markers, so a cited number is one website and not
+  the third hit of every search the answer made.
 - **Search first** as a switch: search before every answer, seed the turn with sources,
   then let the model reason over them.
 - **Token budgets per page**, so one long article cannot swallow the context window.
@@ -114,8 +118,9 @@ A research-first chat is what KiChat was built for:
   Settings → Tool results (the switch is per backend).
 - **Every tool card says what it cost.** The card reads `12,345 → 640 tokens` when a
   result was cut and a single number when it was not, measured by the app rather than
-  estimated in the window; hovering says which of the two cuts it was — the second model
-  or the answer's own tool budget.
+  estimated in the window. The cut names its cause — `(budget)` for the answer's own token
+  budget — and a result the budget refused outright reads `4,374 tokens discarded`, so a
+  search whose results never reached the model cannot be mistaken for a summary of them.
 
 ### Images
 

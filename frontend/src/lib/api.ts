@@ -129,6 +129,8 @@ export namespace store {
   export type GenerationRecipe = Plain<Gen.store.GenerationRecipe>
   /** How an enlarged copy was derived from another attachment. */
   export type Derivation = Plain<Gen.store.Derivation>
+  /** One numbered web source an answer cites. */
+  export type Source = Plain<Gen.store.Source>
   export type Chat = Plain<Gen.store.Chat>
   export type Chunk = Plain<Gen.store.Chunk>
   export type Compaction = Plain<Gen.store.Compaction>
