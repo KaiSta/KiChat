@@ -11,8 +11,8 @@ toolkit in one window. It runs open-weight models (GGUF) on your own hardware th
 **LM Studio**, **Ollama**, or a **llama.cpp** server it downloads, starts and stops for
 you — and it reaches the hosted providers whose free tier or subscription you already
 have: **Groq**, **NVIDIA build.nvidia.com**, **Mistral** and **DeepSeek**. Chats,
-sources, documents, generated pictures and code stay in one searchable, fully offline
-history on your own disk.
+sources, documents, generated pictures, enlarged copies and code stay in one searchable,
+fully offline history on your own disk.
 
 No KiChat account, no service of its own, no telemetry. Nothing leaves the machine unless
 you picked a hosted model or asked for a web search.
@@ -61,13 +61,16 @@ you picked a hosted model or asked for a web search.
   hammering the rate limit. See [Making the most of a free
   tier](#making-the-most-of-a-free-tier).
 - **Long conversations that stay coherent.** Automatic and manual context compaction,
-  with the originals never deleted, and a context meter built from the **measured**
-  `prompt_tokens` the backend reports rather than a guess.
+  with the originals never deleted, a summariser you can point at a different model,
+  and a scraped page condensed once instead of replayed at full length on every later
+  turn — plus a context meter built from the **measured** `prompt_tokens` the backend
+  reports rather than a guess.
 - **Honest numbers.** Everything the model costs — prompt tokens, completion tokens,
   tokens/s, first-token time, the effective per-request limit and where that limit
   came from — is on screen. Estimates are badged as estimates.
 - **One place for chat and pictures.** The model can call `generate_image`; the result
-  is an ordinary attachment you can save or redraw from its stored recipe.
+  is an ordinary attachment you can save, **enlarge** to FHD or 4K in about a second, or
+  redraw from its stored recipe — and an uploaded photograph can be enlarged too.
 - **Nothing is locked in.** Three local runtimes, four hosted APIs, keys in the OS
   keychain, chats in one SQLite file you can copy.
 
@@ -84,6 +87,15 @@ Tool calling works both ways: native function calling where the model supports i
 a parsed text protocol for the local models that do not — so a small model can still
 search the web or read a page.
 
+Around that, the tool path is built to fail honestly rather than silently: a model
+without native calling is shown exactly the tools the request declares, never one the
+app withheld (no search provider, no document index, no picture server). A name the
+model mangled — `scr scrape_url` for `scrape_url`, which local servers accept without
+complaint — is repaired when exactly one known tool fits it and refused rather than
+guessed at when none does. And a hosted backend that rejects the call outright is
+explained in the app's own words instead of quoting a validation sentence that names a
+tool the app never sent.
+
 ### Research
 
 A research-first chat is what KiChat was built for:
@@ -95,6 +107,11 @@ A research-first chat is what KiChat was built for:
 - **Search first** as a switch: search before every answer, seed the turn with sources,
   then let the model reason over them.
 - **Token budgets per page**, so one long article cannot swallow the context window.
+- **Page condensation.** An oversized page can be condensed by a second model before the
+  chat model reads it, so a page read once is not paid for again at full length on every
+  later turn. The tool card keeps the page, asking for the same page a second time hands
+  back the full text, and the feature is off until you pick a model for it in
+  Settings → Tool results (the switch is per backend).
 
 ### Images
 
@@ -112,10 +129,33 @@ Picture generation is a first-class part of the chat, not a separate toy:
 - **Profiles** that save a whole picture configuration and switch checkpoint in one
   pick, an optional **hires second pass** (1.25–2× per side) verified against the
   returned picture's own size, and **VAE tiling** so a large pass decodes on a small
-  card.
+  card. A profile also knows its **pipeline**, which is what a caption-trained model
+  needs: it is drawn from a caption rather than from the sentence you typed, so KiChat
+  has the turn's own model write one — or the chat model writes it as the tool call's
+  own argument, or you turn it off.
 - **One draw at a time, with a Stop button and live step/preview progress.** The
   picture becomes an ordinary image attachment, so you can save it to a folder or redraw
   it later from the recipe stored with it.
+
+**Enlarging is a second axis, and it works on any picture.** *Enlarge…* sits under every
+image attachment — including a photo you uploaded, which no redraw can touch — and asks
+for the target first (FHD at 1920 on the long side, 4K at 3840, or a custom long side,
+with the aspect kept and the resulting pixels shown before you click) and the method
+second:
+
+| Method | Cost, measured here | Detail | Needs |
+| --- | --- | --- | --- |
+| **Resample (Lanczos3)** | 0.13 s for 512²→1920², 0.47 s for 512²→3840² | clean, slightly soft; invents nothing | nothing — pure Go |
+| **Real-ESRGAN 4×** | 1.4–2.3 s on a Vulkan GPU (22.6 s on llvmpipe), mostly loading 33 MB of weights | plausible texture; can hallucinate | an optional 47 MB download and a Vulkan GPU |
+| **Redraw (hires)** | minutes | a new interpretation of the picture | the image server, and a picture KiChat drew |
+
+The neural program is one pinned archive with its weights inside, checksum verified by
+the app, off by default and shipped in no installer; the resampler is always there. An
+enlarged copy is filed beside its source with the operation recorded, a scale past 8×
+warns before it runs, and a Stop reaches the neural pass but not the classical one —
+which is arithmetic with no cancellation point, so it gets no button that would do
+nothing. The FHD/4K buttons under a picture remain, as shortcuts into the same panel
+pre-set to that target.
 
 ### Code
 
@@ -192,12 +232,24 @@ not assumed:
   same `rate_limit_exceeded` envelope, so the words of the refusal decide: an oversized
   *request* is folded and retried once, a *throttle* waits out the retry the provider
   names, and the wait is visible while it sleeps.
-- **Unusable models are hidden, not offered.** The one-token availability check above
-  keeps a catalogue from advertising models your key cannot call.
+- **A tool result is cut against the number the backend stated.** The room a fetched
+  page may fill is computed from the `prompt_tokens` the round just reported, not from
+  the assembly's estimate: measured at 3,776 tokens where the estimate alone allowed
+  4,527, on a prompt the backend stated at 1,200 under a 6,000-token ceiling. A room that
+  is too large cuts too late, and the round that reads the result is refused.
+- **A page is condensed instead of being paid for twice.** The message that is stored,
+  and therefore replayed on every later turn, holds the summary while the tool card keeps
+  the page (see [Research](#research)).
+- **A local model gets the same check between tool rounds.** A local server publishes no
+  per-request ceiling, so a round that grew past the threshold went unpriced until your
+  next message — and llama.cpp truncates such a prompt from the front, losing the system
+  prompt without saying so. Settings → Compaction has a mid-turn check against your own
+  threshold; it ships off, because it spends a summarisation inside an answer you are
+  waiting for.
 
 The same discipline applies offline: one draw at a time on one GPU, a step counter and
 a preview rather than an indefinite spinner, and a Stop button that reaches every
-running draw.
+running draw or neural enlargement.
 
 ## Which local model fits your machine
 
@@ -281,6 +333,10 @@ xattr -dr com.apple.quarantine /Applications/KiChat.app
 5. **Optional: pictures.** In **Settings → Images**, point KiChat at an AUTOMATIC1111 or
    Forge server (`--api`), or at the folder where you unpacked stable-diffusion.cpp and
    let KiChat run `sd-server` itself. The model then has a `generate_image` tool.
+6. **Optional: enlarging.** Nothing to set up for the fast path — *Enlarge…* under any
+   picture resamples in about a second. For the neural pass, **Download Real-ESRGAN** in
+   Settings → Images → Enlarging fetches the pinned 47 MB archive for your machine,
+   verifies its digest and switches the method on.
 
 ## GPU acceleration: CUDA, ROCm, Vulkan
 
@@ -573,6 +629,8 @@ readable from a live response.
 | Model answers slowly with no GPU in the panel | the build cannot resolve its runtime (CUDA/ROCm), or the driver is too old — the panel names the missing libraries |
 | A picture never appears | the WebUI was started without `--api`, or the checkpoint is not installed; `sd-server` needs its `-m` model file |
 | First picture takes minutes | a one-shot `sd-cli` draw loads the model silently before its first step; the managed `sd-server` shows a `starting` row instead |
+| An enlarged picture is black | Real-ESRGAN ran without its `models/` folder — a build of the small archive does exactly that, exits 0 and looks fine; use the app's download button instead |
+| Real-ESRGAN is offered but fails before it starts | its build is Vulkan-only, so a missing or broken driver is the cause — resampling needs neither GPU nor program |
 
 ## FAQ
 
@@ -611,6 +669,11 @@ Yes — stable-diffusion.cpp's `sd-server` speaks the same API, and KiChat can s
 stop it from the folder you unpacked. `sd-cli` works too, one picture per process, which
 skips loading a server at all.
 
+**Can I enlarge a photo I uploaded?**
+Yes. *Enlarge…* under any image attachment resamples to FHD, 4K or a custom long side,
+including a photo KiChat never drew; that path needs no server, no GPU and no download.
+Real-ESRGAN is the slower, sharper option and needs a Vulkan card.
+
 **Does it generate video?**
 Not yet. Chat, research, images and coding are implemented; video generation is on the
 [roadmap](#roadmap).
@@ -628,8 +691,8 @@ One SQLite file under your config directory — see [Privacy and where data live
 
 ## Roadmap
 
-Delivered: chat, research, images, coding, the managed llama.cpp runtime with GPU
-offload, vision projectors and the free-tier budget machinery.
+Delivered: chat, research, images, picture enlarging, coding, the managed llama.cpp
+runtime with GPU offload, vision projectors and the free-tier budget machinery.
 
 Next, roughly in the order they matter:
 
@@ -642,8 +705,8 @@ Next, roughly in the order they matter:
   cancellation.
 - **More picture backends.** ComfyUI (a workflow graph rather than a flat prompt) and
   hosted image APIs behind the same interface the three current servers share.
-- **More picture operations.** `img2img`, inpainting, upscaling, and more than one
-  picture per request.
+- **More picture operations.** `img2img`, inpainting, and more than one picture per
+  request, built on the same panel that now enlarges.
 - **Faster first draws.** The one-shot draw's model load is silent today; the managed
   server reports it as a bounded `starting` row.
 - **Repo-aware coding.** A workspace tool that can read, search and edit a project
@@ -660,12 +723,14 @@ document, and each one distinguishes what was observed from what is expected.
 | [`COMPACT.md`](COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
 | [`RESEARCH.md`](RESEARCH.md) | web search and scraping: providers, refusals, SSRF and robots guards, budgets |
 | [`IMAGES.md`](IMAGES.md) | picture generation: the three server kinds, parameters, profiles, verification |
+| [`UPSCALING.md`](UPSCALING.md) | enlarging a picture: the Lanczos resampler, Real-ESRGAN, targets, the Enlarge panel |
 | [`LLAMACPP.md`](LLAMACPP.md) | the llama.cpp provider, the managed runtime, projector pairing, ternary models |
 | [`GROQ.md`](GROQ.md) | the Groq backend, its listings, refusals, ceilings and pacing |
 | [`NVIDIA.md`](NVIDIA.md) | the build.nvidia.com backend and its availability check |
 | [`MISTRAL.md`](MISTRAL.md) | the Mistral backend, alias collapse, typed content chunks |
 | [`DEEPSEEK.md`](DEEPSEEK.md) | the DeepSeek backend, reasoning content, refusals |
-| [`AGENTS.md`](AGENTS.md) | how to build, check and change this repo; the live-test matrix |
+| [`AGENTS.md`](AGENTS.md) | the index: rules, the checks that must pass, the live-test matrix, and a skill per recurring task |
+| [`CODE_MAP.md`](CODE_MAP.md) | where every package, file and extension point lives, and the request lifecycle |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | pull requests, the CLA, commit style, the harness |
 
 ## Versioning
