@@ -197,6 +197,18 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   applied to the history the turn was started with, and re-asking it between rounds would
   summarise a transcript while the user is reading the answer to it.
 
+  How far that fold goes is `ceilingTarget`, and it used to be ignored: the walk priced the aim
+  against the caller's own `Target`, which an automatic run leaves at **0** — where 0 means "fold
+  as far as the cut allows". Every ceiling fold therefore went all the way to the newest user
+  turn, discarding the memory to save turns a request 2 % of the window did not need. The aim is
+  now `target`, so the cut stops as soon as the kept turns plus the prompt, the reserve and the
+  summary fit the ceiling (`TestAnAutomaticCeilingFoldAimsAtTheCeiling`).
+
+  And a fold cannot make a turn sendable by itself when one *tool result* is the growth: the
+  result belongs to the turn being answered, so the cut may not touch it. That half is not
+  compaction's — the result is cut to the room the next request has left as it is handed to the
+  model (GROQ.md §6.2 item 4).
+
   Where that ceiling comes from is what decides which turn it can save. It is the vendor's own
   number, read from **the budget header of any response** — `x-ratelimit-limit-tokens`, which
   Groq sends with the answer as much as with the refusal, handed to the provider by the shared

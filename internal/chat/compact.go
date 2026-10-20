@@ -368,7 +368,12 @@ func PlanCompaction(in PlanInput) CompactPlan {
 	// the target because the meter's `projected` number, which both bounds read,
 	// includes it.
 	if target > 0 && in.Budget.Limit > 0 && toSeq >= fromSeq {
-		budgetTarget := int(in.Target * float64(in.Budget.Limit))
+		// The aim is `target`, not `in.Target`: a ceiling fold resolves its own target
+		// above (ceilingTarget) and leaves the caller's at 0 — where 0 means "fold as far
+		// as the cut allows", so pricing the walk against it folded the whole memory away
+		// to save two turns on every tool-heavy turn. Pinned by
+		// TestAnAutomaticCeilingFoldAimsAtTheCeiling.
+		budgetTarget := int(target * float64(in.Budget.Limit))
 		// Attachments are part of the request too and sit inside the region this
 		// cut keeps, so leaving them out prices the kept history too cheaply.
 		base := in.Budget.System + in.Budget.Memory + in.Budget.ToolSchemas +

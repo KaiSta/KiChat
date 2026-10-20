@@ -278,6 +278,17 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			return result, ctx.Err()
 		}
 
+		// A tool result is read by the *next* request, so it is budgeted against the room
+		// that request has left rather than only against the user's figure for an answer.
+		// On a backend whose per-request ceiling is a fraction of its window those are
+		// different numbers, and the difference is a refused turn: Groq's allowance is a
+		// few thousand tokens while the tool budget defaults to 25000, so one scraped page
+		// was enough to make the round that reads it unsendable — and no fold can take it
+		// back, because the result belongs to the turn being answered.
+		if room, bounded := roomForToolResults(assembly.Budget, text); bounded {
+			toolBudget.capTo(room)
+		}
+
 		e.emitStatus(in.Chat.ID, "tool")
 		for i, call := range calls {
 			if ctx.Err() != nil {
@@ -366,6 +377,57 @@ func newToolOutputBudget(settings config.Settings) *toolOutputBudget {
 		remaining = 25000
 	}
 	return &toolOutputBudget{remaining: remaining}
+}
+
+// capTo tightens the budget to the room one request has left for tool results.
+//
+// The user's figure bounds an answer; it says nothing about whether the request
+// that reads the answer will fit the backend. Where those differ, the backend wins,
+// because the cost of ignoring it is not a shorter answer but a refused turn: on
+// Groq the per-minute token allowance is also the largest single request the
+// account may send, and it is a few thousand tokens against a setting that defaults
+// to 25000. A result is not something a history fold can take back either — it
+// belongs to the turn being answered, which the fold keeps verbatim — so the cut has
+// to happen where the result is handed to the model.
+//
+// It only ever tightens, which is what keeps a backend that had nothing to cap against
+// exactly as it was: a window larger than the spare tool budget leaves `remaining`
+// where the setting put it, and a model whose limit nobody reported never reaches this
+// call at all. A window *smaller* than the budget does cap now — that request was
+// already unsendable, and the fold that answers the refusal cannot touch the result.
+// A later round with more room cannot undo a cut an earlier one needed, because the
+// rounds of one answer build one history between them.
+func (b *toolOutputBudget) capTo(room int) {
+	if room < 0 {
+		room = 0
+	}
+	if room < b.remaining {
+		b.remaining = room
+	}
+}
+
+// roomForToolResults is how much of one request this round's tool results may fill,
+// and whether there is a limit to answer at all.
+//
+// It is the request's own arithmetic rather than a second estimate: the assembly in
+// hand priced everything the next request will carry except the reply this round just
+// wrote and the results it asks for, so subtracting the first sizes the second. The
+// reserve is already inside Projected, which is what keeps room for the answer the
+// next round has to produce.
+//
+// bounded is false when no limit is known — a model whose window nobody reported,
+// which is also the only case in which the tool budget is left alone. There is nothing
+// to aim at then, and a bare 0 would mean "no room" rather than "nobody said", which
+// is the difference between a withheld result and an untouched budget.
+func roomForToolResults(budget ContextBudget, replyText string) (room int, bounded bool) {
+	if budget.EffectiveLimit <= 0 {
+		return 0, false
+	}
+	room = budget.EffectiveLimit - budget.Projected - llm.EstimateTokens(replyText)
+	if room < 0 {
+		room = 0
+	}
+	return room, true
 }
 
 // exhaustedNotice is what the model sees once the budget is spent, so it learns

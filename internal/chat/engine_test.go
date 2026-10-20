@@ -850,3 +850,69 @@ func TestToolOutputBudgetDefaultsWhenUnset(t *testing.T) {
 		t.Errorf("remaining = %d, want the 25000 default", b.remaining)
 	}
 }
+
+// TestToolOutputBudgetFollowsTheRoomARequestHasLeft pins the half of the bound the
+// user's own figure cannot do. 25000 tokens of tool results is a reasonable answer on
+// a 131k-window model and impossible on a backend whose per-request ceiling is a few
+// thousand, which is Groq's shape exactly — so the room left in the next request, and
+// not the setting, is what decides how much of a result may be carried.
+func TestToolOutputBudgetFollowsTheRoomARequestHasLeft(t *testing.T) {
+	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: 25000})
+	budget.capTo(400)
+
+	got := budget.take(strings.Repeat("wort ", 5000))
+	if tokens := llm.EstimateTokens(got); tokens > 400 {
+		t.Fatalf("a result cut to the room left is %d tokens, want at most 400", tokens)
+	}
+	if !strings.Contains(got, "gekürzt") {
+		t.Fatalf("a shortened result must say so, got %q", got)
+	}
+}
+
+// TestToolOutputBudgetNeverLoosens keeps the cap pointing one way: a later round with
+// more room than an earlier one must not hand back what the earlier round had to give
+// up, because the rounds of one answer produce one history between them.
+func TestToolOutputBudgetNeverLoosens(t *testing.T) {
+	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: 100})
+	budget.capTo(5000)
+
+	got := budget.take(strings.Repeat("wort ", 5000))
+	if tokens := llm.EstimateTokens(got); tokens > 100 {
+		t.Fatalf("a cap of 5000 loosened the 100-token budget: %d tokens", tokens)
+	}
+}
+
+// TestRoomForToolResultsIsTheRequestsOwnArithmetic pins the sum a tool result is
+// budgeted against: what the assembly already priced, the reserve for the answer it
+// holds back, and the reply this round wrote — which the assembly predates.
+func TestRoomForToolResultsIsTheRequestsOwnArithmetic(t *testing.T) {
+	// A model whose limit nobody reported has no room to report, which is not the same
+	// as zero room: the budget must stay untouched rather than withhold every result.
+	if room, bounded := roomForToolResults(ContextBudget{}, "x"); bounded {
+		t.Fatalf("a budget with no known limit reported room %d as bounded", room)
+	}
+	// A window with no ceiling beside it is still a limit: the smaller of the two is
+	// what a request has to fit, and a tool result that ignored it would be the request
+	// no fold can shrink.
+	if room, bounded := roomForToolResults(ContextBudget{
+		Limit: 8192, EffectiveLimit: 8192, Projected: 4000,
+	}, ""); !bounded || room != 4192 {
+		t.Fatalf("room = %d (bounded %v) for a window with 4192 tokens left, want 4192", room, bounded)
+	}
+
+	reply := strings.Repeat("wort ", 300)
+	budget := ContextBudget{Limit: 131072, Ceiling: 8000, EffectiveLimit: 8000, Projected: 5000}
+	room, bounded := roomForToolResults(budget, reply)
+	if !bounded {
+		t.Fatal("a budget with a ceiling reported no room")
+	}
+	if want := 8000 - 5000 - llm.EstimateTokens(reply); room != want {
+		t.Fatalf("room = %d, want %d", room, want)
+	}
+	// The reply can be larger than what is left; a negative room is zero room.
+	if room, _ := roomForToolResults(ContextBudget{
+		Limit: 131072, EffectiveLimit: 1000, Projected: 900,
+	}, strings.Repeat("wort ", 300)); room != 0 {
+		t.Fatalf("room = %d for a reply that does not fit, want 0", room)
+	}
+}

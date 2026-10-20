@@ -387,12 +387,12 @@ turn. `internal/chat/oversize.go`:
    budget: a tool-heavy answer is several, and each round appends a model reply and a tool result
    that the check before the turn never priced — which is why a long turn could still be refused
    mid-answer even though its first request fitted. `generate` now asks the same planner before
-   every round after the first (`autoFold` with `ceilingOnly`), so the fold happens between the
+   every round after the first (`autoFold` with `midTurn` set), so the fold happens between the
    rounds rather than being paid for on the turn's error, where it restarts the turn and loses the
    work already done. Only the ceiling is asked there; the user's threshold belongs to the history
-   the turn was started with (COMPACT.md §4). Measured: a 12-turn history under a ceiling placed
-   just above it folds on the second round — the oldest turns gone, the new message kept, no
-   refusal (`TestAToolRoundFoldsBeforeItsNextRequestCrossesTheCeiling`).
+   the turn was started with (COMPACT.md §4). Measured: a 12-turn history under a ceiling
+   placed just above it folds on the second round — the oldest turns gone, the new message kept,
+   no refusal (`TestAToolRoundFoldsBeforeItsNextRequestCrossesTheCeiling`).
 
    **A number the user types in is the only source that speaks first.** Both routes above need
    a request to have been answered, so the very first oversized request of a session — a fresh
@@ -420,7 +420,22 @@ turn. `internal/chat/oversize.go`:
    131k window is one more oversized request, which is how a compaction that exists to fix this
    fails with the refusal it was folding away. `compactWith` clamps its budget to the ceiling
    the summariser publishes.
-4. **A refusal that survives all that is explained rather than quoted.** The vendor's sentence
+4. **A tool result is cut to the room the next request has left.** This is the one growth no
+   fold can take back, and it is the shape the reported failure had: the model thinks, calls
+   `search_web` or `scrape_url`, and the round that reads the result is refused because the
+   result alone is bigger than the whole allowance. A fold cuts at user-turn boundaries, so the
+   reply and the tool traffic of the turn being answered stay verbatim — which is exactly the
+   material that has to shrink. The user's own tool budget is no help either: it defaults to
+   **25000** tokens, three times an 8K allowance, and one `scrape_url` may ask for **12000** on
+   its own. So `generate` budgets the result against what the next request can actually carry —
+   `roomForToolResults` is the effective limit less what the assembly already priced, the
+   reserve for the answer and the reply this round wrote — and `toolOutputBudget.capTo` only
+   ever tightens, so a backend that publishes no ceiling keeps the behaviour it had. A result
+   cut this way carries the shared `…[gekürzt]` marker, so the model can read a narrower page
+   range instead of re-scraping the same URL. Measured: a 13 480-token document read back
+   through `read_pages` under a 6000-token ceiling reaches the model cut, and the second request
+   fits (`TestAToolResultIsCutToWhatTheRequestCanCarry`).
+5. **A refusal that survives all that is explained rather than quoted.** The vendor's sentence
    names an organization, a service tier and a billing page; what the user is shown is which
    limit was hit, what the app did about it, and what reduces the request — *"Kürze die
    Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit."* What it did is

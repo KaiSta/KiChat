@@ -379,6 +379,58 @@ func TestAFoldThatFailsIsNotReportedAsNothingToFold(t *testing.T) {
 	}
 }
 
+// TestAnAutomaticCeilingFoldAimsAtTheCeiling pins what a preventive fold is allowed
+// to cost. The planner resolves an aim — the usage ratio that puts the folded request
+// at the ceiling — and the walk used to price that aim against the caller's own Target,
+// which an automatic run leaves at 0. Zero in that walk means "fold as far as the cut
+// allows", so every ceiling fold threw the whole memory away to keep only the turn it
+// was answering, on a backend whose ceiling folds on most tool-heavy turns.
+func TestAnAutomaticCeilingFoldAimsAtTheCeiling(t *testing.T) {
+	const (
+		window  = 131072
+		ceiling = 2000
+		turns   = 10
+	)
+	var messages []store.Message
+	for i := 0; i < turns; i++ {
+		messages = append(messages,
+			store.Message{Seq: i*2 + 1, Role: "user", Content: strings.Repeat("wort ", 50)},
+			store.Message{Seq: i*2 + 2, Role: "assistant", Content: strings.Repeat("wort ", 50)},
+		)
+	}
+
+	plan := PlanCompaction(PlanInput{
+		Messages: messages,
+		Budget: ContextBudget{
+			Limit: window, Ceiling: ceiling, EffectiveLimit: ceiling,
+			Projected: 2400, ProjectedRatio: 2400.0 / ceiling,
+			System: 200,
+		},
+		Ceiling:         ceiling,
+		KeepRecentTurns: 2,
+		Reserve:         100,
+	})
+	if !plan.Needed {
+		t.Fatalf("no fold planned for a request at %d of a %d-token ceiling", 2400, ceiling)
+	}
+
+	// Two turns kept verbatim is the aim: their 200 tokens plus the 200-token prompt,
+	// the 100-token reserve and a 1200-token summary come to 1700, which fits the
+	// ceiling. Folding further would buy nothing a request can spend.
+	if want := 2*turns - 3; plan.KeepFromSeq != want {
+		t.Fatalf("kept history starts at seq %d, want %d — the fold was not aimed at the ceiling",
+			plan.KeepFromSeq, want)
+	}
+	if plan.FoldedCount != 2*(turns-2) {
+		t.Fatalf("folded %d messages, want the %d older turns and no more",
+			plan.FoldedCount, 2*(turns-2))
+	}
+	// The turn the fold is answering is never part of it.
+	if plan.ToSeq >= messages[len(messages)-2].Seq {
+		t.Fatalf("the fold reached seq %d, into the turn being answered", plan.ToSeq)
+	}
+}
+
 // seedLongHistory plants enough turns, of enough length, for a fold to have
 // something to fold and for the estimate to reach a small ceiling. The default
 // fixture is two short messages: fine for a threshold, useless for a limit that is
@@ -1317,6 +1369,92 @@ func TestAToolRoundFoldsBeforeItsNextRequestCrossesTheCeiling(t *testing.T) {
 	for _, ev := range captured.snapshot() {
 		if ev.name == events.Error {
 			t.Errorf("a long tool turn failed although its fold could fit: %v", ev.payload["error"])
+		}
+	}
+}
+
+// TestAToolResultIsCutToWhatTheRequestCanCarry is the failure the tool budget's
+// ceiling half exists for, in the shape it was reported: the model thinks, asks for a
+// web search, and the round that reads the result is refused because the result alone
+// is bigger than the account's whole per-request allowance.
+//
+// A history fold cannot repair that. The result belongs to the turn being answered and
+// a fold stops at the newest user turn, so the only thing that can make the round
+// sendable is cutting the result where it is handed to the model. The document below
+// is the offline twin of a scraped page — same verbatim body, same size, no network.
+func TestAToolResultIsCutToWhatTheRequestCanCarry(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	const ceiling = 6000
+	body := strings.Repeat("Ein langer Absatz mit Inhalt. ", 1600)
+	if tokens := llm.EstimateTokens(body); tokens < 2*ceiling {
+		t.Fatalf("the fixture's chunk is %d tokens; it has to exceed the %d-token ceiling by a wide margin",
+			tokens, ceiling)
+	}
+	if err := st.CreateDocument(store.Document{
+		ID: "doc-1", ChatID: "chat-1", Title: "bericht", Text: body,
+		TokenCount: llm.EstimateTokens(body),
+	}); err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if err := st.InsertChunks([]store.Chunk{{
+		DocumentID: "doc-1", ChatID: "chat-1", Ordinal: 0, Text: body,
+		Tokens: llm.EstimateTokens(body),
+	}}); err != nil {
+		t.Fatalf("insert chunk: %v", err)
+	}
+
+	call := "```tool_call\n{\"name\": \"read_pages\", \"arguments\": " +
+		"{\"document\": \"bericht\", \"from\": 0, \"to\": 0}}\n```"
+	provider := &fakeProvider{
+		model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		ceiling: ceiling,
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: call}},
+			{{Type: llm.EventDelta, Text: "Antwort"}, {Type: llm.EventDone}},
+		},
+	}
+
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.ToolIterations = 3
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+	log := &eventLog{}
+	engine := NewEngine(st, registry, tools.New(st, nil, nil),
+		func() config.Settings { return settings }, log.emit)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Lies den Bericht."}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the turn did not finish")
+	}
+
+	if got := provider.requestCount(); got != 2 {
+		t.Fatalf("backend calls = %d, want the round and the answer after it", got)
+	}
+	second := provider.requestAt(1)
+	carried := ""
+	for _, m := range second.Messages {
+		if m.Role == llm.RoleTool {
+			carried = m.Content
+		}
+	}
+	if carried == "" {
+		t.Fatal("the second request carried no tool result")
+	}
+	if !strings.Contains(carried, "gekürzt") {
+		t.Fatalf("the tool result reached the model whole (%d tokens) although it is bigger "+
+			"than the %d-token ceiling", llm.EstimateTokens(carried), ceiling)
+	}
+	if used := llm.EstimateMessagesTokens(second.Messages); used > ceiling {
+		t.Fatalf("the second request estimates at %d tokens for a %d-token ceiling", used, ceiling)
+	}
+	for _, ev := range log.snapshot() {
+		if ev.name == events.Error {
+			t.Errorf("the turn failed although the result could be cut to fit: %v", ev.payload["error"])
 		}
 	}
 }
