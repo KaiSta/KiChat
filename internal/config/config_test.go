@@ -228,6 +228,57 @@ func TestNormaliseKeepsTheDigestSettingsUsable(t *testing.T) {
 	}
 }
 
+// TestTheDefaultModelShipsUnsetAndSurvivesAReload pins both halves of the setting:
+// an installation that predates it keeps choosing "whatever is available", and a
+// chosen model is still there after a restart rather than resetting to automatic.
+//
+// The empty value is deliberately a real answer here, not a missing one — it is the
+// behaviour every earlier version had, and the only way back to it.
+func TestTheDefaultModelShipsUnsetAndSurvivesAReload(t *testing.T) {
+	if def := Default(); def.DefaultModel != (llm.Ref{}) {
+		t.Errorf("default model = %+v, want an empty ref so a new chat picks the first available",
+			def.DefaultModel)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "settings.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	s := Default()
+	s.DefaultModel = llm.Ref{Backend: "ollama", Model: "qwen3:4b"}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutSetting("settings", json.RawMessage(raw)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DefaultModel != s.DefaultModel {
+		t.Errorf("default model after a reload = %+v, want the stored %+v", got.DefaultModel, s.DefaultModel)
+	}
+}
+
+// TestNormaliseClearsAHalfFilledDefaultModel covers a hand-edited blob: a pair with
+// one half missing would look chosen and then hand every new chat a backend it is
+// not on, so it counts as unset instead.
+func TestNormaliseClearsAHalfFilledDefaultModel(t *testing.T) {
+	for _, ref := range []llm.Ref{{Backend: "ollama"}, {Model: "qwen3:4b"}} {
+		s := Default()
+		s.DefaultModel = ref
+		s.normalise()
+		if s.DefaultModel != (llm.Ref{}) {
+			t.Errorf("normalise(%+v) kept a half-filled default model; every new chat would start on it", ref)
+		}
+	}
+}
+
 // TestEnglishIsTheDefaultLanguage pins the shipped default. The German research
 // prompt is still the default *prompt*; the interface language is separate.
 func TestEnglishIsTheDefaultLanguage(t *testing.T) {

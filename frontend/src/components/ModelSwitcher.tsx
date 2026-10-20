@@ -1230,6 +1230,91 @@ function LocalModelStart({
   )
 }
 
+/**
+ * Says that the model this chat is pinned to is not in the catalogue, and offers the
+ * switch that a new chat would have made.
+ *
+ * A model can disappear from under a conversation without the user touching it: a
+ * managed server is stopped, a backend is switched off, the availability check hides
+ * a model the account cannot call, or the vendor withdraws one. The chat then keeps a
+ * name nothing resolves — the switcher shows a red dot and the old name, and the next
+ * Send fails on a model no backend serves. Nothing said so before the click, and the
+ * switcher is not where a user looks for an explanation.
+ *
+ * So the notice names what happened and offers the one model worth one click: the one
+ * Settings names for new chats, or — when that one is gone too — the same pick the
+ * backend makes for a new chat, a loaded model first, then the first one listed
+ * (app.defaultChatModel). The button carries the target's name, so this is a decision
+ * the user reads before it happens rather than a silent repair, and a chat that is
+ * already on a reachable model shows nothing at all.
+ */
+export function MissingModelNotice() {
+  const t = useStore((s) => s.t)
+  const models = useStore((s) => s.models)
+  const chat = useStore((s) => s.chatState?.chat)
+  const settings = useStore((s) => s.settings)
+  const running = useStore((s) => (s.activeChatId ? s.running[s.activeChatId] : false))
+  const updateChat = useStore((s) => s.updateChat)
+  const [switching, setSwitching] = useState(false)
+
+  // Computed on every render rather than memoised. It is a scan of a list the picker
+  // already holds, and a memo keyed on the chat object went stale once the object behind
+  // it was mutated instead of replaced — the notice then named a model that had just
+  // become reachable. Cheap and always current beats cached and sometimes wrong here.
+  const target = (() => {
+    // An empty catalogue is a listing that has not come back yet, not a verdict that
+    // every model is gone — offering a switch from it would be a guess about a machine
+    // that may have every model running.
+    if (!chat || models.length === 0) return null
+    if (models.some((m) => m.backend === chat.backend && m.id === chat.model)) return null
+    const configured = settings?.defaultModel
+    const preferred = configured?.model
+      ? models.find((m) => m.backend === configured.backend && m.id === configured.model)
+      : undefined
+    return preferred ?? models.find((m) => m.state === 'loaded') ?? models[0]
+  })()
+
+  if (!chat || !target) return null
+
+  const switchTo = async () => {
+    setSwitching(true)
+    try {
+      // updateChat reports its own failure as a toast and refreshes the budget, and the
+      // notice disappears on its own once the chat names a model that is listed.
+      await updateChat({ backend: target.backend, model: target.id })
+    } finally {
+      setSwitching(false)
+    }
+  }
+
+  return (
+    <div
+      className="mb-2 flex flex-wrap items-center gap-2 rounded p-2 text-[12px]"
+      style={{
+        background: 'color-mix(in srgb, var(--warn) 12%, transparent)',
+        color: 'var(--warn)',
+      }}
+    >
+      <span className="min-w-0 flex-1">
+        {t('chat.missingModel', { model: modelLabel(chat.model), backend: chat.backend })}
+      </span>
+      <button
+        type="button"
+        className="btn btn-sm btn-primary shrink-0"
+        // The engine is mid-turn with the model it already resolved; switching under it
+        // would report a change this turn did not make. The switcher disables itself
+        // while a turn runs for the same reason.
+        disabled={running || switching}
+        onClick={() => void switchTo()}
+      >
+        {switching
+          ? '…'
+          : t('chat.missingModelSwitch', { model: `${modelLabel(target.id)} (${target.backend})` })}
+      </button>
+    </div>
+  )
+}
+
 function ModelRow({
   model,
   label,

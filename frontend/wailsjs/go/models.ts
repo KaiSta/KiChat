@@ -480,6 +480,7 @@ export namespace config {
 	    compact: CompactSettings;
 	    digest: DigestSettings;
 	    sampler: SamplerSettings;
+	    defaultModel: llm.Ref;
 	    defaultSystemPrompt: string;
 	    promptPresets: PromptPreset[];
 	    autoTitle: boolean;
@@ -506,6 +507,7 @@ export namespace config {
 	        this.compact = this.convertValues(source["compact"], CompactSettings);
 	        this.digest = this.convertValues(source["digest"], DigestSettings);
 	        this.sampler = this.convertValues(source["sampler"], SamplerSettings);
+	        this.defaultModel = this.convertValues(source["defaultModel"], llm.Ref);
 	        this.defaultSystemPrompt = source["defaultSystemPrompt"];
 	        this.promptPresets = this.convertValues(source["promptPresets"], PromptPreset);
 	        this.autoTitle = source["autoTitle"];

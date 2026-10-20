@@ -156,11 +156,27 @@ function GeneralTab({
   const setLang = useStore((s) => s.setLang)
   const theme = useStore((s) => s.theme)
   const setTheme = useStore((s) => s.setTheme)
+  const models = useStore((s) => s.models)
   const [info, setInfo] = useState<main.AppInfo | null>(null)
 
   useEffect(() => {
     void App.GetAppInfo().then(setInfo).catch(() => undefined)
   }, [])
+
+  // The same opaque pair encoding the other model pickers use: a model id may
+  // contain a slash, so `backend/model` would be ambiguous. Read defensively,
+  // because an older settings blob and the harness fixture predate the field.
+  const defaultModel = draft.defaultModel ?? { backend: '', model: '' }
+  const refValue = (backend: string, model: string) => JSON.stringify([backend, model])
+  const selectedModel = defaultModel.model ? refValue(defaultModel.backend, defaultModel.model) : ''
+  const candidates = useMemo(
+    () => [...models].sort((a, b) => a.backend.localeCompare(b.backend) || a.id.localeCompare(b.id)),
+    [models],
+  )
+  // A configured model can be missing from the catalogue — its backend is switched
+  // off, its server is down, or the listing has not run yet. Without an option of
+  // its own the select would show the fallback while the setting still names it.
+  const unavailable = selectedModel !== '' && !candidates.some((m) => refValue(m.backend, m.id) === selectedModel)
 
   return (
     <>
@@ -198,6 +214,37 @@ function GeneralTab({
           >
             <option value="dark">{t('settings.themeDark')}</option>
             <option value="light">{t('settings.themeLight')}</option>
+          </select>
+        </Field>
+        {/* The model a new chat opens on. The empty option says what the fallback
+            is rather than reading as "no model": it is what every installation
+            predating this setting has, and what a machine with nothing running
+            falls back to either way. */}
+        <Field label={t('settings.defaultModel')} hint={t('settings.defaultModelHint')}>
+          <select
+            className="select"
+            value={selectedModel}
+            onChange={(e) => {
+              // The automatic option carries the empty value, and JSON.parse("") throws.
+              if (e.target.value === '') {
+                patch({ defaultModel: { backend: '', model: '' } })
+                return
+              }
+              const [backend, model] = JSON.parse(e.target.value) as [string, string]
+              patch({ defaultModel: { backend, model } })
+            }}
+          >
+            <option value="">{t('settings.defaultModelAuto')}</option>
+            {unavailable && (
+              <option value={selectedModel}>
+                {`${defaultModel.model} (${defaultModel.backend}) ${t('settings.defaultModelUnavailable')}`}
+              </option>
+            )}
+            {candidates.map((m) => (
+              <option key={`${m.backend}/${m.id}`} value={refValue(m.backend, m.id)}>
+                {m.id} ({m.backend})
+              </option>
+            ))}
           </select>
         </Field>
         <Field label={t('settings.location')}>

@@ -1115,6 +1115,10 @@ Verfügbare Tools: {{tool_list}}`,
     // for" line reads from the backend rows below.
     digest: { model: { backend: 'groq', model: 'openai/gpt-oss-20b' }, threshold: 2000, maxTokens: 600 },
     sampler: { temperature: 0.7, topP: 0.9, maxTokens: 0, numCtx: 0 },
+    // Set rather than empty, for the same reason the summary model is: a chosen
+    // default is the state the new control exists to render, and CreateChat below
+    // reads it so a new chat in the harness opens on the model the panel names.
+    defaultModel: { backend: 'lmstudio', model: 'ornith-1.5-9b' },
     defaultSystemPrompt: PROMPT_BODIES.research.en,
     // Same five built-ins, in the same order, as config.DefaultPresets(). The
     // names are only the fallback: the settings view translates a built-in by
@@ -1431,6 +1435,13 @@ Verfügbare Tools: {{tool_list}}`,
   // ?pace=1's on purpose — this allowance is not used up, the turn is being paced — and without
   // the flag the third sentence would never be rendered.
   const spreadFixture = query.get('spread') === '1'
+  // ?missingmodel=1 leaves the opened chat pinned to a model the catalogue does not
+  // list — the state a chat is left in when its backend is switched off, its server is
+  // stopped, or the model was withdrawn. Every other fixture names a model that is
+  // present, so this is the only way the notice above the composer can be rendered.
+  if (query.get('missingmodel') === '1') {
+    chats[0].model = 'withdrawn-model-q4_k_m.gguf'
+  }
   // The wait the pretend refusal names, held for real rather than shown and skipped: a number
   // on screen that does not match the pause the viewer sits through is worse than no number.
   const THROTTLE_WAIT_MS = 6000
@@ -2782,20 +2793,27 @@ Verfügbare Tools: {{tool_list}}`,
       if (force) applyLoadedWindow()
       return Promise.resolve(copy(models))
     },
-    ListChats: () => Promise.resolve(chats),
+    // A copy, like ListModels: the store keeps the array a binding hands it, and the
+    // fixture is mutated in place by UpdateChat and by a streamed title. Returning the
+    // live array made zustand's set() see the reference it already held, so a model
+    // switch never reached the chat list even though the row had changed.
+    ListChats: () => Promise.resolve(copy(chats)),
     GetChat: (id) => Promise.resolve(chats.find((c) => c.id === id)),
     GetChatState: (id) => chatState(id),
     GetBudget: () => Promise.resolve(budget(1713)),
     ActiveGenerations: () => Promise.resolve([...timers.keys()]),
 
     CreateChat: (backend, model) => {
+      // The same precedence the app has: an explicit pair wins, then the default
+      // model the settings name, then the first listed one.
+      const preferred = settings.defaultModel || { backend: '', model: '' }
       const chat = {
         id: nextId('chat'),
         title: '',
         createdAt: now(),
         updatedAt: now(),
-        backend: backend || 'lmstudio',
-        model: model || models[0].id,
+        backend: backend || preferred.backend || 'lmstudio',
+        model: model || preferred.model || models[0].id,
         systemPrompt: settings.defaultSystemPrompt,
         systemPromptPreset: 'research',
         temperature: 0.7,
@@ -2816,7 +2834,10 @@ Verfügbare Tools: {{tool_list}}`,
       const existing = chats.find((c) => c.id === chat.id)
       if (existing) Object.assign(existing, chat)
       emit('chats:changed', {})
-      return Promise.resolve(existing || chat)
+      // A copy, like every other binding here and like the real one: the view keeps the
+      // value it was handed, so returning the live fixture object made a store update
+      // arrive as "the same chat" and a selector or memo keyed on it saw no change.
+      return Promise.resolve(copy(existing || chat))
     },
     RenameChat: (id, title) => {
       const chat = chats.find((c) => c.id === id)

@@ -4,7 +4,13 @@ import { Virtuoso } from 'react-virtuoso'
 import { OnFileDrop, OnFileDropOff } from '../../wailsjs/runtime/runtime'
 import { App, formatNumber, modelLabel, type store as storeTypes } from '../lib/api'
 import { messageText, pendingAttachments, useStore } from '../store'
-import { ContextInspector, ContextMeter, ContextRecheck, ModelSwitcher } from './ModelSwitcher'
+import {
+  ContextInspector,
+  ContextMeter,
+  ContextRecheck,
+  MissingModelNotice,
+  ModelSwitcher,
+} from './ModelSwitcher'
 import {
   AttachmentChips,
   CompactionCard,
@@ -310,6 +316,10 @@ export function ChatView() {
 
       {/* Composer */}
       <div className="border-t px-4 py-3" style={{ borderColor: 'var(--border)' }}>
+        {/* First, because it is about the next request: a chat whose model has gone
+            keeps working only after this switch, and everything below is the row that
+            would otherwise fail. */}
+        <MissingModelNotice />
         {pending.length > 0 && (
           <div className="mb-2 flex flex-wrap items-center gap-1.5">
             {pending.map((a) => (

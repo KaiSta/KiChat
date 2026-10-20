@@ -47,6 +47,9 @@ const de = {
   'chat.send': 'Senden',
   'chat.stop': 'Stoppen',
   'chat.stopping': 'Wird gestoppt …',
+  'chat.missingModel':
+    'Das Modell dieses Chats — {{model}} ({{backend}}) — ist derzeit nicht verfügbar. Sein Backend ist vielleicht aus, oder das Modell wurde entfernt.',
+  'chat.missingModelSwitch': 'Zu {{model}} wechseln',
   'chat.throttled': 'Das Backend begrenzt gerade die Anfragen — neuer Versuch in etwa {{seconds}} s.',
   'chat.paced':
     'Das Kontingent dieses Modells für diese Minute ist aufgebraucht — die Anfrage geht in etwa {{seconds}} s raus.',
@@ -282,6 +285,11 @@ const de = {
   'settings.theme': 'Design',
   'settings.themeDark': 'Dunkel',
   'settings.themeLight': 'Hell',
+  'settings.defaultModel': 'Standardmodell für neue Chats',
+  'settings.defaultModelAuto': 'Automatisch (erstes verfügbares)',
+  'settings.defaultModelUnavailable': '(nicht verfügbar)',
+  'settings.defaultModelHint':
+    'Jeder neue Chat startet mit diesem Modell. Ein Chat behält das Modell, mit dem er erstellt wurde — diese Einstellung verschiebt keine bestehenden Unterhaltungen; ein nicht mehr gelistetes Modell fällt auf die automatische Wahl zurück.',
   'settings.location': 'Standort ({{location}})',
   'settings.backends': 'Backends',
   'settings.apiKeyRequired': 'API-Schlüssel (erforderlich)',
@@ -808,6 +816,9 @@ const en: Record<keyof typeof de, string> = {
   'chat.send': 'Send',
   'chat.stop': 'Stop',
   'chat.stopping': 'Stopping …',
+  'chat.missingModel':
+    'The model this chat uses — {{model}} ({{backend}}) — is not available right now. Its backend may be off, or the model was removed.',
+  'chat.missingModelSwitch': 'Switch to {{model}}',
   'chat.throttled': 'The backend is throttling this request — retrying in about {{seconds}} s.',
   'chat.paced':
     "This model's allowance for the minute is spent — the request goes out in about {{seconds}} s.",
@@ -1040,6 +1051,11 @@ const en: Record<keyof typeof de, string> = {
   'settings.theme': 'Theme',
   'settings.themeDark': 'Dark',
   'settings.themeLight': 'Light',
+  'settings.defaultModel': 'Default model for new chats',
+  'settings.defaultModelAuto': 'Automatic (first available)',
+  'settings.defaultModelUnavailable': '(not available)',
+  'settings.defaultModelHint':
+    'Every new chat starts on this model. A chat keeps the model it was created with, so changing this does not move existing conversations; a model that is no longer listed falls back to the automatic choice.',
   'settings.location': 'Location ({{location}})',
   'settings.backends': 'Backends',
   'settings.apiKeyRequired': 'API key (required)',
@@ -1549,6 +1565,8 @@ const zh: Record<keyof typeof de, string> = {
   'chat.send': '发送',
   'chat.stop': '停止',
   'chat.stopping': '正在停止……',
+  'chat.missingModel': '此对话使用的模型——{{model}}（{{backend}}）——当前不可用。其后端可能已关闭，或该模型已被移除。',
+  'chat.missingModelSwitch': '切换到 {{model}}',
   'chat.throttled': '后端正在限流——约 {{seconds}} 秒后重试。',
   'chat.paced': '该模型本分钟的额度已用完——请求将在约 {{seconds}} 秒后发出。',
   'chat.spread': '本次回答需要的请求数超过本分钟的上限——下一轮将在约 {{seconds}} 秒后发出。',
@@ -1770,6 +1788,11 @@ const zh: Record<keyof typeof de, string> = {
   'settings.theme': '主题',
   'settings.themeDark': '深色',
   'settings.themeLight': '浅色',
+  'settings.defaultModel': '新对话的默认模型',
+  'settings.defaultModelAuto': '自动（第一个可用模型）',
+  'settings.defaultModelUnavailable': '（不可用）',
+  'settings.defaultModelHint':
+    '每个新对话都从这个模型开始。对话会保留创建时使用的模型，因此修改此项不会影响已有对话；不再列出的模型会回退到自动选择。',
   'settings.location': '位置（{{location}}）',
   'settings.backends': '后端',
   'settings.apiKeyRequired': 'API 密钥（必填）',

@@ -1208,14 +1208,15 @@ func (a *App) ListChats(includeArchived bool) ([]store.Chat, error) {
 	return a.store.ListChats(includeArchived)
 }
 
-// CreateChat makes a new chat, defaulting to the first available model.
+// CreateChat makes a new chat, starting on the model the settings name and
+// falling back to the first available one when nothing is configured.
 func (a *App) CreateChat(backend, model string) (store.Chat, error) {
 	if err := a.ensure(); err != nil {
 		return store.Chat{}, err
 	}
 	settings := a.Settings()
 	if backend == "" || model == "" {
-		backend, model = a.firstAvailableModel()
+		backend, model = a.defaultChatModel(settings.DefaultModel)
 	}
 	now := time.Now()
 	newChat := store.Chat{
@@ -1240,11 +1241,27 @@ func (a *App) CreateChat(backend, model string) (store.Chat, error) {
 	return newChat, nil
 }
 
-// firstAvailableModel picks a sensible default, preferring a loaded model.
-func (a *App) firstAvailableModel() (string, string) {
+// defaultChatModel picks the model a new chat opens on: the one the settings name
+// if it is still in the catalogue, otherwise a loaded model, otherwise the first
+// one listed.
+//
+// The configured default is checked against the catalogue rather than trusted,
+// because a model can stop being there without the user touching this setting —
+// its backend gets switched off, its server stops publishing it, or the
+// availability check hides it. A chat created on a ref nothing serves would answer
+// its first message with an error and put a name in the picker that is not in the
+// list; the fallback is the behaviour every older install already had.
+func (a *App) defaultChatModel(preferred llm.Ref) (string, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	models := a.visibleModels(ctx)
+	if preferred.Backend != "" && preferred.Model != "" {
+		for _, m := range models {
+			if m.Backend == preferred.Backend && m.ID == preferred.Model {
+				return m.Backend, m.ID
+			}
+		}
+	}
 	for _, m := range models {
 		if m.State == llm.StateLoaded && m.Type != "embeddings" {
 			return m.Backend, m.ID

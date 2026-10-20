@@ -43,6 +43,7 @@ Query flags, each of which exists because the state is otherwise unreachable:
 | `?upscaler=install` | the Real-ESRGAN download row with its button and its size; pressing it runs a four‑step fake download and ends with the switch on (see `UPSCALING.md` §6) |
 | `?upscaler=noarchive` | a platform with nothing published: the row says so where the button would be |
 | `?startwithapp=1` | the start-with-app switch |
+| `?missingmodel=1` | a chat pinned to a model the catalogue does not list: the notice above the composer and the switch it offers |
 
 `?server=restart` is computed from the stored command line rather than stored,
 which is what makes a save under a running server raise the badge. The runtime and

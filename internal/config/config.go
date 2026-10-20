@@ -21,21 +21,33 @@ const settingsKey = "settings"
 
 // Settings is the complete user configuration.
 type Settings struct {
-	Language            string                       `json:"language"`
-	Location            string                       `json:"location"`
-	Theme               string                       `json:"theme"`
-	Backends            []llm.BackendConfig          `json:"backends"`
-	ModelOverrides      map[string]llm.ModelOverride `json:"modelOverrides"`
-	Search              SearchSettings               `json:"search"`
-	Compact             CompactSettings              `json:"compact"`
-	Digest              DigestSettings               `json:"digest"`
-	Sampler             SamplerSettings              `json:"sampler"`
-	DefaultSystemPrompt string                       `json:"defaultSystemPrompt"`
-	PromptPresets       []PromptPreset               `json:"promptPresets"`
-	AutoTitle           bool                         `json:"autoTitle"`
-	ToolIterations      int                          `json:"toolIterations"`
-	ToolTokenBudget     int                          `json:"toolTokenBudget"`
-	NativeTools         bool                         `json:"nativeTools"`
+	Language       string                       `json:"language"`
+	Location       string                       `json:"location"`
+	Theme          string                       `json:"theme"`
+	Backends       []llm.BackendConfig          `json:"backends"`
+	ModelOverrides map[string]llm.ModelOverride `json:"modelOverrides"`
+	Search         SearchSettings               `json:"search"`
+	Compact        CompactSettings              `json:"compact"`
+	Digest         DigestSettings               `json:"digest"`
+	Sampler        SamplerSettings              `json:"sampler"`
+	// DefaultModel is the model every new chat starts with, so a user with one
+	// model they use for everything does not have to switch to it in each chat
+	// they open. Empty — the zero ref — is "whatever is available": the first
+	// loaded model, else the first one listed. That is also what an installation
+	// predating this field carries, so it needs no migration, and it is the only
+	// way to ask for the old behaviour back.
+	//
+	// It is a preference, not a pin: a chat stores the pair it was created with
+	// (store.Chat), so changing this never moves a conversation that already
+	// exists. A model that has disappeared since it was chosen is skipped in
+	// favour of the available one rather than left to fail on the first message.
+	DefaultModel        llm.Ref        `json:"defaultModel"`
+	DefaultSystemPrompt string         `json:"defaultSystemPrompt"`
+	PromptPresets       []PromptPreset `json:"promptPresets"`
+	AutoTitle           bool           `json:"autoTitle"`
+	ToolIterations      int            `json:"toolIterations"`
+	ToolTokenBudget     int            `json:"toolTokenBudget"`
+	NativeTools         bool           `json:"nativeTools"`
 	// Runtime is the llama.cpp that KiChat runs itself, as opposed to the one a
 	// user started and pointed a backend at. Every field here describes a
 	// capability the app provides rather than a server it contacts, which is why
@@ -1466,6 +1478,12 @@ func (s *Settings) normalise() {
 	// fire.
 	if s.Digest.Model.Backend == "" || s.Digest.Model.Model == "" {
 		s.Digest.Model = llm.Ref{}
+	}
+	// A half-filled default model is unset for the same reason, and here the empty
+	// value is a real answer — "pick whatever is available" — so keeping half of a
+	// pair would leave a new chat asking for a model no backend can resolve.
+	if s.DefaultModel.Backend == "" || s.DefaultModel.Model == "" {
+		s.DefaultModel = llm.Ref{}
 	}
 	if s.Digest.Threshold <= 0 {
 		s.Digest.Threshold = DefaultDigestThreshold
