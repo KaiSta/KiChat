@@ -98,6 +98,136 @@ func TestMidTurnCheckShipsOffAndSurvivesARestart(t *testing.T) {
 	}
 }
 
+// TestDigestShipsOffAndBelongsToTheBackend pins the three things that decide whether
+// this feature can surprise anybody: the model ships unset, so nothing is condensed —
+// and in particular never by the chat's own model, which is the one whose request the
+// condensation exists to shrink — the threshold survives a restart, and the switch is
+// carried by the backend row rather than by the shared settings.
+func TestDigestShipsOffAndBelongsToTheBackend(t *testing.T) {
+	if def := Default(); def.Digest.Model != (llm.Ref{}) {
+		t.Errorf("digest model = %+v, want an empty ref so the feature is off by default",
+			def.Digest.Model)
+	} else if def.Digest.Threshold != 2000 {
+		t.Errorf("digest threshold = %d, want the shipped 2000", def.Digest.Threshold)
+	} else if def.Digest.MaxTokens != DefaultDigestMaxTokens {
+		t.Errorf("digest cap = %d, want the shipped %d", def.Digest.MaxTokens, DefaultDigestMaxTokens)
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "settings.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	s := Default()
+	s.Backends = []llm.BackendConfig{
+		{ID: "groq", Name: "Groq", Kind: "groq", Enabled: true, Digest: true},
+		{ID: "lmstudio", Name: "LM Studio", Kind: "lmstudio", Enabled: true},
+	}
+	s.Digest = DigestSettings{Model: llm.Ref{Backend: "ollama", Model: "qwen3:4b"}, Threshold: 4000,
+		MaxTokens: 1200}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutSetting("settings", json.RawMessage(raw)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Digest.Model != s.Digest.Model || got.Digest.Threshold != 4000 {
+		t.Errorf("digest = %+v, want the stored model and the 4000-token threshold", got.Digest)
+	}
+	if got.Digest.MaxTokens != 1200 {
+		t.Errorf("digest cap = %d, want the stored 1200", got.Digest.MaxTokens)
+	}
+	byID := map[string]bool{}
+	for _, b := range got.Backends {
+		byID[b.ID] = b.Digest
+	}
+	if !byID["groq"] {
+		t.Error("the backend that asked for condensation lost the switch")
+	}
+	if byID["lmstudio"] {
+		t.Error("a backend that never asked for condensation acquired the switch")
+	}
+}
+
+// TestTheDigestCapIsResolvedNotTrusted pins how the summary length is read: an
+// emptied field is the default rather than a one-token summary, and the range is
+// bounded.
+//
+// It also pins the independence from Threshold, which an earlier version got wrong: the
+// threshold is the smallest page worth a request, not the size of the page in hand, so a
+// cap above it is a legitimate choice — and capping it there silently rewrote the stored
+// value, so a chosen 3000 came back as 2000 and raising the threshold later did not
+// restore it.
+func TestTheDigestCapIsResolvedNotTrusted(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		max, threshold int
+		want           int
+	}{
+		{"unset", 0, 2000, DefaultDigestMaxTokens},
+		{"emptied by a save", 0, 2000, DefaultDigestMaxTokens},
+		{"below the floor", 20, 2000, MinDigestMaxTokens},
+		{"above the ceiling", 50000, 60000, MaxDigestMaxTokens},
+		{"above the threshold", 3000, 1500, 3000},
+		{"a plain choice", 1200, 4000, 1200},
+	} {
+		d := DigestSettings{MaxTokens: tc.max, Threshold: tc.threshold}
+		if got := d.DigestMaxTokens(); got != tc.want {
+			t.Errorf("%s: cap %d with threshold %d = %d, want %d",
+				tc.name, tc.max, tc.threshold, got, tc.want)
+		}
+	}
+	// A stored cap above the threshold survives a load. This is the data-loss half of
+	// the same defect: normalise used to write the capped value back.
+	s := Default()
+	s.Digest.Threshold = 1500
+	s.Digest.MaxTokens = 3000
+	s.normalise()
+	if s.Digest.MaxTokens != 3000 {
+		t.Errorf("normalise rewrote the chosen cap to %d; the threshold is not its ceiling",
+			s.Digest.MaxTokens)
+	}
+	// And an out-of-range value is stored bounded, so the panel shows a number that
+	// can be sent rather than one the engine silently ignores.
+	s = Default()
+	s.Digest.MaxTokens = 9000
+	s.normalise()
+	if s.Digest.MaxTokens != MaxDigestMaxTokens {
+		t.Errorf("normalise kept %d, want it bounded to %d", s.Digest.MaxTokens, MaxDigestMaxTokens)
+	}
+}
+
+// TestNormaliseKeepsTheDigestSettingsUsable covers a hand-edited or older blob: a
+// threshold outside the range where the feature can pay for itself falls back to the
+// default, and a half-filled model counts as unset — the same rule the summarisation
+// model follows, because a half-filled ref looks configured and then fails every
+// oversized result.
+func TestNormaliseKeepsTheDigestSettingsUsable(t *testing.T) {
+	for _, tc := range []struct{ in, want int }{{0, 2000}, {-5, 2000}, {200, 200}, {500000, 100000}} {
+		s := Default()
+		s.Digest.Threshold = tc.in
+		s.normalise()
+		if s.Digest.Threshold != tc.want {
+			t.Errorf("normalise(threshold %d) = %d, want %d", tc.in, s.Digest.Threshold, tc.want)
+		}
+	}
+	for _, ref := range []llm.Ref{{Backend: "ollama"}, {Model: "qwen3:4b"}} {
+		s := Default()
+		s.Digest.Model = ref
+		s.normalise()
+		if s.Digest.Model != (llm.Ref{}) {
+			t.Errorf("normalise(%+v) kept a half-filled model; every oversized page would fail", ref)
+		}
+	}
+}
+
 // TestEnglishIsTheDefaultLanguage pins the shipped default. The German research
 // prompt is still the default *prompt*; the interface language is separate.
 func TestEnglishIsTheDefaultLanguage(t *testing.T) {

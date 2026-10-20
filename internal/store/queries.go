@@ -479,18 +479,18 @@ func (s *Store) DeleteAttachment(id string) error {
 	return tx.Commit()
 }
 
-// PruneExpiredCaches deletes expired rows from the two web caches and reports how
-// many it removed.
+// PruneExpiredCaches deletes expired rows from the web caches and the condensation
+// cache, and reports how many it removed.
 //
-// Reads already treat an expired row as a miss (GetSearchCache, GetScrapeCache),
-// so this changes no result — it stops both tables from growing for the whole
-// lifetime of an installation. Nothing else ever deletes from them, and a scrape
-// row holds an entire extracted page, which makes them the fastest-growing rows
-// in a research workflow. Open calls this, so every start trims the backlog.
+// Reads already treat an expired row as a miss (GetSearchCache, GetScrapeCache,
+// GetDigestCache), so this changes no result — it stops the tables from growing for
+// the whole lifetime of an installation. Nothing else ever deletes from them, and a
+// scrape row holds an entire extracted page, which makes them the fastest-growing
+// rows in a research workflow. Open calls this, so every start trims the backlog.
 func (s *Store) PruneExpiredCaches() (int64, error) {
 	now := millis(time.Now())
 	var removed int64
-	for _, table := range []string{"search_cache", "scrape_cache"} {
+	for _, table := range []string{"search_cache", "scrape_cache", "digest_cache"} {
 		res, err := s.db.Exec("DELETE FROM "+table+" WHERE expires_at < ?", now)
 		if err != nil {
 			return removed, fmt.Errorf("%s aufräumen: %w", table, err)
@@ -987,6 +987,40 @@ FROM scrape_cache WHERE url_hash=?`, urlHash).
 		return ScrapeCacheEntry{}, false
 	}
 	e.FetchedAt = fromMillis(fetched)
+	e.ExpiresAt = fromMillis(expires)
+	return e, true
+}
+
+// PutDigestCache stores a condensed tool result.
+func (s *Store) PutDigestCache(e DigestCacheEntry) error {
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = time.Now()
+	}
+	_, err := s.db.Exec(`
+INSERT INTO digest_cache (key,model,source_tokens,summary,digest_tokens,created_at,expires_at)
+VALUES (?,?,?,?,?,?,?)
+ON CONFLICT(key) DO UPDATE SET model=excluded.model,source_tokens=excluded.source_tokens,
+  summary=excluded.summary,digest_tokens=excluded.digest_tokens,
+  created_at=excluded.created_at,expires_at=excluded.expires_at`,
+		e.Key, e.Model, e.SourceTokens, e.Summary, e.DigestTokens,
+		millis(e.CreatedAt), millis(e.ExpiresAt))
+	return err
+}
+
+// GetDigestCache returns a condensation if it has not expired.
+func (s *Store) GetDigestCache(key string) (DigestCacheEntry, bool) {
+	var e DigestCacheEntry
+	var created, expires int64
+	err := s.db.QueryRow(`SELECT key,model,source_tokens,summary,digest_tokens,created_at,expires_at
+FROM digest_cache WHERE key=?`, key).
+		Scan(&e.Key, &e.Model, &e.SourceTokens, &e.Summary, &e.DigestTokens, &created, &expires)
+	if err != nil {
+		return DigestCacheEntry{}, false
+	}
+	if time.Now().After(fromMillis(expires)) {
+		return DigestCacheEntry{}, false
+	}
+	e.CreatedAt = fromMillis(created)
 	e.ExpiresAt = fromMillis(expires)
 	return e, true
 }

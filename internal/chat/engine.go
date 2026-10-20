@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,6 +57,12 @@ type Engine struct {
 	Emit     func(name string, payload any)
 
 	turns *TurnState
+
+	// condensationOnce guards the lazily built ledger of pages this process has
+	// already condensed per chat (see digest.go), which is what makes a second read
+	// of the same page the escape hatch back to the full text.
+	condensationOnce   sync.Once
+	condensationLedger *condensationLedger
 }
 
 // turnHandle is one claimed chat: how to cancel its turn, and which chat it is.

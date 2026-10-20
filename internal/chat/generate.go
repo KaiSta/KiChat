@@ -375,7 +375,19 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 	e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
 	e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 
-	e.appendToolResult(chatID, call, budget.take(output), record.Status)
+	// The condensation happens after the record: the tool card keeps what the tool
+	// actually returned, while the message the model reads — and the one every later
+	// turn replays — holds what it was given instead. Storing the summary as the
+	// result would hide the page from the user; storing the page in the message is
+	// the cost this exists to avoid.
+	//
+	// It is skipped when the budget is already spent: take would replace the summary
+	// with the exhausted notice, so the request would be paid for and thrown away.
+	condensed := output
+	if budget.remaining > 0 {
+		condensed = e.condenseToolOutput(ctx, chatID, call, output, turn)
+	}
+	e.appendToolResult(chatID, call, budget.take(condensed), record.Status)
 }
 
 // toolOutputBudget bounds how many tokens of tool results one answer carries into

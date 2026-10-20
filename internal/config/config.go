@@ -28,6 +28,7 @@ type Settings struct {
 	ModelOverrides      map[string]llm.ModelOverride `json:"modelOverrides"`
 	Search              SearchSettings               `json:"search"`
 	Compact             CompactSettings              `json:"compact"`
+	Digest              DigestSettings               `json:"digest"`
 	Sampler             SamplerSettings              `json:"sampler"`
 	DefaultSystemPrompt string                       `json:"defaultSystemPrompt"`
 	PromptPresets       []PromptPreset               `json:"promptPresets"`
@@ -928,6 +929,104 @@ type CompactSettings struct {
 	SummaryModel llm.Ref `json:"summaryModel"`
 }
 
+// DigestSettings condense an oversized tool result with a model of its own before
+// the chat's model reads it, so a scraped page costs the chat a few hundred tokens
+// instead of a few thousand — which on a backend that refuses an oversized request
+// is the difference between reading the page and being told it was withheld.
+//
+// It is its own group rather than fields on CompactSettings: a fold rewrites a
+// history the model has already read, while this decides what a tool result becomes
+// on its way in. The two want different models and they fail differently — a fold
+// that fails leaves the memory alone, a condensation that fails must still deliver
+// the result.
+type DigestSettings struct {
+	// Model writes the condensation. Empty switches the feature off everywhere,
+	// whatever the per-backend switches say — and it is deliberately the only way to
+	// mean "off", because the one model this must not use is the chat's own: that is
+	// the model whose request the condensation exists to make smaller, and on a
+	// backend whose allowance is a shared per-minute bucket, asking it to read the
+	// page first spends the budget the answer needs.
+	Model llm.Ref `json:"model"`
+	// Threshold is the size above which a tool result is condensed. Below it the
+	// result is handed over verbatim: a second request costs more in latency than the
+	// tokens it would save.
+	Threshold int `json:"threshold"`
+	// MaxTokens caps the summary itself — the length of what the chat's model reads
+	// in place of the page, not the size at which condensing starts. It is a setting
+	// rather than a constant because how short a summary can be before it loses the
+	// answer depends on the model and the task, and no measurement here fixes it for
+	// everyone: 600 is a starting point, not a finding.
+	//
+	// Read it through DigestMaxTokens, which answers the zero value as the default and
+	// holds it to a range — a save persists the draft as it arrived, so an emptied
+	// numeric field reaches the running app as 0.
+	//
+	// It is independent of Threshold: one is the least page worth a request, the other
+	// is how long the answer may be, and a large page costs a large summary.
+	MaxTokens int `json:"maxTokens"`
+}
+
+// DefaultDigestThreshold is the size a tool result has to reach before it is worth a
+// second request. A few thousand tokens is where a page stops being a paragraph.
+const DefaultDigestThreshold = 2000
+
+const (
+	// DefaultDigestMaxTokens is the summary length the feature ships with: roughly
+	// 400–450 words of bullets, enough for the facts, numbers and URLs of a page
+	// without becoming a second copy of it. It is a default, not a measurement — a
+	// short summariser is free to go under it, since the prompt asks for bullets.
+	DefaultDigestMaxTokens = 600
+	// MinDigestMaxTokens is the floor. Below a hundred tokens the "summary" is a
+	// sentence or two, which loses more than the request costs.
+	MinDigestMaxTokens = 100
+	// MaxDigestMaxTokens is the ceiling. Past this the answer is no longer a
+	// condensation: it is the page again, paid for twice.
+	MaxDigestMaxTokens = 8000
+)
+
+// DigestThreshold is Threshold with the zero value answered as the default.
+//
+// The engine reads it instead of the field for one reason: a save persists the draft
+// as it arrived, so a numeric field the user emptied reaches the running app as 0 —
+// and 0 read literally would condense every tool result, including a five-token
+// error message, which is a request per tool call nobody asked for. The load path
+// repairs it too; this is what covers the window between the save and the restart.
+func (d DigestSettings) DigestThreshold() int {
+	if d.Threshold <= 0 {
+		return DefaultDigestThreshold
+	}
+	return d.Threshold
+}
+
+// DigestMaxTokens is the cap on a summary, resolved from the field.
+//
+// Two rules, both here rather than at the call site so the save that arrives between
+// two restarts and the value normalise() stores cannot disagree: the zero value means
+// the default (an emptied field is not a request for a one-token summary), and the
+// range is bounded.
+//
+// It is deliberately not capped by Threshold. The first version of this did that, on
+// the reasoning that a summary should never be longer than what it replaces — but the
+// threshold is the *smallest* page that is worth condensing, not the size of the page
+// being condensed, so a 40k-token page above a 2000-token threshold can want far more
+// than 2000 tokens out. Worse, normalise stored the capped value, so a chosen 3000 came
+// back as 2000, was gone from the blob, and raising the threshold later did not bring
+// it back. The remaining bound is the tool budget: whatever comes back still passes
+// through toolOutputBudget.take.
+func (d DigestSettings) DigestMaxTokens() int {
+	max := d.MaxTokens
+	if max <= 0 {
+		max = DefaultDigestMaxTokens
+	}
+	if max < MinDigestMaxTokens {
+		max = MinDigestMaxTokens
+	}
+	if max > MaxDigestMaxTokens {
+		max = MaxDigestMaxTokens
+	}
+	return max
+}
+
 // SamplerSettings are the global generation defaults.
 type SamplerSettings struct {
 	Temperature float64 `json:"temperature"`
@@ -994,6 +1093,12 @@ func Default() Settings {
 			ReserveForResponse: 1024,
 			SummaryTemperature: 0.2,
 			MaxSummaryTokens:   1200,
+		},
+		Digest: DigestSettings{
+			// The model ships unset, so nothing is condensed until someone picks one:
+			// this feature costs a request per oversized result and must be opted into.
+			Threshold: DefaultDigestThreshold,
+			MaxTokens: DefaultDigestMaxTokens,
 		},
 		Sampler: SamplerSettings{
 			Temperature: 0.7,
@@ -1355,6 +1460,22 @@ func (s *Settings) normalise() {
 	if s.Compact.SummaryModel.Backend == "" || s.Compact.SummaryModel.Model == "" {
 		s.Compact.SummaryModel = llm.Ref{}
 	}
+	// A half-filled digest model is unset for the same reason, and the threshold is
+	// kept in the range where the feature can pay for itself: below a few hundred
+	// tokens the second request is all cost, and above the tool budget it could never
+	// fire.
+	if s.Digest.Model.Backend == "" || s.Digest.Model.Model == "" {
+		s.Digest.Model = llm.Ref{}
+	}
+	if s.Digest.Threshold <= 0 {
+		s.Digest.Threshold = DefaultDigestThreshold
+	}
+	if s.Digest.Threshold > 100000 {
+		s.Digest.Threshold = 100000
+	}
+	// Stored resolved, so the next read and the picker show the cap that is really
+	// used — including the reading where the threshold holds it down.
+	s.Digest.MaxTokens = s.Digest.DigestMaxTokens()
 	if s.Sampler.Temperature <= 0 {
 		s.Sampler.Temperature = 0.7
 	}

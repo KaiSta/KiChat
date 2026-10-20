@@ -44,6 +44,15 @@ type BackendConfig struct {
 	BaseURL string `json:"baseUrl"`
 	APIKey  string `json:"apiKey"`
 	Enabled bool   `json:"enabled"`
+	// Digest asks for oversized tool results on this backend to be condensed before
+	// this backend's model reads them (config.DigestSettings names the model).
+	//
+	// Per backend because what it buys differs per backend and so does the price: on
+	// one whose allowance is a shared per-minute bucket it turns a withheld page into
+	// a summary, while a local server with a large window loses only the latency of
+	// the extra request. The switch therefore belongs where "is this backend worth
+	// paying for" is answered, not in the global settings.
+	Digest bool `json:"digest"`
 }
 
 // ModelOverride lets the user correct or supply metadata a backend does not

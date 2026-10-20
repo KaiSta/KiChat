@@ -171,6 +171,40 @@ export namespace config {
 		    return a;
 		}
 	}
+	export class DigestSettings {
+	    model: llm.Ref;
+	    threshold: number;
+	    maxTokens: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DigestSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.model = this.convertValues(source["model"], llm.Ref);
+	        this.threshold = source["threshold"];
+	        this.maxTokens = source["maxTokens"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class ImageSettings {
 	    enabled: boolean;
 	    baseUrl: string;
@@ -444,6 +478,7 @@ export namespace config {
 	    modelOverrides: Record<string, llm.ModelOverride>;
 	    search: SearchSettings;
 	    compact: CompactSettings;
+	    digest: DigestSettings;
 	    sampler: SamplerSettings;
 	    defaultSystemPrompt: string;
 	    promptPresets: PromptPreset[];
@@ -469,6 +504,7 @@ export namespace config {
 	        this.modelOverrides = this.convertValues(source["modelOverrides"], llm.ModelOverride, true);
 	        this.search = this.convertValues(source["search"], SearchSettings);
 	        this.compact = this.convertValues(source["compact"], CompactSettings);
+	        this.digest = this.convertValues(source["digest"], DigestSettings);
 	        this.sampler = this.convertValues(source["sampler"], SamplerSettings);
 	        this.defaultSystemPrompt = source["defaultSystemPrompt"];
 	        this.promptPresets = this.convertValues(source["promptPresets"], PromptPreset);
@@ -555,6 +591,7 @@ export namespace llm {
 	    baseUrl: string;
 	    apiKey: string;
 	    enabled: boolean;
+	    digest: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new BackendConfig(source);
@@ -568,6 +605,7 @@ export namespace llm {
 	        this.baseUrl = source["baseUrl"];
 	        this.apiKey = source["apiKey"];
 	        this.enabled = source["enabled"];
+	        this.digest = source["digest"];
 	    }
 	}
 	export class HealthStatus {

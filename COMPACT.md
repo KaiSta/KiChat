@@ -845,6 +845,10 @@ Per chat (`store.Chat`): `autoCompact`, `compactThreshold` (0 < v < 1), `keepRec
 An absent field keeps its default — the settings blob is one JSON row decoded over a fully
 populated default, so no migration is needed for these.
 
+The condensation of tool results has its own group, `config.DigestSettings` (§17), because
+it is a different job with a different model: a fold rewrites a history the model has
+already read, a condensation decides what a tool result becomes on its way in.
+
 ---
 
 ## 13. Failure modes, and what each looks like
@@ -984,3 +988,122 @@ assume are covered.
 | compaction card, fold grouping, 🗜 badge | `frontend/src/components/MessageParts.tsx:268`, `ChatView.tsx:72`, `:358` |
 | compact buttons, focus field, busy state, running badge | `frontend/src/components/ModelSwitcher.tsx:62`, `:141`, `:216`, `:233`, `:242` |
 | labels (de/en/zh) | `frontend/src/lib/i18n.ts` (`compact.*`) |
+
+---
+
+## 17. Condensing a tool result (its sibling, not a fold)
+
+A fold is one answer to "this request is too large". The other one is to stop the large
+thing entering the context at all, and for a scraped page that is now a feature of its
+own: `internal/chat/digest.go`.
+
+### 17.1 What it does
+
+After a tool returns and before its text is charged against the tool budget, a second
+model condenses the text. The chat's model reads the condensation; the tool-call card
+keeps what the tool actually returned. The message that is stored — and therefore
+replayed on every later turn — holds the condensation, which is the whole point: a page
+the user read once would otherwise cost every subsequent request in that chat.
+
+| setting | where | default |
+| --- | --- | --- |
+| `Digest.Model` | Settings → Tool results | empty = **off** |
+| `Digest.Threshold` | Settings → Tool results | `2000` tokens (0 means the default) |
+| `Digest.MaxTokens` | Settings → Tool results | `600` tokens (0 means the default; range 100–8000) |
+| `Backend.Digest` | Settings → Backends, per backend | `false` |
+
+`Digest.MaxTokens` is the **length of the summary**, not the size at which condensing
+starts: it goes out as the request's `max_tokens`. It is a setting because how short a
+summary can be before it stops answering the question depends on the model and the
+page, and 600 was a starting point rather than a measurement. Two rules resolve it
+(`DigestSettings.DigestMaxTokens`): 0 means the default, and the range is bounded
+(100–8000).
+
+The first version also capped it at `Threshold` — a summary should never be longer than
+what it replaces — and that was wrong twice over. The threshold is the *smallest* page
+worth a request, not the size of the page in hand, so a 40k-token page above a 2k
+threshold can want far more than 2k tokens out. And `normalise` stored the capped value,
+so a chosen 3000 came back as 2000, was gone from the blob, and raising the threshold
+later did not restore it. Both are pinned by `TestTheDigestCapIsResolvedNotTrusted`. The
+bound that remains is the tool budget: a condensation still passes through
+`toolOutputBudget.take` before the model reads it.
+
+### 17.2 The rules that make it safe to switch on
+
+- **Off unless a model is chosen.** Empty is the only "off": the one model this must
+  never use is the chat's own, because that is the model whose request the condensation
+  exists to shrink. On a backend whose allowance is a shared per-minute bucket, asking it
+  to read the page first spends the budget the answer needs (GROQ.md §6.1).
+- **Per backend.** What it buys differs per backend and so does the price, so the switch
+  lives on the backend row: one where a page would otherwise be refused, or one with a
+  large window that loses only the latency.
+- **Only a page.** `scrape_url` is condensed. A document is already chunked and read by
+  chunk range (`read_pages`), and a condensation there would throw away the precision
+  retrieval was built for.
+- **Never the reason a result is missing.** Every failure — no provider, an unreachable
+  model, an empty answer — returns the result unchanged and emits a warning. The feature
+  is an optimisation of what the model reads; the behaviour without it is always the
+  fallback.
+- **The way back is the same call.** The second read of a page in one chat hands over the
+  full text (a per-process ledger keys it), so a model that needs an exact quotation can
+  ask for it. Without that the escape would close: it would be answered with a
+  condensation of what it had just failed to read.
+- **Cached by content.** The key is the model *reference* (backend and id, the same
+  identity `llm.Ref` gives everything else), the prompt version, the cap the summary was
+  written under, and a hash of the text — not the URL, because a changed page is a
+  different page. The cap is in the key because it is a setting: a summary asked to fit
+  in 600 tokens is not the one the same model gives at 2000, so a changed cap must miss
+  the cache instead of serving the old length for up to 30 days. A page read twice in one
+  chat or across chats costs one condensation; the entry expires after 30 days and the
+  start-up prune removes it.
+- **No ratio is stated to the model.** It is told that the text is a summary and that the
+  full text can be had again; it is not told how much was cut. A ratio it cannot verify
+  invites claims of completeness it cannot have.
+
+### 17.3 Where it plugs in
+
+`runTool` ([generate.go:341](internal/chat/generate.go#L341)) hands the result through
+`condenseToolOutput` ([digest.go:199](internal/chat/digest.go#L199)) immediately before
+`budget.take`, so the budget is charged for what the model actually receives. The call
+itself reuses `extractWithBudget` ([compact.go:673](internal/chat/compact.go#L673)) — the
+retry that survives a reasoning model spending its cap on thinking is the same failure
+here — with its own prompt, the configured cap and thinking switched off where the
+backend allows it.
+
+The cap is also held under the summariser's window on the *first* attempt, not only on
+the retry: a backend validates the prompt and the output allowance together, so 8000
+output tokens beside a page that fills a small window is an oversized request, refused
+before a token is generated. That was theoretical while the cap was a constant of 600;
+with the cap as a setting it is what a small local model sees first, so
+`extractWithBudget` shrinks the allowance to the room that is left (pinned by
+`TestTheCapIsHeldUnderTheWindow`).
+
+Because it is the same helper, every reasoning-model measure a fold takes is taken here
+too, for free: the backend's thinking toggle, the `/no_think` soft switch, inline
+`<think>`/`<analysis>` blocks stripped from the answer before it is judged (and counted
+as reasoning when nothing else came back), and the retry that grows the budget by the
+reasoning measured — capped by `ContextLimit − prompt`, so the condensation never asks
+for more than the summariser can hold. The one thing that is *not* shared is the
+budget: a fold's output cap is deliberately generous (`summaryOutputTokens = 8192`,
+because `max_tokens` bounds thinking and answer together), while this one is small by
+purpose and now configurable — which is why the retry matters more here than there.
+
+### 17.4 Tests
+
+`internal/chat/digest_test.go`, one per rule above: the page replaced by the
+condensation end to end (through a real scrape against a local page), a backend without
+the switch, no model configured, below the threshold, a failed condensation delivering
+the page plus a warning, the second read returning the full text, a cache hit across
+chats, a document chunk left alone, the configured cap reaching the request as
+`max_tokens`, a changed cap missing the cache, inline thinking stripped from the answer,
+and a thinking-only answer retried with a larger budget. `TestACondensationReplacesThePageTheModelReads`
+fails by design if the call in `runTool` is removed. The cap's resolution (0 = default,
+bounds, threshold) is pinned in `internal/config/config_test.go`.
+
+### 17.5 Known gap
+
+The transcript shows the condensation where the model read it and the full output on the
+tool card; nothing tells the reader *how much* was cut, because the record has no field
+for it. That is a display question, not a correctness one.
+
+---

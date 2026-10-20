@@ -882,7 +882,7 @@ Verfügbare Tools: {{tool_list}}`,
     location: 'Karlsdorf-Neuthard, Landkreis Karlsruhe, Baden-Württemberg, Deutschland',
     theme: 'dark',
     backends: [
-      { id: 'lmstudio', name: 'LM Studio', kind: 'lmstudio', baseUrl: 'http://127.0.0.1:1234', enabled: true },
+      { id: 'lmstudio', name: 'LM Studio', kind: 'lmstudio', baseUrl: 'http://127.0.0.1:1234', enabled: true, digest: true },
       // Ollama and DeepSeek are switched on so the two failure rows the panel has
       // to render — a refused server, and a missing credential — belong to
       // backends that really were probed. Mistral and llama.cpp stay off, which is
@@ -1110,6 +1110,10 @@ Verfügbare Tools: {{tool_list}}`,
     // the one this fixture exists to render. The smaller non-reasoning model is
     // the realistic choice — that is what the setting is for.
     compact: { enabled: true, midTurnCheck: false, threshold: 0.8, keepRecentTurns: 6, reserveForResponse: 1024, summaryTemperature: 0.2, maxSummaryTokens: 1200, summaryModel: { backend: 'lmstudio', model: 'ornith-1.5-9b' } },
+    // The condensation runs on a different backend than the chat's on purpose: that
+    // is the configuration the feature is for, and it is what the panel's "active
+    // for" line reads from the backend rows below.
+    digest: { model: { backend: 'groq', model: 'openai/gpt-oss-20b' }, threshold: 2000, maxTokens: 600 },
     sampler: { temperature: 0.7, topP: 0.9, maxTokens: 0, numCtx: 0 },
     defaultSystemPrompt: PROMPT_BODIES.research.en,
     // Same five built-ins, in the same order, as config.DefaultPresets(). The

@@ -626,6 +626,52 @@ func stripThinking(text string) (answer, thinking string) {
 // back. The content itself stays bounded: the extra budget goes to the thinking,
 // not to a larger memory.
 func Summarize(ctx context.Context, p llm.Provider, model string, opts SummarizeOptions) (string, error) {
+	// Ask the model not to think. A summary is a mechanical task, and `max_tokens`
+	// bounds thinking and answer together, so a reasoning model that thinks first
+	// can spend the whole budget before writing a word. `/no_think` is the in-prompt
+	// soft switch — the only lever that reaches a local backend with no reasoning
+	// parameter (LM Studio). A model that does not know the tag treats it as an
+	// ignorable trailing note.
+	return extractWithBudget(ctx, p, model, summarySystemPrompt,
+		summarisePrompt(opts)+"\n\n"+noThinkTag, extractionOptions{
+			Temperature:     opts.Temperature,
+			MaxTokens:       opts.MaxTokens,
+			NumCtx:          opts.NumCtx,
+			DisableThinking: opts.DisableThinking,
+			ContextLimit:    opts.ContextLimit,
+			Failure:         "Zusammenfassung fehlgeschlagen",
+			EmptyHint:       "erhöhe „Max. Zusammenfassung (Tokens)“ in den Einstellungen",
+		})
+}
+
+// extractionOptions are what a bounded, prompted extraction needs regardless of
+// which prompt it is: a compaction's memory and a tool result's condensation are
+// the same request shape over different text.
+type extractionOptions struct {
+	Temperature     float64
+	MaxTokens       int
+	NumCtx          int
+	DisableThinking bool
+	ContextLimit    int
+	// Failure names the request in an error the user reads, in the transcript's
+	// language, so a failed condensation does not report itself as a failed
+	// compaction.
+	Failure string
+	// EmptyHint is what the empty-answer error advises, because the two callers
+	// cannot act on the same advice: one has a settings field to raise, the other
+	// wants a model that does not think first at all.
+	EmptyHint string
+}
+
+// extractWithBudget runs one prompted extraction and retries it when a reasoning
+// model spent the whole output budget thinking and returned nothing. It is shared by
+// the two callers in this package — the memory a fold writes and the condensation a
+// tool result becomes — because `max_tokens` bounds thinking and answer together, so
+// both have exactly the same failure to survive and neither should reinvent the
+// arithmetic for it: the retry grows the budget by the reasoning that actually came
+// back, measured rather than guessed.
+func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt, userPrompt string,
+	opts extractionOptions) (string, error) {
 	if p == nil {
 		return "", errors.New("kein Backend verfügbar")
 	}
@@ -633,15 +679,8 @@ func Summarize(ctx context.Context, p llm.Provider, model string, opts Summarize
 	if temp <= 0 {
 		temp = 0.2
 	}
-	// Ask the model not to think. A summary is a mechanical task, and `max_tokens`
-	// bounds thinking and answer together, so a reasoning model that thinks first
-	// can spend the whole budget before writing a word. `/no_think` is the in-prompt
-	// soft switch — the only lever that reaches a local backend with no reasoning
-	// parameter (LM Studio). A model that does not know the tag treats it as an
-	// ignorable trailing note.
-	userPrompt := summarisePrompt(opts) + "\n\n" + noThinkTag
 	messages := []llm.Message{
-		{Role: llm.RoleSystem, Content: summarySystemPrompt},
+		{Role: llm.RoleSystem, Content: systemPrompt},
 		{Role: llm.RoleUser, Content: userPrompt},
 	}
 	promptTokens := llm.EstimateMessagesTokens(messages)
@@ -649,6 +688,19 @@ func Summarize(ctx context.Context, p llm.Provider, model string, opts Summarize
 	answer := opts.MaxTokens
 	if answer <= 0 {
 		answer = 1024
+	}
+	// The *first* attempt is held under the window as well, not just the retry below.
+	// A backend validates the prompt and the output allowance together, so an output
+	// cap that does not fit beside the prompt is an oversized request — refused before
+	// a token is generated. That was theoretical while the condensation's cap was a
+	// constant of 600 and the caller prepared the transcript for the window; it stopped
+	// being theoretical once the cap became a setting, where 8000 of output next to a
+	// page that fills a small window is a request no local model accepts. The answer
+	// shrinks to the room that is left, and the page — not the cap — decides the rest.
+	if opts.ContextLimit > 0 {
+		if room := opts.ContextLimit - promptTokens; room > 0 && room < answer {
+			answer = room
+		}
 	}
 	budget := answer
 	var last completion
@@ -666,14 +718,14 @@ func Summarize(ctx context.Context, p llm.Provider, model string, opts Summarize
 		}
 		out, err := runToCompletion(ctx, p, req)
 		if err != nil {
-			return "", fmt.Errorf("Zusammenfassung fehlgeschlagen: %w", err)
+			return "", fmt.Errorf("%s: %w", opts.Failure, err)
 		}
 		// A backend without a separate reasoning channel inlines the model's
 		// deliberation in the content — `<think>…</think>`, `<analysis>…</analysis>`
-		// — and a summary that consisted of nothing but that would be stored as
-		// the chat's memory and re-read on every later turn. So the blocks are
-		// removed before the answer is judged, and what they contained is counted
-		// as reasoning, because that is what it is.
+		// — and an answer that consisted of nothing but that is not an empty answer:
+		// it is the reasoning-budget failure. So the blocks are removed before the
+		// answer is judged, and what they contained is counted as reasoning, because
+		// that is what it is.
 		summary, thought := stripThinking(out.text)
 		if summary != "" {
 			return summary, nil
@@ -698,23 +750,23 @@ func Summarize(ctx context.Context, p llm.Provider, model string, opts Summarize
 		}
 		budget = grown
 	}
-	return "", emptySummaryError(last)
+	return "", emptyExtractionError(last, opts.EmptyHint)
 }
 
-// emptySummaryError explains a summary that came back empty. The usual cause is a
+// emptyExtractionError explains an answer that came back empty. The usual cause is a
 // reasoning model: because `max_tokens` bounds thinking and answer together, a
 // model that spent the whole budget thinking returns stop_reason "length" with no
 // content at all. Naming that cause names the fix — raise the summary budget —
 // instead of leaving "empty summary" to be read as a model that refused to answer.
-func emptySummaryError(out completion) error {
+func emptyExtractionError(out completion, hint string) error {
 	if out.reasoning != "" || strings.EqualFold(out.stopReason, "length") {
 		stop := out.stopReason
 		if stop == "" {
 			stop = "unbekannt"
 		}
 		return fmt.Errorf("das Modell hat sein Ausgabebudget beim Reasoning aufgebraucht und "+
-			"keine Zusammenfassung geschrieben (stop_reason %q, %d Zeichen Reasoning) — erhöhe "+
-			"„Max. Zusammenfassung (Tokens)“ in den Einstellungen", stop, len([]rune(out.reasoning)))
+			"keine Zusammenfassung geschrieben (stop_reason %q, %d Zeichen Reasoning) — %s",
+			stop, len([]rune(out.reasoning)), hint)
 	}
 	return errors.New("das Modell hat eine leere Zusammenfassung geliefert")
 }

@@ -17,7 +17,7 @@ import {
 import { useStore } from '../store'
 import { asLang, LANGS } from '../lib/i18n'
 
-type Tab = 'general' | 'backends' | 'images' | 'prompt' | 'research' | 'context'
+type Tab = 'general' | 'backends' | 'images' | 'prompt' | 'research' | 'context' | 'payload'
 
 /**
  * Translate a key, falling back to text the backend supplied. translate() echoes
@@ -77,6 +77,10 @@ export function Settings() {
     { id: 'prompt', label: t('settings.prompt') },
     { id: 'research', label: t('settings.research') },
     { id: 'context', label: t('settings.compaction') },
+    // Its own tab rather than a section of Compaction: a fold rewrites a history the
+    // model has already read, this decides what a tool result becomes on its way in,
+    // and the two are configured with a different model each.
+    { id: 'payload', label: t('settings.payload') },
   ]
 
   return (
@@ -108,6 +112,7 @@ export function Settings() {
           {tab === 'prompt' && <PromptTab draft={draft} patch={patch} />}
           {tab === 'research' && <ResearchTab draft={draft} patch={patch} />}
           {tab === 'context' && <ContextTab draft={draft} patch={patch} />}
+          {tab === 'payload' && <PayloadTab draft={draft} patch={patch} />}
         </div>
       </div>
     </div>
@@ -1614,6 +1619,21 @@ function BackendsTab({
                     {t('settings.enableAndCheck')}
                   </button>
                 </div>
+              )}
+              {/* The switch belongs to the backend rather than to the settings page
+                  because what it costs depends on the backend: on a rated one it is
+                  the difference between reading a page and being refused for its
+                  size, on a local server only the latency of the extra request. */}
+              <label className="mt-2 flex items-center gap-2 text-[13px]">
+                <input
+                  type="checkbox"
+                  checked={backend.digest ?? false}
+                  onChange={(e) => updateBackend(index, { digest: e.target.checked })}
+                />
+                {t('settings.backendDigest')}
+              </label>
+              {backend.digest && (
+                <p className="faint mt-1 text-[11px]">{t('settings.backendDigestHint')}</p>
               )}
               {/* Only the kind that KiChat knows how to run itself gets the
                   controls; every other entry stays an address it contacts. */}
@@ -4026,6 +4046,111 @@ function ResearchTab({
         <p className="faint mt-1 text-[11px]">{t('settings.allowPrivateHint')}</p>
       </Section>
     </>
+  )
+}
+
+/* -------------------------------------------------------------------------
+ * Tool results
+ * ---------------------------------------------------------------------- */
+
+function PayloadTab({
+  draft,
+  patch,
+}: {
+  draft: config.Settings
+  patch: (c: Partial<config.Settings>) => void
+}) {
+  const t = useStore((s) => s.t)
+  const models = useStore((s) => s.models)
+  // An older settings blob and the harness fixture both predate the group, so it is
+  // read defensively rather than assumed: the panel has to render before the first
+  // save, and an undefined group would throw on the first keystroke.
+  const digest = draft.digest ?? {
+    model: { backend: '', model: '' },
+    threshold: 2000,
+    maxTokens: 600,
+  }
+  // The same opaque pair encoding the summarisation picker uses: a model id may
+  // contain a slash, so `backend/model` would be ambiguous.
+  const refValue = (backend: string, model: string) => JSON.stringify([backend, model])
+  const selected = digest.model?.model
+    ? refValue(digest.model.backend, digest.model.model)
+    : ''
+  const candidates = useMemo(
+    () => [...models].sort((a, b) => a.backend.localeCompare(b.backend) || a.id.localeCompare(b.id)),
+    [models],
+  )
+  // A configured model can be missing from the catalogue — its backend is switched
+  // off, its server is down, or the listing has not run yet. Without an option of its
+  // own the select falls back to the first one and displays "off" while the setting
+  // still condenses, which is the one thing a settings screen must not do.
+  const unavailable = selected !== '' && !candidates.some((m) => refValue(m.backend, m.id) === selected)
+  const active = (draft.backends ?? []).filter((b) => b.digest).map((b) => b.name || b.id)
+  return (
+    <Section title={t('settings.payload')} hint={t('settings.payloadHint')}>
+      <Field label={t('settings.digestModel')} hint={t('settings.digestModelHint')}>
+        <select
+          className="select"
+          value={selected}
+          onChange={(e) => {
+            // The off option carries the empty value, and JSON.parse("") throws — the
+            // same trap the summarisation picker had, where clearing a choice raised
+            // an error before the patch and could not be undone.
+            if (e.target.value === '') {
+              patch({ digest: { ...digest, model: { backend: '', model: '' } } })
+              return
+            }
+            const [backend, model] = JSON.parse(e.target.value) as [string, string]
+            patch({ digest: { ...digest, model: { backend, model } } })
+          }}
+        >
+          <option value="">{t('settings.digestModelDefault')}</option>
+          {unavailable && (
+            <option value={selected}>
+              {`${digest.model.model} (${digest.model.backend}) ${t('settings.digestModelUnavailable')}`}
+            </option>
+          )}
+          {candidates.map((m) => (
+            <option key={`${m.backend}/${m.id}`} value={refValue(m.backend, m.id)}>
+              {m.id} ({m.backend})
+            </option>
+          ))}
+        </select>
+      </Field>
+      <Field label={t('settings.digestThreshold')} hint={t('settings.digestThresholdHint')}>
+        <input
+          className="input"
+          type="number"
+          min={200}
+          step={100}
+          value={digest.threshold}
+          onChange={(e) =>
+            patch({ digest: { ...digest, threshold: Number(e.target.value) || 0 } })
+          }
+        />
+      </Field>
+      {/* A blob written before the field existed has no `maxTokens`, so the zero
+          case is rendered as the shipped default rather than as an empty box — the
+          backend resolves a 0 to exactly that number, and the panel must show the
+          value that is really used. */}
+      <Field label={t('settings.digestMaxTokens')} hint={t('settings.digestMaxTokensHint')}>
+        <input
+          className="input"
+          type="number"
+          min={100}
+          step={100}
+          value={digest.maxTokens || 600}
+          onChange={(e) =>
+            patch({ digest: { ...digest, maxTokens: Number(e.target.value) || 0 } })
+          }
+        />
+      </Field>
+      <p className="faint text-[11px]">
+        {active.length > 0
+          ? `${t('settings.payloadActive')} ${active.join(', ')}`
+          : t('settings.payloadInactive')}
+      </p>
+    </Section>
   )
 }
 

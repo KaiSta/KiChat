@@ -698,6 +698,50 @@ func TestToolCallCancelledStateSurvives(t *testing.T) {
 	}
 }
 
+// TestACondensationIsReusedUntilItExpires pins the cache a second read of the same
+// page depends on: the entry is found by its key, carries the summary and what it was
+// made from, and stops being served once it has expired — an entry nobody reads again
+// is still pruned rather than kept for the life of the installation.
+func TestACondensationIsReusedUntilItExpires(t *testing.T) {
+	st := newStore(t)
+	entry := DigestCacheEntry{
+		Key: "k1", Model: "small", SourceTokens: 19800,
+		Summary: "- Kurzfassung", DigestTokens: 120,
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour),
+	}
+	if err := st.PutDigestCache(entry); err != nil {
+		t.Fatalf("PutDigestCache: %v", err)
+	}
+	got, ok := st.GetDigestCache("k1")
+	if !ok {
+		t.Fatal("a stored condensation was not found")
+	}
+	if got.Summary != entry.Summary || got.SourceTokens != 19800 || got.Model != "small" {
+		t.Errorf("GetDigestCache = %+v, want the stored entry", got)
+	}
+	if _, ok := st.GetDigestCache("never-written"); ok {
+		t.Error("an absent key reported a hit")
+	}
+
+	// An expired entry is a miss, and the start-up prune removes it for good: reads
+	// treat it as absent either way, but nothing else would ever delete the row.
+	if err := st.PutDigestCache(DigestCacheEntry{
+		Key: "k2", Model: "small", Summary: "alt",
+		CreatedAt: time.Now().Add(-48 * time.Hour), ExpiresAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("PutDigestCache: %v", err)
+	}
+	if _, ok := st.GetDigestCache("k2"); ok {
+		t.Error("an expired condensation was served")
+	}
+	if _, err := st.PruneExpiredCaches(); err != nil {
+		t.Fatalf("PruneExpiredCaches: %v", err)
+	}
+	if n := rowCount(t, st, "digest_cache", "key = ?", "k2"); n != 0 {
+		t.Errorf("the expired condensation survived the prune (%d rows)", n)
+	}
+}
+
 // TestAnExistingInstallationGainsTheGenerationColumn is the upgrade path, and it is
 // asserted rather than assumed because getting it wrong is silent and total.
 //

@@ -442,6 +442,11 @@ turn. `internal/chat/oversize.go`:
    the second request fits (`TestAToolResultIsCutToWhatTheRequestCanCarry`); a backend that states
    the same prompt at 1200 tokens gets its result cut to 3776 of that ceiling, where the estimate
    alone would have allowed 4527 (`TestTheCutFollowsTheBackendsOwnPromptCount`).
+   A cut is the floor, not the only answer: a backend can ask for its oversized results to be
+   **condensed** by a second model before they are sent, so the model reads a complete (if
+   shorter) page instead of the first few thousand tokens of one. That switch lives on the
+   backend row, and the condensation model must sit on a different quota — this backend's
+   allowance is the bucket both requests would draw from (COMPACT.md §17).
 5. **A refusal that survives all that is explained rather than quoted.** The vendor's sentence
    names an organization, a service tier and a billing page; what the user is shown is which
    limit was hit, what the app did about it, and what reduces the request — *"Kürze die

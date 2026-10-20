@@ -267,6 +267,26 @@ CREATE TABLE IF NOT EXISTS counters (
 	// no prompt of its own. Its own migration for the same reason 4 and 5 are: an existing
 	// database resumes here and only runs this entry.
 	`ALTER TABLE attachments ADD COLUMN derivation_json TEXT NOT NULL DEFAULT ''`,
+	// 7: condensed tool results, keyed by the content they were made from.
+	//
+	// The page itself is already cached in scrape_cache, so this is the other half of
+	// the same economy: reading the same page twice should cost one condensation, not
+	// two — and the key is the content hash rather than the URL, because a page that
+	// changed is a different page and must not inherit the old summary. The model is
+	// part of the key for the same reason: two models write different condensations,
+	// and swapping the model is how a user asks for a different one.
+	`
+CREATE TABLE IF NOT EXISTS digest_cache (
+  key TEXT PRIMARY KEY,
+  model TEXT NOT NULL DEFAULT '',
+  source_tokens INTEGER NOT NULL DEFAULT 0,
+  summary TEXT NOT NULL DEFAULT '',
+  digest_tokens INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_digest_cache_expiry ON digest_cache(expires_at);
+`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

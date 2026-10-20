@@ -277,3 +277,19 @@ type ScrapeCacheEntry struct {
 	FetchedAt time.Time `json:"fetchedAt"`
 	ExpiresAt time.Time `json:"expiresAt"`
 }
+
+// DigestCacheEntry is a tool result already condensed by a model.
+//
+// Key is derived from the model, the prompt that asked for the condensation and a
+// hash of the content, so the same page read twice — in this chat or another — costs
+// one request. The content is not stored: scrape_cache already holds the page, and a
+// second copy of the thing the condensation exists to shrink would defeat the point.
+type DigestCacheEntry struct {
+	Key          string    `json:"key"`
+	Model        string    `json:"model"`
+	SourceTokens int       `json:"sourceTokens"`
+	Summary      string    `json:"summary"`
+	DigestTokens int       `json:"digestTokens"`
+	CreatedAt    time.Time `json:"createdAt"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+}

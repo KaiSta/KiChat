@@ -443,6 +443,25 @@ const de = {
   'settings.numCtxHint': 'Nur Ollama nutzt diesen Wert pro Anfrage.',
   'settings.maxTokens': 'Max. Antwort-Tokens (0 = unbegrenzt)',
   'settings.compaction': 'Kompaktierung',
+  'settings.payload': 'Tool-Ergebnisse',
+  'settings.payloadHint':
+    'Große Tool-Ergebnisse werden von einem zweiten Modell gekürzt, bevor das Chat-Modell sie liest. Der vollständige Text bleibt am Tool-Aufruf sichtbar.',
+  'settings.digestModel': 'Modell für die Kürzung',
+  'settings.digestModelDefault': 'Aus (kein Modell gewählt)',
+  'settings.digestModelUnavailable': '(nicht verfügbar)',
+  'settings.digestModelHint':
+    'Ein kleines, schnelles Modell — am besten auf einem anderen Backend als der Chat. Dasselbe Backend zahlt die Kürzung aus demselben Minuten-Budget wie die Antwort; ein gehostetes Kürzungs-Modell bekommt die Seiten zu lesen, die es kürzt.',
+  'settings.digestThreshold': 'Ab dieser Größe kürzen (Tokens)',
+  'settings.digestThresholdHint':
+    'Darunter wird das Ergebnis unverändert übernommen — die zusätzliche Anfrage kostet mehr Zeit als Tokens.',
+  'settings.digestMaxTokens': 'Max. Länge der Kürzung (Tokens)',
+  'settings.digestMaxTokensHint':
+    'Wie lang die Zusammenfassung höchstens werden darf. Kurz halten — sie ersetzt die Seite im Kontext; für sehr lange Seiten darf es mehr sein als die Schwelle oben.',
+  'settings.backendDigest': 'Tool-Ergebnisse kürzen',
+  'settings.backendDigestHint':
+    'Gilt nur für Antworten dieses Backends. Große Seiten werden vor dem Senden zusammengefasst; ein zweiter Aufruf derselben Seite liefert den Volltext.',
+  'settings.payloadActive': 'Aktiv für:',
+  'settings.payloadInactive': 'Für kein Backend aktiv — einschalten im Tab „Backends“.',
   'settings.autoCompact': 'Automatisch komprimieren',
   'settings.midTurnCheck': 'Zwischen Tool-Runden prüfen',
   'settings.midTurnCheckHint':
@@ -1168,6 +1187,25 @@ const en: Record<keyof typeof de, string> = {
   'settings.numCtxHint': 'Only Ollama applies this per request.',
   'settings.maxTokens': 'Max reply tokens (0 = unlimited)',
   'settings.compaction': 'Compaction',
+  'settings.payload': 'Tool results',
+  'settings.payloadHint':
+    'Oversized tool results are condensed by a second model before the chat model reads them. The full text stays visible on the tool call.',
+  'settings.digestModel': 'Condensation model',
+  'settings.digestModelDefault': 'Off (no model chosen)',
+  'settings.digestModelUnavailable': '(not available)',
+  'settings.digestModelHint':
+    'A small, fast model — ideally on a backend other than the chat’s. The same backend pays for the condensation out of the same per-minute allowance as the answer, and a hosted condensation model gets to read the pages it condenses.',
+  'settings.digestThreshold': 'Condense above (tokens)',
+  'settings.digestThresholdHint':
+    'Below this the result is handed over unchanged — the extra request costs more in time than it saves in tokens.',
+  'settings.digestMaxTokens': 'Condensation length (tokens)',
+  'settings.digestMaxTokensHint':
+    'The most the summary may write. Keep it short — it is what replaces the page in the context; for a very long page it may legitimately be more than the threshold above.',
+  'settings.backendDigest': 'Condense tool results',
+  'settings.backendDigestHint':
+    'Applies to answers on this backend only. Large pages are summarised before sending; asking for the same page again returns the full text.',
+  'settings.payloadActive': 'Active for:',
+  'settings.payloadInactive': 'Active for no backend — switch it on in the Backends tab.',
   'settings.autoCompact': 'Compact automatically',
   'settings.midTurnCheck': 'Check between tool rounds',
   'settings.midTurnCheckHint':
@@ -1859,6 +1897,23 @@ const zh: Record<keyof typeof de, string> = {
   'settings.numCtxHint': '仅 Ollama 会在每次请求中应用该值。',
   'settings.maxTokens': '回答最大令牌数（0 = 不限）',
   'settings.compaction': '压缩',
+  'settings.payload': '工具结果',
+  'settings.payloadHint': '较大的工具结果会先由另一个模型压缩，再交给对话模型阅读。完整文本仍显示在工具调用上。',
+  'settings.digestModel': '压缩模型',
+  'settings.digestModelDefault': '关闭（未选择模型）',
+  'settings.digestModelUnavailable': '（不可用）',
+  'settings.digestModelHint':
+    '选择一个小而快的模型——最好不要与对话在同一个后端。同一后端会用同一份每分钟额度支付压缩开销；若压缩模型在云端，它会读到这些网页内容。',
+  'settings.digestThreshold': '超过此大小则压缩（tokens）',
+  'settings.digestThresholdHint': '低于此值时结果原样使用——额外请求花费的时间会多于节省的令牌。',
+  'settings.digestMaxTokens': '压缩结果的最大长度（tokens）',
+  'settings.digestMaxTokensHint':
+    '摘要最多写多长。请保持简短——它将在上下文中取代原网页；对于很长的网页，可以合理地超过上面的阈值。',
+  'settings.backendDigest': '压缩工具结果',
+  'settings.backendDigestHint':
+    '仅对该后端的回答生效。较大的网页会在发送前被概括；再次请求同一网页会得到完整文本。',
+  'settings.payloadActive': '已启用：',
+  'settings.payloadInactive': '未对任何后端启用——请在“后端”标签页中开启。',
   'settings.autoCompact': '自动压缩',
   'settings.midTurnCheck': '在工具轮次之间检查',
   'settings.midTurnCheckHint':
