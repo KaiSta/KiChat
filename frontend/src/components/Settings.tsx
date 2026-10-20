@@ -4082,6 +4082,13 @@ function ContextTab({
             className="select"
             value={selectedRef}
             onChange={(e) => {
+              // The default option carries the empty value, and JSON.parse("") throws:
+              // going back to the chat's own model is not a pair that can be parsed,
+              // and the throw skipped the patch, so the choice could not be undone.
+              if (e.target.value === '') {
+                patch({ compact: { ...compact, summaryModel: { backend: '', model: '' } } })
+                return
+              }
               const [backend, model] = JSON.parse(e.target.value) as [string, string]
               patch({ compact: { ...compact, summaryModel: { backend, model } } })
             }}
