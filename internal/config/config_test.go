@@ -48,6 +48,12 @@ func TestLoadKeepsDefaultsForFieldsAddedLater(t *testing.T) {
 		t.Errorf("summaryModel = %+v, want an empty ref meaning the chat's own model",
 			got.Compact.SummaryModel)
 	}
+	// The between-rounds check costs a summarisation inside an answer the user is
+	// waiting for, so an install that never asked for it must not start folding
+	// mid-turn after an upgrade.
+	if got.Compact.MidTurnCheck {
+		t.Error("an older settings row switched on the mid-turn check")
+	}
 	// A managed model saved before the projector field existed keeps an empty one, and
 	// empty means "the projector beside the model" rather than "run text-only": a
 	// multimodal GGUF nobody can pair by hand is the state this field exists to end, so
@@ -57,6 +63,38 @@ func TestLoadKeepsDefaultsForFieldsAddedLater(t *testing.T) {
 	}
 	if path := got.Runtime.Models["llamacpp"].ModelPath; path != "/models/a.gguf" {
 		t.Errorf("modelPath = %q, want the stored model kept", path)
+	}
+}
+
+// TestMidTurnCheckShipsOffAndSurvivesARestart pins both halves of the switch: the
+// shipped default (off, because it spends a request inside an answer somebody is waiting
+// for) and the round trip through the one JSON row the settings blob is.
+func TestMidTurnCheckShipsOffAndSurvivesARestart(t *testing.T) {
+	if Default().Compact.MidTurnCheck {
+		t.Error("the mid-turn check is on by default")
+	}
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "settings.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	s := Default()
+	s.Compact.MidTurnCheck = true
+	raw, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutSetting("settings", json.RawMessage(raw)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Compact.MidTurnCheck {
+		t.Error("a stored mid-turn check did not survive the reload")
 	}
 }
 

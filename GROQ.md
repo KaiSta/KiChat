@@ -389,8 +389,9 @@ turn. `internal/chat/oversize.go`:
    mid-answer even though its first request fitted. `generate` now asks the same planner before
    every round after the first (`autoFold` with `midTurn` set), so the fold happens between the
    rounds rather than being paid for on the turn's error, where it restarts the turn and loses the
-   work already done. Only the ceiling is asked there; the user's threshold belongs to the history
-   the turn was started with (COMPACT.md §4). Measured: a 12-turn history under a ceiling
+   work already done. The ceiling is always asked there; the user's threshold is asked only when
+   they switch `Compact.MidTurnCheck` on, which is also the only mid-turn check a backend
+   publishing no ceiling can get (COMPACT.md §4). Measured: a 12-turn history under a ceiling
    placed just above it folds on the second round — the oldest turns gone, the new message kept,
    no refusal (`TestAToolRoundFoldsBeforeItsNextRequestCrossesTheCeiling`).
 

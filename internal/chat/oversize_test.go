@@ -1459,19 +1459,20 @@ func TestAToolResultIsCutToWhatTheRequestCanCarry(t *testing.T) {
 	}
 }
 
-// TestTheBetweenRoundFoldAsksOnlyForTheCeiling pins the difference between the two calls
-// to autoFold. Before a turn both bounds are the planner's — the user's threshold as much
-// as a published ceiling — while between rounds only the ceiling is: the threshold was
-// already applied to the history the turn was started with, and folding for it again
-// mid-turn would summarise a transcript while the user is reading the answer to it.
-func TestTheBetweenRoundFoldAsksOnlyForTheCeiling(t *testing.T) {
-	fold := func(t *testing.T, ceilingOnly bool, ceiling int) int {
+// TestTheBetweenRoundFoldAsksTheThresholdOnlyWhenTheUserSaidSo pins the two calls to
+// autoFold. Before a turn both bounds are the planner's — the user's threshold as much as
+// a published ceiling. Between rounds the ceiling is always asked, because crossing it
+// costs the whole answer; the threshold is asked only when Compact.MidTurnCheck is on,
+// because a window fold is a summarisation inside an answer somebody is waiting for. That
+// switch is also the only mid-turn check a backend without a ceiling can get.
+func TestTheBetweenRoundFoldAsksTheThresholdOnlyWhenTheUserSaidSo(t *testing.T) {
+	fold := func(t *testing.T, midTurn, midTurnCheck bool, ceiling int) int {
 		t.Helper()
 		st := newTestStore(t)
 		chat := makeChat(t, st)
 		// The shipped default switches automatic compaction on, and this chat opts in:
-		// the threshold is live and very low, so the only thing that can keep the fold
-		// from happening is ceilingOnly.
+		// the threshold is live and very low, so only the mid-turn gate can keep the
+		// fold from happening.
 		chat.AutoCompact = true
 		if err := st.UpdateChat(chat); err != nil {
 			t.Fatalf("enable auto-compaction: %v", err)
@@ -1487,20 +1488,127 @@ func TestTheBetweenRoundFoldAsksOnlyForTheCeiling(t *testing.T) {
 		engine, _ := newTestEngine(t, st, provider)
 		settings := engine.Settings()
 		settings.Compact.Threshold = 0.01
+		settings.Compact.MidTurnCheck = midTurnCheck
 		if err := engine.autoFold(context.Background(), &chat, provider, "fake", "fake-model",
-			provider.model, settings, ceilingOnly); err != nil {
+			provider.model, settings, midTurn); err != nil {
 			t.Fatalf("autoFold: %v", err)
 		}
 		return len(summariesOf(t, st))
 	}
 
-	if got := fold(t, true, 0); got != 0 {
-		t.Fatalf("between-round folds with no ceiling = %d, want none", got)
+	if got := fold(t, true, false, 0); got != 0 {
+		t.Fatalf("between-round folds with no ceiling and the check off = %d, want none", got)
 	}
-	if got := fold(t, false, 0); got != 1 {
+	if got := fold(t, false, false, 0); got != 1 {
 		t.Fatalf("the fold before the turn = %d, want the one the threshold asks for", got)
 	}
-	if got := fold(t, true, 2000); got != 1 {
+	// The new switch: the same call, the same absent ceiling, one fold.
+	if got := fold(t, true, true, 0); got != 1 {
+		t.Fatalf("between-round folds with the check on = %d, want the one the threshold asks for", got)
+	}
+	if got := fold(t, true, false, 2000); got != 1 {
 		t.Fatalf("between-round folds with a ceiling = %d, want the one it asks for", got)
+	}
+	// Both bounds live at once is still one decision and therefore one fold.
+	if got := fold(t, true, true, 2000); got != 1 {
+		t.Fatalf("between-round folds with both bounds = %d, want one", got)
+	}
+}
+
+// TestTheMidTurnCheckFoldsALocalToolTurnWhenTheUserAsks is the behaviour the setting
+// exists for. A local model publishes no per-request ceiling, so without it the only size
+// check is the one before the turn — and a tool round that grows past the window's
+// threshold is never noticed, because the growth does not exist yet when that check runs.
+//
+// The growth is the model's own report, deliberately: it is the one part of a round that
+// nothing cuts to fit (a tool result is budgeted against the room left), and it is what
+// the next round has to carry.
+func TestTheMidTurnCheckFoldsALocalToolTurnWhenTheUserAsks(t *testing.T) {
+	run := func(t *testing.T, midTurnCheck bool) (summaries int, carriedOldest bool) {
+		t.Helper()
+		st := newTestStore(t)
+		chat := makeChat(t, st)
+		chat.AutoCompact = true
+		if err := st.UpdateChat(chat); err != nil {
+			t.Fatalf("enable auto-compaction: %v", err)
+		}
+		// More turns than KeepRecentTurns, or the planner has nothing older to fold and
+		// both sides of this test would agree for the wrong reason.
+		seedLongHistory(t, st, 8)
+
+		call := "```tool_call\n{\"name\": \"search_web\", \"arguments\": {\"query\": \"mietrecht\"}}\n```"
+		report := strings.Repeat("Der Bericht ist lang und wird länger. ", 450)
+		replies := [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: call + "\n\n" + report}},
+		}
+		if midTurnCheck {
+			replies = append(replies, []llm.StreamEvent{
+				{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone},
+			})
+		}
+		replies = append(replies, []llm.StreamEvent{
+			{Type: llm.EventDelta, Text: "Antwort"}, {Type: llm.EventDone},
+		})
+
+		provider := &fakeProvider{
+			// No ceiling: the shape of every local backend here.
+			model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+			replies: replies,
+		}
+		engine, captured := newTestEngine(t, st, provider)
+		if midTurnCheck {
+			settings := engine.Settings()
+			settings.Compact.MidTurnCheck = true
+			settings.Compact.Threshold = 0.8
+			engine.Settings = func() config.Settings { return settings }
+		}
+
+		// The check before the turn has to stay quiet, or the fold would be the one that
+		// already existed and this test would prove nothing about the mid-turn path.
+		before, _, err := engine.buildAssembly(context.Background(), &chat, "fake", "fake-model",
+			engine.Settings(), provider.model, tools.TextProtocolHint)
+		if err != nil {
+			t.Fatalf("buildAssembly: %v", err)
+		}
+		if before.Budget.ProjectedRatio >= 0.8 {
+			t.Fatalf("the turn's own check already folds at %.2f", before.Budget.ProjectedRatio)
+		}
+
+		if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Eine neue Frage"}); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if !waitFor(t, 5*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+			t.Fatal("the turn did not finish")
+		}
+		for _, ev := range captured.snapshot() {
+			if ev.name == events.Error {
+				t.Errorf("the turn failed: %v", ev.payload["error"])
+			}
+		}
+
+		last := provider.requestAt(provider.requestCount() - 1)
+		for _, m := range last.Messages {
+			if strings.Contains(m.Content, "Frage 0:") {
+				carriedOldest = true
+			}
+		}
+		return len(summariesOf(t, st)), carriedOldest
+	}
+
+	summaries, carriedOldest := run(t, false)
+	if summaries != 0 {
+		t.Fatalf("compactions without the setting = %d, want none", summaries)
+	}
+	if !carriedOldest {
+		t.Fatal("the control case lost its oldest turn, so the two cases below would not" +
+			" differ for the reason this test is about")
+	}
+
+	summaries, carriedOldest = run(t, true)
+	if summaries != 1 {
+		t.Fatalf("compactions with the setting on = %d, want the one the second round asked for", summaries)
+	}
+	if carriedOldest {
+		t.Error("the round after the fold still carried the oldest turn verbatim")
 	}
 }

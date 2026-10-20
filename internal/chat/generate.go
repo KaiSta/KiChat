@@ -98,11 +98,16 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// refusal here costs the whole answer, not one request, because the fold that
 		// answers it restarts the turn. So the ceiling is asked again before every round
 		// after the first, through the same planner and with the same arithmetic as the
-		// check that ran before the turn; only the ceiling is asked (see autoFold).
+		// check that ran before the turn.
 		//
-		// A backend that publishes no ceiling pays nothing for this: the guard is the
-		// number itself, and with none there is no wall to fold for.
-		if iteration > 0 && e.ceilingFor(in.BackendID, in.ModelID).Tokens > 0 {
+		// A backend that publishes no ceiling has no wall to fold for, and the window it
+		// does have is only folded on request: an answer that folds itself mid-stream pays
+		// a summarisation the user waits through, so Settings → Compaction carries the
+		// switch (Compact.MidTurnCheck) rather than this loop deciding for them. With it on,
+		// the check is the same one a local model gets before every turn — the threshold
+		// against the effective limit — just asked where the round grew.
+		if iteration > 0 && (e.ceilingFor(in.BackendID, in.ModelID).Tokens > 0 ||
+			autoFoldThreshold(in.Settings, in.Chat, true) > 0) {
 			if err := e.autoFold(ctx, &in.Chat, in.Provider, in.BackendID, in.ModelID,
 				in.Model, in.Settings, true); err != nil {
 				// Same contract as the fold before the turn: a failed summarisation is

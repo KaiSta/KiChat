@@ -4068,6 +4068,15 @@ function ContextTab({
           />
           {t('settings.autoCompact')}
         </label>
+        <label className="mb-1 flex items-center gap-2 text-[13px]">
+          <input
+            type="checkbox"
+            checked={compact.midTurnCheck}
+            onChange={(e) => patch({ compact: { ...compact, midTurnCheck: e.target.checked } })}
+          />
+          {t('settings.midTurnCheck')}
+        </label>
+        <p className="faint mb-3 mt-1 text-[11px]">{t('settings.midTurnCheckHint')}</p>
         <Field label={t('settings.summaryModel')} hint={t('settings.summaryModelHint')}>
           <select
             className="select"

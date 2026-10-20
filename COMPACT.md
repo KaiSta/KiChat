@@ -190,12 +190,19 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   *projected* prompt. Its card says `auto`, which is exactly what a threshold nobody pressed means.
 
   The gate is asked again **between tool rounds** (`generate` calls `autoFold` with
-  `ceilingOnly` before every round after the first): a round appends a model reply and a tool
+  `midTurn` set, before every round after the first): a round appends a model reply and a tool
   result that the check before the turn could not price, and a refusal there costs the whole
-  answer — `foldForSize` answers it on the turn's error and restarts the turn. Only the ceiling is
-  asked mid-turn; the user's threshold is a preference about how full the chat may become, it was
-  applied to the history the turn was started with, and re-asking it between rounds would
-  summarise a transcript while the user is reading the answer to it.
+  answer — `foldForSize` answers it on the turn's error and restarts the turn. The **ceiling** is
+  always asked mid-turn. The **user's threshold** is asked only when `Compact.MidTurnCheck` is on
+  (`autoFoldThreshold`, one function so the two calls cannot disagree about what "switched on"
+  means): folding on a window rather than on a published ceiling spends a summarisation inside the
+  answer the user is reading, so it is their decision and it ships off. That switch is also the
+  only mid-turn check a backend that publishes **no** ceiling can get at all — every local model
+  — and without it such a turn is only ever priced before it starts.
+  Pinned by `TestTheBetweenRoundFoldAsksTheThresholdOnlyWhenTheUserSaidSo` and
+  `TestTheMidTurnCheckFoldsALocalToolTurnWhenTheUserAsks` (which asserts the pre-turn check stays
+  quiet, so the fold it sees is the mid-turn one). The mid-turn switch is **subordinate**: a chat
+  whose automatic compaction is off does not regain it between rounds.
 
   How far that fold goes is `ceilingTarget`, and it used to be ignored: the walk priced the aim
   against the caller's own `Target`, which an automatic run leaves at **0** — where 0 means "fold
@@ -826,6 +833,7 @@ approximate. Two things happen with it:
 | setting | default | effect |
 | --- | --- | --- |
 | `Enabled` | `true` | master switch for the automatic **threshold** (manual still works, and a backend's published ceiling folds regardless — §4) |
+| `MidTurnCheck` | `false` | ask the threshold again between the tool rounds of one answer. Off because it costs a summary inside an answer somebody waits for; it is the only mid-turn check a backend with no published ceiling gets (§4) |
 | `Threshold` | `0.80` | projected ratio at which the threshold bound fires |
 | `KeepRecentTurns` | `6` | turns kept verbatim; also the floor for the forced-short-chat rule |
 | `ReserveForResponse` | `1024` | headroom the budget keeps for the answer |

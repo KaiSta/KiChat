@@ -135,26 +135,22 @@ func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions
 // there is nothing to decide. Every send runs this, so the early return is also what keeps a
 // chat with no bound at all from being assembled for an answer that cannot change.
 //
-// ceilingOnly is the between-rounds call (generate.go). A tool round is exactly where a turn
+// midTurn is the between-rounds call (generate.go). A tool round is exactly where a turn
 // grows — the assert before the turn priced neither the reply nor the tool result that the
-// previous round added — so the ceiling has to be asked again before each request. The user's
-// threshold is deliberately not: it is a preference about how full a chat may become, it was
-// considered against the history the turn was started with, and asking it again mid-turn would
-// fold a transcript while the user is watching the answer to it being written — for a cost
-// (one summary call, inside a turn somebody is waiting on) that the wall the ceiling describes
-// never justifies.
+// previous round added — so the size has to be asked again before each request. The ceiling
+// below is always asked: crossing it costs the whole answer. The user's threshold is asked
+// only when they switched the between-rounds check on, because a window fold pays for itself
+// differently — it is one summary call inside an answer somebody is waiting for, and it is
+// the only mid-turn check a backend that publishes no ceiling can get at all.
 func (e *Engine) autoFold(ctx context.Context, chat *store.Chat, provider llm.Provider,
 	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings,
-	ceilingOnly bool) error {
+	midTurn bool) error {
 
 	// The user's bound exists only while they have automatic compaction switched on, and 0
 	// is how its absence reaches the planner — which is why nothing defaults it here: the
 	// planner's default belongs to the user's setting, not to a caller that switched the
 	// feature off (effectiveThreshold is where it lives).
-	threshold := 0.0
-	if !ceilingOnly && settings.Compact.Enabled && chat.AutoCompact {
-		threshold = effectiveThreshold(*chat, settings)
-	}
+	threshold := autoFoldThreshold(settings, *chat, midTurn)
 	// The backend's bound is a number it published, and it is not the window: Groq's
 	// per-minute token allowance is also the largest single request the account may send.
 	// Only a backend that publishes one has it (llm.RequestCeiling), learned from a
@@ -484,6 +480,25 @@ func triggerName(force bool) string {
 		return triggerManual
 	}
 	return triggerAuto
+}
+
+// autoFoldThreshold is the user's bound as one automatic fold may use it: 0 when their
+// automatic compaction is off for this chat — or, mid-turn, when they have not asked for
+// the between-rounds check.
+//
+// One function rather than the same two conditions written twice, so the fold before a
+// turn and the fold between its rounds cannot disagree about what "switched on" means.
+// The mid-turn switch is subordinate deliberately: a chat with automatic compaction off
+// does not regain it between rounds, which is the reading a checkbox in the compaction
+// panel has to have.
+func autoFoldThreshold(settings config.Settings, chat store.Chat, midTurn bool) float64 {
+	if !settings.Compact.Enabled || !chat.AutoCompact {
+		return 0
+	}
+	if midTurn && !settings.Compact.MidTurnCheck {
+		return 0
+	}
+	return effectiveThreshold(chat, settings)
 }
 
 // effectiveThreshold prefers the per-chat value over the global one.

@@ -904,7 +904,15 @@ type SearchSettings struct {
 
 // CompactSettings configures automatic compaction.
 type CompactSettings struct {
-	Enabled            bool    `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// MidTurnCheck asks the size question again between the tool rounds of one answer,
+	// which is the only check a backend that publishes no per-request ceiling would
+	// otherwise never get: the ceiling states itself again after every response, so that
+	// check is free and always runs, while a local model has only its window — and folding
+	// on a window mid-answer costs a summarisation the user is waiting for. Hence a switch,
+	// and off by default. It is subordinate to Enabled and to the chat's own AutoCompact,
+	// exactly like the threshold it asks about.
+	MidTurnCheck       bool    `json:"midTurnCheck"`
 	Threshold          float64 `json:"threshold"`
 	KeepRecentTurns    int     `json:"keepRecentTurns"`
 	ReserveForResponse int     `json:"reserveForResponse"`
@@ -976,7 +984,11 @@ func Default() Settings {
 			ScrapeCacheHours:     168,
 		},
 		Compact: CompactSettings{
-			Enabled:            true,
+			Enabled: true,
+			// The mid-turn check ships off because it spends a request inside an
+			// answer the user is waiting for, and only a chat that is already folding
+			// at its threshold benefits from it.
+			MidTurnCheck:       false,
 			Threshold:          0.80,
 			KeepRecentTurns:    6,
 			ReserveForResponse: 1024,

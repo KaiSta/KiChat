@@ -444,6 +444,9 @@ const de = {
   'settings.maxTokens': 'Max. Antwort-Tokens (0 = unbegrenzt)',
   'settings.compaction': 'Kompaktierung',
   'settings.autoCompact': 'Automatisch komprimieren',
+  'settings.midTurnCheck': 'Zwischen Tool-Runden prüfen',
+  'settings.midTurnCheckHint':
+    'Prüft die Größe vor jeder weiteren Tool-Runde erneut. Nötig für lokale Modelle, die kein Anfrage-Limit melden — kostet dafür eine Zusammenfassung mitten in der Antwort.',
   'settings.threshold': 'Schwelle',
   'settings.keepTurns': 'Letzte Turns im Volltext',
   'settings.reserve': 'Reserve für Antwort',
@@ -1166,6 +1169,9 @@ const en: Record<keyof typeof de, string> = {
   'settings.maxTokens': 'Max reply tokens (0 = unlimited)',
   'settings.compaction': 'Compaction',
   'settings.autoCompact': 'Compact automatically',
+  'settings.midTurnCheck': 'Check between tool rounds',
+  'settings.midTurnCheckHint':
+    'Re-checks the size before every further tool round. Needed for local models, which publish no per-request limit — at the cost of one summary in the middle of an answer.',
   'settings.threshold': 'Threshold',
   'settings.keepTurns': 'Recent turns kept verbatim',
   'settings.reserve': 'Response reserve',
@@ -1854,6 +1860,9 @@ const zh: Record<keyof typeof de, string> = {
   'settings.maxTokens': '回答最大令牌数（0 = 不限）',
   'settings.compaction': '压缩',
   'settings.autoCompact': '自动压缩',
+  'settings.midTurnCheck': '在工具轮次之间检查',
+  'settings.midTurnCheckHint':
+    '在每次继续工具轮次前重新检查大小。适用于不公布单次请求上限的本地模型——代价是回答中途多一次摘要。',
   'settings.threshold': '阈值',
   'settings.keepTurns': '保留原文的最近轮数',
   'settings.reserve': '为回答预留',

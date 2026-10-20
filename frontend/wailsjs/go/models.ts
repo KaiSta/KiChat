@@ -129,6 +129,7 @@ export namespace config {
 	
 	export class CompactSettings {
 	    enabled: boolean;
+	    midTurnCheck: boolean;
 	    threshold: number;
 	    keepRecentTurns: number;
 	    reserveForResponse: number;
@@ -143,6 +144,7 @@ export namespace config {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.enabled = source["enabled"];
+	        this.midTurnCheck = source["midTurnCheck"];
 	        this.threshold = source["threshold"];
 	        this.keepRecentTurns = source["keepRecentTurns"];
 	        this.reserveForResponse = source["reserveForResponse"];
