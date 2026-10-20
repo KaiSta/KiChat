@@ -698,6 +698,52 @@ func TestToolCallCancelledStateSurvives(t *testing.T) {
 	}
 }
 
+// TestAToolCallKeepsWhatItCostAndWhatWasRead is the row a reopened chat builds its
+// cards from, so the two sizes and the cause have to survive the write: the card can
+// only say "12,345 → 640 tokens, condensed" if the record still holds all three after
+// a restart, and nothing else in the schema does.
+func TestAToolCallKeepsWhatItCostAndWhatWasRead(t *testing.T) {
+	st := newStore(t)
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertToolCall(ToolCallRecord{
+		ID: "call-a", MessageID: "m1", ChatID: "c1", Name: "scrape_url",
+		Status: ToolOK, SourceTokens: 12345, ContextTokens: 640, Condensed: true,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A second call that reported nothing, which is every row written before migration
+	// 8: zero is the absence of a measurement, not a result of no size.
+	if err := st.UpsertToolCall(ToolCallRecord{
+		ID: "call-b", MessageID: "m1", ChatID: "c1", Name: "search_web",
+		Status: ToolOK, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := st.ListToolCalls("c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("tool calls = %d, want two", len(records))
+	}
+	byID := map[string]ToolCallRecord{}
+	for _, record := range records {
+		byID[record.ID] = record
+	}
+	condensed := byID["call-a"]
+	if condensed.SourceTokens != 12345 || condensed.ContextTokens != 640 || !condensed.Condensed {
+		t.Errorf("the condensation was not stored: %+v", condensed)
+	}
+	plain := byID["call-b"]
+	if plain.SourceTokens != 0 || plain.ContextTokens != 0 || plain.Condensed {
+		t.Errorf("an unmeasured call reports a size: %+v", plain)
+	}
+}
+
 // TestACondensationIsReusedUntilItExpires pins the cache a second read of the same
 // page depends on: the entry is found by its key, carries the summary and what it was
 // made from, and stops being served once it has expired — an entry nobody reads again
@@ -758,13 +804,20 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	// Every column a later migration adds, not just the first one: the version below is
-	// rolled back to 3, so a real database from that version has neither of them — and
+	// rolled back to 3, so a real database from that version has none of them — and
 	// dropping only one leaves an `ALTER TABLE ... ADD COLUMN` in the runner failing on a
 	// column that is already there, which is how this test broke when the second one
 	// arrived. A column added by migration N is dropped here in the same commit that adds it.
-	for _, column := range []string{"generation_json", "saved_path", "derivation_json"} {
-		if _, err := st.DB().Exec(`ALTER TABLE attachments DROP COLUMN ` + column); err != nil {
-			t.Fatalf("drop %s to build the older schema: %v", column, err)
+	for _, column := range []struct{ table, name string }{
+		{"attachments", "generation_json"},
+		{"attachments", "saved_path"},
+		{"attachments", "derivation_json"},
+		{"tool_calls", "source_tokens"},
+		{"tool_calls", "context_tokens"},
+		{"tool_calls", "condensed"},
+	} {
+		if _, err := st.DB().Exec(`ALTER TABLE ` + column.table + ` DROP COLUMN ` + column.name); err != nil {
+			t.Fatalf("drop %s.%s to build the older schema: %v", column.table, column.name, err)
 		}
 	}
 	if _, err := st.DB().Exec(`PRAGMA user_version = 3`); err != nil {

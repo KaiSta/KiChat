@@ -1759,6 +1759,69 @@ Verfügbare Tools: {{tool_list}}`,
       statsSource: 'estimated',
     }),
   ])
+  // The two tool calls a research answer carries, because the token line on the card is
+  // only reachable from a record: one result the summary model cut, and one that came
+  // back whole. The sizes are what the backend measured, not something the browser may
+  // recompute — so a fixture is the only honest way to render them.
+  const searchToolCall = {
+    id: 'call-search-1',
+    messageId: 'msg-search-2',
+    chatId: 'chat-search',
+    name: 'search_web',
+    argsJson: JSON.stringify({ query: 'Wärmepumpen-Speicher Preis 2026' }),
+    resultJson: JSON.stringify({
+      content:
+        'Suchergebnisse für "Wärmepumpen-Speicher Preis 2026" (Quelle: brave):\n\n' +
+        '[1] Wärmespeicher\n    URL: https://example.de/waermespeicher\n    Preise zwischen 2.400 und 4.800 Euro.',
+    }),
+    status: 'ok',
+    durationMs: 1180,
+    error: '',
+    // A result list is small enough that nothing cuts it: one number, no arrow.
+    sourceTokens: 412,
+    contextTokens: 412,
+    condensed: false,
+    createdAt: now(),
+  }
+  const scrapeToolCall = {
+    id: 'call-search-2',
+    messageId: 'msg-search-2',
+    chatId: 'chat-search',
+    name: 'scrape_url',
+    argsJson: JSON.stringify({ url: 'https://example.de/waermespeicher' }),
+    resultJson: JSON.stringify({
+      content: '# Wärmespeicher\n\nQuelle: https://example.de/waermespeicher\n\n…',
+    }),
+    status: 'ok',
+    durationMs: 2310,
+    error: '',
+    // The page as it arrived, and the condensation the second model wrote: the arrow the
+    // card shows, with `condensed` as the cause the tooltip names.
+    sourceTokens: 12345,
+    contextTokens: 640,
+    condensed: true,
+    createdAt: now(),
+  }
+  // The third cause of a smaller context size, and the reason the tooltip exists: this
+  // result was cut by the answer's tool budget, not by the summary model, so the card
+  // shows the same arrow with a different explanation.
+  const budgetToolCall = {
+    id: 'call-search-3',
+    messageId: 'msg-search-2',
+    chatId: 'chat-search',
+    name: 'scrape_url',
+    argsJson: JSON.stringify({ url: 'https://example.de/foerderung' }),
+    resultJson: JSON.stringify({
+      content: '# Förderung\n\nQuelle: https://example.de/foerderung\n\n…',
+    }),
+    status: 'ok',
+    durationMs: 1870,
+    error: '',
+    sourceTokens: 31280,
+    contextTokens: 2048,
+    condensed: false,
+    createdAt: now(),
+  }
   messages.set('chat-search', [
     message('chat-search', 'user', 'Was kostet ein Wärmepumpen-Speicher aktuell?'),
     message(
@@ -1768,7 +1831,9 @@ Verfügbare Tools: {{tool_list}}`,
       { seq: 1, name: 'search', model: '', backend: '' },
     ),
     message('chat-search', 'assistant', 'Aktuell liegen die Preise je nach Größe zwischen **2.400 €** und **4.800 €** ([1](https://example.de/waermespeicher)).', {
+      id: 'msg-search-2',
       seq: 2,
+      toolCalls: [searchToolCall, scrapeToolCall, budgetToolCall],
     }),
     // A reply the backend stopped delivering halfway through. It carries the
     // partial text and the `failed` status, which the chat has to show as

@@ -245,16 +245,27 @@ const (
 
 // ToolCallRecord is the persisted outcome of one tool invocation.
 type ToolCallRecord struct {
-	ID         string    `json:"id"`
-	MessageID  string    `json:"messageId"`
-	ChatID     string    `json:"chatId"`
-	Name       string    `json:"name"`
-	ArgsJSON   string    `json:"argsJson"`
-	ResultJSON string    `json:"resultJson"`
-	Status     string    `json:"status"`
-	DurationMs int64     `json:"durationMs"`
-	Error      string    `json:"error"`
-	CreatedAt  time.Time `json:"createdAt"`
+	ID         string `json:"id"`
+	MessageID  string `json:"messageId"`
+	ChatID     string `json:"chatId"`
+	Name       string `json:"name"`
+	ArgsJSON   string `json:"argsJson"`
+	ResultJSON string `json:"resultJson"`
+	Status     string `json:"status"`
+	DurationMs int64  `json:"durationMs"`
+	Error      string `json:"error"`
+	// SourceTokens is the size of what the tool returned; ContextTokens is the size
+	// of the text the model was given instead. They differ when a second model
+	// condensed the result or when the answer's tool budget cut it, and Condensed
+	// says which — a number the user cannot attribute is worse than no number.
+	//
+	// They are 0 on a record written before migration 8, and on a call that failed,
+	// which is the honest reading of a row that never measured anything: a card
+	// shows nothing rather than a zero.
+	SourceTokens  int       `json:"sourceTokens"`
+	ContextTokens int       `json:"contextTokens"`
+	Condensed     bool      `json:"condensed"`
+	CreatedAt     time.Time `json:"createdAt"`
 }
 
 // SearchCacheEntry caches a search provider response.

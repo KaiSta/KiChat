@@ -204,40 +204,45 @@ func condensedIdentity(chatID string, call llm.ToolCall, output string) string {
 // that failed. The feature is an optimisation of what the model reads — it is never
 // allowed to be the reason a tool result goes missing, so the fallback is always the
 // behaviour that existed before it.
+//
+// The second return value says whether the text is a condensation, and exists for the
+// tool card alone: a call that was cut by a second model and a call that was cut by the
+// answer's token budget show the same two numbers, and only the cause tells a reader
+// which of them to do something about.
 func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm.ToolCall,
-	output string, turn tools.TurnRef) string {
+	output string, turn tools.TurnRef) (string, bool) {
 
 	if e == nil || e.Settings == nil || e.Registry == nil || e.Store == nil || output == "" {
-		return output
+		return output, false
 	}
 	settings := e.Settings()
 	ref := settings.Digest.Model
 	if ref.Backend == "" || ref.Model == "" || !digestsFor(settings, turn.BackendID) {
-		return output
+		return output, false
 	}
 	// Only a page is condensed. A document is not read whole in the first place —
 	// the ingest index chunks it and read_pages fetches the range whose chunk
 	// numbers the model found — so a condensation there would throw away the
 	// precision that retrieval was built for.
 	if call.Name != tools.ToolScrapeURL {
-		return output
+		return output, false
 	}
 	// DigestThreshold rather than the field: a save that arrived with the field emptied
 	// carries 0, and 0 read literally would condense every tool result — one request
 	// per tool call, including for a five-token error message.
 	if llm.EstimateTokens(output) < settings.Digest.DigestThreshold() {
-		return output
+		return output, false
 	}
 	identity := condensedIdentity(chatID, call, output)
 	if e.condensations().has(identity) {
-		return output
+		return output, false
 	}
 
 	provider, ok := e.Registry.Provider(ref.Backend)
 	if !ok {
 		e.condenseWarning(chatID, fmt.Sprintf("das Kürzungs-Modell %q gehört zum Backend %q, "+
 			"das nicht konfiguriert ist — das Ergebnis wird ungekürzt übernommen", ref.Model, ref.Backend))
-		return output
+		return output, false
 	}
 	// The cap the user configured, resolved: zero means the default and the range is
 	// bounded. Independent of the threshold on purpose — that is the least page worth
@@ -247,7 +252,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	key := digestKey(ref, maxTokens, output)
 	if entry, ok := e.Store.GetDigestCache(key); ok {
 		e.condensations().add(identity)
-		return digestNotice(call) + "\n\n" + entry.Summary
+		return digestNotice(call) + "\n\n" + entry.Summary, true
 	}
 
 	// The cached resolution, not the fresh one: only the window and the capability
@@ -282,7 +287,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	if err != nil {
 		e.condenseWarning(chatID, fmt.Sprintf("das Tool-Ergebnis konnte nicht gekürzt werden (%v) — "+
 			"es wird ungekürzt übernommen", err))
-		return output
+		return output, false
 	}
 
 	source := llm.EstimateTokens(output)
@@ -299,7 +304,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 		ExpiresAt:    time.Now().Add(digestCacheDays * 24 * time.Hour),
 	}))
 	e.condensations().add(identity)
-	return digestNotice(call) + "\n\n" + summary
+	return digestNotice(call) + "\n\n" + summary, true
 }
 
 // condenseWarning reports a condensation that did not happen, once per chat and

@@ -112,6 +112,10 @@ A research-first chat is what KiChat was built for:
   later turn. The tool card keeps the page, asking for the same page a second time hands
   back the full text, and the feature is off until you pick a model for it in
   Settings → Tool results (the switch is per backend).
+- **Every tool card says what it cost.** The card reads `12,345 → 640 tokens` when a
+  result was cut and a single number when it was not, measured by the app rather than
+  estimated in the window; hovering says which of the two cuts it was — the second model
+  or the answer's own tool budget.
 
 ### Images
 

@@ -1100,10 +1100,34 @@ and a thinking-only answer retried with a larger budget. `TestACondensationRepla
 fails by design if the call in `runTool` is removed. The cap's resolution (0 = default,
 bounds, threshold) is pinned in `internal/config/config_test.go`.
 
-### 17.5 Known gap
+### 17.5 What the card says: the two sizes
 
-The transcript shows the condensation where the model read it and the full output on the
-tool card; nothing tells the reader *how much* was cut, because the record has no field
-for it. That is a display question, not a correctness one.
+Until now the transcript showed the condensation where the model read it and the full
+output on the tool card, and nothing said *how much* was cut. The card now carries both
+sizes, and they are the backend's own measurements rather than a client-side estimate:
+`ToolCallRecord.SourceTokens` is `llm.EstimateTokens` of what the tool returned, and
+`ContextTokens` is the same estimate of the exact string `toolOutputBudget.take` handed
+to `appendToolResult` — so the second number already includes the digest notice and any
+cut the answer's budget made *after* the condensation.
+
+Two causes produce that pair and only one of them is a setting the user switched on, so
+`Condensed` records which: a second model, or the answer's tool budget. The card renders
+one number when they are equal, `12,345 → 640 tokens` when they differ, and names the
+cause in the `title` — the difference between "raise `Digest.Threshold`" and "raise
+`ToolTokenBudget`, or move to a backend with room". The numbers live in `tool_calls`
+(migration 8, appended for the usual reason), because the card is rebuilt from the row
+after a reload and a number recomputed in the window would be a second tokenizer
+disagreeing with the one the budget charged. A row written before migration 8 carries
+zeros and renders nothing, which is the honest reading of a call nobody measured.
+
+A call is re-emitted once the condensation has run: the card was drawn while the tool
+was still executing, and a count that appeared only after reopening the chat would be a
+number the reader has to go looking for. `TestTheToolCardIsToldHowMuchWasCut` pins both
+shapes — cut and uncut — on the emitted event *and* on the row read back, over the same
+page under a threshold it clears and one it cannot reach.
+
+The harness fixture for the research chat carries all three causes (uncut, condensed,
+budget-cut), because the inline line is identical for the last two and only the tooltip
+tells them apart.
 
 ---

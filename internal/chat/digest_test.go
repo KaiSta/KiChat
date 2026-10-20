@@ -149,6 +149,122 @@ func TestACondensationReplacesThePageTheModelReads(t *testing.T) {
 	}
 }
 
+// TestTheToolCardIsToldHowMuchWasCut is the number a reader sees on the card. The page
+// is condensed, so the record must carry both sizes — what the tool returned and what
+// of it the model reads — and say that a second model was the cause. The second case is
+// the same page under a threshold it cannot reach: one number, and no claim of a cut
+// that did not happen. Both are asserted on what was emitted and on what was stored,
+// because the card is drawn from the event and rebuilt from the row after a reload.
+func TestTheToolCardIsToldHowMuchWasCut(t *testing.T) {
+	page := `<!doctype html><html><head><title>Bericht</title></head><body><article><h1>Bericht</h1>` +
+		strings.Repeat("<p>Ein langer Absatz mit Inhalt.</p>", 900) +
+		`</article></body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, page)
+	}))
+	t.Cleanup(srv.Close)
+
+	for _, tc := range []struct {
+		name      string
+		threshold int
+		condensed bool
+	}{
+		{"past the threshold", 500, true},
+		{"below the threshold", 1_000_000, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			makeChat(t, st)
+			call := fmt.Sprintf("```tool_call\n{\"name\": \"scrape_url\", \"arguments\": {\"url\": %q}}\n```", srv.URL)
+			provider := &fakeProvider{
+				model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+				replies: [][]llm.StreamEvent{
+					{{Type: llm.EventDelta, Text: call}},
+					{{Type: llm.EventDelta, Text: "Antwort"}, {Type: llm.EventDone}},
+				},
+			}
+			digester := newDigester([]llm.StreamEvent{
+				{Type: llm.EventDelta, Text: "- Ein langer Absatz."}, {Type: llm.EventDone},
+			})
+			settings := digestSettings()
+			settings.Digest.Threshold = tc.threshold
+			registry := llm.NewRegistry(nil)
+			registry.Register(provider)
+			registry.Register(digester)
+			scraper := research.NewScraper(st, research.ScrapeOptions{
+				AllowPrivateHosts: true, RespectRobots: false, Timeout: 5 * time.Second,
+			}, nil)
+			log := &eventLog{}
+			engine := NewEngine(st, registry, tools.New(st, nil, scraper),
+				func() config.Settings { return settings }, log.emit)
+
+			if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Lies den Bericht."}); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if !waitFor(t, 10*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+				t.Fatal("the turn did not finish")
+			}
+
+			// The last report for the call is the one the card ends up showing: the first
+			// is written while the tool runs, the last after the condensation.
+			var emitted store.ToolCallRecord
+			sawOK := false
+			for _, ev := range log.snapshot() {
+				if ev.name != "chat:tool" {
+					continue
+				}
+				record, ok := ev.payload["toolCall"].(store.ToolCallRecord)
+				if ok && record.Status == store.ToolOK {
+					emitted, sawOK = record, true
+				}
+			}
+			if !sawOK {
+				t.Fatal("the tool call was never reported as finished")
+			}
+			stored := persistedToolCall(t, st)
+			for name, record := range map[string]store.ToolCallRecord{"emitted": emitted, "stored": stored} {
+				if record.SourceTokens == 0 {
+					t.Fatalf("%s record carries no source size: %+v", name, record)
+				}
+				if record.Condensed != tc.condensed {
+					t.Errorf("%s condensed = %v, want %v", name, record.Condensed, tc.condensed)
+				}
+				if tc.condensed {
+					if record.ContextTokens >= record.SourceTokens {
+						t.Errorf("%s claims a cut that saved nothing: %d -> %d", name,
+							record.SourceTokens, record.ContextTokens)
+					}
+					if record.ContextTokens == 0 {
+						t.Errorf("%s condensed the page and recorded no size for what is read", name)
+					}
+				} else if record.ContextTokens != record.SourceTokens {
+					t.Errorf("%s reports a cut it did not make: %d -> %d", name,
+						record.SourceTokens, record.ContextTokens)
+				}
+			}
+			if tc.condensed && digester.requestCount() != 1 {
+				t.Errorf("digester calls = %d, want the one condensation the numbers describe",
+					digester.requestCount())
+			}
+		})
+	}
+}
+
+// persistedToolCall reads back the chat's one tool call, which is what a reopened chat
+// builds its cards from.
+func persistedToolCall(t *testing.T, st *store.Store) store.ToolCallRecord {
+	t.Helper()
+	records, err := st.ListToolCalls("chat-1")
+	if err != nil {
+		t.Fatalf("ListToolCalls: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("tool calls = %d, want one", len(records))
+	}
+	return records[0]
+}
+
 // TestABackendWithoutTheSwitchKeepsTheResult keeps the opt-in honest: the same page,
 // the same configured model, and one backend that never asked for the feature. The
 // result must arrive uncondensed, and no request may be spent on it.
@@ -161,7 +277,7 @@ func TestABackendWithoutTheSwitchKeepsTheResult(t *testing.T) {
 	digester := newDigester([]llm.StreamEvent{{Type: llm.EventDelta, Text: "nie gelesen"}})
 	engine, _ := newDigestEngine(t, st, settings, digester)
 
-	out := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
+	out, _ := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
 		bigPage(), tools.TurnRef{BackendID: "fake"})
 
 	if out != bigPage() {
@@ -183,7 +299,7 @@ func TestAnUnconfiguredDigestModelIsOff(t *testing.T) {
 	digester := newDigester([]llm.StreamEvent{{Type: llm.EventDelta, Text: "nie gelesen"}})
 	engine, _ := newDigestEngine(t, st, settings, digester)
 
-	if out := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
+	if out, _ := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
 		bigPage(), tools.TurnRef{BackendID: "fake"}); out != bigPage() {
 		t.Fatal("a result was condensed with no model configured")
 	}
@@ -200,7 +316,7 @@ func TestASmallResultIsNotCondensed(t *testing.T) {
 	engine, _ := newDigestEngine(t, st, digestSettings(), digester)
 
 	small := "Ein kurzer Absatz."
-	if out := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
+	if out, _ := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
 		small, tools.TurnRef{BackendID: "fake"}); out != small {
 		t.Fatal("a result below the threshold was condensed")
 	}
@@ -221,7 +337,7 @@ func TestAnEmptyThresholdMeansTheDefault(t *testing.T) {
 	engine, _ := newDigestEngine(t, st, settings, digester)
 
 	small := "Ein kurzer Absatz."
-	if out := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
+	if out, _ := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
 		small, tools.TurnRef{BackendID: "fake"}); out != small {
 		t.Fatal("a zero threshold condensed a result far below the default")
 	}
@@ -243,7 +359,7 @@ func TestAFailedCondensationStillDeliversTheResult(t *testing.T) {
 	}
 	engine, log := newDigestEngine(t, st, digestSettings(), digester)
 
-	out := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
+	out, _ := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
 		bigPage(), tools.TurnRef{BackendID: "fake"})
 
 	if out != bigPage() {
@@ -270,12 +386,12 @@ func TestTheSecondReadIsTheEscapeHatch(t *testing.T) {
 	engine, _ := newDigestEngine(t, st, digestSettings(), digester)
 	call := scrapeCall("https://example.com/a")
 
-	first := engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(),
+	first, _ := engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(),
 		tools.TurnRef{BackendID: "fake"})
 	if !strings.Contains(first, "Kurzfassung") {
 		t.Fatalf("the first read was not condensed: %q", truncateForTest(first, 120))
 	}
-	second := engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(),
+	second, _ := engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(),
 		tools.TurnRef{BackendID: "fake"})
 	if second != bigPage() {
 		t.Fatal("the second read of the same page did not hand over the full text")
@@ -295,8 +411,8 @@ func TestACondensationIsReusedAcrossChats(t *testing.T) {
 	engine, _ := newDigestEngine(t, st, digestSettings(), digester)
 	call := scrapeCall("https://example.com/a")
 
-	engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(), tools.TurnRef{BackendID: "fake"})
-	other := engine.condenseToolOutput(context.Background(), "chat-2", call, bigPage(), tools.TurnRef{BackendID: "fake"})
+	_, _ = engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(), tools.TurnRef{BackendID: "fake"})
+	other, _ := engine.condenseToolOutput(context.Background(), "chat-2", call, bigPage(), tools.TurnRef{BackendID: "fake"})
 
 	if !strings.Contains(other, "Kurzfassung") {
 		t.Fatalf("the second chat did not receive the cached condensation: %q", truncateForTest(other, 120))
@@ -316,7 +432,7 @@ func TestADocumentIsNotCondensed(t *testing.T) {
 
 	call := llm.ToolCall{ID: "call-1", Name: tools.ToolReadPages,
 		Arguments: `{"document":"bericht","from":0,"to":3}`}
-	if out := engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(),
+	if out, _ := engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(),
 		tools.TurnRef{BackendID: "fake"}); out != bigPage() {
 		t.Fatal("a document chunk was condensed")
 	}
@@ -354,7 +470,7 @@ func TestTheConfiguredCapIsWhatTheModelIsAskedFor(t *testing.T) {
 	digester := newDigester([]llm.StreamEvent{{Type: llm.EventDelta, Text: "Kurzfassung"}})
 	engine, _ := newDigestEngine(t, st, settings, digester)
 
-	engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
+	_, _ = engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
 		bigPage(), tools.TurnRef{BackendID: "fake"})
 
 	if got := digester.requestCount(); got != 1 {
@@ -378,7 +494,7 @@ func TestACondensationStripsInlineThinking(t *testing.T) {
 	})
 	engine, _ := newDigestEngine(t, st, digestSettings(), digester)
 
-	out := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
+	out, _ := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
 		bigPage(), tools.TurnRef{BackendID: "fake"})
 
 	if !strings.Contains(out, "Kurzfassung der Seite.") {
@@ -409,7 +525,7 @@ func TestACondensationRetriesAnAnswerThatWasOnlyThinking(t *testing.T) {
 	})
 	engine, _ := newDigestEngine(t, st, digestSettings(), digester)
 
-	out := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
+	out, _ := engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
 		bigPage(), tools.TurnRef{BackendID: "fake"})
 
 	if !strings.Contains(out, "Kurzfassung") {
@@ -442,7 +558,7 @@ func TestTheCapIsHeldUnderTheWindow(t *testing.T) {
 
 	// Roughly 1,200 tokens: above the 500-token threshold, below the window.
 	page := strings.Repeat("Ein langer Absatz mit Inhalt. ", 200)
-	engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
+	_, _ = engine.condenseToolOutput(context.Background(), "chat-1", scrapeCall("https://example.com/a"),
 		page, tools.TurnRef{BackendID: "fake"})
 
 	if got := digester.requestCount(); got != 1 {
@@ -477,14 +593,14 @@ func TestAChangedCapDoesNotReuseTheOldSummary(t *testing.T) {
 	engine, _ := newDigestEngine(t, st, settings, digester)
 	call := scrapeCall("https://example.com/a")
 
-	engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(), tools.TurnRef{BackendID: "fake"})
+	_, _ = engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(), tools.TurnRef{BackendID: "fake"})
 	// A fresh engine on the same store, which is what a save produces: the settings a
 	// running engine reads are the ones it was built with. The second chat is what
 	// keeps the per-chat escape hatch out of the answer.
 	changed := settings
 	changed.Digest.MaxTokens = 1200
 	next, _ := newDigestEngine(t, st, changed, digester)
-	other := next.condenseToolOutput(context.Background(), "chat-2", call, bigPage(),
+	other, _ := next.condenseToolOutput(context.Background(), "chat-2", call, bigPage(),
 		tools.TurnRef{BackendID: "fake"})
 
 	if got := digester.requestCount(); got != 2 {

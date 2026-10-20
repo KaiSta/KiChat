@@ -892,19 +892,23 @@ func (s *Store) UpsertToolCall(tc ToolCallRecord) error {
 		tc.CreatedAt = time.Now()
 	}
 	_, err := s.db.Exec(`
-INSERT INTO tool_calls (id,message_id,chat_id,name,args_json,result_json,status,duration_ms,error,created_at)
-VALUES (?,?,?,?,?,?,?,?,?,?)
+INSERT INTO tool_calls (id,message_id,chat_id,name,args_json,result_json,status,duration_ms,error,
+  source_tokens,context_tokens,condensed,created_at)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET result_json=excluded.result_json,status=excluded.status,
-  duration_ms=excluded.duration_ms,error=excluded.error`,
+  duration_ms=excluded.duration_ms,error=excluded.error,
+  source_tokens=excluded.source_tokens,context_tokens=excluded.context_tokens,
+  condensed=excluded.condensed`,
 		tc.ID, tc.MessageID, tc.ChatID, tc.Name, tc.ArgsJSON, tc.ResultJSON,
-		tc.Status, tc.DurationMs, tc.Error, millis(tc.CreatedAt))
+		tc.Status, tc.DurationMs, tc.Error, tc.SourceTokens, tc.ContextTokens,
+		boolToInt(tc.Condensed), millis(tc.CreatedAt))
 	return err
 }
 
 // ListToolCalls returns a chat's tool calls oldest first.
 func (s *Store) ListToolCalls(chatID string) ([]ToolCallRecord, error) {
 	rows, err := s.db.Query(`SELECT id,message_id,chat_id,name,args_json,result_json,
-  status,duration_ms,error,created_at
+  status,duration_ms,error,source_tokens,context_tokens,condensed,created_at
 FROM tool_calls WHERE chat_id=? ORDER BY created_at`, chatID)
 	if err != nil {
 		return nil, err
@@ -914,10 +918,13 @@ FROM tool_calls WHERE chat_id=? ORDER BY created_at`, chatID)
 	for rows.Next() {
 		var tc ToolCallRecord
 		var created int64
+		var condensed int
 		if err := rows.Scan(&tc.ID, &tc.MessageID, &tc.ChatID, &tc.Name, &tc.ArgsJSON,
-			&tc.ResultJSON, &tc.Status, &tc.DurationMs, &tc.Error, &created); err != nil {
+			&tc.ResultJSON, &tc.Status, &tc.DurationMs, &tc.Error, &tc.SourceTokens,
+			&tc.ContextTokens, &condensed, &created); err != nil {
 			return nil, err
 		}
+		tc.Condensed = condensed != 0
 		tc.CreatedAt = fromMillis(created)
 		out = append(out, tc)
 	}

@@ -142,6 +142,22 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
         <span className="faint mono truncate" style={{ maxWidth: 360 }}>
           {summariseArgs(call.argsJson)}
         </span>
+        {/* What the result cost and what of it the model reads. One number when they
+            are the same; two when they are not, because a reader who is told the page
+            cost 12,000 tokens and then sees the turn fit has to be told where the rest
+            went. The cause lives in the tooltip: the same drop is a second model's
+            condensation or this answer's tool budget, and the two call for different
+            fixes. A zero is a record that measured nothing, so it renders nothing. */}
+        {call.status === 'ok' && call.sourceTokens > 0 && (
+          <span className="faint mono shrink-0" title={tokenHint(t, call)}>
+            {call.contextTokens > 0 && call.contextTokens < call.sourceTokens
+              ? t('tool.tokensCut', {
+                  source: formatNumber(call.sourceTokens),
+                  context: formatNumber(call.contextTokens),
+                })
+              : t('tool.tokensOne', { tokens: formatNumber(call.sourceTokens) })}
+          </span>
+        )}
         <span className="ml-auto faint">{formatDuration(call.durationMs)}</span>
       </button>
 
@@ -209,6 +225,26 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
       )}
     </div>
   )
+}
+
+/** Why a tool result is the size it is, in the words the numbers need.
+ *
+ * Three causes produce the same pair of sizes and only one of them is a setting the user
+ * switched on: the summary model, this answer's tool budget, or neither. The inline line
+ * carries the sizes, so the tooltip is where the cause can be named without making every
+ * card three lines taller.
+ */
+function tokenHint(
+  t: (key: string, vars?: Record<string, string | number>) => string,
+  call: storeTypes.ToolCallRecord,
+): string {
+  const source = formatNumber(call.sourceTokens)
+  const context = formatNumber(call.contextTokens)
+  if (call.condensed) return t('tool.tokensCondensedHint', { source, context })
+  if (call.contextTokens > 0 && call.contextTokens < call.sourceTokens) {
+    return t('tool.tokensBudgetHint', { source, context })
+  }
+  return t('tool.tokensHint', { tokens: source })
 }
 
 /** The one sentence a running draw is described by, wherever it is shown.

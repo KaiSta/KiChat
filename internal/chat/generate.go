@@ -415,10 +415,28 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 	// It is skipped when the budget is already spent: take would replace the summary
 	// with the exhausted notice, so the request would be paid for and thrown away.
 	condensed := output
+	condensedByModel := false
 	if budget.remaining > 0 {
-		condensed = e.condenseToolOutput(ctx, chatID, call, output, turn)
+		condensed, condensedByModel = e.condenseToolOutput(ctx, chatID, call, output, turn)
 	}
-	e.appendToolResult(chatID, call, budget.take(condensed), record.Status)
+	delivered := budget.take(condensed)
+	// What the result cost and what of it the model actually reads is what makes the
+	// condensation visible: without it the feature is indistinguishable from a page
+	// that happened to be short. Both numbers are measured on the strings that travel
+	// — the tool's own output and the exact text `take` returns — so a result cut by
+	// the answer's budget, by the second model, or by neither is reported as it is.
+	//
+	// The card is re-emitted rather than only stored: it was drawn before the second
+	// model ran, and a count that appeared only after reopening the chat would be a
+	// number the reader had to go looking for.
+	if execErr == nil {
+		record.SourceTokens = llm.EstimateTokens(output)
+		record.ContextTokens = llm.EstimateTokens(delivered)
+		record.Condensed = condensedByModel
+		e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
+		e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
+	}
+	e.appendToolResult(chatID, call, delivered, record.Status)
 }
 
 // toolOutputBudget bounds how many tokens of tool results one answer carries into

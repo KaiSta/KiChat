@@ -763,6 +763,13 @@ const de = {
   'tool.cancelled': 'abgebrochen',
   'tool.arguments': 'Argumente',
   'tool.result': 'Ergebnis',
+  'tool.tokensOne': '{{tokens}} Tokens',
+  'tool.tokensCut': '{{source}} → {{context}} Tokens',
+  'tool.tokensHint': 'Das Tool hat {{tokens}} Tokens zurückgegeben; sie stehen unverändert im Kontext.',
+  'tool.tokensCondensedHint':
+    'Das Tool hat {{source}} Tokens zurückgegeben; ein zweites Modell hat sie auf {{context}} Tokens gekürzt, und so stehen sie im Kontext.',
+  'tool.tokensBudgetHint':
+    'Das Tool hat {{source}} Tokens zurückgegeben; das Token-Budget dieser Antwort hat nur {{context}} davon in den Kontext gelassen.',
 
   'common.cancel': 'Abbrechen',
   'common.close': 'Schließen',
@@ -1493,6 +1500,13 @@ const en: Record<keyof typeof de, string> = {
   'tool.cancelled': 'cancelled',
   'tool.arguments': 'Arguments',
   'tool.result': 'Result',
+  'tool.tokensOne': '{{tokens}} tokens',
+  'tool.tokensCut': '{{source}} → {{context}} tokens',
+  'tool.tokensHint': 'The tool returned {{tokens}} tokens; they stand in the context unchanged.',
+  'tool.tokensCondensedHint':
+    'The tool returned {{source}} tokens; a second model condensed them to {{context}}, which is what stands in the context.',
+  'tool.tokensBudgetHint':
+    'The tool returned {{source}} tokens; this answer’s tool budget let only {{context}} of them into the context.',
 
   'common.cancel': 'Cancel',
   'common.close': 'Close',
@@ -2172,6 +2186,13 @@ const zh: Record<keyof typeof de, string> = {
   'tool.cancelled': '已取消',
   'tool.arguments': '参数',
   'tool.result': '结果',
+  'tool.tokensOne': '{{tokens}} 个令牌',
+  'tool.tokensCut': '{{source}} → {{context}} 个令牌',
+  'tool.tokensHint': '工具返回了 {{tokens}} 个令牌，原样进入上下文。',
+  'tool.tokensCondensedHint':
+    '工具返回了 {{source}} 个令牌；第二个模型将其压缩为 {{context}} 个，并以此进入上下文。',
+  'tool.tokensBudgetHint':
+    '工具返回了 {{source}} 个令牌；本回答的工具预算只让其中 {{context}} 个进入上下文。',
 
   'common.cancel': '取消',
   'common.close': '关闭',

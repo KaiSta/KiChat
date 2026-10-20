@@ -1773,6 +1773,9 @@ export namespace store {
 	    status: string;
 	    durationMs: number;
 	    error: string;
+	    sourceTokens: number;
+	    contextTokens: number;
+	    condensed: boolean;
 	    // Go type: time
 	    createdAt: any;
 	
@@ -1791,6 +1794,9 @@ export namespace store {
 	        this.status = source["status"];
 	        this.durationMs = source["durationMs"];
 	        this.error = source["error"];
+	        this.sourceTokens = source["sourceTokens"];
+	        this.contextTokens = source["contextTokens"];
+	        this.condensed = source["condensed"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	    }
 	
