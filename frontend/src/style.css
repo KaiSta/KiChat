@@ -182,6 +182,13 @@ body {
   opacity: 0.55;
   cursor: not-allowed;
 }
+/* A model picker's placeholder is its current value, not a hint: with no query
+ * typed the field shows which model is chosen, and dimming it the way a hint is
+ * dimmed would read as "nothing chosen" next to a setting that is set. */
+.model-picker::placeholder {
+  color: var(--text);
+  opacity: 1;
+}
 /* The popup list is a native widget and does not inherit the select's colours, so
  * it has to be told explicitly or it renders its default text on our background. */
 .select option {

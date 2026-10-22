@@ -16,6 +16,7 @@ import {
 } from '../lib/api'
 import { useStore } from '../store'
 import { asLang, LANGS } from '../lib/i18n'
+import { ModelPicker, type ModelRef } from './ModelPicker'
 
 type Tab = 'general' | 'backends' | 'images' | 'prompt' | 'research' | 'context' | 'payload'
 
@@ -129,7 +130,38 @@ function Section({ title, children, hint }: { title: string; children: ReactNode
   )
 }
 
-function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
+function Field({
+  label,
+  children,
+  hint,
+  labelledBy,
+}: {
+  label: string
+  children: ReactNode
+  hint?: string
+  /**
+   * Set when the control inside must not sit in a `<label>`: the model picker is a
+   * combobox whose rows are clickable, and a click inside a label forwards a second
+   * activation to the labelled field. The visible label is linked by
+   * `aria-labelledby` instead.
+   */
+  labelledBy?: string
+}) {
+  if (labelledBy) {
+    return (
+      <div className="mb-3 block">
+        <span
+          id={labelledBy}
+          className="mb-1 block text-[12px]"
+          style={{ color: 'var(--text-dim)' }}
+        >
+          {label}
+        </span>
+        {children}
+        {hint && <span className="faint mt-1 block text-[11px]">{hint}</span>}
+      </div>
+    )
+  }
   return (
     <label className="mb-3 block">
       <span className="mb-1 block text-[12px]" style={{ color: 'var(--text-dim)' }}>
@@ -163,20 +195,9 @@ function GeneralTab({
     void App.GetAppInfo().then(setInfo).catch(() => undefined)
   }, [])
 
-  // The same opaque pair encoding the other model pickers use: a model id may
-  // contain a slash, so `backend/model` would be ambiguous. Read defensively,
-  // because an older settings blob and the harness fixture predate the field.
+  // Read defensively, because an older settings blob and the harness fixture
+  // predate the field.
   const defaultModel = draft.defaultModel ?? { backend: '', model: '' }
-  const refValue = (backend: string, model: string) => JSON.stringify([backend, model])
-  const selectedModel = defaultModel.model ? refValue(defaultModel.backend, defaultModel.model) : ''
-  const candidates = useMemo(
-    () => [...models].sort((a, b) => a.backend.localeCompare(b.backend) || a.id.localeCompare(b.id)),
-    [models],
-  )
-  // A configured model can be missing from the catalogue — its backend is switched
-  // off, its server is down, or the listing has not run yet. Without an option of
-  // its own the select would show the fallback while the setting still names it.
-  const unavailable = selectedModel !== '' && !candidates.some((m) => refValue(m.backend, m.id) === selectedModel)
 
   return (
     <>
@@ -220,32 +241,20 @@ function GeneralTab({
             is rather than reading as "no model": it is what every installation
             predating this setting has, and what a machine with nothing running
             falls back to either way. */}
-        <Field label={t('settings.defaultModel')} hint={t('settings.defaultModelHint')}>
-          <select
-            className="select"
-            value={selectedModel}
-            onChange={(e) => {
-              // The automatic option carries the empty value, and JSON.parse("") throws.
-              if (e.target.value === '') {
-                patch({ defaultModel: { backend: '', model: '' } })
-                return
-              }
-              const [backend, model] = JSON.parse(e.target.value) as [string, string]
-              patch({ defaultModel: { backend, model } })
-            }}
-          >
-            <option value="">{t('settings.defaultModelAuto')}</option>
-            {unavailable && (
-              <option value={selectedModel}>
-                {`${defaultModel.model} (${defaultModel.backend}) ${t('settings.defaultModelUnavailable')}`}
-              </option>
-            )}
-            {candidates.map((m) => (
-              <option key={`${m.backend}/${m.id}`} value={refValue(m.backend, m.id)}>
-                {m.id} ({m.backend})
-              </option>
-            ))}
-          </select>
+        <Field
+          label={t('settings.defaultModel')}
+          hint={t('settings.defaultModelHint')}
+          labelledBy="default-model-label"
+        >
+          <ModelPicker
+            id="default-model"
+            labelledBy="default-model-label"
+            models={models}
+            value={defaultModel}
+            emptyLabel={t('settings.defaultModelAuto')}
+            unavailableLabel={t('settings.defaultModelUnavailable')}
+            onChange={(ref) => patch({ defaultModel: ref ?? { backend: '', model: '' } })}
+          />
         </Field>
         <Field label={t('settings.location')}>
           <input className="input" value={draft.location} onChange={(e) => patch({ location: e.target.value })} />
@@ -3564,8 +3573,13 @@ function ModelOverridesTab({
 }) {
   const t = useStore((s) => s.t)
   const models = useStore((s) => s.models)
-  const [editing, setEditing] = useState<string | null>(null)
-  const [value, setValue] = useState('')
+  // The chosen model, by `backend/id`. Found in `models` rather than in the filtered
+  // candidate list, so toggling the filter cannot close the editor mid-edit.
+  const [selected, setSelected] = useState('')
+  const [windowValue, setWindowValue] = useState('')
+  const [ceilingValue, setCeilingValue] = useState('')
+  const [onlyMissing, setOnlyMissing] = useState(false)
+  const [saving, setSaving] = useState(false)
 
   // Groq is the one backend whose per-request budget cannot be fetched before the
   // first request: the listing publishes windows only, the Rate Limits and Models
@@ -3577,146 +3591,243 @@ function ModelOverridesTab({
   // this backend alone (GROQ.md §6.2).
   // The kind alone decides it: the model list only ever contains models of backends
   // that are switched on, so asking for `enabled` here would make the field depend on
-  // the settings row rather than on what is on screen — and a switched-off backend has
-  // no models to show it for anyway.
+  // the settings row rather than on what is on screen.
   const groqBackends = useMemo(
     () => new Set(backends.filter((b) => b.kind === 'groq').map((b) => b.id)),
     [backends],
   )
 
-  // A model needs a row when its window is unknown (the case this tab was built for)
-  // or when it belongs to a backend whose request budget nothing publishes.
-  const rows = useMemo(
-    () => models.filter((m) => !m.contextLimit || groqBackends.has(m.backend)),
-    [models, groqBackends],
+  const missing = useMemo(() => models.filter((m) => !m.contextLimit), [models])
+  // Every model, not only the ones missing a window. "Change this model's window" is
+  // the intention, and hiding the models that already report a figure made the old
+  // list read as if the missing ones were the only editable models. The filter above
+  // keeps the old shortcut for a catalogue with many unreported windows.
+  const candidates = onlyMissing ? missing : models
+
+  const selectedModel = useMemo(
+    () => models.find((m) => `${m.backend}/${m.id}` === selected),
+    [models, selected],
+  )
+  const stored = overrides[selected]
+  const isGroq = selectedModel ? groqBackends.has(selectedModel.backend) : false
+
+  const listed = useMemo(() => new Set(models.map((m) => `${m.backend}/${m.id}`)), [models])
+  // Overrides kept for a model this catalogue no longer lists: the backend is switched
+  // off, the file was deleted, or the vendor retired the model. They used to vanish
+  // with the row, which left no way to remove them.
+  const orphans = useMemo(
+    () =>
+      Object.keys(overrides).filter(
+        (key) =>
+          !listed.has(key) &&
+          ((overrides[key].contextLimit ?? 0) > 0 || (overrides[key].requestCeiling ?? 0) > 0),
+      ),
+    [overrides, listed],
   )
 
-  const saveOverride = async (
-    backend: string,
-    id: string,
-    patch: { contextLimit?: number; requestCeiling?: number },
-  ) => {
+  const select = (ref: ModelRef | null) => {
+    if (!ref) {
+      setSelected('')
+      setWindowValue('')
+      setCeilingValue('')
+      return
+    }
+    const key = `${ref.backend}/${ref.model}`
+    setSelected(key)
+    // Seeded from the override, never from the merged listing: the listing already
+    // carries the override's number, and saving that back would read as an edit while
+    // changing nothing.
+    setWindowValue(overrides[key]?.contextLimit ? String(overrides[key].contextLimit) : '')
+    setCeilingValue(overrides[key]?.requestCeiling ? String(overrides[key].requestCeiling) : '')
+  }
+
+  const write = async (backend: string, id: string, next: llm.ModelOverride) => {
     const key = `${backend}/${id}`
-    const current = overrides[key]
-    // The other field is carried over from the row's own state, so saving the window of
-    // a model whose ceiling was saved a moment ago cannot send a 0 and clear it.
-    const next = {
-      contextLimit: current?.contextLimit ?? 0,
-      capabilities: current?.capabilities ?? [],
-      requestCeiling: current?.requestCeiling ?? 0,
-      ...patch,
-    } as llm.ModelOverride
+    const before = overrides[key]?.contextLimit ?? 0
     await App.SetModelOverride(backend, id, next)
     onSaved(key, next)
-    setEditing(null)
-    // Only the window is part of a model's listed metadata, so only a window save asks
-    // for a re-listing — and on a metered backend a listing is a request.
-    if (patch.contextLimit !== undefined) {
+    // Only the window is part of a model's listed metadata, so only a window change
+    // asks for a re-listing — and on a metered backend a listing is a request.
+    if (next.contextLimit !== before) {
       await useStore.getState().refreshModels(true)
+    }
+  }
+
+  const save = async () => {
+    if (!selectedModel) return
+    setSaving(true)
+    try {
+      await write(selectedModel.backend, selectedModel.id, {
+        contextLimit: Number(windowValue) || 0,
+        // A ceiling this backend does not show is carried over rather than cleared by
+        // a save of the window alone.
+        requestCeiling: isGroq ? Number(ceilingValue) || 0 : (stored?.requestCeiling ?? 0),
+        capabilities: stored?.capabilities ?? [],
+      } as llm.ModelOverride)
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /**
+   * Removes the numbers, and only the numbers. The capability list is not edited on
+   * this panel, so a save or a clear here must not be able to drop it.
+   */
+  const clear = async () => {
+    if (!selectedModel) return
+    setSaving(true)
+    try {
+      await write(selectedModel.backend, selectedModel.id, {
+        contextLimit: 0,
+        requestCeiling: 0,
+        capabilities: stored?.capabilities ?? [],
+      } as llm.ModelOverride)
+      setWindowValue('')
+      setCeilingValue('')
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const clearOrphan = async (key: string) => {
+    // The key is `backend/id`, and a model id may itself contain slashes, so only the
+    // first one separates the two.
+    const at = key.indexOf('/')
+    if (at < 0) return
+    const backend = key.slice(0, at)
+    const id = key.slice(at + 1)
+    const next = {
+      contextLimit: 0,
+      requestCeiling: 0,
+      capabilities: overrides[key]?.capabilities ?? [],
+    } as llm.ModelOverride
+    try {
+      await App.SetModelOverride(backend, id, next)
+      onSaved(key, next)
+    } catch (err) {
+      useStore.getState().toast('error', String(err))
     }
   }
 
   return (
     <Section title={t('model.overrides')} hint={t('model.overrideHint')}>
-      {rows.length === 0 ? (
-        <div className="faint text-[12px]">Alle Modelle melden ihr Kontextfenster.</div>
+      <div className="mb-2 flex flex-wrap items-center gap-3 text-[12px]">
+        <span className="faint">
+          {t('model.overridesSummary', { missing: missing.length, total: models.length })}
+        </span>
+        <label className="ml-auto flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={onlyMissing}
+            onChange={(e) => setOnlyMissing(e.target.checked)}
+          />
+          {t('model.overridesOnlyMissing')}
+        </label>
+      </div>
+
+      <Field label={t('model.overridesPick')} labelledBy="override-model-label">
+        <ModelPicker
+          id="override-model"
+          labelledBy="override-model-label"
+          models={candidates}
+          value={
+            selectedModel ? { backend: selectedModel.backend, model: selectedModel.id } : null
+          }
+          placeholder={t('model.overridesSearch')}
+          // Nothing to clear here: with no model chosen the editor is simply closed,
+          // and an empty row would suggest the override itself had an "off" state.
+          onChange={select}
+        />
+      </Field>
+
+      {!selectedModel ? (
+        <p className="faint text-[11px]">{t('model.overridesPickHint')}</p>
       ) : (
-        <div className="space-y-3">
-          {rows.map((m) => {
-            const key = `${m.backend}/${m.id}`
-            const ceiling = overrides[key]?.requestCeiling ?? 0
-            const needsWindow = !m.contextLimit
-            const needsCeiling = groqBackends.has(m.backend)
-            return (
-              <div key={key} className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="mono min-w-0 flex-1 truncate text-[12px]">
-                    {m.backend}/{m.id}
-                  </span>
-                  {needsWindow ? (
-                    editing === `window:${key}` ? (
-                      <>
-                        <input
-                          className="input w-32"
-                          type="number"
-                          value={value}
-                          onChange={(e) => setValue(e.target.value)}
-                          placeholder="32768"
-                        />
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-primary"
-                          onClick={() => saveOverride(m.backend, m.id, { contextLimit: Number(value) || 0 })}
-                        >
-                          {t('settings.save')}
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <span className="badge badge-warn">{t('context.unknown')}</span>
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          onClick={() => {
-                            setEditing(`window:${key}`)
-                            setValue(String(overrides[key]?.contextLimit ?? 32768))
-                          }}
-                        >
-                          {t('model.overrides')}
-                        </button>
-                      </>
-                    )
-                  ) : null}
-                </div>
-                {needsCeiling ? (
-                  <div className="flex items-center gap-2">
-                    <span className="faint min-w-0 flex-1 truncate text-[11px]" title={t('model.ceilingHint')}>
-                      {t('model.ceiling')}
-                    </span>
-                    {editing === `ceiling:${key}` ? (
-                      <>
-                        <input
-                          className="input w-32"
-                          type="number"
-                          value={value}
-                          onChange={(e) => setValue(e.target.value)}
-                          placeholder="8000"
-                          title={t('model.ceilingHint')}
-                        />
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-primary"
-                          onClick={() => saveOverride(m.backend, m.id, { requestCeiling: Number(value) || 0 })}
-                        >
-                          {t('settings.save')}
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <span className="mono text-[11px]">
-                          {ceiling > 0 ? formatNumber(ceiling) : t('model.ceilingUnset')}
-                        </span>
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          title={t('model.ceilingHint')}
-                          onClick={() => {
-                            setEditing(`ceiling:${key}`)
-                            // Empty when nothing is set: the placeholder shows what a
-                            // typical figure looks like, but an untouched field must
-                            // not save a number nobody measured.
-                            setValue(ceiling > 0 ? String(ceiling) : '')
-                          }}
-                        >
-                          {t('model.ceiling')}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                ) : null}
-              </div>
-            )
-          })}
+        <div className="mt-1 rounded p-3" style={{ background: 'var(--surface-2)' }}>
+          <div className="mb-2 flex items-baseline gap-2">
+            <span
+              className="mono min-w-0 truncate text-[12px]"
+              title={`${selectedModel.backend}/${selectedModel.id}`}
+            >
+              {modelLabel(selectedModel.id)}
+            </span>
+            <span className="faint shrink-0 text-[11px]">{selectedModel.backend}</span>
+            {stored && <span className="badge shrink-0">{t('model.overridden')}</span>}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label={t('model.overrideWindow')}>
+              <input
+                className="input"
+                type="number"
+                min={0}
+                value={windowValue}
+                placeholder={
+                  selectedModel.maxContextLimit ? String(selectedModel.maxContextLimit) : '32768'
+                }
+                onChange={(e) => setWindowValue(e.target.value)}
+              />
+            </Field>
+            {isGroq && (
+              <Field label={t('model.ceiling')} hint={t('model.ceilingHint')}>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  value={ceilingValue}
+                  placeholder="8000"
+                  onChange={(e) => setCeilingValue(e.target.value)}
+                />
+              </Field>
+            )}
+          </div>
+
+          <div className="faint mb-2 mt-1 text-[11px]">
+            {selectedModel.contextLimit > 0
+              ? t('model.windowCurrent', { tokens: formatNumber(selectedModel.contextLimit) })
+              : t('model.windowUnknown')}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              disabled={saving}
+              onClick={() => void save()}
+            >
+              {saving ? '…' : t('settings.save')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={!stored || saving}
+              onClick={() => void clear()}
+            >
+              {t('model.overrideClear')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {orphans.length > 0 && (
+        <div className="mt-3 border-t pt-2" style={{ borderColor: 'var(--border)' }}>
+          <p className="faint mb-1 text-[11px]">{t('model.overridesOrphanHint')}</p>
+          {orphans.map((key) => (
+            <div key={key} className="flex items-center gap-2 text-[12px]">
+              <span className="mono min-w-0 flex-1 truncate">{key}</span>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => void clearOrphan(key)}
+              >
+                {t('model.overrideClear')}
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </Section>
@@ -4117,52 +4228,25 @@ function PayloadTab({
     threshold: 2000,
     maxTokens: 600,
   }
-  // The same opaque pair encoding the summarisation picker uses: a model id may
-  // contain a slash, so `backend/model` would be ambiguous.
-  const refValue = (backend: string, model: string) => JSON.stringify([backend, model])
-  const selected = digest.model?.model
-    ? refValue(digest.model.backend, digest.model.model)
-    : ''
-  const candidates = useMemo(
-    () => [...models].sort((a, b) => a.backend.localeCompare(b.backend) || a.id.localeCompare(b.id)),
-    [models],
-  )
-  // A configured model can be missing from the catalogue — its backend is switched
-  // off, its server is down, or the listing has not run yet. Without an option of its
-  // own the select falls back to the first one and displays "off" while the setting
-  // still condenses, which is the one thing a settings screen must not do.
-  const unavailable = selected !== '' && !candidates.some((m) => refValue(m.backend, m.id) === selected)
   const active = (draft.backends ?? []).filter((b) => b.digest).map((b) => b.name || b.id)
   return (
     <Section title={t('settings.payload')} hint={t('settings.payloadHint')}>
-      <Field label={t('settings.digestModel')} hint={t('settings.digestModelHint')}>
-        <select
-          className="select"
-          value={selected}
-          onChange={(e) => {
-            // The off option carries the empty value, and JSON.parse("") throws — the
-            // same trap the summarisation picker had, where clearing a choice raised
-            // an error before the patch and could not be undone.
-            if (e.target.value === '') {
-              patch({ digest: { ...digest, model: { backend: '', model: '' } } })
-              return
-            }
-            const [backend, model] = JSON.parse(e.target.value) as [string, string]
-            patch({ digest: { ...digest, model: { backend, model } } })
-          }}
-        >
-          <option value="">{t('settings.digestModelDefault')}</option>
-          {unavailable && (
-            <option value={selected}>
-              {`${digest.model.model} (${digest.model.backend}) ${t('settings.digestModelUnavailable')}`}
-            </option>
-          )}
-          {candidates.map((m) => (
-            <option key={`${m.backend}/${m.id}`} value={refValue(m.backend, m.id)}>
-              {m.id} ({m.backend})
-            </option>
-          ))}
-        </select>
+      <Field
+        label={t('settings.digestModel')}
+        hint={t('settings.digestModelHint')}
+        labelledBy="digest-model-label"
+      >
+        <ModelPicker
+          id="digest-model"
+          labelledBy="digest-model-label"
+          models={models}
+          value={digest.model}
+          emptyLabel={t('settings.digestModelDefault')}
+          unavailableLabel={t('settings.digestModelUnavailable')}
+          onChange={(ref) =>
+            patch({ digest: { ...digest, model: ref ?? { backend: '', model: '' } } })
+          }
+        />
       </Field>
       <Field label={t('settings.digestThreshold')} hint={t('settings.digestThresholdHint')}>
         <input
@@ -4215,17 +4299,7 @@ function ContextTab({
   const t = useStore((s) => s.t)
   const models = useStore((s) => s.models)
   const compact = draft.compact
-  // A model id may contain a slash, so a `backend/model` key would be ambiguous.
-  // The pair is encoded instead of concatenated, so the select can carry it as
-  // one opaque value.
-  const refValue = (backend: string, model: string) => JSON.stringify([backend, model])
-  const selectedRef = compact.summaryModel?.model
-    ? refValue(compact.summaryModel.backend, compact.summaryModel.model)
-    : ''
-  const candidates = useMemo(
-    () => [...models].sort((a, b) => a.backend.localeCompare(b.backend) || a.id.localeCompare(b.id)),
-    [models],
-  )
+  const summaryModel = compact.summaryModel ?? { backend: '', model: '' }
   return (
     <>
       <Section
@@ -4249,29 +4323,22 @@ function ContextTab({
           {t('settings.midTurnCheck')}
         </label>
         <p className="faint mb-3 mt-1 text-[11px]">{t('settings.midTurnCheckHint')}</p>
-        <Field label={t('settings.summaryModel')} hint={t('settings.summaryModelHint')}>
-          <select
-            className="select"
-            value={selectedRef}
-            onChange={(e) => {
-              // The default option carries the empty value, and JSON.parse("") throws:
-              // going back to the chat's own model is not a pair that can be parsed,
-              // and the throw skipped the patch, so the choice could not be undone.
-              if (e.target.value === '') {
-                patch({ compact: { ...compact, summaryModel: { backend: '', model: '' } } })
-                return
-              }
-              const [backend, model] = JSON.parse(e.target.value) as [string, string]
-              patch({ compact: { ...compact, summaryModel: { backend, model } } })
-            }}
-          >
-            <option value="">{t('settings.summaryModelDefault')}</option>
-            {candidates.map((m) => (
-              <option key={`${m.backend}/${m.id}`} value={refValue(m.backend, m.id)}>
-                {m.id} ({m.backend})
-              </option>
-            ))}
-          </select>
+        <Field
+          label={t('settings.summaryModel')}
+          hint={t('settings.summaryModelHint')}
+          labelledBy="summary-model-label"
+        >
+          <ModelPicker
+            id="summary-model"
+            labelledBy="summary-model-label"
+            models={models}
+            value={summaryModel}
+            emptyLabel={t('settings.summaryModelDefault')}
+            unavailableLabel={t('settings.summaryModelUnavailable')}
+            onChange={(ref) =>
+              patch({ compact: { ...compact, summaryModel: ref ?? { backend: '', model: '' } } })
+            }
+          />
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label={`${t('settings.threshold')} (0–1)`}>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import {
   App,
   defaultManagedModel,
@@ -6,7 +6,6 @@ import {
   formatBytes,
   formatNumber,
   formatPercentSafe,
-  modelFolder,
   modelLabel,
   usageTone,
   type chat,
@@ -15,6 +14,13 @@ import {
   type runtime,
 } from '../lib/api'
 import { useStore } from '../store'
+import {
+  buildModelSearchIndex,
+  groupEntries,
+  modelQualifiers,
+  searchModels,
+} from '../lib/modelSearch'
+import { Highlighted } from './Highlighted'
 
 /* -------------------------------------------------------------------------
  * Context meter
@@ -379,6 +385,8 @@ export function ModelSwitcher() {
 
   const [open, setOpen] = useState(false)
   const [filter, setFilter] = useState('')
+  // Where the keyboard cursor sits in the ranked results, -1 while the list is unread.
+  const [activeIndex, setActiveIndex] = useState(0)
   const [nextOnly, setNextOnly] = useState(false)
   const [preview, setPreview] = useState<chat.ContextBudget | null>(null)
   const [candidate, setCandidate] = useState<llm.ModelInfo | null>(null)
@@ -403,6 +411,7 @@ export function ModelSwitcher() {
   const [localStop, setLocalStop] = useState('')
   const [localErrors, setLocalErrors] = useState<Record<string, string>>({})
   const boxRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
 
   const current = useMemo(
     () => models.find((m) => m.backend === chatState?.chat.backend && m.id === chatState?.chat.model),
@@ -495,74 +504,79 @@ export function ModelSwitcher() {
     }
   }
 
-  const filtered = useMemo(() => {
-    const needle = filter.trim().toLowerCase()
-    const list = needle
-      ? models.filter(
-          (m) =>
-            m.id.toLowerCase().includes(needle) ||
-            m.backend.toLowerCase().includes(needle) ||
-            (m.publisher ?? '').toLowerCase().includes(needle),
-        )
-      : models
-    return [...list].sort((a, b) => {
-      // Loaded models first, then by backend and name.
-      if (a.state !== b.state) return a.state === 'loaded' ? -1 : 1
-      if (a.backend !== b.backend) return a.backend.localeCompare(b.backend)
-      return a.id.localeCompare(b.id)
-    })
-  }, [models, filter])
+  // The catalogue is indexed once per listing rather than once per keystroke: the
+  // listing changes when a backend is refreshed, while the query changes on every
+  // character typed.
+  const index = useMemo(() => buildModelSearchIndex(models), [models])
+  const results = useMemo(() => searchModels(index, filter), [index, filter])
+  const grouped = useMemo(() => groupEntries(results), [results])
+  const qualifiers = useMemo(() => modelQualifiers(models), [models])
 
-  const grouped = useMemo(() => {
-    const map = new Map<string, llm.ModelInfo[]>()
-    for (const m of filtered) {
-      const list = map.get(m.backend) ?? []
-      list.push(m)
-      map.set(m.backend, list)
-    }
-    return [...map.entries()]
-  }, [filtered])
-
-  /**
-   * How often a model name repeats, per backend. A file name alone can collide —
-   * two publishers ship the same quantization — and the picker is where that has to
-   * stay visible, so a repeated name is shown with its folder. Counted over every
-   * model rather than the filtered list, so the labels do not shift while a user
-   * types.
-   */
-  const repeats = useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const m of models) {
-      const key = `${m.backend}/${modelLabel(m.id)}`
-      counts.set(key, (counts.get(key) ?? 0) + 1)
-    }
-    return counts
-  }, [models])
+  /** Where each match sits in the flattened result list, for the keyboard cursor. */
+  const resultIndex = useMemo(() => {
+    const map = new Map<string, number>()
+    results.forEach((entry, i) => map.set(`${entry.model.backend}/${entry.model.id}`, i))
+    return map
+  }, [results])
 
   /** The model's name, without the path it happens to live at. */
   const labelFor = (m: llm.ModelInfo) => modelLabel(m.id)
 
-  /**
-   * What to add when two models in one backend share a file name, and nothing when
-   * they do not — two publishers shipping the same quantization is the ordinary
-   * case, and a list of two identical rows is what has to be avoided. The publisher
-   * is short and is what a user recognises, and a model without one (a GGUF from the
-   * managed runtime, keyed by its path) falls back to the folder it sits in.
-   *
-   * Measured in the harness: the *folder* is the wrong segment for this — two
-   * publishers both call theirs `Ornith-1.5-9B-GGUF`, so qualifying by it produced
-   * two identical labels again.
-   */
-  const qualifierFor = (m: llm.ModelInfo) => {
-    if ((repeats.get(`${m.backend}/${modelLabel(m.id)}`) ?? 0) < 2) return ''
-    return m.publisher || modelFolder(m.id)
-  }
+  /** What tells two same-named models in one backend apart; empty when none collide. */
+  const qualifierFor = (m: llm.ModelInfo) => qualifiers.get(`${m.backend}/${m.id}`) ?? ''
 
   /**
    * Selecting a model checks the conversation against that model's window first.
    * Switching to a model with a smaller context would otherwise fail on the next
    * request with an opaque backend error.
    */
+  // Keep the keyboard cursor on screen while arrowing through a list longer than the
+  // panel. `nearest` scrolls only when the row is really out of view.
+  useEffect(() => {
+    if (!open) return
+    listRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: 'nearest' })
+  }, [open, activeIndex])
+
+  /**
+   * Arrow keys move a cursor through the ranked results, Enter opens the same budget
+   * check a click does, and Escape closes the panel. A picker that can run past a
+   * hundred rows was otherwise mouse-only.
+   */
+  const onSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setActiveIndex((i) => (results.length === 0 ? 0 : (i + 1) % results.length))
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setActiveIndex((i) => (results.length === 0 ? 0 : (i - 1 + results.length) % results.length))
+      return
+    }
+    if (event.key === 'Home') {
+      event.preventDefault()
+      setActiveIndex(0)
+      return
+    }
+    if (event.key === 'End') {
+      event.preventDefault()
+      setActiveIndex(Math.max(0, results.length - 1))
+      return
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      const entry = results[activeIndex]
+      if (entry) void choose(entry.model)
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      setOpen(false)
+      setCandidate(null)
+      setPreview(null)
+    }
+  }
+
   const choose = async (model: llm.ModelInfo) => {
     const chatId = chatState?.chat.id
     if (!chatId) return
@@ -820,7 +834,10 @@ export function ModelSwitcher() {
       <button
         type="button"
         className="btn btn-sm"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          setOpen((v) => !v)
+          setActiveIndex(0)
+        }}
         title={t('model.switch')}
         disabled={running}
       >
@@ -875,7 +892,11 @@ export function ModelSwitcher() {
               className="input"
               placeholder={t('model.search')}
               value={filter}
-              onChange={(e) => setFilter(e.target.value)}
+              onChange={(e) => {
+                setFilter(e.target.value)
+                setActiveIndex(0)
+              }}
+              onKeyDown={onSearchKeyDown}
             />
             <button
               type="button"
@@ -894,7 +915,7 @@ export function ModelSwitcher() {
             {t('model.nextOnly')}
           </label>
 
-          <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+          <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto scroll-thin">
             {/* Before the catalogue, because it is the section that *has* something to
                 offer when the catalogue is empty: a stopped managed server answers with
                 no models at all, and "No models found. Is LM Studio or Ollama running?"
@@ -913,7 +934,30 @@ export function ModelSwitcher() {
                 onStop={() => void stopLocal(b.id)}
               />
             ))}
-            {grouped.length === 0 && <div className="p-3 text-center faint">{t('model.noModels')}</div>}
+            {/* A search miss and an empty catalogue are different answers. Saying
+                "is LM Studio running?" because the query was `qwen` sent the user to
+                check a server that was answering fine. */}
+            {grouped.length === 0 && (
+              <div className="p-3 text-center faint">
+                {models.length === 0 ? (
+                  t('model.noModels')
+                ) : (
+                  <>
+                    <div>{t('model.noMatches', { query: filter.trim() })}</div>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-ghost mt-2"
+                      onClick={() => {
+                        setFilter('')
+                        setActiveIndex(0)
+                      }}
+                    >
+                      {t('model.clearSearch')}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             {grouped.map(([backend, list]) => (
               <div key={backend} className="mb-2">
                 <div className="flex items-center gap-2 px-1 py-1">
@@ -933,19 +977,31 @@ export function ModelSwitcher() {
                       : t('model.check')}
                   </button>
                 </div>
-                {list.map((m) => (
-                  <ModelRow
-                    key={`${m.backend}/${m.id}`}
-                    model={m}
-                    label={labelFor(m)}
-                    qualifier={qualifierFor(m)}
-                    active={m.backend === chatState?.chat.backend && m.id === chatState?.chat.model}
-                    onClick={() => void choose(m)}
-                  />
-                ))}
+                {list.map((entry) => {
+                  const m = entry.model
+                  const key = `${m.backend}/${m.id}`
+                  const at = resultIndex.get(key) ?? -1
+                  return (
+                    <ModelRow
+                      key={key}
+                      model={m}
+                      label={<Highlighted text={entry.label} query={filter} />}
+                      qualifier={qualifierFor(m)}
+                      selected={m.backend === chatState?.chat.backend && m.id === chatState?.chat.model}
+                      active={activeIndex === at}
+                      onClick={() => void choose(m)}
+                    />
+                  )
+                })}
               </div>
             ))}
           </div>
+
+          {models.length > 0 && (
+            <div className="faint mt-1 px-1 text-[10px]">
+              {t('model.resultCount', { shown: results.length, total: models.length })}
+            </div>
+          )}
 
           {check?.error && (
             <div
@@ -1319,14 +1375,18 @@ function ModelRow({
   model,
   label,
   qualifier,
+  selected,
   active,
   onClick,
 }: {
   model: llm.ModelInfo
   /** The model's name, without its path; the full id is the tooltip. */
-  label: string
+  label: ReactNode
   /** Shown beside the name when two models share it, e.g. the publisher. */
   qualifier: string
+  /** The model the conversation is on. */
+  selected: boolean
+  /** Where the keyboard cursor is, which is not the same thing. */
   active: boolean
   onClick: () => void
 }) {
@@ -1334,9 +1394,16 @@ function ModelRow({
   return (
     <button
       type="button"
+      data-active={active ? 'true' : undefined}
       onClick={onClick}
       className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] hover:bg-[var(--surface-2)]"
-      style={active ? { background: 'color-mix(in srgb, var(--accent) 14%, transparent)' } : undefined}
+      style={
+        selected
+          ? { background: 'color-mix(in srgb, var(--accent) 14%, transparent)' }
+          : active
+            ? { background: 'var(--surface-2)' }
+            : undefined
+      }
     >
       <span
         className="inline-block h-2 w-2 shrink-0 rounded-full"

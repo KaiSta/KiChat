@@ -420,6 +420,55 @@
     { id: 'llamacpp', ok: false, error: 'llm: backend unavailable: connection refused', models: 0 },
   ]
 
+  // ?many=1 grows the catalogue to the size a real machine reaches: one hosted
+  // vendor's entitlement list plus a folder of GGUFs runs to several hundred rows.
+  // The dozen entries above cannot show whether searching, ranking and the keyboard
+  // cursor survive that, so this generates a broad, deterministic set. Generated
+  // after the probes because those carry a per-backend model count that has to be
+  // counted again, not left claiming two.
+  if (new URLSearchParams(location.search).get('many') === '1') {
+    const families = ['Llama-3.3', 'Qwen2.5', 'Mistral-Small', 'Gemma-3']
+    const sizes = ['7B', '8B', '14B', '27B', '70B']
+    const quants = ['Q4_K_M', 'Q8_0', 'F16']
+    let n = 0
+    for (const backend of ['nvidia', 'groq', 'mistral']) {
+      for (const family of families) {
+        for (const size of sizes) {
+          for (const quant of quants) {
+            n += 1
+            models.push({
+              id: `${family}-${size}-Instruct-${quant}`,
+              backend,
+              publisher: family.split('-')[0],
+              quantization: quant,
+              state: 'not-loaded',
+              type: 'llm',
+              contextLimit: 32768 * (1 + (n % 4)),
+              capabilities: n % 3 === 0 ? ['tool_use'] : [],
+            })
+          }
+        }
+      }
+    }
+    // Two publishers, one file name: the collision the qualifier exists to explain.
+    // `?many=1` is the only fixture that can show the qualifier surviving a search.
+    for (const publisher of ['acme-ai', 'zenith-labs']) {
+      models.push({
+        id: `${publisher}/Ornith-1.5-9B-GGUF/Ornith-1.5-9B-Q8_0.gguf`,
+        backend: 'lmstudio',
+        publisher,
+        quantization: 'Q8_0',
+        state: 'not-loaded',
+        type: 'llm',
+        contextLimit: 8192,
+        maxContextLimit: 8192,
+      })
+    }
+    for (const probe of probes) {
+      if (probe.ok) probe.models = models.filter((m) => m.backend === probe.id).length
+    }
+  }
+
   // One row per configured backend, switched on or not, with `enabled` following
   // the current fixture state: the runtime flags flip a backend on to render its
   // controls, and the row has to follow or it would read "off" on a backend the
@@ -1135,6 +1184,24 @@ Verfügbare Tools: {{tool_list}}`,
     toolIterations: 6,
     toolTokenBudget: 25000,
     nativeTools: true,
+  }
+
+  // ?missing=1 stores a model no backend lists any more — the state a switched-off
+  // backend or a deleted GGUF leaves behind. The picker has to show that value
+  // instead of falling back to the empty option, which would read as "reset".
+  if (new URLSearchParams(location.search).get('missing') === '1') {
+    settings.defaultModel = { backend: 'openrouter', model: 'ghost-7b-instruct' }
+    settings.compact.summaryModel = { backend: 'openrouter', model: 'ghost-7b-instruct' }
+  }
+
+  // ?orphan=1 keeps an override for a model no backend lists — a retired vendor
+  // model, or a backend that is switched off. The override editor has to offer a way
+  // to remove it; before that it lived only in the settings blob.
+  if (new URLSearchParams(location.search).get('orphan') === '1') {
+    settings.modelOverrides['openrouter/ghost-7b-instruct'] = {
+      contextLimit: 32768,
+      capabilities: [],
+    }
   }
 
   /*
