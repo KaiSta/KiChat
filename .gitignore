@@ -22,8 +22,11 @@ frontend/dist
 # Wails caches the dependency hash next to package.json.
 frontend/package.json.md5
 
-# Local session/agent metadata.
+# Local session/agent metadata, and the scratch directory AGENTS.md calls
+# gitignored: drafts, screenshots and one-off probes live there, none of which is a
+# source file. Without this line `git status` offers all of it to `git add`.
 .freebuff/
+scratch/
 
 # The chat database lives in ~/.config/kichat, but exclude any stray copy.
 *.db
