@@ -11,6 +11,7 @@ import (
 	"github.com/ledongthuc/pdf"
 
 	"kichat/internal/llm"
+	"kichat/internal/uimsg"
 )
 
 // extractPDF reads a PDF, preferring poppler's pdftotext for layout fidelity and
@@ -34,9 +35,9 @@ func extractPDF(data []byte, preferExternal bool) (text string, pages int, warni
 	builtinText, builtinPages, builtinErr := extractPDFBuiltin(data)
 	if builtinErr != nil {
 		if len(warnings) > 0 {
-			return "", 0, warnings, "", fmt.Errorf("PDF konnte nicht gelesen werden: %w", builtinErr)
+			return "", 0, warnings, "", uimsg.Errorf("ingest.pdfUnreadable", builtinErr)
 		}
-		return "", 0, nil, "", fmt.Errorf("PDF konnte nicht gelesen werden: %w", builtinErr)
+		return "", 0, nil, "", uimsg.Errorf("ingest.pdfUnreadable", builtinErr)
 	}
 	if isLikelyScanned(builtinText, builtinPages) {
 		warnings = append(warnings, scannedWarning)
@@ -112,11 +113,11 @@ func pageMarkedText(raw string) (string, int) {
 func extractPDFBuiltin(data []byte) (text string, pages int, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("PDF-Parser abgestürzt: %v", r)
+			err = uimsg.Errorf("ingest.pdfCrashed", r)
 		}
 	}()
 	if !looksLikePDF(data) {
-		return "", 0, fmt.Errorf("keine gültige PDF-Datei")
+		return "", 0, uimsg.Errorf("ingest.pdfInvalid")
 	}
 	reader, readErr := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
 	if readErr != nil {
@@ -124,7 +125,7 @@ func extractPDFBuiltin(data []byte) (text string, pages int, err error) {
 	}
 	total := reader.NumPage()
 	if total <= 0 {
-		return "", 0, fmt.Errorf("PDF ohne Seiten")
+		return "", 0, uimsg.Errorf("ingest.pdfNoPages")
 	}
 	var sb strings.Builder
 	for i := 1; i <= total; i++ {
@@ -170,7 +171,7 @@ func (e *Extractor) PDFExtractorFunc() PDFExtractor {
 			return "", 0, err
 		}
 		if res.Pages == 0 && llm.EstimateTokens(res.Text) == 0 {
-			return "", 0, fmt.Errorf("PDF enthält keinen extrahierbaren Text")
+			return "", 0, uimsg.Errorf("ingest.pdfNoText")
 		}
 		return res.Text, res.Pages, nil
 	}

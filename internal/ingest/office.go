@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"github.com/xuri/excelize/v2"
+
+	"kichat/internal/uimsg"
 )
 
 // OOXML files are ZIP archives of XML parts. Rather than pull in a heavy office
@@ -22,7 +24,7 @@ import (
 func extractDocx(data []byte) (string, []string, error) {
 	zr, err := zipReader(data)
 	if err != nil {
-		return "", nil, fmt.Errorf("DOCX konnte nicht geöffnet werden: %w", err)
+		return "", nil, uimsg.Errorf("ingest.docxOpen", err)
 	}
 	var warnings []string
 
@@ -69,7 +71,7 @@ func extractDocx(data []byte) (string, []string, error) {
 func extractPptx(data []byte) (string, int, []string, error) {
 	zr, err := zipReader(data)
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("PPTX konnte nicht geöffnet werden: %w", err)
+		return "", 0, nil, uimsg.Errorf("ingest.pptxOpen", err)
 	}
 
 	type slide struct {
@@ -90,7 +92,7 @@ func extractPptx(data []byte) (string, int, []string, error) {
 		slides = append(slides, slide{index: n, name: name})
 	}
 	if len(slides) == 0 {
-		return "", 0, nil, fmt.Errorf("PPTX enthält keine Folien")
+		return "", 0, nil, uimsg.Errorf("ingest.pptxNoSlides")
 	}
 	sort.Slice(slides, func(i, j int) bool { return slides[i].index < slides[j].index })
 
@@ -136,13 +138,13 @@ func extractPptx(data []byte) (string, int, []string, error) {
 func extractXlsx(data []byte) (string, int, []string, error) {
 	f, err := excelize.OpenReader(bytes.NewReader(data))
 	if err != nil {
-		return "", 0, nil, fmt.Errorf("Tabelle konnte nicht geöffnet werden: %w", err)
+		return "", 0, nil, uimsg.Errorf("ingest.xlsxOpen", err)
 	}
 	defer f.Close()
 
 	sheets := f.GetSheetList()
 	if len(sheets) == 0 {
-		return "", 0, nil, fmt.Errorf("Tabelle enthält keine Blätter")
+		return "", 0, nil, uimsg.Errorf("ingest.xlsxNoSheets")
 	}
 	var (
 		sb       strings.Builder
@@ -271,5 +273,5 @@ func zipPart(zr *zip.Reader, name string) (io.Reader, error) {
 		}
 		return bytes.NewReader(raw), nil
 	}
-	return nil, fmt.Errorf("Teil %s nicht gefunden", name)
+	return nil, uimsg.Errorf("ingest.partMissing", name)
 }

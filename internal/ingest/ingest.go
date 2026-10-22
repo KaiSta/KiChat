@@ -5,7 +5,6 @@ package ingest
 
 import (
 	"bytes"
-	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"golang.org/x/text/transform"
 
 	"kichat/internal/llm"
+	"kichat/internal/uimsg"
 )
 
 // Kind classifies what was ingested.
@@ -167,7 +167,7 @@ func (e *Extractor) Ingest(filename, mime string, data []byte) (Result, error) {
 	}
 	text := decodeText(data)
 	if strings.TrimSpace(text) == "" {
-		return Result{}, fmt.Errorf("Datei enthält keinen lesbaren Text")
+		return Result{}, uimsg.Errorf("ingest.noText")
 	}
 	return Result{
 		Kind:   KindText,
