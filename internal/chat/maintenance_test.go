@@ -11,6 +11,7 @@ import (
 	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/store"
+	"kichat/internal/uimsg"
 )
 
 // TestAutoCompactStaysQuietWhenTheWindowIsUnknown pins the difference between a
@@ -82,8 +83,8 @@ func TestManualCompactStillRefusesAnUnknownWindow(t *testing.T) {
 	if err == nil {
 		t.Fatal("a manual compaction ran against a model whose window nobody reports")
 	}
-	if !strings.Contains(err.Error(), "unbekannt") {
-		t.Errorf("error = %v, want it to name the unknown window", err)
+	if message, ok := uimsg.Parse(err.Error()); !ok || message.Code != "chat.contextUnknown" {
+		t.Errorf("error = %v, want the code naming the unknown window", err)
 	}
 	if n := provider.requestCount(); n != 0 {
 		t.Errorf("the summariser was called %d times, want 0", n)
@@ -544,8 +545,9 @@ func TestSummarizeExplainsAReasoningOnlyAnswer(t *testing.T) {
 	if err == nil {
 		t.Fatal("a reasoning-only answer was accepted as a summary")
 	}
-	if !strings.Contains(err.Error(), "Reasoning") || !strings.Contains(err.Error(), "stop_reason") {
-		t.Errorf("error %q does not name the reasoning that ate the budget", err)
+	if message, ok := uimsg.Parse(err.Error()); !ok || message.Code != "chat.summaryBudgetSpent" ||
+		len(message.Args) != 2 || message.Args[0] != "length" || message.Args[1] == "0" {
+		t.Errorf("error %q does not name the reasoning that ate the budget, with its stop reason and length", err)
 	}
 }
 
@@ -556,8 +558,8 @@ func TestSummarizeRejectsAnEmptyAnswer(t *testing.T) {
 	_, err := Summarize(context.Background(), provider, "fake-model", SummarizeOptions{
 		Transcript: "### Nutzer\nHallo", MaxTokens: 1200,
 	})
-	if err == nil || !strings.Contains(err.Error(), "leere Zusammenfassung") {
-		t.Fatalf("err = %v, want the empty-summary error", err)
+	if message, ok := uimsg.Parse(err.Error()); err == nil || !ok || message.Code != "chat.summaryEmpty" {
+		t.Fatalf("err = %v, want the empty-summary code", err)
 	}
 }
 

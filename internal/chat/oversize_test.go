@@ -19,6 +19,7 @@ import (
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/uimsg"
 )
 
 // groqChatListing is the one model these tests drive, in the shape the live listing
@@ -292,9 +293,23 @@ func TestGroqWithoutAnythingToFoldSaysWhatToDo(t *testing.T) {
 	if failure == "" {
 		t.Fatal("a turn that could not be rescued reported no error")
 	}
-	for _, want := range []string{"zu groß", "10000", "15088", "Kürze die Nachricht"} {
-		if !strings.Contains(failure, want) {
-			t.Errorf("error text %q does not mention %q", failure, want)
+	// What the user reads comes from the dictionary now, so the assertion is on the
+	// code and the numbers it carries: the situation, the stated limit, and what this
+	// request was counted at — the three things the sentence has to name.
+	message, ok := uimsg.Parse(failure)
+	if !ok {
+		t.Fatalf("error %q is not a message the window can translate", failure)
+	}
+	if message.Code != "chat.tooLargeNoHistoryLimitRequested" {
+		t.Errorf("code = %q, want chat.tooLargeNoHistoryLimitRequested", message.Code)
+	}
+	want := []string{"Fake", "10000", "15088"}
+	if len(message.Args) != len(want) {
+		t.Fatalf("args = %v, want %v", message.Args, want)
+	}
+	for i := range want {
+		if message.Args[i] != want[i] {
+			t.Errorf("arg %d = %q, want %q", i, message.Args[i], want[i])
 		}
 	}
 	// The vendor's envelope is what it replaced, and the app is not the place to read
@@ -351,11 +366,12 @@ func TestAFoldThatFailsIsNotReportedAsNothingToFold(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(failure, "ließ sich nicht komprimieren") {
-		t.Errorf("error text %q does not say the fold failed", failure)
+	message, ok := uimsg.Parse(failure)
+	if !ok {
+		t.Fatalf("error %q is not a message the window can translate", failure)
 	}
-	if strings.Contains(failure, "es gab keinen Verlauf") {
-		t.Errorf("error text %q blames an empty history for a fold that broke", failure)
+	if message.Code != "chat.tooLargeFoldFailedLimitRequested" {
+		t.Errorf("code = %q, want the fold-failed code rather than nothing-to-fold", message.Code)
 	}
 	// The cause is named, and it is the summariser rather than the chat: that warning
 	// and the sentence above describe one event, so they cannot disagree.

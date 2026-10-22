@@ -2,9 +2,9 @@ package chat
 
 import (
 	"context"
-	"fmt"
 
 	"kichat/internal/llm"
+	"kichat/internal/uimsg"
 )
 
 // PreviewBudget reports the context budget a chat would have with the given
@@ -35,7 +35,7 @@ func (e *Engine) PreviewBudget(ctx context.Context, chatID, backendID, modelID s
 	if backendID != "" && modelID != "" {
 		model = e.resolveModelCached(backendID, modelID, settings)
 	} else {
-		return ContextBudget{}, fmt.Errorf("kein Modell ausgewählt")
+		return ContextBudget{}, uimsg.Errorf("model.noneSelected")
 	}
 
 	// No provider is needed: this is a preview, and it has to work for a backend

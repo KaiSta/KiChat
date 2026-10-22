@@ -9,6 +9,7 @@ import (
 	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/tools"
+	"kichat/internal/uimsg"
 )
 
 // turnErrorText returns what the UI was told a failed turn was, or "" when the turn
@@ -57,11 +58,15 @@ func TestAMalformedToolCallIsExplainedRatherThanQuoted(t *testing.T) {
 	if strings.Contains(text, "request.tools") || strings.Contains(text, "scr scrape_url") {
 		t.Errorf("the vendor's validation sentence reached the user verbatim: %q", text)
 	}
-	if !strings.Contains(text, "Tool-Aufruf") || !strings.Contains(text, "Modell") {
-		t.Errorf("the explanation does not say what happened: %q", text)
+	message, ok := uimsg.Parse(text)
+	if !ok {
+		t.Fatalf("the refusal is not a message the window can translate: %q", text)
 	}
-	if !strings.Contains(text, "erneut") {
-		t.Errorf("the explanation does not say what to do: %q", text)
+	// The sentence itself lives in the dictionaries now (err.chat.malformedToolCall),
+	// and i18n_test.go fails if any language lacks it. What a Go test can pin is
+	// which explanation was chosen for this refusal.
+	if message.Code != "chat.malformedToolCall" {
+		t.Errorf("code = %q, want chat.malformedToolCall", message.Code)
 	}
 }
 

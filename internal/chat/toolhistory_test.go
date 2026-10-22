@@ -228,9 +228,11 @@ func TestAnUnresolvableTextCallReachesTheModelAsAnError(t *testing.T) {
 	// answer to the name rather than the app's silence. It travels as text rather than as
 	// a tool turn (the call it answers names nothing the app knows), which is why the
 	// assertion is on what the request carries, not on the role carrying it.
+	// The sentence the model reads is the tool's detail, not the code the window
+	// translates: a model gets no help from `i18n:{…}`.
 	carried := ""
 	for _, m := range provider.requestAt(1).Messages {
-		if strings.Contains(m.Content, "unbekanntes Tool") {
+		if strings.Contains(m.Content, "no tool named") {
 			carried = m.Content
 		}
 	}

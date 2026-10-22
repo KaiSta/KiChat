@@ -872,6 +872,45 @@ const de = {
   'err.image.noCaptionModel': 'kein Modell für die Bildbeschreibung verfügbar',
   'err.model.backendUnavailable': 'Backend {{1}} ist nicht verfügbar',
   'err.image.notLocalServer': 'die Bildgenerierung steht nicht auf dem lokalen Server',
+  'err.chat.tooLargeFoldedLimitRequested':
+    'Die Anfrage ist zu groß für {{1}} (höchstens {{2}} Token pro Anfrage, angefragt waren {{3}}) — auch mit komprimiertem Verlauf passt sie nicht hinein. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
+  'err.chat.tooLargeFoldFailedLimitRequested':
+    'Die Anfrage ist zu groß für {{1}} (höchstens {{2}} Token pro Anfrage, angefragt waren {{3}}) — der Verlauf ließ sich nicht komprimieren. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
+  'err.chat.tooLargeNoHistoryLimitRequested':
+    'Die Anfrage ist zu groß für {{1}} (höchstens {{2}} Token pro Anfrage, angefragt waren {{3}}) — es gab keinen Verlauf, der sich noch hätte zusammenfassen lassen. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
+  'err.chat.noBackend': 'kein Backend verfügbar',
+  'err.chat.summaryFailed': 'Zusammenfassung fehlgeschlagen: {{1}}',
+  'err.chat.summaryEmpty': 'das Modell hat eine leere Zusammenfassung geliefert',
+  'err.chat.summaryBudgetSpent':
+    'das Modell hat sein Ausgabebudget beim Reasoning aufgebraucht und keine Zusammenfassung geschrieben (stop_reason {{1}}, {{2}} Zeichen Reasoning) — erhöhe „Max. Zusammenfassung (Tokens)“ in den Einstellungen',
+  'err.chat.digestFailed': 'Kürzung des Tool-Ergebnisses fehlgeschlagen: {{1}}',
+  'err.chat.digestEmpty': 'das Modell hat eine leere gekürzte Fassung geliefert',
+  'err.chat.digestBudgetSpent':
+    'das Modell hat sein Ausgabebudget beim Reasoning aufgebraucht und keine gekürzte Fassung geschrieben (stop_reason {{1}}, {{2}} Zeichen Reasoning) — erhöhe „Max. Länge der Kürzung (Tokens)“ in den Einstellungen oder wähle ein Modell, das nicht zuerst denkt',
+  'err.chat.compactionWhileRunning':
+    'für diesen Chat läuft noch eine Generierung — kompaktieren ist möglich, sobald sie fertig ist',
+  'err.chat.backendNotConfigured': 'Backend {{1}} ist nicht konfiguriert',
+  'err.chat.contextUnknown': 'Kontextfenster des Modells ist unbekannt',
+  'err.chat.summaryBackendUnknown':
+    'das Zusammenfassungs-Modell {{1}} gehört zum Backend {{2}}, das nicht konfiguriert ist',
+  'err.chat.turnRunning': 'für diesen Chat läuft bereits eine Generierung',
+  'err.chat.malformedToolCall':
+    'das Modell hat einen Tool-Aufruf mit einem Namen erzeugt, den die Anfrage nicht deklariert hat — der Anbieter hat die Anfrage deshalb abgelehnt. Sende die Nachricht erneut; geschieht es wieder, wähle für diesen Chat ein anderes Modell.',
+  'err.chat.noModelInChat': 'Kein Modell ausgewählt. Bitte oben im Chat ein Modell wählen.',
+  'err.chat.noTools': 'keine Tools verfügbar',
+  'err.chat.tooLargeFolded':
+    'Die Anfrage ist zu groß für {{1}} — auch mit komprimiertem Verlauf passt sie nicht hinein. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
+  'err.chat.tooLargeFoldedLimit':
+    'Die Anfrage ist zu groß für {{1}} (höchstens {{2}} Token pro Anfrage) — auch mit komprimiertem Verlauf passt sie nicht hinein. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
+  'err.chat.tooLargeFoldFailed':
+    'Die Anfrage ist zu groß für {{1}} — der Verlauf ließ sich nicht komprimieren. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
+  'err.chat.tooLargeFoldFailedLimit':
+    'Die Anfrage ist zu groß für {{1}} (höchstens {{2}} Token pro Anfrage) — der Verlauf ließ sich nicht komprimieren. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
+  'err.chat.tooLargeNoHistory':
+    'Die Anfrage ist zu groß für {{1}} — es gab keinen Verlauf, der sich noch hätte zusammenfassen lassen. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
+  'err.chat.tooLargeNoHistoryLimit':
+    'Die Anfrage ist zu groß für {{1}} (höchstens {{2}} Token pro Anfrage) — es gab keinen Verlauf, der sich noch hätte zusammenfassen lassen. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
+  'err.llm.requestTooLarge': 'die Anfrage ist zu groß für dieses Modell',
 } as const
 
 /**
@@ -1708,6 +1747,45 @@ const en: Record<keyof typeof de, string> = {
   'err.image.noCaptionModel': 'no model is available to caption pictures',
   'err.model.backendUnavailable': 'backend {{1}} is not available',
   'err.image.notLocalServer': 'picture generation is not set to the local server',
+  'err.chat.tooLargeFoldedLimitRequested':
+    'The request is too large for {{1}} (at most {{2}} tokens per request, {{3}} were requested) — it does not fit even with a compacted history. Shorten the message, remove attachments, or choose a model with a higher limit.',
+  'err.chat.tooLargeFoldFailedLimitRequested':
+    'The request is too large for {{1}} (at most {{2}} tokens per request, {{3}} were requested) — the history could not be compacted. Shorten the message, remove attachments, or choose a model with a higher limit.',
+  'err.chat.tooLargeNoHistoryLimitRequested':
+    'The request is too large for {{1}} (at most {{2}} tokens per request, {{3}} were requested) — there was no history left to summarise. Shorten the message, remove attachments, or choose a model with a higher limit.',
+  'err.chat.noBackend': 'no backend is available',
+  'err.chat.summaryFailed': 'summarising failed: {{1}}',
+  'err.chat.summaryEmpty': 'the model returned an empty summary',
+  'err.chat.summaryBudgetSpent':
+    'the model spent its output budget thinking and wrote no summary (stop_reason {{1}}, {{2}} characters of reasoning) — raise “Max summary (tokens)” in Settings',
+  'err.chat.digestFailed': 'condensing the tool result failed: {{1}}',
+  'err.chat.digestEmpty': 'the model returned an empty condensation',
+  'err.chat.digestBudgetSpent':
+    'the model spent its output budget thinking and wrote no condensation (stop_reason {{1}}, {{2}} characters of reasoning) — raise “Max condensed length (tokens)” in Settings or pick a model that does not think first',
+  'err.chat.compactionWhileRunning':
+    'this chat is still generating — compaction is possible once it finishes',
+  'err.chat.backendNotConfigured': 'backend {{1}} is not configured',
+  'err.chat.contextUnknown': 'the model\'s context window is unknown',
+  'err.chat.summaryBackendUnknown':
+    'the summary model {{1}} belongs to backend {{2}}, which is not configured',
+  'err.chat.turnRunning': 'this chat is already generating',
+  'err.chat.malformedToolCall':
+    'the model produced a tool call with a name the request did not declare, so the provider rejected the request. Send the message again; if it happens again, choose a different model for this chat.',
+  'err.chat.noModelInChat': 'No model selected. Choose one at the top of the chat.',
+  'err.chat.noTools': 'no tools are available',
+  'err.chat.tooLargeFolded':
+    'The request is too large for {{1}} — it does not fit even with a compacted history. Shorten the message, remove attachments, or choose a model with a higher limit.',
+  'err.chat.tooLargeFoldedLimit':
+    'The request is too large for {{1}} (at most {{2}} tokens per request) — it does not fit even with a compacted history. Shorten the message, remove attachments, or choose a model with a higher limit.',
+  'err.chat.tooLargeFoldFailed':
+    'The request is too large for {{1}} — the history could not be compacted. Shorten the message, remove attachments, or choose a model with a higher limit.',
+  'err.chat.tooLargeFoldFailedLimit':
+    'The request is too large for {{1}} (at most {{2}} tokens per request) — the history could not be compacted. Shorten the message, remove attachments, or choose a model with a higher limit.',
+  'err.chat.tooLargeNoHistory':
+    'The request is too large for {{1}} — there was no history left to summarise. Shorten the message, remove attachments, or choose a model with a higher limit.',
+  'err.chat.tooLargeNoHistoryLimit':
+    'The request is too large for {{1}} (at most {{2}} tokens per request) — there was no history left to summarise. Shorten the message, remove attachments, or choose a model with a higher limit.',
+  'err.llm.requestTooLarge': 'the request is too large for this model',
 }
 
 const zh: Record<keyof typeof de, string> = {
@@ -2480,6 +2558,39 @@ const zh: Record<keyof typeof de, string> = {
   'err.image.noCaptionModel': '没有可用于描述图片的模型',
   'err.model.backendUnavailable': '后端 {{1}} 不可用',
   'err.image.notLocalServer': '图片生成未设置为本机服务器',
+  'err.chat.tooLargeFoldedLimitRequested':
+    '请求对 {{1}} 来说过大（每次请求最多 {{2}} 个 token，本次请求为 {{3}}）——即使压缩历史后也放不下。请缩短消息、移除附件，或选择上限更高的模型。',
+  'err.chat.tooLargeFoldFailedLimitRequested':
+    '请求对 {{1}} 来说过大（每次请求最多 {{2}} 个 token，本次请求为 {{3}}）——历史无法压缩。请缩短消息、移除附件，或选择上限更高的模型。',
+  'err.chat.tooLargeNoHistoryLimitRequested':
+    '请求对 {{1}} 来说过大（每次请求最多 {{2}} 个 token，本次请求为 {{3}}）——没有还可以总结的历史。请缩短消息、移除附件，或选择上限更高的模型。',
+  'err.chat.noBackend': '没有可用的后端',
+  'err.chat.summaryFailed': '生成摘要失败：{{1}}',
+  'err.chat.summaryEmpty': '模型返回了空摘要',
+  'err.chat.summaryBudgetSpent':
+    '模型把输出预算用于推理，没有写出摘要（stop_reason {{1}}，{{2}} 个字符的推理）——请在设置中提高“摘要最大 token”',
+  'err.chat.digestFailed': '压缩工具结果失败：{{1}}',
+  'err.chat.digestEmpty': '模型返回了空的压缩结果',
+  'err.chat.digestBudgetSpent':
+    '模型把输出预算用于推理，没有写出压缩结果（stop_reason {{1}}，{{2}} 个字符的推理）——请在设置中提高“压缩最大长度 token”，或选择不先推理的模型',
+  'err.chat.compactionWhileRunning': '该对话仍在生成——生成结束后才能压缩',
+  'err.chat.backendNotConfigured': '后端 {{1}} 尚未配置',
+  'err.chat.contextUnknown': '模型的上下文窗口未知',
+  'err.chat.summaryBackendUnknown': '摘要模型 {{1}} 属于尚未配置的后端 {{2}}',
+  'err.chat.turnRunning': '该对话正在生成中',
+  'err.chat.malformedToolCall': '模型生成的工具调用使用了请求中未声明的名称，提供方因此拒绝了该请求。请重新发送消息；若再次出现，请为该对话选择其他模型。',
+  'err.chat.noModelInChat': '未选择模型。请在对话顶部选择一个模型。',
+  'err.chat.noTools': '没有可用的工具',
+  'err.chat.tooLargeFolded': '请求对 {{1}} 来说过大——即使压缩历史后也放不下。请缩短消息、移除附件，或选择上限更高的模型。',
+  'err.chat.tooLargeFoldedLimit':
+    '请求对 {{1}} 来说过大（每次请求最多 {{2}} 个 token）——即使压缩历史后也放不下。请缩短消息、移除附件，或选择上限更高的模型。',
+  'err.chat.tooLargeFoldFailed': '请求对 {{1}} 来说过大——历史无法压缩。请缩短消息、移除附件，或选择上限更高的模型。',
+  'err.chat.tooLargeFoldFailedLimit':
+    '请求对 {{1}} 来说过大（每次请求最多 {{2}} 个 token）——历史无法压缩。请缩短消息、移除附件，或选择上限更高的模型。',
+  'err.chat.tooLargeNoHistory': '请求对 {{1}} 来说过大——没有还可以总结的历史。请缩短消息、移除附件，或选择上限更高的模型。',
+  'err.chat.tooLargeNoHistoryLimit':
+    '请求对 {{1}} 来说过大（每次请求最多 {{2}} 个 token）——没有还可以总结的历史。请缩短消息、移除附件，或选择上限更高的模型。',
+  'err.llm.requestTooLarge': '请求对该模型来说过大',
 }
 
 const dictionaries: Record<Lang, Record<MessageKey, string>> = { de, en, zh }
@@ -2512,8 +2623,9 @@ const ERROR_PREFIX = 'i18n:'
  * Go answers with a code and its arguments, wrapped in `i18n:` and JSON (see
  * internal/uimsg) because a bound method can only return an error, and the window
  * only receives its text. Anything without that prefix — an operating system's
- * wording, a server's own message, a string from a package that does not speak
- * codes yet — is returned unchanged, which is what keeps those readable.
+ * wording, a server's own message, a string a package passed through — is returned
+ * unchanged, which is what keeps those readable, and why an argument can be passed
+ * to this function without asking what it is.
  */
 export function translateError(lang: Lang, raw: string): string {
   if (!raw.startsWith(ERROR_PREFIX)) return raw
@@ -2525,8 +2637,14 @@ export function translateError(lang: Lang, raw: string): string {
   }
   if (!payload || typeof payload.code !== 'string' || payload.code === '') return raw
 
+  // An argument can itself be a message: one package wraps another's refusal
+  // (`ingest.pdfUnreadable` around `ingest.pdfInvalid`), and the outer sentence would
+  // otherwise read "… could not be read: i18n:{…}". translateError leaves plain text
+  // alone, so this is the same call for both kinds of argument.
   const vars: Record<string, string> = {}
-  for (const [index, arg] of (payload.args ?? []).entries()) vars[String(index + 1)] = arg
+  for (const [index, arg] of (payload.args ?? []).entries()) {
+    vars[String(index + 1)] = translateError(lang, arg)
+  }
 
   // `error.<code>` is a dictionary key the Go test checks exists in all three
   // languages, so the cast here is the same contract a literal carries.

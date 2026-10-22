@@ -9,6 +9,7 @@ import (
 
 	"kichat/internal/llm"
 	"kichat/internal/store"
+	"kichat/internal/uimsg"
 )
 
 // completion is the outcome of a generation run to its end rather than streamed.
@@ -639,8 +640,9 @@ func Summarize(ctx context.Context, p llm.Provider, model string, opts Summarize
 			NumCtx:          opts.NumCtx,
 			DisableThinking: opts.DisableThinking,
 			ContextLimit:    opts.ContextLimit,
-			Failure:         "Zusammenfassung fehlgeschlagen",
-			EmptyHint:       "erhöhe „Max. Zusammenfassung (Tokens)“ in den Einstellungen",
+			FailureCode:     "chat.summaryFailed",
+			EmptyCode:       "chat.summaryEmpty",
+			BudgetCode:      "chat.summaryBudgetSpent",
 		})
 }
 
@@ -653,14 +655,15 @@ type extractionOptions struct {
 	NumCtx          int
 	DisableThinking bool
 	ContextLimit    int
-	// Failure names the request in an error the user reads, in the transcript's
-	// language, so a failed condensation does not report itself as a failed
-	// compaction.
-	Failure string
-	// EmptyHint is what the empty-answer error advises, because the two callers
-	// cannot act on the same advice: one has a settings field to raise, the other
-	// wants a model that does not think first at all.
-	EmptyHint string
+	// FailureCode names the request in an error the user reads, so a failed
+	// condensation does not report itself as a failed compaction.
+	FailureCode string
+	// EmptyCode and BudgetCode are the two sentences an empty answer can produce.
+	// They differ per caller because the advice does: a compaction has a settings
+	// field to raise, a condensation can also be had from a model that does not
+	// think first.
+	EmptyCode  string
+	BudgetCode string
 }
 
 // extractWithBudget runs one prompted extraction and retries it when a reasoning
@@ -673,7 +676,7 @@ type extractionOptions struct {
 func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt, userPrompt string,
 	opts extractionOptions) (string, error) {
 	if p == nil {
-		return "", errors.New("kein Backend verfügbar")
+		return "", uimsg.Errorf("chat.noBackend")
 	}
 	temp := opts.Temperature
 	if temp <= 0 {
@@ -718,7 +721,7 @@ func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt,
 		}
 		out, err := runToCompletion(ctx, p, req)
 		if err != nil {
-			return "", fmt.Errorf("%s: %w", opts.Failure, err)
+			return "", uimsg.Errorf(opts.FailureCode, uimsg.Sentence(err))
 		}
 		// A backend without a separate reasoning channel inlines the model's
 		// deliberation in the content — `<think>…</think>`, `<analysis>…</analysis>`
@@ -750,25 +753,26 @@ func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt,
 		}
 		budget = grown
 	}
-	return "", emptyExtractionError(last, opts.EmptyHint)
+	return "", emptyExtractionError(last, opts.EmptyCode, opts.BudgetCode)
 }
 
 // emptyExtractionError explains an answer that came back empty. The usual cause is a
 // reasoning model: because `max_tokens` bounds thinking and answer together, a
 // model that spent the whole budget thinking returns stop_reason "length" with no
-// content at all. Naming that cause names the fix — raise the summary budget —
-// instead of leaving "empty summary" to be read as a model that refused to answer.
-func emptyExtractionError(out completion, hint string) error {
+// content at all. Naming that cause names the fix — the budget code carries that
+// advice, per caller — instead of leaving an empty answer to be read as a model that
+// refused to answer.
+func emptyExtractionError(out completion, emptyCode, budgetCode string) error {
 	if out.reasoning != "" || strings.EqualFold(out.stopReason, "length") {
 		stop := out.stopReason
 		if stop == "" {
-			stop = "unbekannt"
+			// A word rather than an empty argument, because it lands inside the
+			// sentence the dictionary holds ("stop_reason {{1}}").
+			stop = "unknown"
 		}
-		return fmt.Errorf("das Modell hat sein Ausgabebudget beim Reasoning aufgebraucht und "+
-			"keine Zusammenfassung geschrieben (stop_reason %q, %d Zeichen Reasoning) — %s",
-			stop, len([]rune(out.reasoning)), hint)
+		return uimsg.Errorf(budgetCode, stop, len([]rune(out.reasoning)))
 	}
-	return errors.New("das Modell hat eine leere Zusammenfassung geliefert")
+	return uimsg.Errorf(emptyCode)
 }
 
 // summarisePrompt builds the user message of a summarisation call. It is split

@@ -105,7 +105,13 @@ func TestEveryTranslatedNameExistsInEveryDictionary(t *testing.T) {
 // errorCodePattern finds the codes the backend emits. internal/uimsg is the only
 // producer, so the call is what names them; a message built any other way is text,
 // not a code, and is left alone by design.
-var errorCodePattern = regexp.MustCompile(`uimsg\.Errorf\("([^"]+)"`)
+var errorCodePattern = regexp.MustCompile(`uimsg\.(?:Errorf|Detailf|Wrapf)\("([^"]+)"`)
+
+// extractionCodePattern finds the codes a caller hands to extractWithBudget. They
+// cannot appear at a uimsg call site because one extraction is used for two
+// operations whose wording differs, so the code is chosen by the caller and travels
+// as a field. Naming the fields is narrower than accepting any string literal.
+var extractionCodePattern = regexp.MustCompile(`(?:Failure|Empty|Budget)Code:\s*"([^"]+)"`)
 
 // The other half of the dictionary check, and the reason the codes exist at all: a
 // code with no sentence — or with a German sentence only — reads as `i18n:{…}` or as
@@ -136,8 +142,14 @@ func TestEveryBackendErrorCodeIsTranslated(t *testing.T) {
 			return err
 		}
 		if entry.IsDir() {
+			// The root `tools/` is the dev harness, but internal/tools is a package
+			// that reports to the window like any other. Matching by name skipped it,
+			// which is how a whole package's codes went unchecked.
+			if filepath.Clean(path) == "tools" {
+				return fs.SkipDir
+			}
 			switch entry.Name() {
-			case ".git", "frontend", "scratch", "build", "packaging", "tools":
+			case ".git", "frontend", "scratch", "build", "packaging", "node_modules":
 				return fs.SkipDir
 			}
 			return nil
@@ -149,8 +161,10 @@ func TestEveryBackendErrorCodeIsTranslated(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for _, match := range errorCodePattern.FindAllStringSubmatch(string(body), -1) {
-			codes[match[1]] = true
+		for _, pattern := range []*regexp.Regexp{errorCodePattern, extractionCodePattern} {
+			for _, match := range pattern.FindAllStringSubmatch(string(body), -1) {
+				codes[match[1]] = true
+			}
 		}
 		return nil
 	})

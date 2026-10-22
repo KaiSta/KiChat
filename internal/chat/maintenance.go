@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/store"
+	"kichat/internal/uimsg"
 )
 
 // newID returns a fresh identifier.
@@ -90,8 +90,7 @@ func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions
 	defer cancel()
 	handle := &turnHandle{cancel: cancel, chatID: chatID}
 	if !e.turns.claim(chatID, handle) {
-		return CompactResult{}, errors.New("für diesen Chat läuft noch eine Generierung — " +
-			"kompaktieren ist möglich, sobald sie fertig ist")
+		return CompactResult{}, uimsg.Errorf("chat.compactionWhileRunning")
 	}
 	defer e.turns.release(chatID, handle)
 
@@ -102,11 +101,11 @@ func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions
 	}
 	backendID, modelID := chat.Backend, chat.Model
 	if backendID == "" || modelID == "" {
-		return CompactResult{}, errors.New("kein Modell ausgewählt")
+		return CompactResult{}, uimsg.Errorf("model.noneSelected")
 	}
 	provider, ok := e.Registry.Provider(backendID)
 	if !ok {
-		return CompactResult{}, fmt.Errorf("Backend %q ist nicht konfiguriert", backendID)
+		return CompactResult{}, uimsg.Errorf("chat.backendNotConfigured", backendID)
 	}
 	modelInfo := e.resolveModel(ctx, backendID, modelID, settings)
 
@@ -204,7 +203,7 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		return nil, err
 	}
 	if assembly.Budget.Limit <= 0 {
-		return nil, errors.New("Kontextfenster des Modells ist unbekannt")
+		return nil, uimsg.Errorf("chat.contextUnknown")
 	}
 
 	messages, err := e.Store.ListMessages(chat.ID)
@@ -450,8 +449,7 @@ func (e *Engine) summariser(ctx context.Context, provider llm.Provider, backendI
 	}
 	summaryProvider, ok := e.Registry.Provider(ref.Backend)
 	if !ok {
-		return summaryTarget{}, fmt.Errorf("das Zusammenfassungs-Modell %q gehört zum Backend %q, "+
-			"das nicht konfiguriert ist", ref.Model, ref.Backend)
+		return summaryTarget{}, uimsg.Errorf("chat.summaryBackendUnknown", ref.Model, ref.Backend)
 	}
 	info := e.resolveModel(ctx, ref.Backend, ref.Model, settings)
 	return summaryTarget{

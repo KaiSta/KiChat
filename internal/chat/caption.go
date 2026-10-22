@@ -2,10 +2,10 @@ package chat
 
 import (
 	"context"
-	"errors"
 
 	"kichat/internal/images"
 	"kichat/internal/llm"
+	"kichat/internal/uimsg"
 )
 
 // Caption asks the model that is already loaded for the caption a caption-trained image
@@ -59,4 +59,4 @@ func Caption(ctx context.Context, p llm.Provider, model string, req images.Capti
 // errNoCaptionBackend is what a caption request answers when the turn has no provider to
 // ask. It is its own error rather than a generic one because the tool's reaction is
 // specific: draw the request as typed and say the caption did not happen.
-var errNoCaptionBackend = errors.New("kein Backend für die Bildbeschreibung verfügbar")
+var errNoCaptionBackend = uimsg.Errorf("image.noCaptionModel")

@@ -3,12 +3,12 @@ package chat
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"kichat/internal/config"
 	"kichat/internal/events"
 	"kichat/internal/llm"
 	"kichat/internal/store"
+	"kichat/internal/uimsg"
 )
 
 // A request a backend refuses for its own size used to end the turn.
@@ -249,16 +249,43 @@ func turnFailureText(providerName string, err error, outcome foldOutcome) string
 	if !ok {
 		return err.Error()
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Die Anfrage ist zu groß für %s%s", providerName, ceilingNote(too))
-	switch outcome {
-	case foldFolded:
-		b.WriteString(" — auch mit komprimiertem Verlauf passt sie nicht hinein.")
-	case foldFailed:
-		b.WriteString(" — der Verlauf ließ sich nicht komprimieren.")
-	default:
-		b.WriteString(" — es gab keinen Verlauf, der sich noch hätte zusammenfassen lassen.")
+	limit, requested := 0, 0
+	if too != nil {
+		limit, requested = too.Limit, too.Requested
 	}
-	b.WriteString(" Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.")
-	return b.String()
+	// One code per situation rather than a sentence with pieces glued on: the
+	// dictionary owns the whole wording, and a language can put the limit clause
+	// wherever its grammar wants it instead of inheriting German word order. The
+	// number the refusal stated is an argument, not a clause, for the same reason.
+	var message error
+	switch {
+	case limit <= 0:
+		switch outcome {
+		case foldFolded:
+			message = uimsg.Errorf("chat.tooLargeFolded", providerName)
+		case foldFailed:
+			message = uimsg.Errorf("chat.tooLargeFoldFailed", providerName)
+		default:
+			message = uimsg.Errorf("chat.tooLargeNoHistory", providerName)
+		}
+	case requested <= 0:
+		switch outcome {
+		case foldFolded:
+			message = uimsg.Errorf("chat.tooLargeFoldedLimit", providerName, limit)
+		case foldFailed:
+			message = uimsg.Errorf("chat.tooLargeFoldFailedLimit", providerName, limit)
+		default:
+			message = uimsg.Errorf("chat.tooLargeNoHistoryLimit", providerName, limit)
+		}
+	default:
+		switch outcome {
+		case foldFolded:
+			message = uimsg.Errorf("chat.tooLargeFoldedLimitRequested", providerName, limit, requested)
+		case foldFailed:
+			message = uimsg.Errorf("chat.tooLargeFoldFailedLimitRequested", providerName, limit, requested)
+		default:
+			message = uimsg.Errorf("chat.tooLargeNoHistoryLimitRequested", providerName, limit, requested)
+		}
+	}
+	return message.Error()
 }

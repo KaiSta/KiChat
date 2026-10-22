@@ -219,7 +219,7 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
           {call.error && (
             <div>
               <div className="faint mb-1">{t('tool.error')}</div>
-              <div style={{ color: 'var(--danger)' }}>{call.error}</div>
+              <div style={{ color: 'var(--danger)' }}>{errText(call.error)}</div>
             </div>
           )}
           <div>

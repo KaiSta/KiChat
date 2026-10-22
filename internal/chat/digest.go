@@ -124,11 +124,11 @@ func DigestToolOutput(ctx context.Context, p llm.Provider, model string, opts Di
 			MaxTokens:       opts.MaxTokens,
 			DisableThinking: opts.DisableThinking,
 			ContextLimit:    opts.ContextLimit,
-			Failure:         "Kürzung des Tool-Ergebnisses fehlgeschlagen",
+			FailureCode:     "chat.digestFailed",
 			// Two fixes, named in the order that costs less: the cap is a setting now,
 			// and a model that thinks first is the other half of the same failure.
-			EmptyHint: "erhöhe „Max. Länge der Kürzung (Tokens)“ in den Einstellungen oder " +
-				"wähle ein Modell, das nicht zuerst denkt",
+			EmptyCode:  "chat.digestEmpty",
+			BudgetCode: "chat.digestBudgetSpent",
 		})
 }
 

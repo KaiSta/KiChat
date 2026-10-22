@@ -13,6 +13,7 @@ import (
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/uimsg"
 )
 
 type generateInput struct {
@@ -401,8 +402,11 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 
 	if execErr != nil {
 		record.Status = store.ToolError
+		// The card translates the code; the model gets the sentence the tool wrote for
+		// it, because a payload is not something it can correct a call from. This is the
+		// one place a message has two audiences, and uimsg carries both.
 		record.Error = execErr.Error()
-		output = fmt.Sprintf("Tool-Fehler: %s", execErr.Error())
+		output = fmt.Sprintf("Tool error: %s", uimsg.Sentence(execErr))
 	} else {
 		record.Status = store.ToolOK
 	}
@@ -561,7 +565,7 @@ func (b *toolOutputBudget) take(output string) (string, bool) {
 // at once, and the tool service is one value for the whole app.
 func (e *Engine) executeTool(ctx context.Context, chatID, messageID string, call llm.ToolCall, turn tools.TurnRef) (string, error) {
 	if e.Tools == nil {
-		return "", fmt.Errorf("keine Tools verfügbar")
+		return "", uimsg.Detailf("chat.noTools", "no tools are available")
 	}
 	// The turn's backend and model travel with the call beside the message id: a tool that
 	// needs the model that asked for it — the captioner is the first — must not read them

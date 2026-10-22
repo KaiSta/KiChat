@@ -3,7 +3,6 @@ package chat
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/uimsg"
 )
 
 // Measurements remember what a backend said the prompt cost, so the context
@@ -172,7 +172,7 @@ func (e *Engine) Send(req TurnRequest) error {
 	// second turn able to start beside the first.
 	if !e.turns.claim(req.ChatID, handle) {
 		cancel()
-		return errors.New("für diesen Chat läuft bereits eine Generierung")
+		return uimsg.Errorf("chat.turnRunning")
 	}
 
 	go func() {
@@ -205,7 +205,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	if backendID == "" || modelID == "" {
 		e.emit(events.Error, map[string]any{
 			"chatId": req.ChatID,
-			"error":  "Kein Modell ausgewählt. Bitte oben im Chat ein Modell wählen.",
+			"error":  uimsg.Errorf("chat.noModelInChat").Error(),
 		})
 		return
 	}
@@ -556,9 +556,7 @@ func (e *Engine) ceilingFor(backendID, modelID string) llm.Ceiling {
 // the two things that help: send it again, or pick a different model for this chat. A
 // malformed generation is not a fact about the conversation, so nothing is repaired or
 // dropped behind the user's back.
-var errMalformedToolCall = errors.New("das Modell hat einen Tool-Aufruf mit einem Namen erzeugt, " +
-	"den die Anfrage nicht deklariert hat — der Anbieter hat die Anfrage deshalb abgelehnt. " +
-	"Sende die Nachricht erneut; geschieht es wieder, wähle für diesen Chat ein anderes Modell.")
+var errMalformedToolCall = uimsg.Errorf("chat.malformedToolCall")
 
 // warn reports something the user should know without failing the turn. It exists as
 // a method because `generate` holds the stream in a variable called `events`, which

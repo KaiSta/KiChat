@@ -2,6 +2,7 @@ package llm
 
 import (
 	"errors"
+	"kichat/internal/uimsg"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -30,7 +31,7 @@ import (
 //
 //	Rate limit reached for model `qwen/qwen3.8-27b` … on input tokens per minute
 //	(ITPM): Limit 7000, Used 1911, Requested 6248. Please try again in 9.934285714s.
-var ErrRequestTooLarge = errors.New("anfrage zu groß für dieses modell")
+var ErrRequestTooLarge = uimsg.Errorf("llm.requestTooLarge")
 
 // RequestTooLargeError is a refusal caused by the size of the request itself.
 //
