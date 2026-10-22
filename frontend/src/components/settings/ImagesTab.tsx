@@ -389,7 +389,7 @@ export function ImagesTab({
         setUpscalerInstall(next)
         if (next.busy) continue
         if (next.error) {
-          useStore.getState().toast('error', next.error)
+          useStore.getState().toast('error', errText(next.error))
           return
         }
         const status = await App.GetUpscalerStatus()
@@ -697,7 +697,7 @@ export function ImagesTab({
         {!images.enabled ? (
           <span className="badge">{t('settings.images.off')}</span>
         ) : status?.error ? (
-          <span className="badge badge-danger" title={status.error}>
+          <span className="badge badge-danger" title={errText(status.error)}>
             {t('settings.fail')}
           </span>
         ) : isSD ? (
@@ -706,7 +706,7 @@ export function ImagesTab({
              button that changes it. */
           <span
             className={`badge ${sdRunning && status?.ok ? 'badge-ok' : sdFailed ? 'badge-danger' : ''}`}
-            title={server?.error || undefined}
+            title={server?.error ? errText(server.error) : undefined}
           >
             {sdRunning && status?.ok
               ? `${t('settings.images.ok')} · ${status.models.length} ${t('settings.images.models')}`
@@ -1539,7 +1539,9 @@ export function ImagesTab({
                 <span className="faint text-[11px]">
                   {upscaler?.available
                     ? `${t('settings.images.upscalerReady')}: ${upscaler.path}`
-                    : upscaler?.error || t('settings.images.upscalerNotReady')}
+                    : upscaler?.error
+                      ? errText(upscaler.error)
+                      : t('settings.images.upscalerNotReady')}
                 </span>
               </div>
             </div>
@@ -1613,7 +1615,7 @@ export function ImagesTab({
 
       {images.enabled && status?.error && (
         <div className="mt-2 text-[11px]" style={{ color: 'var(--danger)' }}>
-          {status.error}
+          {errText(status.error)}
         </div>
       )}
       {images.enabled && !isCLI && status?.ok && status.models.length === 0 && (
@@ -1754,7 +1756,7 @@ function ImageServerRow({
       ) : null}
       {server?.error ? (
         <div className="mt-2 whitespace-pre-wrap text-[11px]" style={{ color: 'var(--danger)' }}>
-          {server.error}
+          {errText(server.error)}
         </div>
       ) : null}
       {state === 'failed' && server?.log?.length ? (

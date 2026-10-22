@@ -19,6 +19,7 @@ import (
 	"kichat/internal/config"
 	"kichat/internal/images"
 	rt "kichat/internal/runtime"
+	"kichat/internal/uimsg"
 )
 
 // upscalerArchive is a stand-in for the published 46 MB zip: the program, optionally the
@@ -201,8 +202,8 @@ func TestInstallUpscalerRefusesADownloadThatDoesNotMatchItsDigest(t *testing.T) 
 		t.Fatalf("InstallUpscaler: %v", err)
 	}
 	status := waitForInstall(t, a)
-	if !strings.Contains(status.Error, "Prüfsumme") {
-		t.Fatalf("error = %q, want the digest mismatch reported", status.Error)
+	if message, ok := uimsg.Parse(status.Error); !ok || message.Code != "runtime.checksumMismatch" || len(message.Args) != 2 {
+		t.Fatalf("error = %q, want the checksum refusal naming expected and got", status.Error)
 	}
 	if a.Settings().Images.ESRGANBinary != "" {
 		t.Error("a download that failed its check was recorded as installed")

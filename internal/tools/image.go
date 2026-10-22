@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"kichat/internal/ingest"
 	"kichat/internal/llm"
 	"kichat/internal/store"
+	"kichat/internal/uimsg"
 )
 
 // ToolGenerateImage is the one tool that does not read anything: it costs GPU
@@ -103,13 +103,13 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	}
 	var args generateImageArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return "", fmt.Errorf("ungültige Argumente: %w", err)
+		return "", badArguments(err)
 	}
 	prompt := strings.TrimSpace(args.Prompt)
 	if prompt == "" {
 		// A picture with no prompt is not a degenerate case, it is a blank canvas:
 		// the server would draw something arbitrary and charge for it.
-		return "", fmt.Errorf("prompt fehlt — ein Bild braucht eine Beschreibung")
+		return "", uimsg.Detailf("tools.promptMissing", "the prompt argument is empty; a picture needs a description")
 	}
 
 	cfg := s.imageSettings()
@@ -203,7 +203,8 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	// dialog that offers the same filename twice.
 	used, err := s.usedFilenames(chatID)
 	if err != nil {
-		return "", fmt.Errorf("die vergebenen Bildnamen konnten nicht gelesen werden: %w", err)
+		return "", uimsg.Detailf("tools.imageNamesUnreadable",
+			fmt.Sprintf("the filenames already used in this chat could not be read: %v", err), err)
 	}
 	for i, img := range result.Kept() {
 		name := uniqueName(used, imageFilename(prompt, i, img.Ext))
@@ -212,7 +213,8 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 			// entirely. Reporting the failure is still right: silently returning a
 			// cheerful result would leave the user with a tool card claiming a
 			// picture that exists nowhere.
-			return "", fmt.Errorf("das erzeugte Bild konnte nicht gespeichert werden: %w", err)
+			return "", uimsg.Detailf("tools.imageSaveFailed",
+				fmt.Sprintf("the generated picture could not be saved: %v", err), err)
 		}
 		used[name] = true
 	}
@@ -390,7 +392,7 @@ func (s *Service) imageSettings() config.ImageSettings {
 // of new plumbing — and the frontend already renders a message's attachments.
 func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img images.Image, recipe *store.GenerationRecipe, derivation *store.Derivation) (store.Attachment, error) {
 	if s.Store == nil {
-		return store.Attachment{}, fmt.Errorf("kein Speicher verfügbar")
+		return store.Attachment{}, uimsg.Detailf("tools.noStore", "no storage is available, so the picture cannot be filed")
 	}
 	now := time.Now()
 	// The estimate is the app's shared one for an image payload, so the context
@@ -559,7 +561,7 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 		return store.Attachment{}, images.ErrNotConfigured
 	}
 	if s.Store == nil {
-		return store.Attachment{}, fmt.Errorf("kein Speicher verfügbar")
+		return store.Attachment{}, uimsg.Detailf("tools.noStore", "no storage is available, so the picture cannot be redrawn")
 	}
 	source, err := s.Store.GetAttachment(attachmentID)
 	if err != nil {
@@ -568,15 +570,15 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 	if source.Generation == nil {
 		// An uploaded file, a scraped page, or a picture drawn before the recipe was
 		// recorded. Naming the reason beats drawing something unrelated to it.
-		return store.Attachment{}, fmt.Errorf(
-			"%s hat kein Rezept: nur ein von KiChat erzeugtes Bild lässt sich erneut zeichnen",
+		return store.Attachment{}, uimsg.Detailf("tools.noRecipe",
+			fmt.Sprintf("%s has no recipe; only a picture KiChat drew itself can be redrawn", source.Filename),
 			source.Filename)
 	}
 	if strings.TrimSpace(recipe.Prompt) == "" {
 		// A picture with no prompt is a blank canvas: the server draws something arbitrary
 		// and charges for it. The editor disables the button for this, but a request can
 		// arrive from anywhere.
-		return store.Attachment{}, errors.New("der Bild-Prompt ist leer")
+		return store.Attachment{}, uimsg.Detailf("tools.emptyPrompt", "the stored recipe has an empty prompt")
 	}
 	req := requestFromRecipe(recipe)
 	// A redraw is drawn by the pipeline too: a stored recipe that asked for a second pass
@@ -745,10 +747,10 @@ func verifyHiresOutput(req images.Request, result images.Result) error {
 			continue
 		}
 		if width < wantWidth || height < wantHeight || width > maxWidth || height > maxHeight {
-			return fmt.Errorf(
-				"die zweite Zeichenstufe hat das Bild nicht auf die erwartete Größe vergrößert "+
-					"(%dx%d statt %dx%d bis %dx%d): %w",
-				width, height, wantWidth, wantHeight, maxWidth, maxHeight, images.ErrHiresUnsupported)
+			return uimsg.Wrapf("tools.hiresSize",
+				fmt.Sprintf("the second drawing pass returned %dx%d instead of %dx%d to %dx%d",
+					width, height, wantWidth, wantHeight, maxWidth, maxHeight),
+				images.ErrHiresUnsupported, width, height, wantWidth, wantHeight, maxWidth, maxHeight)
 		}
 	}
 	return nil

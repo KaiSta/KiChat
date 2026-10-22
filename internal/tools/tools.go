@@ -17,6 +17,7 @@ import (
 	"kichat/internal/llm"
 	"kichat/internal/research"
 	"kichat/internal/store"
+	"kichat/internal/uimsg"
 )
 
 // Tool names.
@@ -251,8 +252,17 @@ func (s *Service) Execute(ctx context.Context, chatID, name, argsJSON string) (s
 	case ToolGenerateImage:
 		return s.generateImage(ctx, chatID, argsJSON)
 	default:
-		return "", fmt.Errorf("unbekanntes Tool %q", name)
+		return "", uimsg.Detailf("tools.unknownTool",
+			fmt.Sprintf("no tool named %q exists; use one of the tools this request declares", name), name)
 	}
+}
+
+// badArguments is a call whose JSON could not be read. The model wrote it, so the
+// detail names what to resend rather than what the parser objected to, and the
+// window still shows a translated sentence.
+func badArguments(err error) error {
+	return uimsg.Detailf("tools.badArgs",
+		fmt.Sprintf("the arguments were not valid JSON: %v", err), err)
 }
 
 type searchArgs struct {
@@ -264,14 +274,14 @@ type searchArgs struct {
 func (s *Service) searchWeb(ctx context.Context, argsJSON string) (string, error) {
 	var args searchArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return "", fmt.Errorf("ungültige Argumente: %w", err)
+		return "", badArguments(err)
 	}
 	args.Query = strings.TrimSpace(args.Query)
 	if args.Query == "" {
-		return "", fmt.Errorf("query fehlt")
+		return "", uimsg.Detailf("tools.queryMissing", "the query argument is empty")
 	}
 	if s.Chain == nil {
-		return "", fmt.Errorf("Websuche ist nicht konfiguriert")
+		return "", uimsg.Detailf("tools.noSearch", "web search is not configured, so this tool cannot run")
 	}
 	outcome, err := s.Chain.Search(ctx, args.Query, research.SearchRequest{
 		Count:     looseInt(args.Count, 8),
@@ -322,14 +332,14 @@ type scrapeArgs struct {
 func (s *Service) scrapeURL(ctx context.Context, argsJSON string) (string, error) {
 	var args scrapeArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return "", fmt.Errorf("ungültige Argumente: %w", err)
+		return "", badArguments(err)
 	}
 	args.URL = strings.TrimSpace(args.URL)
 	if args.URL == "" {
-		return "", fmt.Errorf("url fehlt")
+		return "", uimsg.Detailf("tools.urlMissing", "the url argument is empty")
 	}
 	if s.Scraper == nil {
-		return "", fmt.Errorf("Web-Scraping ist nicht konfiguriert")
+		return "", uimsg.Detailf("tools.noScrape", "web scraping is not configured, so this tool cannot run")
 	}
 	maxTokens := looseInt(args.MaxTokens, s.ScrapeMaxTokens)
 	if maxTokens <= 0 {
@@ -377,13 +387,13 @@ type searchDocsArgs struct {
 func (s *Service) searchDocs(chatID, argsJSON string) (string, error) {
 	var args searchDocsArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return "", fmt.Errorf("ungültige Argumente: %w", err)
+		return "", badArguments(err)
 	}
 	if s.Store == nil {
-		return "", fmt.Errorf("Dokumentensuche ist nicht verfügbar")
+		return "", uimsg.Detailf("tools.noDocsSearch", "document search is not available in this build")
 	}
 	if !s.Store.FTS {
-		return "", fmt.Errorf("Volltextsuche ist in diesem Build nicht verfügbar")
+		return "", uimsg.Detailf("tools.noFts", "full-text search is not available in this build")
 	}
 	hits, err := s.Store.SearchChunks(chatID, args.Query, looseInt(args.Limit, 6))
 	if err != nil {
@@ -417,10 +427,10 @@ type readPagesArgs struct {
 func (s *Service) readPages(chatID, argsJSON string) (string, error) {
 	var args readPagesArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return "", fmt.Errorf("ungültige Argumente: %w", err)
+		return "", badArguments(err)
 	}
 	if s.Store == nil {
-		return "", fmt.Errorf("Dokumentenzugriff ist nicht verfügbar")
+		return "", uimsg.Detailf("tools.noDocAccess", "document access is not available in this build")
 	}
 	docs, err := s.Store.ListDocuments(chatID)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"kichat/internal/images"
 	"kichat/internal/ingest"
 	"kichat/internal/store"
+	"kichat/internal/uimsg"
 )
 
 // Upscale enlarges one stored picture and files the copy beside it.
@@ -24,17 +25,19 @@ import (
 // so the two can be compared and the original stays exactly as it was.
 func (s *Service) Upscale(ctx context.Context, attachmentID string, req images.UpscaleRequest) (store.Attachment, error) {
 	if s.Store == nil {
-		return store.Attachment{}, fmt.Errorf("kein Speicher verfügbar")
+		return store.Attachment{}, uimsg.Detailf("tools.noStore", "no storage is available, so the enlargement cannot be filed")
 	}
 	source, err := s.Store.GetAttachment(attachmentID)
 	if err != nil {
 		return store.Attachment{}, err
 	}
 	if source.Kind != string(ingest.KindImage) && !strings.HasPrefix(strings.ToLower(source.Mime), "image/") {
-		return store.Attachment{}, fmt.Errorf("%s ist kein Bild", source.Filename)
+		return store.Attachment{}, uimsg.Detailf("tools.notAnImage",
+			fmt.Sprintf("%s is not an image", source.Filename), source.Filename)
 	}
 	if source.DocumentID == "" {
-		return store.Attachment{}, fmt.Errorf("das Bild von %s ist leer", source.Filename)
+		return store.Attachment{}, uimsg.Detailf("tools.emptyImage",
+			fmt.Sprintf("the image of %s is empty", source.Filename), source.Filename)
 	}
 	document, err := s.Store.GetDocument(source.DocumentID)
 	if err != nil {
@@ -42,7 +45,8 @@ func (s *Service) Upscale(ctx context.Context, attachmentID string, req images.U
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(document.Text))
 	if err != nil {
-		return store.Attachment{}, fmt.Errorf("das Bild von %s konnte nicht gelesen werden: %w", source.Filename, err)
+		return store.Attachment{}, uimsg.Detailf("tools.imageUnreadable",
+			fmt.Sprintf("the image of %s could not be read: %v", source.Filename, err), source.Filename)
 	}
 
 	cfg := s.imageSettings()

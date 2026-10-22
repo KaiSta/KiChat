@@ -970,6 +970,28 @@ const de = {
   'err.runtime.readVersion': 'Version von {{1}} lesen: {{2}}',
   'err.runtime.noVersionReported': '{{1}} meldet keine Version',
   'err.runtime.noVariant': 'für {{1}}/{{2}} gibt es im {{3}}-Build keinen {{4}}-Build',
+  'err.tools.unknownTool': 'unbekanntes Tool {{1}}',
+  'err.tools.badArgs': 'ungültige Argumente: {{1}}',
+  'err.tools.queryMissing': 'query fehlt',
+  'err.tools.noSearch': 'Websuche ist nicht konfiguriert',
+  'err.tools.urlMissing': 'url fehlt',
+  'err.tools.noScrape': 'Web-Scraping ist nicht konfiguriert',
+  'err.tools.noDocsSearch': 'Dokumentensuche ist nicht verfügbar',
+  'err.tools.noFts': 'Volltextsuche ist in diesem Build nicht verfügbar',
+  'err.tools.noDocAccess': 'Dokumentenzugriff ist nicht verfügbar',
+  'err.tools.promptMissing': 'prompt fehlt — ein Bild braucht eine Beschreibung',
+  'err.tools.imageNamesUnreadable':
+    'die vergebenen Bildnamen konnten nicht gelesen werden: {{1}}',
+  'err.tools.imageSaveFailed': 'das erzeugte Bild konnte nicht gespeichert werden: {{1}}',
+  'err.tools.noStore': 'kein Speicher verfügbar',
+  'err.tools.noRecipe':
+    '{{1}} hat kein Rezept: nur ein von KiChat erzeugtes Bild lässt sich erneut zeichnen',
+  'err.tools.emptyPrompt': 'der Bild-Prompt ist leer',
+  'err.tools.hiresSize':
+    'die zweite Zeichenstufe hat das Bild nicht auf die erwartete Größe vergrößert ({{1}}x{{2}} statt {{3}}x{{4}} bis {{5}}x{{6}})',
+  'err.tools.notAnImage': '{{1}} ist kein Bild',
+  'err.tools.emptyImage': 'das Bild von {{1}} ist leer',
+  'err.tools.imageUnreadable': 'das Bild von {{1}} konnte nicht gelesen werden: {{2}}',
 } as const
 
 /**
@@ -1903,6 +1925,27 @@ const en: Record<keyof typeof de, string> = {
   'err.runtime.readVersion': 'reading the version of {{1}}: {{2}}',
   'err.runtime.noVersionReported': '{{1}} reports no version',
   'err.runtime.noVariant': 'the {{3}} build has no {{4}} build for {{1}}/{{2}}',
+  'err.tools.unknownTool': 'unknown tool {{1}}',
+  'err.tools.badArgs': 'invalid arguments: {{1}}',
+  'err.tools.queryMissing': 'query is missing',
+  'err.tools.noSearch': 'web search is not configured',
+  'err.tools.urlMissing': 'url is missing',
+  'err.tools.noScrape': 'web scraping is not configured',
+  'err.tools.noDocsSearch': 'document search is not available',
+  'err.tools.noFts': 'full-text search is not available in this build',
+  'err.tools.noDocAccess': 'document access is not available',
+  'err.tools.promptMissing': 'prompt is missing — a picture needs a description',
+  'err.tools.imageNamesUnreadable':
+    'the filenames already used in this chat could not be read: {{1}}',
+  'err.tools.imageSaveFailed': 'the generated picture could not be saved: {{1}}',
+  'err.tools.noStore': 'no storage is available',
+  'err.tools.noRecipe': '{{1}} has no recipe: only a picture KiChat drew itself can be redrawn',
+  'err.tools.emptyPrompt': 'the picture prompt is empty',
+  'err.tools.hiresSize':
+    'the second drawing pass did not enlarge the picture to the expected size ({{1}}x{{2}} instead of {{3}}x{{4}} to {{5}}x{{6}})',
+  'err.tools.notAnImage': '{{1}} is not an image',
+  'err.tools.emptyImage': 'the image of {{1}} is empty',
+  'err.tools.imageUnreadable': 'the image of {{1}} could not be read: {{2}}',
 }
 
 const zh: Record<keyof typeof de, string> = {
@@ -2764,6 +2807,25 @@ const zh: Record<keyof typeof de, string> = {
   'err.runtime.readVersion': '读取 {{1}} 的版本：{{2}}',
   'err.runtime.noVersionReported': '{{1}} 未报告版本',
   'err.runtime.noVariant': '{{3}} 构建没有适用于 {{1}}/{{2}} 的 {{4}} 构建',
+  'err.tools.unknownTool': '未知工具 {{1}}',
+  'err.tools.badArgs': '参数无效：{{1}}',
+  'err.tools.queryMissing': '缺少 query',
+  'err.tools.noSearch': '未配置网页搜索',
+  'err.tools.urlMissing': '缺少 url',
+  'err.tools.noScrape': '未配置网页抓取',
+  'err.tools.noDocsSearch': '文档搜索不可用',
+  'err.tools.noFts': '此构建中没有全文搜索',
+  'err.tools.noDocAccess': '文档访问不可用',
+  'err.tools.promptMissing': '缺少 prompt——图片需要描述',
+  'err.tools.imageNamesUnreadable': '无法读取已使用的图片名称：{{1}}',
+  'err.tools.imageSaveFailed': '无法保存生成的图片：{{1}}',
+  'err.tools.noStore': '没有可用的存储',
+  'err.tools.noRecipe': '{{1}} 没有配方：只有 KiChat 生成的图片才能重新绘制',
+  'err.tools.emptyPrompt': '图片提示词为空',
+  'err.tools.hiresSize': '第二遍绘制没有把图片放大到预期尺寸（{{1}}x{{2}}，应为 {{3}}x{{4}} 至 {{5}}x{{6}}）',
+  'err.tools.notAnImage': '{{1}} 不是图片',
+  'err.tools.emptyImage': '{{1}} 的图片为空',
+  'err.tools.imageUnreadable': '无法读取 {{1}} 的图片：{{2}}',
 }
 
 const dictionaries: Record<Lang, Record<MessageKey, string>> = { de, en, zh }
