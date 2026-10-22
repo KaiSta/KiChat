@@ -40,7 +40,11 @@ permissions:
 
 # Same pin as ci.yml, for the same reason: the CLI renders the project template
 # and drives the build, so a CLI from another version builds against something
-# the library does not match.
+# the library does not match. The actions are ci.yml's versions too — checkout v5,
+# setup-go v6, setup-node v5, the first majors that run on Node 24 (ci.yml's header
+# records why those and not the newest) — so a release is built by the same
+# toolchain the gate validated. The artifact actions have no earlier major that
+# runs on Node 24, so they are simply current.
 env:
   WAILS_VERSION: v2.15.0
   # `github.ref_name` is the tag on a tag push and the *branch* on a manual run,
@@ -58,7 +62,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -110,14 +114,14 @@ jobs:
       # ships (4.1 only), the same way ci.yml's linux job does it.
       GOFLAGS: -tags=webkit2_41
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -196,14 +200,14 @@ jobs:
         shell: pwsh
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -273,14 +277,14 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -344,7 +348,7 @@ jobs:
       # workflow needs; the token is otherwise read-only.
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 

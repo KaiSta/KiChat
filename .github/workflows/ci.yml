@@ -24,6 +24,23 @@ permissions:
 # drives the build, so a CLI from another version builds against something the
 # library does not match; README's `@latest` is the instruction for a person
 # setting up a machine, not for a gate that has to be reproducible.
+#
+# The actions are pinned to the first major each one published that runs on
+# Node 24 — checkout v5, setup-go v6, setup-node v5 — because Node 20 was
+# deprecated on runners and every job now reports that it is being forced onto
+# Node 24. That warning has the shape of the v3 artifact-action notice, which ended
+# in a hard block, so the runtime is not something a gate should be behind on.
+#
+# Some of those majors changed something else too, and each was checked against
+# this repository rather than assumed harmless: setup-go v6 reworks toolchain
+# selection (go.mod carries `go 1.26.0` and no `toolchain` line, which is the
+# version it then installs), setup-node v5 turns caching on by itself only when
+# package.json has a `packageManager` field (this one does not, and `cache: npm` is
+# explicit here), and checkout v5 asks for a runner of 2.327.1 or newer, which a
+# GitHub-hosted runner is. The majors after them — checkout v6/v7, setup-go v7,
+# setup-node v7 — are not taken: their breaking changes are unrelated to the
+# runtime, so adopting them is a separate decision with its own check, not a side
+# effect of this one.
 env:
   WAILS_VERSION: v2.15.0
 
@@ -41,9 +58,9 @@ jobs:
       # link here. It is inert on the GOOS=windows and GOOS=darwin vets.
       GOFLAGS: -tags=webkit2_41
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -51,7 +68,7 @@ jobs:
       # Node 22, because the lockfile's platform-gated optional dependencies need
       # npm 10 (the Makefile's `deps` target records what npm 9 does to Tailwind's
       # native binding), and Vite 7 needs 20.19+/22.12+.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -90,14 +107,14 @@ jobs:
         shell: pwsh
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -141,14 +158,14 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
