@@ -695,14 +695,21 @@ the **CI gate** is `.github/workflows/ci.yml`, which runs the Makefile targets o
    is exactly the class of defect a test there would have caught. Either commit a
    placeholder `frontend/dist` so `package main` compiles for testing, or move the
    bindings behind an `internal/app` package.
-3. **Finish localising the backend's text.** The bridge now answers with codes
-   (`internal/uimsg`) that the dictionaries translate, so a failed bound call reads in the
-   window's language. The deeper packages (`internal/chat`, `internal/llm`,
-   `internal/runtime`, `internal/ingest`, `internal/tools`) still return German sentences,
-   and those reach a toast as text whenever the bridge passes one through; converting them
-   is the same change repeated there, with `i18n_test.go` already failing a code that has
-   no sentence in all three dictionaries. Tool output and seeded search text are prompt
-   content for the model, not UI text, and should stay as they are.
+3. **Localise the backend's remaining UI text.** Every error a bound call can return now
+   carries a code (`internal/uimsg`) that the dictionaries translate — in the bridge and
+   in `internal/chat`, `internal/llm`, `internal/runtime`, `internal/ingest` and
+   `internal/tools` alike — and `i18n_test.go` fails a code that has no sentence in all
+   three dictionaries. What is still German there is the text that is not an error: the
+   turn's warnings (`events.Warning`), the context panel's section labels and compaction
+   reasons, and the ingest warnings an attachment carries. Those reach a toast, a card or
+   a panel the user reads, so they are the same change again over a different channel;
+   warnings would need a code-rendering path of their own, since a warning is not an
+   `error`.
+
+   Prompt content stays as it is, deliberately: tool schemas, tool results, seeded search
+   text and the system prompts are read by the model, not the user. A tool failure is the
+   one message with both audiences, which is why `uimsg.Detailf` carries a sentence for
+   the model beside the code the window translates.
 4. **Semantic retrieval over ingested documents.** FTS5 BM25 exists and documents are
    already chunked; embeddings (the local `text-embedding-nomic-embed-text-v1.5` is
    already available) would enable "ask a question across the whole library".

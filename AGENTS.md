@@ -44,6 +44,7 @@ Linux build needs `-tags webkit2_41`** because only webkit2gtk-4.1 is installed.
 | `internal/runtime` | llama.cpp install and supervision, GPU placement, model folders |
 | `internal/research`, `internal/tools`, `internal/ingest` | search/scrape, model tools, attachments |
 | `internal/store`, `internal/config`, `internal/secret`, `internal/events` | state, settings, keys, event names |
+| `internal/uimsg` | a user-facing message from Go as a dictionary key (`i18n:` payload, `err.*` entries) |
 | `frontend/src` | the window; `lib/i18n.ts` holds every user-facing string |
 
 [`CODE_MAP.md`](CODE_MAP.md) has the per-file detail, the storage schema, and a

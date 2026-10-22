@@ -60,6 +60,7 @@ Two rules keep this useful:
 | `internal/tools` | What the model can call, native schema *and* text protocol, plus `generate_image` | `tools.go`, `image.go` | `tools_test.go`, `image_test.go` |
 | `internal/secret` | API keys: OS keyring, encrypted-file fallback | `secret.go` (`New`, `NewIsolated`) | `secret_test.go` |
 | `internal/events` | The names of every Wails event, so emitters and the frontend cannot drift | `events.go` | — |
+| `internal/uimsg` | A user-facing failure from Go as a dictionary key and its arguments, since Wails marshals a bound method's error as text; `Detailf` adds the sentence the model reads | `uimsg.go` | `uimsg_test.go` (and `i18n_test.go` in the root, for the dictionary half) |
 | `internal/version` | Build identity filled by `-ldflags -X` | `version.go` | `version_test.go` |
 
 ## Frontend
