@@ -677,60 +677,58 @@ wails build                    # when webkit2gtk-4.0 is available
 - **A fresh clone does not build on Node 18 / npm 9** (see §6). This is a toolchain
   limitation rather than a defect in the repository, but it does mean the repository
   alone is not sufficient to build on the machine it was developed on.
-- No CI, so none of the above is enforced automatically.
 
 ---
 
 ## 9. Roadmap
 
 Ordered by value, not effort. Shipped items are deleted rather than left to rot: the
-**error boundary** that was #1 here is in `App.tsx`, wrapping the view switch, and the
-event-name constants now live in `internal/events` so a mismatch fails the build.
+**error boundary** that was #1 here is in `App.tsx`, wrapping the view switch, the
+event-name constants now live in `internal/events` so a mismatch fails the build, and
+the **CI gate** is `.github/workflows/ci.yml`, which runs the Makefile targets on Linux
+(webkit2gtk-4.1), Windows and macOS rather than restating their commands.
 
-1. **CI on a clean clone** with Node 22 and `-tags webkit2_41`, running `go vet`,
-   `go test`, `tsc --noEmit` and a full build. This converts the build recipe and the
-   native-binding trap into a red build instead of a discovery. It is now the highest
-   value item on this list by a wide margin: without it, the frontend cannot be checked
-   automatically at all, and `go vet ./...` cannot run on a clone that has not been
-   built yet.
-2. **Move the development toolchain to Node 22.** Fixes the clone build, restores
+1. **Move the development toolchain to Node 22.** Fixes the clone build, restores
    `wails dev`, and removes the recurring `--no-save` step.
-3. **Give the binding layer tests.** `app.go` and `api.go` are ~1,000 lines with no test
+2. **Give the binding layer tests.** `app.go` and `api.go` are ~1,000 lines with no test
    file, and they are the surface the UI actually calls. The event mismatch fixed above
    is exactly the class of defect a test there would have caught. Either commit a
    placeholder `frontend/dist` so `package main` compiles for testing, or move the
    bindings behind an `internal/app` package.
-4. **Localise the backend's user-facing text.** All UI-facing errors and warnings are
-   German literals emitted from Go, so the English and Chinese UI show German toasts. The fix is
-   for Go to emit stable codes and let the frontend translate, keeping today's strings
-   as the `de` entries. Tool output and seeded search text are prompt content for the
-   model, not UI text, and should stay as they are.
-5. **Semantic retrieval over ingested documents.** FTS5 BM25 exists and documents are
+3. **Finish localising the backend's text.** The bridge now answers with codes
+   (`internal/uimsg`) that the dictionaries translate, so a failed bound call reads in the
+   window's language. The deeper packages (`internal/chat`, `internal/llm`,
+   `internal/runtime`, `internal/ingest`, `internal/tools`) still return German sentences,
+   and those reach a toast as text whenever the bridge passes one through; converting them
+   is the same change repeated there, with `i18n_test.go` already failing a code that has
+   no sentence in all three dictionaries. Tool output and seeded search text are prompt
+   content for the model, not UI text, and should stay as they are.
+4. **Semantic retrieval over ingested documents.** FTS5 BM25 exists and documents are
    already chunked; embeddings (the local `text-embedding-nomic-embed-text-v1.5` is
    already available) would enable "ask a question across the whole library".
-6. **Citation-fidelity checker.** Nothing currently verifies that a claim appears in the
+5. **Citation-fidelity checker.** Nothing currently verifies that a claim appears in the
    cited source. A post-generation pass over the fetched text would make research mode
    trustworthy rather than merely plausible.
-7. **MCP client**, so tools come from the ecosystem instead of being hardcoded.
-8. **Multi-model arena** — one prompt across several local models, side by side.
-9. **Model download inside the app.** The picker now lists the GGUF files a user already
+6. **MCP client**, so tools come from the ecosystem instead of being hardcoded.
+7. **Multi-model arena** — one prompt across several local models, side by side.
+8. **Model download inside the app.** The picker now lists the GGUF files a user already
    has — LM Studio's folder first — so nobody has to fetch a file twice, but a *fresh*
    machine still has nothing to list. A search over Hugging Face's GGUF repos, a
    digest-checked download into `~/.config/kichat/models`, and the same progress row the
    installer already has would close the last gap between "install KiChat" and "chat with
    a local model".
-10. **Automatic model fallback** when a backend is down or the context does not fit.
-11. **Cross-chat memory** backed by the same FTS index.
-12. **SourcesPanel UI** for the existing `scrapeIntoChat` binding.
-13. Vision support for the VLM models already listed by LM Studio. The half that
+9. **Automatic model fallback** when a backend is down or the context does not fit.
+10. **Cross-chat memory** backed by the same FTS index.
+11. **SourcesPanel UI** for the existing `scrapeIntoChat` binding.
+12. Vision support for the VLM models already listed by LM Studio. The half that
     accepts an image is already there — a picture is an image attachment, and the
     assembly turns it into an image part (IMAGES.md §4); what is missing is the UI
     that lets a user drop one in for a model that can read it.
-14. More image backends behind the same `images.Provider`: ComfyUI (a workflow graph,
+13. More image backends behind the same `images.Provider`: ComfyUI (a workflow graph,
     then poll `/history` and fetch `/view`) and a hosted OpenAI-style
     `/v1/images/generations`. The interface has no HTTP in it, which is what makes
     this an addition rather than a rewrite.
-15. Remaining exploratory ideas: document generation, model benchmarking, branching
+14. Remaining exploratory ideas: document generation, model benchmarking, branching
     conversations, and scheduled watch tasks.
 
 ---

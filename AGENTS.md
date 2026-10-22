@@ -1,6 +1,6 @@
 # Working on KiChat
 
-KiChat is a local-first AI desktop workspace: `main.go` + `app.go` + `api.go` over
+KiChat is a local-first AI desktop workspace: `main.go` + `app.go` + `api*.go` over
 Go packages in `internal/`, and a React 19 / TypeScript UI in `frontend/`. It is a
 **Wails v2** application (Go binary + webkit2gtk on Linux, WebView2 on Windows),
 talking to LM Studio (`:1234`), Ollama (`:11434`), a llama.cpp server it can install
@@ -37,7 +37,7 @@ Linux build needs `-tags webkit2_41`** because only webkit2gtk-4.1 is installed.
 | Path | What |
 | --- | --- |
 | `main.go` | Wails bootstrap, embedded `frontend/dist`, `--version` |
-| `app.go`, `api.go` | the bridge: every method the window can call |
+| `app.go`, `api*.go` | the bridge: every method the window can call, split by domain (`api.go` holds settings, keys and the shared types) |
 | `internal/chat` | context assembly, the model/tool loop, compaction, pacing |
 | `internal/llm` | the provider interface and every chat backend |
 | `internal/images` | picture generation: WebUI, `sd-cli`, managed `sd-server`; and enlarging: Lanczos, optional Real-ESRGAN |
@@ -112,6 +112,13 @@ cd frontend && npx tsc --noEmit             # or: npm run build (tsc && vite bui
 go test ./... -count=1
 wails build -tags webkit2_41                # the last one, into build/bin/kichat
 ```
+
+CI runs these targets rather than a second copy of the commands:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) has `make check` and `make build`
+on Linux (the only platform that links, and the one `-tags webkit2_41` exists for),
+`make windows` on Windows and `make darwin` on macOS. A job that restated a recipe
+would be free to drift from it, so a change to the build belongs in the Makefile and is
+then picked up by every job.
 
 `wails build` regenerates `frontend/wailsjs/go/models.ts`: after changing a Go
 struct that crosses the bridge, build (or `wails generate module`) **before**

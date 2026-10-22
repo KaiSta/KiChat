@@ -16,7 +16,7 @@ Two rules keep this useful:
 
     frontend/src (React 19)          ← the window
         │  window.go.* (Wails binds every exported App method)
-    api.go / app.go (package main)   ← the bridge: settings, chats, images, files
+    api*.go / app.go (package main)  ← the bridge: settings, chats, images, files
         │
     internal/*                       ← everything that can be tested without a window
         │
@@ -31,7 +31,11 @@ Two rules keep this useful:
 | --- | --- |
 | `main.go` | Wails bootstrap, window/menu options, `go:embed all:frontend/dist`, `--version` |
 | `app.go` | The `App` struct and the chat lifecycle: send, regenerate, stop, chats CRUD, `GetBudget` |
-| `api.go` | The rest of the bridge: settings, backends and keys, runtime, images, attachments, search, prompts, compaction |
+| `api.go` | The bridge's own vocabulary: settings, backends and keys, app info, search status, `OpenExternal` — and the struct types the other bridge files return |
+| `api_runtime.go` | llama.cpp as the app installs and supervises it: builds, GPU families, model folders, start/stop, the image server's process |
+| `api_models.go` | Listing models and probing them, overrides, prompt variables, the model-file pickers |
+| `api_chat.go` | Compaction, attachments, chats' documents and chunk search, web search and scrape |
+| `api_images.go` | Picture generation: status, redraw, progress, the one-draw slot, cache, saving and reading an attachment's image |
 | `api_upscale.go` | The enlarging bridge: `UpscaleAttachment`, the upscaler status/test/dialog/install (`InstallUpscaler`, `GetUpscalerInstall`), the upscale bound |
 | `internal/` | All logic, one package per subsystem (below) |
 | `frontend/` | React 19 + TypeScript; `frontend/dist` is embedded by the Go build |
@@ -66,7 +70,7 @@ Two rules keep this useful:
 | `frontend/src/components/ChatView.tsx` | The conversation: message list, composer, attachments, context meter, stop |
 | `frontend/src/components/MessageParts.tsx` | How one message renders — the split between settled and streaming pieces |
 | `frontend/src/components/Markdown.tsx` | The markdown pipeline: remark/rehype, KaTeX, highlight.js |
-| `frontend/src/components/Settings.tsx` | Every settings tab, including the backend rows and their kind-specific fields |
+| `frontend/src/components/settings/` | The settings screen: `Settings.tsx` is the shell and tab strip, `shared.tsx` the `Section`/`Field` helpers, and one file per tab (`GeneralTab`, `BackendsTab`, `ImagesTab`, `PromptTab`, `ResearchTab`, `ContextTab`, `PayloadTab`) |
 | `frontend/src/components/ModelSwitcher.tsx` | Model picker with capability badges and window size |
 | `frontend/src/lib/api.ts` | The typed wrapper over the generated `window.go` bindings |
 | `frontend/src/lib/i18n.ts` | Every user-facing string, in `de`, `en` and `zh` |
@@ -103,7 +107,7 @@ progress uses a name from `internal/events`.
 
 | To add… | Touch | Skill |
 | --- | --- | --- |
-| A chat backend (hosted API) | `internal/llm/<name>.go`, `registry.go`, `DefaultBackendConfigs`, `Settings.tsx` kind lists, docs | [`add-llm-backend`](.claude/skills/add-llm-backend/SKILL.md) |
+| A chat backend (hosted API) | `internal/llm/<name>.go`, `registry.go`, `DefaultBackendConfigs`, `settings/BackendsTab.tsx` kind lists, docs | [`add-llm-backend`](.claude/skills/add-llm-backend/SKILL.md) |
 | An image backend | `internal/images/<name>.go` implementing `Provider`, `images.Provider` construction in `app.go`, settings | [`add-image-backend`](.claude/skills/add-image-backend/SKILL.md) |
 | A setting | `internal/config/config.go` (+ `clone_test.go`), the settings UI, i18n | [`change-settings`](.claude/skills/change-settings/SKILL.md) |
 | An enlarging method | `internal/images/upscale.go` (`Method*`, the switch in `Upscale`), the Enlarge panel, i18n | [`UPSCALING.md`](UPSCALING.md) |
