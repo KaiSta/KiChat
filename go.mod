@@ -12,7 +12,7 @@ require (
 	github.com/xuri/excelize/v2 v2.11.0
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/image v0.41.0
-	golang.org/x/text v0.42.0
+	golang.org/x/text v0.43.0
 	modernc.org/sqlite v1.60.1
 )
 
