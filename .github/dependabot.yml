@@ -1,0 +1,24 @@
+# Security alerts need no config: Dependabot reads go.mod against the advisory
+# database and says when a pinned module is affected. What they do not do is open
+# a pull request when a fix is finally released — that is this file, and it is the
+# half that matters here.
+#
+# excelize is the reason it exists. v2.11.0 is what go.mod pins; the panic classes
+# internal/ingest guards against with recover are fixed only on master, with no
+# v2.11.1 tag published, so the release that carries the fixes cannot be taken
+# today. Daily rather than weekly because the point is the gap between that tag
+# appearing and the upgrade landing: a version bump is a one-line diff that
+# `make check` validates, not something that needs batching.
+#
+# The security alerts themselves are left open on purpose. They are the other
+# signal — the moment a fixed release exists they say so — and a dismissed alert
+# stays dismissed, which would hide exactly the news this file is waiting for.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
