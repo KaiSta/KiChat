@@ -251,11 +251,13 @@ func (a *App) ensure() error {
 }
 
 func (a *App) init() error {
-	dir, err := os.UserConfigDir()
+	dir, err := config.DataDir()
 	if err != nil {
-		dir = "."
+		// No printable config directory: keep the fallback beside the working
+		// directory rather than refusing to start at all.
+		dir = "kichat"
 	}
-	a.dataDir = filepath.Join(dir, "kichat")
+	a.dataDir = dir
 	if err := os.MkdirAll(a.dataDir, 0o755); err != nil {
 		return fmt.Errorf("Datenverzeichnis anlegen: %w", err)
 	}

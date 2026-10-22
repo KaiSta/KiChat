@@ -11,6 +11,8 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 
+	"kichat/internal/config"
+	"kichat/internal/logfile"
 	"kichat/internal/version"
 )
 
@@ -39,8 +41,19 @@ func main() {
 	// Create an instance of the app structure
 	app := NewApp()
 
+	// Opened before the window exists: `wails.Run` failing is the one failure with no
+	// UI to report through, and a launch from a menu, a .desktop file or Explorer has
+	// no terminal for stderr either. Without this a failure to start left no trace at
+	// all, which is the report "it just does not open".
+	logDir, err := config.DataDir()
+	if err != nil {
+		logDir = "."
+	}
+	logger, closeLog := logfile.Open(logDir)
+	logger.Printf("KiChat %s starting", version.String())
+
 	// Create application with options
-	err := wails.Run(&options.App{
+	err = wails.Run(&options.App{
 		Title:     "KiChat",
 		Width:     1440,
 		Height:    900,
@@ -96,8 +109,17 @@ func main() {
 	})
 
 	if err != nil {
-		println("Error:", err.Error())
+		logger.Printf("startup failed: %v", err)
+		// The stderr line is for the shell case; the log above is what survives a
+		// launch from a menu.
+		fmt.Fprintf(os.Stderr, "KiChat: %v\n", err)
+		closeLog()
+		// Non-zero, because a program that could not open its window did not run.
+		// Returning here would report success to whatever started it.
+		os.Exit(1)
 	}
+	logger.Printf("KiChat %s closed", version.String())
+	closeLog()
 }
 
 // wantsVersion reports whether the command line asked for the version.

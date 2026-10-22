@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +20,19 @@ import (
 // settingsKey is the single row the whole settings blob lives under, so adding
 // a field never requires a migration.
 const settingsKey = "settings"
+
+// DataDir is the directory every piece of KiChat's own state lives in: the SQLite
+// file, the encrypted-secret fallback, the downloaded runtime and upscaler, and the
+// startup log. It is named once, here, because a second spelling of `kichat` would
+// put the log beside a directory nobody looks in — and a log nobody finds is the
+// same as no log.
+func DataDir() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "kichat"), nil
+}
 
 // Settings is the complete user configuration.
 type Settings struct {
