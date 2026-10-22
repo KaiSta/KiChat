@@ -24,6 +24,12 @@ const Prefix = "i18n:"
 type Message struct {
 	Code string   `json:"code"`
 	Args []string `json:"args,omitempty"`
+	// Detail is a sentence for the one reader that is not the window: the model,
+	// which receives a failed tool call as the tool's result. A code is not
+	// something a model can act on — "query is missing" tells it what to fix,
+	// `i18n:{"code":"tools.queryMissing"}` does not. The window ignores this
+	// field and translates the code like any other.
+	Detail string `json:"detail,omitempty"`
 }
 
 // Errorf builds an error whose text is a code and the arguments to put in it.
@@ -34,7 +40,53 @@ type Message struct {
 // frontend falls back to this raw text, which names the condition rather than
 // silently showing nothing.
 func Errorf(code string, args ...any) error {
-	message := Message{Code: code, Args: make([]string, 0, len(args))}
+	return build(Message{Code: code}, args)
+}
+
+// Detailf is Errorf for a failure that is also handed to the model as text.
+//
+// Both halves are needed because the two readers want different things: the window
+// wants a sentence in its own language, and the model wants the condition in words
+// it can correct a tool call from. detail is that sentence; the dictionaries hold
+// the others.
+func Detailf(code, detail string, args ...any) error {
+	return build(Message{Code: code, Detail: detail}, args)
+}
+
+// Wrapf is Errorf with a cause kept for errors.Is. The text is still the code, so the
+// window translates it like any other message; the cause stays reachable for the
+// caller that tests for it, which is the one thing fmt.Errorf could do and a code
+// cannot. An empty detail leaves the message with none, as Errorf does.
+func Wrapf(code, detail string, cause error, args ...any) error {
+	return &wrappedError{message: build(Message{Code: code, Detail: detail}, args), cause: cause}
+}
+
+type wrappedError struct {
+	message error
+	cause   error
+}
+
+func (e *wrappedError) Error() string { return e.message.Error() }
+
+func (e *wrappedError) Unwrap() error { return e.cause }
+
+// Sentence returns the text a reader that is not the window should see: the detail
+// when the message carries one, the error's own text otherwise. An error from a
+// package that does not use this package reads exactly as it did before.
+func Sentence(err error) string {
+	if err == nil {
+		return ""
+	}
+	if message, ok := parse(err.Error()); ok && message.Detail != "" {
+		return message.Detail
+	}
+	return err.Error()
+}
+
+// build stringifies the arguments and renders the payload both the window and the
+// tests read back.
+func build(message Message, args []any) error {
+	message.Args = make([]string, 0, len(args))
 	for _, arg := range args {
 		message.Args = append(message.Args, fmt.Sprint(arg))
 	}
@@ -42,14 +94,20 @@ func Errorf(code string, args ...any) error {
 	if err != nil {
 		// Only strings go in, so this is unreachable; naming the code is still better
 		// than dropping the failure entirely.
-		return fmt.Errorf("%s%s", Prefix, code)
+		return fmt.Errorf("%s%s", Prefix, message.Code)
 	}
 	return fmt.Errorf("%s%s", Prefix, payload)
 }
 
-// parse splits a message back into its code and arguments. Unexported because only
-// the test needs it: the frontend does the parsing that matters, and an exported
-// Go-side parser would be a second implementation to keep in step.
+// Parse splits an error's text back into its code and arguments.
+//
+// The window is the reader this format exists for, but a test in another package that
+// wants to assert *which* refusal a call produced needs the same split — and pinning
+// English prose in Go is what this package replaced.
+func Parse(text string) (Message, bool) { return parse(text) }
+
+// parse does the work behind Parse and Sentence: one implementation, so a test and a
+// fallback reader cannot disagree about what a payload is.
 func parse(text string) (Message, bool) {
 	var message Message
 	if len(text) <= len(Prefix) || text[:len(Prefix)] != Prefix {

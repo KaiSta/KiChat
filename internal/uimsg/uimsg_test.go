@@ -1,6 +1,9 @@
 package uimsg
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestErrorfCarriesTheCodeAndItsArguments(t *testing.T) {
 	err := Errorf("attachment.noStoredImage", "photo.png", 3)
@@ -26,6 +29,33 @@ func TestErrorfWithoutArgumentsStaysParseable(t *testing.T) {
 	message, ok := parse(Errorf("image.serverNotRunning").Error())
 	if !ok || message.Code != "image.serverNotRunning" || len(message.Args) != 0 {
 		t.Fatalf("got %+v (ok=%v), want the code and no arguments", message, ok)
+	}
+}
+
+// A tool failure is read twice: the window translates the code, and the model gets
+// the detail. Both must survive the round trip, and the detail must not be inferred
+// from the code — it is the only copy written for the model.
+func TestDetailfCarriesASentenceForTheModel(t *testing.T) {
+	err := Detailf("tools.queryMissing", "the query argument is empty", "search_web")
+	message, ok := parse(err.Error())
+	if !ok || message.Code != "tools.queryMissing" {
+		t.Fatalf("got %+v (ok=%v), want the code", message, ok)
+	}
+	if message.Detail != "the query argument is empty" {
+		t.Errorf("detail is %q, want the sentence the model reads", message.Detail)
+	}
+	if got := Sentence(err); got != "the query argument is empty" {
+		t.Errorf("Sentence = %q, want the detail", got)
+	}
+}
+
+func TestSentenceLeavesPlainErrorsAlone(t *testing.T) {
+	if got := Sentence(errors.New("permission denied")); got != "permission denied" {
+		t.Errorf("Sentence = %q, want the error text unchanged", got)
+	}
+	codeOnly := Errorf("image.serverNotRunning")
+	if got := Sentence(codeOnly); got != codeOnly.Error() {
+		t.Errorf("Sentence of a code without a detail = %q, want %q", got, codeOnly.Error())
 	}
 }
 
