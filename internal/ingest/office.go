@@ -135,23 +135,34 @@ func extractPptx(data []byte) (string, int, []string, error) {
 }
 
 // extractXlsx renders each sheet as CSV, which keeps tables interpretable.
-func extractXlsx(data []byte) (string, int, []string, error) {
+//
+// It recovers from panics for the same reason extractPDFBuiltin does, and one is
+// known rather than hypothetical: excelize has no recover anywhere, and a workbook
+// whose pivot table names a field the pivot cache does not have panics with an
+// index out of range (measured against v2.11.0 — an 8 KB workbook with
+// `<dataField fld="99999">` and a two-field cache dies at pivotTable.go:1444 via
+// GetPivotTables). That particular call is not made here, but the file this
+// function is handed comes from a chat attachment, and a parser that ends the
+// process on a malformed one is worse than a spreadsheet that cannot be read.
+func extractXlsx(data []byte) (text string, sheets int, warnings []string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			text, sheets, warnings, err = "", 0, nil, uimsg.Errorf("ingest.xlsxCrashed", r)
+		}
+	}()
 	f, err := excelize.OpenReader(bytes.NewReader(data))
 	if err != nil {
 		return "", 0, nil, uimsg.Errorf("ingest.xlsxOpen", err)
 	}
 	defer f.Close()
 
-	sheets := f.GetSheetList()
-	if len(sheets) == 0 {
+	names := f.GetSheetList()
+	if len(names) == 0 {
 		return "", 0, nil, uimsg.Errorf("ingest.xlsxNoSheets")
 	}
-	var (
-		sb       strings.Builder
-		warnings []string
-	)
+	var sb strings.Builder
 	const maxRows = 2000
-	for _, sheet := range sheets {
+	for _, sheet := range names {
 		rows, err := f.GetRows(sheet)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("Blatt %q nicht lesbar", sheet))
@@ -172,7 +183,7 @@ func extractXlsx(data []byte) (string, int, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("Blatt %q auf %d Zeilen gekürzt", sheet, maxRows))
 		}
 	}
-	return normaliseLines(sb.String()), len(sheets), warnings, nil
+	return normaliseLines(sb.String()), len(names), warnings, nil
 }
 
 // --- ooxml plumbing --------------------------------------------------------
