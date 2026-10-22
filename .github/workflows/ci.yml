@@ -107,11 +107,21 @@ jobs:
       # AGENTS.md names as what a Windows build needs beside make. MSYS2's make
       # is the one that resolves /bin/bash; a native build of make hands the
       # string to CreateProcess and fails on the first recipe.
+      #
+      # path-type: inherit, because the action's default (minimal) hands the
+      # MSYS2 shell only Windows' own directories: the Go and Node that
+      # setup-go/setup-node installed are on the job's PATH but not inside this
+      # shell, and the first run failed with `go: command not found` and then
+      # npm resolved through the Makefile's Linux fallback
+      # (~/.local/node/bin/npm), which does not exist on a runner. The Makefile
+      # asks the toolchain which platform it is on, so the toolchain has to be
+      # reachable from this shell, not merely installed.
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           update: false
           install: make
+          path-type: inherit
 
       - name: Install the Wails CLI
         shell: pwsh
