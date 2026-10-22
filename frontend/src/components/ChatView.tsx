@@ -57,6 +57,26 @@ export function ChatView() {
   //    the same way.
   const pending = useStore(useShallow(pendingAttachments))
 
+  /* What a screen reader hears when a turn ends.
+   *
+   * A live region over the transcript would read every delta of a streaming answer,
+   * and scrolling a virtualised list mounts messages the reader is only passing on
+   * the way to a different one — both are noise. So the list is a plain `log` with
+   * announcements off, and the finished reply is read once, when `running` drops.
+   * Captured from `content` rather than the stream buffer: by the time the flag is
+   * false the store has the settled message, and that is the text worth hearing.
+   */
+  const [announcement, setAnnouncement] = useState('')
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (wasRunning.current && !running) {
+      const messages = chatState?.messages ?? []
+      const last = [...messages].reverse().find((m) => m.role === 'assistant' && m.content)
+      if (last) setAnnouncement(last.content.slice(0, 800))
+    }
+    wasRunning.current = running
+  }, [running, chatState?.messages])
+
   /* Following the newest content.
    *
    * Virtuoso's `followOutput` is not enough for a streamed reply, and the shortfall is
@@ -271,7 +291,14 @@ export function ChatView() {
       </div>
 
       {/* Messages */}
-      <div className="min-h-0 flex-1">
+      <div
+        className="min-h-0 flex-1"
+        role="log"
+        aria-label={t('chat.transcript')}
+        // A conversation, not a live region: the finished reply is announced once
+        // by the status region below, rather than a token at a time.
+        aria-live="off"
+      >
         {items.length === 0 ? (
           <div className="flex h-full items-center justify-center p-8">
             <div className="max-w-md text-center">
@@ -335,6 +362,7 @@ export function ChatView() {
                   type="button"
                   className="ml-1"
                   title={t('files.remove')}
+                  aria-label={`${t('files.remove')} ${a.filename}`}
                   onClick={async () => {
                     await App.RemoveAttachment(a.id)
                     await useStore.getState().refreshChatState()
@@ -348,7 +376,9 @@ export function ChatView() {
         )}
 
         {phase && phase !== 'idle' && (
-          <div className="mb-1 text-[11px]" style={{ color: 'var(--accent)' }}>
+          // Polite, because a wait is not an error: the reader is told that something
+          // is happening, and the reply itself arrives through the region below.
+          <div className="mb-1 text-[11px]" role="status" style={{ color: 'var(--accent)' }}>
             {phase === 'compacting'
               ? t('compact.running')
               : phase === 'tool'
@@ -380,6 +410,9 @@ export function ChatView() {
             className="textarea min-h-[42px] max-h-40 flex-1"
             rows={1}
             placeholder={t('chat.placeholder')}
+            // A placeholder is a hint, not a name: it disappears the moment the
+            // field has text, and a screen reader would then have nothing to call it.
+            aria-label={t('chat.composerLabel')}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
@@ -420,6 +453,12 @@ export function ChatView() {
           <ContextRecheck />
           <span className="faint ml-auto text-[11px]">{t('files.dropHint')}</span>
         </div>
+      </div>
+
+      {/* The one announcement a turn makes. Visually hidden, and empty until a reply
+          settles, so it never reads a partial answer. */}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {announcement}
       </div>
     </div>
   )
@@ -613,6 +652,7 @@ function SearchFirstToggle() {
     <button
       type="button"
       className={`btn btn-sm ${on ? 'btn-primary' : ''}`}
+      aria-pressed={on}
       // The label says what is switched, the tooltip says what switching it
       // actually does to the turn — a repeated label taught nothing.
       title={t('search.searchFirstHint')}

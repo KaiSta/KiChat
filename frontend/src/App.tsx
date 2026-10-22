@@ -4,7 +4,7 @@ import { LANGS } from './lib/i18n'
 import { useStore } from './store'
 import { ChatView } from './components/ChatView'
 import { ErrorBoundary } from './components/ErrorBoundary'
-import { Settings } from './components/Settings'
+import { Settings } from './components/settings/Settings'
 
 export default function App() {
   const bootstrap = useStore((s) => s.bootstrap)
@@ -255,10 +255,40 @@ function Sidebar() {
 
       {confirmDelete && (
         <div className="absolute inset-0 z-40 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.5)' }}>
-          <div className="card w-80 p-4">
-            <div className="mb-3">{t('nav.delete')}?</div>
+          {/* A confirmation that covers the window has to behave like one for a keyboard
+              and a screen reader too: it is a modal dialog, it takes focus to the safe
+              choice, Escape closes it, and Tab cycles inside it rather than walking
+              into the sidebar behind the overlay. */}
+          <div
+            className="card w-80 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="confirm-delete-title"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setConfirmDelete(null)
+                return
+              }
+              if (event.key !== 'Tab') return
+              const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('button')
+              const first = buttons[0]
+              const last = buttons[buttons.length - 1]
+              if (!first || !last) return
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault()
+                last.focus()
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault()
+                first.focus()
+              }
+            }}
+          >
+            <div id="confirm-delete-title" className="mb-3">
+              {t('nav.delete')}?
+            </div>
             <div className="flex justify-end gap-2">
-              <button type="button" className="btn" onClick={() => setConfirmDelete(null)}>
+              <button type="button" className="btn" autoFocus onClick={() => setConfirmDelete(null)}>
                 {t('common.cancel')}
               </button>
               <button

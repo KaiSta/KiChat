@@ -13,7 +13,8 @@ import {
   type main,
   type runtime,
 } from '../lib/api'
-import { useStore } from '../store'
+import type { MessageKey } from '../lib/i18n'
+import { errText, useStore } from '../store'
 import {
   buildModelSearchIndex,
   groupEntries,
@@ -179,7 +180,7 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
       }
       onClose()
     } catch (err) {
-      useStore.getState().toast('error', String(err))
+      useStore.getState().toast('error', errText(err))
     } finally {
       setBusy(false)
     }
@@ -336,7 +337,7 @@ export function ContextInspector({ onClose }: { onClose: () => void }) {
   )
 }
 
-function limitSourceLabel(source: string, t: (k: string) => string): string {
+function limitSourceLabel(source: string, t: (k: MessageKey) => string): string {
   switch (source) {
     case 'backend':
       return 'Backend'
@@ -354,7 +355,7 @@ function limitSourceLabel(source: string, t: (k: string) => string): string {
  * that could not be sent, while one a response published cost nothing — and only the
  * second makes the first oversized turn of a session avoidable.
  */
-function ceilingSourceLabel(source: string, t: (k: string) => string): string {
+function ceilingSourceLabel(source: string, t: (k: MessageKey) => string): string {
   switch (source) {
     case 'header':
       return t('context.ceilingFrom.header')
@@ -445,7 +446,7 @@ export function ModelSwitcher() {
         if (live) setCheck(st)
       })
       .catch((err) => {
-        if (live) setCheck({ busy: false, done: 0, total: 0, hidden: 0, hiddenTotal: 0, error: String(err) })
+        if (live) setCheck({ busy: false, done: 0, total: 0, hidden: 0, hiddenTotal: 0, error: errText(err) })
       })
     return () => {
       live = false
@@ -470,7 +471,7 @@ export function ModelSwitcher() {
         .catch((err) => {
           // A failed poll is not worth a toast while the row can say it, but it
           // has to stop the interval rather than spin against a broken bridge.
-          setCheck((prev) => (prev ? { ...prev, busy: false, error: String(err) } : prev))
+          setCheck((prev) => (prev ? { ...prev, busy: false, error: errText(err) } : prev))
         })
     }, 900)
     return () => window.clearInterval(id)
@@ -491,7 +492,7 @@ export function ModelSwitcher() {
       // A sweep that could not even start — an unknown backend, an unreachable
       // one, a listing that came back empty — has to be said out loud, because
       // nothing else in the panel would show it.
-      useStore.getState().toast('error', String(err))
+      useStore.getState().toast('error', errText(err))
     }
   }
 
@@ -500,7 +501,7 @@ export function ModelSwitcher() {
       setCheck(await App.ClearHiddenModels(''))
       await refreshModels(false)
     } catch (err) {
-      useStore.getState().toast('error', String(err))
+      useStore.getState().toast('error', errText(err))
     }
   }
 
@@ -607,7 +608,7 @@ export function ModelSwitcher() {
       setPreview(null)
       setNextOnly(false)
     } catch (err) {
-      useStore.getState().toast('error', String(err))
+      useStore.getState().toast('error', errText(err))
     }
   }
 
@@ -655,7 +656,7 @@ export function ModelSwitcher() {
           // Said on the section instead of swallowed. Without an answer the rows would
           // read as "nothing is loaded", which is a statement about a server this app
           // could not see — and the start button they carry would be a guess.
-          if (live) setStatusError(String(err))
+          if (live) setStatusError(errText(err))
         })
     void read()
     // Polled only while a load is being waited for. A load is minutes long and has no
@@ -708,7 +709,7 @@ export function ModelSwitcher() {
       }
       await commit(model, false)
     } catch (err) {
-      useStore.getState().toast('error', String(err))
+      useStore.getState().toast('error', errText(err))
     }
   }
 
@@ -776,7 +777,7 @@ export function ModelSwitcher() {
       setRuntimeStatus(await App.GetRuntimeStatus())
       setLocalStart({ backend: backendID, path })
     } catch (err) {
-      setLocalErrors((prev) => ({ ...prev, [backendID]: String(err) }))
+      setLocalErrors((prev) => ({ ...prev, [backendID]: errText(err) }))
     }
   }
 
@@ -818,7 +819,7 @@ export function ModelSwitcher() {
       void refreshHealth()
       void useStore.getState().refreshSettings()
     } catch (err) {
-      setLocalErrors((prev) => ({ ...prev, [backendID]: String(err) }))
+      setLocalErrors((prev) => ({ ...prev, [backendID]: errText(err) }))
     } finally {
       setLocalStop('')
     }
@@ -1117,6 +1118,7 @@ function LocalModelStart({
   onStop: () => void
 }) {
   const t = useStore((s) => s.t)
+  const tDynamic = useStore((s) => s.tDynamic)
   const [open, setOpen] = useState(false)
   const [scan, setScan] = useState<runtime.ModelFolderScan | null>(null)
   const [scanning, setScanning] = useState(false)
@@ -1191,7 +1193,7 @@ function LocalModelStart({
             className={`badge shrink-0 ${state === 'running' ? 'badge-ok' : state === 'failed' ? 'badge-danger' : ''}`}
             title={status?.error || undefined}
           >
-            {t(`settings.managed.state.${state}`)}
+            {tDynamic(`settings.managed.state.${state}`)}
           </span>
         )}
       </button>
@@ -1209,7 +1211,7 @@ function LocalModelStart({
                 className={`badge shrink-0 ${state === 'running' ? 'badge-ok' : state === 'failed' ? 'badge-danger' : ''}`}
                 title={status?.error || undefined}
               >
-                {t(`settings.managed.state.${state}`)}
+                {tDynamic(`settings.managed.state.${state}`)}
               </span>
               <span className="mono min-w-0 flex-1 truncate text-[11px] faint" title={loaded || undefined}>
                 {loaded ? folderName(loaded) : ''}

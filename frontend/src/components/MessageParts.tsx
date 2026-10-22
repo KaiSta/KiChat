@@ -1,8 +1,9 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { App, formatDuration, formatNumber, formatSpeed } from '../lib/api'
 import type { store as storeTypes, tools as toolTypes } from '../lib/api'
+import type { MessageKey } from '../lib/i18n'
 import { useThrottled } from '../lib/stream'
-import { useStore } from '../store'
+import { errText, useStore } from '../store'
 
 /* -------------------------------------------------------------------------
  * Speed and token statistics for one generation.
@@ -97,6 +98,8 @@ function Row({ label, value }: { label: string; value: string }) {
 
 export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
   const t = useStore((s) => s.t)
+  // The tool's name is the model's, not a key this build knows: see translateDynamic.
+  const tDynamic = useStore((s) => s.tDynamic)
   const [open, setOpen] = useState(false)
   // A draw the model asked for is registered under the message this call is rendered on,
   // because that is the only row the view has until the picture exists. Reading it here is
@@ -137,7 +140,9 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
                 : t('tool.running')}
         </span>
         <strong style={{ color: 'var(--text)' }}>
-          {t(`tool.${call.name}`) !== `tool.${call.name}` ? t(`tool.${call.name}`) : call.name}
+          {tDynamic(`tool.${call.name}`) !== `tool.${call.name}`
+            ? tDynamic(`tool.${call.name}`)
+            : call.name}
         </strong>
         <span className="faint mono truncate" style={{ maxWidth: 360 }}>
           {summariseArgs(call.argsJson)}
@@ -189,7 +194,7 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
               try {
                 await App.StopImageDraw(call.messageId)
               } catch (err) {
-                useStore.getState().toast('error', String(err))
+                useStore.getState().toast('error', errText(err))
               } finally {
                 setStopping(false)
               }
@@ -240,7 +245,7 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
  * card three lines taller.
  */
 function tokenHint(
-  t: (key: string, vars?: Record<string, string | number>) => string,
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
   call: storeTypes.ToolCallRecord,
 ): string {
   const source = formatNumber(call.sourceTokens)
@@ -262,7 +267,7 @@ function tokenHint(
  * passes at all — there is only one.
  */
 function drawProgressText(
-  t: (key: string, vars?: Record<string, string | number>) => string,
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
   draw: { step: number; steps: number; pass: number; passes: number; phase?: string },
 ): string {
   // A phase comes before any sampling: a caption-trained model spends seconds on its
@@ -432,7 +437,7 @@ export function CompactionCard({
       await App.DeleteCompaction(compaction.chatId, compaction.id)
       await useStore.getState().refreshChatState()
     } catch (err) {
-      useStore.getState().toast('error', String(err))
+      useStore.getState().toast('error', errText(err))
     } finally {
       setUndoing(false)
     }
@@ -1120,7 +1125,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
         if (!cancelled) setSrc(value)
       })
       .catch((err) => {
-        if (!cancelled) setError(String(err))
+        if (!cancelled) setError(errText(err))
       })
     return () => {
       cancelled = true
@@ -1152,7 +1157,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
       // or a failure would both be wrong, so it says nothing at all.
       if (path) useStore.getState().toast('info', `${t('images.saved')}: ${path}`)
     } catch (err) {
-      useStore.getState().toast('error', String(err))
+      useStore.getState().toast('error', errText(err))
     } finally {
       setSaving(false)
     }
@@ -1184,7 +1189,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
       if (stopping.current) {
         useStore.getState().toast('info', t('images.drawStopped'))
       } else {
-        useStore.getState().toast('error', String(err))
+        useStore.getState().toast('error', errText(err))
       }
     } finally {
       setBusy(null)
@@ -1209,7 +1214,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
       if (!result.wasDrawing) stopping.current = false
     } catch (err) {
       stopping.current = false
-      useStore.getState().toast('error', String(err))
+      useStore.getState().toast('error', errText(err))
     } finally {
       setStoppingUi(false)
     }
@@ -1250,7 +1255,7 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
         const key = next.method === 'redraw' ? 'images.drawStopped' : 'images.enlargeStopped'
         useStore.getState().toast('info', t(key))
       } else {
-        useStore.getState().toast('error', String(err))
+        useStore.getState().toast('error', errText(err))
       }
     } finally {
       stopping.current = false

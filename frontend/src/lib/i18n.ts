@@ -44,6 +44,8 @@ const de = {
   'chat.empty.hint':
     'Wähle unten ein Modell und stelle eine Frage. Dateien können per Drag & Drop hinzugefügt werden.',
   'chat.placeholder': 'Nachricht schreiben … (Enter senden, Shift+Enter Zeilenumbruch)',
+  'chat.transcript': 'Unterhaltung',
+  'chat.composerLabel': 'Nachricht',
   'chat.send': 'Senden',
   'chat.stop': 'Stoppen',
   'chat.stopping': 'Wird gestoppt …',
@@ -826,7 +828,61 @@ const de = {
   'common.no': 'Nein',
   'common.none': 'keine',
   'common.optional': 'optional',
+
+  // What the backend answers with when a bound method fails. The code travels in the
+  // error text (internal/uimsg) and the arguments fill {{1}}, {{2}}… in order.
+  'err.runtime.modelRunning': '{{1}} läuft gerade — Modell zuerst stoppen',
+  'err.runtime.buildInUse':
+    '{{1}} ist der Build, den KiChat startet — erst aktualisieren oder einen anderen Build wählen',
+  'err.download.running': 'ein Download läuft bereits',
+  'err.model.noBackend': 'kein Backend angegeben',
+  'err.model.noneSelected': 'kein Modell ausgewählt',
+  'err.runtime.notManaged': '{{1}} wird nicht von KiChat gestartet',
+  'err.model.notFound': 'Modell nicht gefunden: {{1}}',
+  'err.search.noBraveKey': 'kein Brave API-Key angegeben',
+  'err.model.backendOff': 'Backend {{1}} ist nicht konfiguriert oder ausgeschaltet',
+  'err.model.backendUnreachable': 'Backend {{1}} ist nicht erreichbar: {{2}}',
+  'err.model.listFailed': 'Modellliste von {{1}}: {{2}}',
+  'err.model.noModelsReported': 'Backend {{1}} meldet keine Modelle',
+  'err.model.checkNone': 'kein Modell konnte geprüft werden',
+  'err.model.checkAllRefused':
+    'alle {{1}} Modelle wurden abgelehnt — das deutet auf Adresse oder Schlüssel hin, nicht auf die Liste; es wurde nichts ausgeblendet',
+  'err.compaction.gone': 'Kompaktierung {{1}} existiert nicht mehr',
+  'err.attachment.noPath': 'kein Dateipfad angegeben',
+  'err.attachment.unreadable': 'Datei nicht lesbar: {{1}}',
+  'err.attachment.folderNotSupported': 'Ordner können nicht angehängt werden',
+  'err.attachment.tooLarge': 'Datei ist zu groß ({{1}} MB, Maximum {{2}} MB)',
+  'err.attachment.cleanupFailed': '{{1}} (Dokument {{2}} konnte nicht aufgeräumt werden: {{3}})',
+  'err.attachment.imageNotIndexed': 'Bilder werden nicht indiziert, sondern direkt übergeben',
+  'err.attachment.documentRead': 'Dokument des Anhangs lesen: {{1}}',
+  'err.image.serverNotRunning': 'der Bildserver läuft nicht — zuerst starten',
+  'err.image.noNvidiaKey': 'kein NVIDIA-Schlüssel — im Backends-Tab unter NVIDIA eintragen',
+  'err.app.notReady': 'App ist noch nicht bereit',
+  'err.image.noStoredImage': 'Anhang {{1}} hat kein gespeichertes Bild',
+  'err.image.notAnImage': '{{1}} ist kein Bild',
+  'err.image.empty': 'das Bild von {{1}} ist leer',
+  'err.image.notStored': '{{1}} ist kein gespeichertes Bild',
+  'err.image.decodeFailed': 'das Bild konnte nicht dekodiert werden: {{1}}',
+  'err.image.saveFailed': 'Bild konnte nicht gespeichert werden: {{1}}',
+  'err.image.removeFailed': 'Bild {{1}} entfernen: {{2}}',
+  'err.model.notConfigured': 'für {{1}} ist kein eigenes Modell eingerichtet',
+  'err.runtime.mmprojMissing': 'die mmproj-Datei {{1}} ist nicht vorhanden',
+  'err.runtime.mmprojIsFolder': '{{1}} ist ein Ordner, keine mmproj-Datei',
+  'err.runtime.notInstalled': 'llama-server ist noch nicht installiert',
+  'err.image.noCaptionModel': 'kein Modell für die Bildbeschreibung verfügbar',
+  'err.model.backendUnavailable': 'Backend {{1}} ist nicht verfügbar',
+  'err.image.notLocalServer': 'die Bildgenerierung steht nicht auf dem lokalen Server',
 } as const
+
+/**
+ * Every key the three dictionaries share.
+ *
+ * Derived from `de`, the dictionary the other two are declared against, so a
+ * mistyped key in `t('chat.copied')` is a compile error instead of a dotted key
+ * rendered into the UI at runtime. `en` and `zh` are already
+ * `Record<keyof typeof de, string>`, which is what keeps the three in step.
+ */
+export type MessageKey = keyof typeof de
 
 const en: Record<keyof typeof de, string> = {
   'app.title': 'KiChat',
@@ -845,6 +901,8 @@ const en: Record<keyof typeof de, string> = {
   'chat.empty.hint':
     'Pick a model below and ask a question. Files can be added by drag and drop.',
   'chat.placeholder': 'Write a message … (Enter to send, Shift+Enter for a new line)',
+  'chat.transcript': 'Conversation',
+  'chat.composerLabel': 'Message',
   'chat.send': 'Send',
   'chat.stop': 'Stop',
   'chat.stopping': 'Stopping …',
@@ -1607,6 +1665,49 @@ const en: Record<keyof typeof de, string> = {
   'common.no': 'No',
   'common.none': 'none',
   'common.optional': 'optional',
+
+  // See the German dictionary: codes the backend sends, with {{1}}, {{2}}… in order.
+  'err.runtime.modelRunning': '{{1}} is running — stop the model first',
+  'err.runtime.buildInUse':
+    '{{1}} is the build KiChat starts — update it first, or choose another build',
+  'err.download.running': 'a download is already running',
+  'err.model.noBackend': 'no backend given',
+  'err.model.noneSelected': 'no model selected',
+  'err.runtime.notManaged': '{{1}} is not started by KiChat',
+  'err.model.notFound': 'model not found: {{1}}',
+  'err.search.noBraveKey': 'no Brave API key set',
+  'err.model.backendOff': 'backend {{1}} is not configured or switched off',
+  'err.model.backendUnreachable': 'backend {{1}} is unreachable: {{2}}',
+  'err.model.listFailed': 'model list from {{1}}: {{2}}',
+  'err.model.noModelsReported': 'backend {{1}} reports no models',
+  'err.model.checkNone': 'no model could be checked',
+  'err.model.checkAllRefused':
+    'all {{1}} models were refused — that points at the address or the key rather than the list; nothing was hidden',
+  'err.compaction.gone': 'compaction {{1}} no longer exists',
+  'err.attachment.noPath': 'no file path given',
+  'err.attachment.unreadable': 'file cannot be read: {{1}}',
+  'err.attachment.folderNotSupported': 'folders cannot be attached',
+  'err.attachment.tooLarge': 'file is too large ({{1}} MB, maximum {{2}} MB)',
+  'err.attachment.cleanupFailed': '{{1}} (document {{2}} could not be cleaned up: {{3}})',
+  'err.attachment.imageNotIndexed': 'pictures are not indexed; they are passed in directly',
+  'err.attachment.documentRead': 'reading the document of the attachment: {{1}}',
+  'err.image.serverNotRunning': 'the picture server is not running — start it first',
+  'err.image.noNvidiaKey': 'no NVIDIA key — add one under NVIDIA in the Backends tab',
+  'err.app.notReady': 'the app is not ready yet',
+  'err.image.noStoredImage': 'attachment {{1}} has no stored picture',
+  'err.image.notAnImage': '{{1}} is not a picture',
+  'err.image.empty': 'the picture of {{1}} is empty',
+  'err.image.notStored': '{{1}} is not a stored picture',
+  'err.image.decodeFailed': 'the picture could not be decoded: {{1}}',
+  'err.image.saveFailed': 'the picture could not be saved: {{1}}',
+  'err.image.removeFailed': 'removing picture {{1}}: {{2}}',
+  'err.model.notConfigured': 'no managed model is configured for {{1}}',
+  'err.runtime.mmprojMissing': 'the mmproj file {{1}} does not exist',
+  'err.runtime.mmprojIsFolder': '{{1}} is a folder, not an mmproj file',
+  'err.runtime.notInstalled': 'llama-server is not installed yet',
+  'err.image.noCaptionModel': 'no model is available to caption pictures',
+  'err.model.backendUnavailable': 'backend {{1}} is not available',
+  'err.image.notLocalServer': 'picture generation is not set to the local server',
 }
 
 const zh: Record<keyof typeof de, string> = {
@@ -1625,6 +1726,8 @@ const zh: Record<keyof typeof de, string> = {
   'chat.empty.title': '新建对话',
   'chat.empty.hint': '在下方选择模型并提问。文件可拖放添加。',
   'chat.placeholder': '输入消息……（Enter 发送，Shift+Enter 换行）',
+  'chat.transcript': '对话',
+  'chat.composerLabel': '消息',
   'chat.send': '发送',
   'chat.stop': '停止',
   'chat.stopping': '正在停止……',
@@ -2335,17 +2438,109 @@ const zh: Record<keyof typeof de, string> = {
   'common.no': '否',
   'common.none': '无',
   'common.optional': '可选',
+
+  // See the German dictionary: codes the backend sends, with {{1}}, {{2}}… in order.
+  'err.runtime.modelRunning': '{{1}} 正在运行 — 请先停止该模型',
+  'err.runtime.buildInUse': '{{1}} 是 KiChat 当前启动的构建 — 请先更新，或选择其他构建',
+  'err.download.running': '已有下载正在进行',
+  'err.model.noBackend': '未指定后端',
+  'err.model.noneSelected': '未选择模型',
+  'err.runtime.notManaged': '{{1}} 不是由 KiChat 启动的',
+  'err.model.notFound': '未找到模型：{{1}}',
+  'err.search.noBraveKey': '未设置 Brave API 密钥',
+  'err.model.backendOff': '后端 {{1}} 未配置或已关闭',
+  'err.model.backendUnreachable': '无法访问后端 {{1}}：{{2}}',
+  'err.model.listFailed': '{{1}} 的模型列表：{{2}}',
+  'err.model.noModelsReported': '后端 {{1}} 未报告任何模型',
+  'err.model.checkNone': '未能检查任何模型',
+  'err.model.checkAllRefused':
+    '全部 {{1}} 个模型都被拒绝 — 这通常意味着地址或密钥有问题，而不是模型列表；没有隐藏任何模型',
+  'err.compaction.gone': '压缩记录 {{1}} 已不存在',
+  'err.attachment.noPath': '未指定文件路径',
+  'err.attachment.unreadable': '无法读取文件：{{1}}',
+  'err.attachment.folderNotSupported': '无法添加文件夹',
+  'err.attachment.tooLarge': '文件过大（{{1}} MB，最多 {{2}} MB）',
+  'err.attachment.cleanupFailed': '{{1}}（文档 {{2}} 无法清理：{{3}}）',
+  'err.attachment.imageNotIndexed': '图片不会被索引，而是直接传入',
+  'err.attachment.documentRead': '读取附件文档失败：{{1}}',
+  'err.image.serverNotRunning': '图片服务器未运行 — 请先启动',
+  'err.image.noNvidiaKey': '没有 NVIDIA 密钥 — 请在“后端”选项卡的 NVIDIA 下填写',
+  'err.app.notReady': '应用尚未就绪',
+  'err.image.noStoredImage': '附件 {{1}} 没有已保存的图片',
+  'err.image.notAnImage': '{{1}} 不是图片',
+  'err.image.empty': '{{1}} 的图片为空',
+  'err.image.notStored': '{{1}} 不是已保存的图片',
+  'err.image.decodeFailed': '无法解码图片：{{1}}',
+  'err.image.saveFailed': '无法保存图片：{{1}}',
+  'err.image.removeFailed': '删除图片 {{1}} 失败：{{2}}',
+  'err.model.notConfigured': '{{1}} 未配置自己的模型',
+  'err.runtime.mmprojMissing': 'mmproj 文件 {{1}} 不存在',
+  'err.runtime.mmprojIsFolder': '{{1}} 是一个文件夹，不是 mmproj 文件',
+  'err.runtime.notInstalled': 'llama-server 尚未安装',
+  'err.image.noCaptionModel': '没有可用于描述图片的模型',
+  'err.model.backendUnavailable': '后端 {{1}} 不可用',
+  'err.image.notLocalServer': '图片生成未设置为本机服务器',
 }
 
-const dictionaries: Record<Lang, Record<string, string>> = { de, en, zh }
+const dictionaries: Record<Lang, Record<MessageKey, string>> = { de, en, zh }
 
 /** Translate a key, falling back to the key itself so gaps are visible. */
-export function translate(lang: Lang, key: string, vars?: Record<string, string | number>): string {
-  const dict = dictionaries[lang] ?? en
+export function translate(lang: Lang, key: MessageKey, vars?: Record<string, string | number>): string {
+  return lookup(lang, key, vars)
+}
+
+/**
+ * Translate a key this build cannot name as a literal.
+ *
+ * Three kinds of key arrive as strings: one the backend supplied (a preset's label,
+ * a template variable, a build's note), one assembled from a state name
+ * (`settings.managed.state.${state}`), and the tool name a model chose. They get
+ * their own entry point so `translate` stays checked, and they keep the old
+ * behaviour: an unknown key renders as itself, which is how a tool the UI has no
+ * sentence for still shows its own name.
+ */
+export function translateDynamic(lang: Lang, key: string, vars?: Record<string, string | number>): string {
+  return lookup(lang, key, vars)
+}
+
+/** The prefix internal/uimsg puts in front of a translatable message. */
+const ERROR_PREFIX = 'i18n:'
+
+/**
+ * The text of an error the backend sent.
+ *
+ * Go answers with a code and its arguments, wrapped in `i18n:` and JSON (see
+ * internal/uimsg) because a bound method can only return an error, and the window
+ * only receives its text. Anything without that prefix — an operating system's
+ * wording, a server's own message, a string from a package that does not speak
+ * codes yet — is returned unchanged, which is what keeps those readable.
+ */
+export function translateError(lang: Lang, raw: string): string {
+  if (!raw.startsWith(ERROR_PREFIX)) return raw
+  let payload: { code?: string; args?: string[] }
+  try {
+    payload = JSON.parse(raw.slice(ERROR_PREFIX.length))
+  } catch {
+    return raw
+  }
+  if (!payload || typeof payload.code !== 'string' || payload.code === '') return raw
+
+  const vars: Record<string, string> = {}
+  for (const [index, arg] of (payload.args ?? []).entries()) vars[String(index + 1)] = arg
+
+  // `error.<code>` is a dictionary key the Go test checks exists in all three
+  // languages, so the cast here is the same contract a literal carries.
+  const key = `err.${payload.code}` as MessageKey
+  const text = lookup(lang, key, vars)
+  return text === key ? raw : text
+}
+
+function lookup(lang: Lang, key: string, vars?: Record<string, string | number>): string {
+  const dict: Record<string, string> = dictionaries[lang] ?? en
   // The English source of truth doubles as the fallback: a key that exists in de
   // but is missing from a newer language should read as English, not as a raw
   // dotted key.
-  let text = dict[key] ?? en[key as keyof typeof en] ?? de[key as keyof typeof de] ?? key
+  let text = dict[key] ?? en[key as MessageKey] ?? de[key as MessageKey] ?? key
   if (vars) {
     for (const [name, value] of Object.entries(vars)) {
       text = text.replaceAll(`{{${name}}}`, String(value))

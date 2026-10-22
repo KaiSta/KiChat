@@ -12,7 +12,14 @@ import {
   type store as storeTypes,
 } from './lib/api'
 import { WindowSetDarkTheme, WindowSetLightTheme } from '../wailsjs/runtime/runtime'
-import { asLang, translate, type Lang } from './lib/i18n'
+import {
+  asLang,
+  translate,
+  translateDynamic,
+  translateError,
+  type Lang,
+  type MessageKey,
+} from './lib/i18n'
 
 /**
  * Applies the theme to the document and asks the native window to match.
@@ -47,8 +54,14 @@ function applyTheme(theme: 'dark' | 'light') {
  * the previous language until some unrelated state change happened to repaint
  * it.
  */
-function makeT(lang: Lang): (key: string, vars?: Record<string, string | number>) => string {
+function makeT(lang: Lang): (key: MessageKey, vars?: Record<string, string | number>) => string {
   return (key, vars) => translate(lang, key, vars)
+}
+
+/** The unchecked half of the pair above: see `translateDynamic` for which keys are
+ * assembled at runtime rather than written out. */
+function makeTDynamic(lang: Lang): (key: string, vars?: Record<string, string | number>) => string {
+  return (key, vars) => translateDynamic(lang, key, vars)
 }
 
 /** Live text for a message that is still streaming. */
@@ -128,7 +141,9 @@ interface State {
   setNextModel: (value: { backend: string; model: string } | null) => void
 
   /* actions */
-  t: (key: string, vars?: Record<string, string | number>) => string
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string
+  /** For keys built at runtime: see `translateDynamic`. */
+  tDynamic: (key: string, vars?: Record<string, string | number>) => string
   toast: (kind: Toast['kind'], message: string) => void
   dismissToast: (id: number) => void
 
@@ -220,6 +235,7 @@ export const useStore = create<State>((set, get) => {
     setNextModel: (value) => set({ nextModel: value }),
 
     t: makeT('en'),
+    tDynamic: makeTDynamic('en'),
 
     toast: (kind, message) => {
       const id = ++toastSeq
@@ -239,7 +255,7 @@ export const useStore = create<State>((set, get) => {
         applyTheme(theme)
         // The translator is replaced alongside the language it speaks, so every
         // subscriber repaints.
-        set({ settings, lang, theme, ready: true, t: makeT(lang) })
+        set({ settings, lang, theme, ready: true, t: makeT(lang), tDynamic: makeTDynamic(lang) })
 
         wireEvents(set, get, clearStreaming, upsertMessage)
 
@@ -254,12 +270,12 @@ export const useStore = create<State>((set, get) => {
           await get().selectChat(chats[0].id)
         }
       } catch (err) {
-        set({ bootError: String(err), ready: true })
+        set({ bootError: errText(err), ready: true })
       }
     },
 
     setLang: (lang) => {
-      set({ lang, t: makeT(lang) })
+      set({ lang, t: makeT(lang), tDynamic: makeTDynamic(lang) })
       const settings = get().settings
       if (settings) {
         const next = { ...settings, language: lang }
@@ -306,7 +322,7 @@ export const useStore = create<State>((set, get) => {
         const models = await App.ListModels(force)
         set({ models })
       } catch (err) {
-        get().toast('error', String(err))
+        get().toast('error', errText(err))
       } finally {
         set({ modelsLoading: false })
       }
@@ -324,7 +340,7 @@ export const useStore = create<State>((set, get) => {
       try {
         set({ chats: await App.ListChats(false) })
       } catch (err) {
-        get().toast('error', String(err))
+        get().toast('error', errText(err))
       }
     },
 
@@ -343,7 +359,7 @@ export const useStore = create<State>((set, get) => {
         const running = { ...get().running, [id]: state.running }
         set({ running })
       } catch (err) {
-        get().toast('error', String(err))
+        get().toast('error', errText(err))
       } finally {
         set({ chatLoading: false })
       }
@@ -369,7 +385,7 @@ export const useStore = create<State>((set, get) => {
         set({ view: 'chat' })
         return created.id
       } catch (err) {
-        get().toast('error', String(err))
+        get().toast('error', errText(err))
         return null
       }
     },
@@ -384,7 +400,7 @@ export const useStore = create<State>((set, get) => {
           if (chats.length > 0) await get().selectChat(chats[0].id)
         }
       } catch (err) {
-        get().toast('error', String(err))
+        get().toast('error', errText(err))
       }
     },
 
@@ -399,7 +415,7 @@ export const useStore = create<State>((set, get) => {
               : get().chatState,
         })
       } catch (err) {
-        get().toast('error', String(err))
+        get().toast('error', errText(err))
       }
     },
 
@@ -428,7 +444,7 @@ export const useStore = create<State>((set, get) => {
         })
       } catch (err) {
         set({ running: { ...get().running, [chatId]: false } })
-        get().toast('error', String(err))
+        get().toast('error', errText(err))
       }
     },
 
@@ -438,7 +454,7 @@ export const useStore = create<State>((set, get) => {
       try {
         await App.StopGeneration(chatId)
       } catch (err) {
-        get().toast('error', String(err))
+        get().toast('error', errText(err))
       }
     },
 
@@ -450,7 +466,7 @@ export const useStore = create<State>((set, get) => {
         await App.Regenerate(chatId, backend, model)
       } catch (err) {
         set({ running: { ...get().running, [chatId]: false } })
-        get().toast('error', String(err))
+        get().toast('error', errText(err))
       }
     },
 
@@ -467,7 +483,7 @@ export const useStore = create<State>((set, get) => {
         // A model change must refresh the budget and the switch warning.
         void get().refreshChatState()
       } catch (err) {
-        get().toast('error', String(err))
+        get().toast('error', errText(err))
       }
     },
   }
@@ -578,12 +594,12 @@ function wireEvents(
         clearStreaming(p.chatId)
       })()
     }
-    get().toast('error', p.error)
+    get().toast('error', translateError(get().lang, p.error))
   })
 
   on<{ chatId: string; warning: string }>(EV.warning, (p) => {
     if (p.chatId !== active()) return
-    get().toast('warning', p.warning)
+    get().toast('warning', translateError(get().lang, p.warning))
   })
 
   on<{ chatId: string; compaction: storeTypes.Compaction }>(EV.compaction, (p) => {
@@ -660,6 +676,18 @@ function wireEvents(
       return { draws }
     })
   })
+}
+
+/**
+ * The text of an error for the window's current language.
+ *
+ * Go answers in codes (see internal/uimsg), and `String(err)` on a rejected binding
+ * carries that code as the message. Every `catch` that puts the error in front of a
+ * user goes through here instead, so one message is translated in one place rather
+ * than at fifty call sites.
+ */
+export function errText(err: unknown): string {
+  return translateError(useStore.getState().lang, String(err))
 }
 
 /** Convenience selector for the active chat's pending (unsent) attachments. */

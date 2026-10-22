@@ -1,5 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
-import { translate } from '../lib/i18n'
+import { translate, type MessageKey } from '../lib/i18n'
 import { useStore } from '../store'
 
 type Props = {
@@ -40,7 +40,7 @@ export class ErrorBoundary extends Component<Props, State> {
     // Read the store directly rather than through a hook: a class component
     // cannot subscribe, and the language only matters at the moment of failure.
     const lang = useStore.getState().lang
-    const t = (key: string) => translate(lang, key)
+    const t = (key: MessageKey) => translate(lang, key)
     const details = [error.stack ?? error.message, stack].filter(Boolean).join('\n\n')
 
     return (
