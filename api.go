@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/url"
 	goruntime "runtime"
 	"strings"
 	"time"
@@ -364,11 +365,38 @@ func (a *App) GetSearchStatus() (SearchStatus, error) {
 }
 
 // OpenExternal opens a URL in the user's browser.
+//
+// The string is not trusted to be a URL the operating system should act on. Three
+// callers hand it text this app did not author: a markdown link in a model's reply,
+// a citation row built from a scraped page's own title, and a help link in Settings.
+// A `file://` path opens a local file in whatever program claims it, `smb://` asks
+// for a network share, and any registered scheme reaches its handler — each from one
+// click on text a model produced. Only what a citation can legitimately be is let
+// through; everything else is dropped, because the click has nowhere useful to go and
+// a dialog about a link that will not open is worse than nothing happening.
 func (a *App) OpenExternal(target string) {
-	if a.ctx == nil {
+	if a.ctx == nil || !isWebURL(target) {
 		return
 	}
 	runtime.BrowserOpenURL(a.ctx, target)
+}
+
+// isWebURL reports whether target is an absolute http(s) URL naming a host.
+//
+// The scheme is read from the parsed URL rather than from a prefix test: what a
+// string starts with says nothing about the scheme `url.Parse` finds after leading
+// whitespace or an escaped separator, and `javascript:` is as easy to spell as
+// `https:`.
+func isWebURL(target string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(target))
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		return parsed.Host != ""
+	}
+	return false
 }
 
 // RedactSecrets strips stored secrets from arbitrary text.
