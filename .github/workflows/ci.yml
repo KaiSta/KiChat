@@ -1,0 +1,157 @@
+# The gate PLAN.md §9 has asked for: every job here runs a Makefile target that
+# already exists. The recipes are where this project's environment traps are
+# recorded (webkit2gtk-4.1 only, the Wails CLI outside PATH, npm 9 unable to
+# install Tailwind's binding), so a workflow that spelled those commands out
+# again would be a second copy of the build that can drift from the first.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A superseded push should not hold a runner: only the newest commit of a branch
+# is a result anyone is waiting for.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Pinned to go.mod's wails/v2 v2.15.0. The CLI renders the project template and
+# drives the build, so a CLI from another version builds against something the
+# library does not match; README's `@latest` is the instruction for a person
+# setting up a machine, not for a gate that has to be reproducible.
+env:
+  WAILS_VERSION: v2.15.0
+
+jobs:
+  linux:
+    name: check and build (linux/webkit2gtk-4.1)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # `make build` passes this tag for a Linux target; `make check`'s vet and
+      # test do not, and would compile Wails' untagged variant, whose cgo asks
+      # pkg-config for webkit2gtk-4.0. Ubuntu 24.04 ships 4.1 only — the same
+      # situation as the development machine — so the tag is set for the whole
+      # job and check tests the variant that ships rather than one that cannot
+      # link here. It is inert on the GOOS=windows and GOOS=darwin vets.
+      GOFLAGS: -tags=webkit2_41
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Node 22, because the lockfile's platform-gated optional dependencies need
+      # npm 10 (the Makefile's `deps` target records what npm 9 does to Tailwind's
+      # native binding), and Vite 7 needs 20.19+/22.12+.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install the GTK and WebKit headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
+
+      - name: Install the Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: make check
+        run: make check
+
+      # `check` vets and tests but never links, so on its own it cannot see a
+      # missing webkit2gtk-4.1 — the tag it exists for is a link-time flag. This
+      # is also the only step that builds the frontend bundle and embeds it.
+      - name: make build
+        run: make build
+
+  windows:
+    name: build (windows/amd64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      # Before checkout, and not after: MSYS2's make is a POSIX program, so a
+      # working tree converted to CRLF would leave a \r at the end of every recipe
+      # line for bash to execute. The repository stores LF and the Makefile is
+      # written for it, so no conversion is the only tree this job can build.
+      - name: Check out with LF line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # The recipes are POSIX sh and the Makefile sets SHELL := /bin/bash, which
+      # AGENTS.md names as what a Windows build needs beside make. MSYS2's make
+      # is the one that resolves /bin/bash; a native build of make hands the
+      # string to CreateProcess and fails on the first recipe.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: make
+
+      - name: Install the Wails CLI
+        shell: pwsh
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@$env:WAILS_VERSION
+          "$(go env GOPATH)\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Wails writes the version resource, the manifest and the icon in pure Go,
+      # so this needs neither mingw nor a Windows SDK; the target also fails when
+      # no executable was left in build/bin, which Wails itself would not.
+      - name: make windows
+        shell: msys2 {0}
+        run: make windows
+
+  darwin:
+    name: build (darwin/universal)
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install the Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # macOS is the one platform Wails can only package on: `make darwin` first
+      # refuses a non-Mac host (Wails exits 0 having built nothing there), then
+      # builds both slices, and finally reads the version back out of the bundle's
+      # plist and compares it with VERSION — a drift `make check` cannot see.
+      - name: make darwin
+        run: make darwin
