@@ -1,0 +1,400 @@
+# The only workflow that publishes anything.
+#
+# ci.yml is the gate: it proves every platform compiles, links and type-checks, and
+# keeps nothing. This one turns a pushed tag into the three downloads a user picks
+# between — the Debian package, the Windows Setup.exe and the macOS disk image —
+# and attaches them to one GitHub Release. It runs the same Makefile targets the
+# release procedure has always run by hand, on the host each one needs: dpkg on
+# Ubuntu, makensis on Windows, hdiutil and the Apple toolchain on macOS. A
+# workflow that spelled the packaging out itself would be a second copy of
+# Makefile recipes that can drift from the first, and drift is how a release
+# ships a binary that reports the wrong version.
+#
+# Publishing is a tag push, so the tag is the one act that ships: `git tag -a
+# x.y.z` and `git push origin x.y.z` (cut-release has the rest). Nothing is
+# published until that push, and a tag that fails verification publishes nothing.
+name: Release
+
+on:
+  push:
+    # Tag names are the version, with no `v` prefix (the one `v0.4.0` in this
+    # repository is a lightweight outlier that this filter deliberately skips).
+    tags: ['[0-9]*']
+  # Rebuilding an existing tag — after a runner failure, or to attach an asset
+  # that was missing — without moving the tag, which is never done.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing annotated tag to build and publish, e.g. 0.5.11'
+        required: true
+        type: string
+
+# One release at a time, and a superseded run is not cancelled: half a release is
+# worse than a late one, and the publish job is what makes a run matter.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# Same pin as ci.yml, for the same reason: the CLI renders the project template
+# and drives the build, so a CLI from another version builds against something
+# the library does not match.
+env:
+  WAILS_VERSION: v2.15.0
+  # `github.ref_name` is the tag on a tag push and the *branch* on a manual run,
+  # so the tag is read from the input when there is one.
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  # Everything below is expensive and irreversible-ish: it publishes. This job is
+  # what stops a mistyped tag, a tag on the wrong commit, or a VERSION that was
+  # never bumped from reaching a download page. It is a separate job rather than a
+  # step in each build so it fails once, before three builds, and so the failure
+  # reads as itself.
+  verify:
+    name: the tag is a release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The tag, VERSION and master agree
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          if [ -z "$tag" ]; then
+            echo "no tag to release: push a tag, or pass one to this workflow" >&2
+            exit 1
+          fi
+          # A dispatch run checks out the branch, so the tag has to be fetched
+          # before it can be looked at; on a tag push this is already there.
+          git fetch --quiet --force --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if ! git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            echo "there is no tag $tag in this repository" >&2
+            exit 1
+          fi
+          # Annotated, because a lightweight tag carries no release notes and it is
+          # the annotation that becomes the release body.
+          kind="$(git cat-file -t "refs/tags/$tag")"
+          if [ "$kind" != "tag" ]; then
+            echo "$tag is a lightweight tag ($kind); releases are annotated, so its notes would be empty" >&2
+            exit 1
+          fi
+          version="$(cat VERSION)"
+          if [ "$tag" != "$version" ]; then
+            echo "the tag is $tag but VERSION says $version" >&2
+            echo "VERSION is the one authored number: bump it, commit, and tag that commit" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/$tag" refs/remotes/origin/master; then
+            echo "$tag is not on master; releases are cut from it (0.5.11's procedure in cut-release)" >&2
+            exit 1
+          fi
+          echo "$tag: annotated, on master, and equal to VERSION $(cat VERSION)"
+
+  # The .deb has to be built on Linux: it is the Debian layout (a .desktop file,
+  # the icon theme, a man page, a generated changelog) staged with the Makefile's
+  # own INSTALL_FILES and packed by dpkg-deb.
+  deb:
+    name: .deb (linux/amd64)
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      # `make build` passes this tag for a Linux target and `make check`'s vet does
+      # not; set for the job so the package links against the webkit2gtk Ubuntu
+      # ships (4.1 only), the same way ci.yml's linux job does it.
+      GOFLAGS: -tags=webkit2_41
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install the GTK and WebKit headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
+
+      - name: Install the Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: make deb
+        run: make deb
+
+      # The target prints `dpkg-deb --info`, which is not an assertion: a package
+      # can be built from a VERSION the tag does not name. These are.
+      - name: Verify the package
+        run: |
+          set -euo pipefail
+          # Scoped to the tag rather than globbing every .deb: the archive name is
+          # kichat_<version>_<arch>.deb, and a bare wildcard would pick up any
+          # older package left in the directory by a previous run.
+          shopt -s nullglob
+          debs=(build/deb/kichat_"$RELEASE_TAG"_*.deb)
+          if [ "${#debs[@]}" -ne 1 ]; then
+            echo "expected one .deb for $RELEASE_TAG, found ${#debs[@]} in build/deb:" >&2
+            ls -1 build/deb >&2
+            exit 1
+          fi
+          deb="${debs[0]}"
+          version="$(dpkg-deb --field "$deb" Version)"
+          if [ "$version" != "$RELEASE_TAG" ]; then
+            echo "$deb says Version: $version, the tag is $RELEASE_TAG" >&2
+            exit 1
+          fi
+          # Into a file, not a pipe into `grep -q`: grep exits on the first match,
+          # dpkg-deb then dies of SIGPIPE, and pipefail turns a success into 141.
+          # Measured: that reports "carries no /usr/bin/kichat" for a package that
+          # has one.
+          listing="$(mktemp)"
+          dpkg-deb --contents "$deb" > "$listing"
+          grep -q '\./usr/bin/kichat$' "$listing" \
+            || { echo "$deb carries no /usr/bin/kichat" >&2; exit 1; }
+          grep -q '/share/doc/kichat/changelog\.gz$' "$listing" \
+            || { echo "$deb carries no changelog" >&2; exit 1; }
+          rm -f "$listing"
+          echo "$deb ($(dpkg-deb --field "$deb" Installed-Size) KiB): Version $version"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb
+          path: build/deb/*.deb
+          # A release with a platform quietly missing is the failure this workflow
+          # exists to make impossible.
+          if-no-files-found: error
+
+  # The Setup.exe is built with makensis, which is in no platform's default
+  # toolchain — and its absence is silent: Wails prints "Cannot create installer:
+  # makensis not found" and exits 0. `make nsis` therefore checks for it before
+  # building, and the recipe then fails if no installer was left behind.
+  nsis:
+    name: Setup.exe (windows/amd64)
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      # Before checkout: MSYS2's make is a POSIX program, so a working tree
+      # converted to CRLF would leave a \r at the end of every recipe line for
+      # bash to execute.
+      - name: Check out with LF line endings
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # The recipes are POSIX sh and the Makefile sets SHELL := /bin/bash, which
+      # only MSYS2's make resolves; path-type: inherit is what puts the job's Go
+      # and Node on that shell's PATH (its default, minimal, hides them — the
+      # failure ci.yml's windows job records).
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: make
+          path-type: inherit
+
+      # makensis, on PATH through Chocolatey's shim directory, which is on the
+      # job's PATH from the start.
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --no-progress -y
+
+      - name: Install the Wails CLI
+        shell: pwsh
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@$env:WAILS_VERSION
+          "$(go env GOPATH)\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: make nsis
+        shell: msys2 {0}
+        run: make nsis
+
+      # The Makefile already proves an MZ executable exists and computed its name;
+      # this reads the version Wails rendered into the resource, which is the one
+      # thing a download's Properties dialog will show.
+      - name: Verify the installer
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG
+          $found = @(Get-ChildItem build/bin/*-installer.exe -ErrorAction SilentlyContinue)
+          if ($found.Count -ne 1) {
+            throw "expected one installer in build/bin, found $($found.Count)"
+          }
+          $exe = $found[0]
+          # Windows version fields are numbers, so a Debian pre-release
+          # (0.2.0~beta1) appears as its numeric head.
+          $numeric = $tag.Split('~')[0]
+          $product = $exe.VersionInfo.ProductVersion
+          if (-not $product.StartsWith($numeric)) {
+            throw "$($exe.Name) reports ProductVersion $product, the tag is $tag"
+          }
+          Write-Host "$($exe.Name): $($exe.Length) bytes, ProductVersion $product"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          path: build/bin/*-installer.exe
+          if-no-files-found: error
+
+  # The .dmg needs a Mac: `make dmg` refuses any other host, because Wails'
+  # darwin path is cgo against AppKit and WebKit and packaging only runs on
+  # macOS. `make darwin` reads CFBundleShortVersionString back out of the built
+  # bundle and compares it with VERSION before the image is made.
+  dmg:
+    name: .dmg (darwin/universal)
+    needs: verify
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install the Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: make dmg
+        run: make dmg
+
+      # A non-empty .dmg is not an installable one: this mounts the image the way
+      # a user would and looks for the bundle, its executable and the version the
+      # Finder's Get Info will show.
+      - name: Verify the image
+        run: |
+          set -euo pipefail
+          # Scoped to the tag, like the .deb step: the image is named
+          # kichat_<version>_<arch>.dmg and a bare wildcard would take an older one.
+          shopt -s nullglob
+          images=(build/dmg/kichat_"$RELEASE_TAG"_*.dmg)
+          if [ "${#images[@]}" -ne 1 ]; then
+            echo "expected one .dmg for $RELEASE_TAG, found ${#images[@]} in build/dmg:" >&2
+            ls -1 build/dmg >&2
+            exit 1
+          fi
+          dmg="${images[0]}"
+          hdiutil verify "$dmg"
+          mount="$(mktemp -d)"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount" >/dev/null
+          trap 'hdiutil detach "$mount" -quiet || true; rmdir "$mount" 2>/dev/null || true' EXIT
+          test -d "$mount/KiChat.app" || { echo "$dmg holds no KiChat.app" >&2; exit 1; }
+          test -x "$mount/KiChat.app/Contents/MacOS/kichat" \
+            || { echo "KiChat.app holds no kichat executable" >&2; exit 1; }
+          version="$(plutil -extract CFBundleShortVersionString raw "$mount/KiChat.app/Contents/Info.plist")"
+          numeric="${RELEASE_TAG%%~*}"
+          if [ "$version" != "$numeric" ]; then
+            echo "KiChat.app says $version, the tag is $RELEASE_TAG" >&2
+            exit 1
+          fi
+          echo "$dmg ($(wc -c < "$dmg") bytes): KiChat.app $version"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dmg
+          path: build/dmg/*.dmg
+          if-no-files-found: error
+
+  # One release, three assets. It runs only after all three builds succeeded and
+  # verified their own artifacts, so a partial release is not a state this can
+  # reach: a failed build means no release page at all.
+  publish:
+    name: publish the GitHub Release
+    needs: [verify, deb, nsis, dmg]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # Creating the release and uploading its assets is the one write this
+      # workflow needs; the token is otherwise read-only.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write the release notes from the tag annotation
+        run: |
+          set -euo pipefail
+          git fetch --quiet --force --tags origin
+          notes="$(git tag -l --format='%(contents)' "$RELEASE_TAG")"
+          if [ -z "$notes" ]; then
+            echo "no annotation on $RELEASE_TAG" >&2
+            printf 'Built from `%s`.\n' "$RELEASE_TAG" > notes.md
+          else
+            # The annotation is the release note cut-release writes onto the tag,
+            # so the page and the tag cannot say different things.
+            printf '%s\n' "$notes" > notes.md
+          fi
+          cat notes.md
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets=(dist/*)
+          if [ "${#assets[@]}" -ne 3 ]; then
+            echo "expected the .deb, the Setup.exe and the .dmg, found ${#assets[@]}:" >&2
+            printf '  %s\n' "${assets[@]}" >&2
+            exit 1
+          fi
+          printf 'asset: %s\n' "${assets[@]}"
+          # A Debian pre-release is `~beta1`, never `-beta.1`, and it should not be
+          # offered as the current release. `~` in a tag is legal git.
+          prerelease=()
+          case "$RELEASE_TAG" in *'~'*) prerelease=(--prerelease) ;; esac
+          # A re-run of a run that already published updates the existing release
+          # instead of failing on it: the tag is never moved, so the release it
+          # names is the same one.
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit "$RELEASE_TAG" --title "KiChat $RELEASE_TAG" --notes-file notes.md "${prerelease[@]}"
+            echo "updated the release for $RELEASE_TAG"
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --title "KiChat $RELEASE_TAG" \
+              --notes-file notes.md \
+              "${prerelease[@]}"
+            echo "published $RELEASE_TAG"
+          fi

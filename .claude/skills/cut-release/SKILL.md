@@ -66,10 +66,31 @@ git describe --tags --exact-match HEAD   # is the tag where you think it is
 0.4.0 was bumped without a tag and only got one after the fact, which is the
 mistake this step exists for.
 
-## 5. The tag stays local until asked for
+## 5. The tag stays local until asked for, and pushing it publishes
 
 `git push origin x.y.z` is a separate request, like any other push — nothing here
-pushes a tag on its own.
+pushes a tag on its own. It is also the act that *ships*: `.github/workflows/release.yml`
+triggers on a tag whose name starts with a digit, and it does four things.
+
+1. **Verify.** The tag must be annotated, equal to `VERSION`, and reachable from
+   `master`. Any of the three failing ends the run before a build starts, so a
+   mistyped tag or an unbumped `VERSION` publishes nothing.
+2. **Build, on the host each package needs.** `make deb` on Ubuntu 24.04,
+   `make nsis` on Windows after installing NSIS, `make dmg` on macOS.
+3. **Check each artifact against the tag**, because a build that succeeded is not
+   a package that says the right thing: `dpkg-deb --field Version`, the Setup.exe's
+   `ProductVersion` resource, and `CFBundleShortVersionString` read out of the
+   bundle *inside* the mounted image. A missing or mismatched file fails the run.
+4. **Publish** `kichat_<version>_<arch>.deb`, `kichat-<arch>-installer.exe` and
+   `kichat_<version>_universal.dmg` on a GitHub Release titled `KiChat <version>`,
+   whose notes are the tag's annotation — the same text as the bump commit's body,
+   so the page and the tag cannot disagree.
+
+The three builds are separate jobs and the release job needs all of them: a failed
+build means no release page at all, never a partial one. Re-running the workflow
+for the same tag (`workflow_dispatch` with the tag as its input, or Re-run jobs)
+uploads over the existing release and edits its notes; the tag is never moved.
+Deleting a release is `gh release delete <version>` — the tag stays.
 
 What the repo's own config changes is what an asked-for push carries:
 `.git/config` sets `push.followTags = true`, so a plain `git push origin master`
@@ -89,6 +110,12 @@ The setting lives in `.git/config`, which is not cloned: a fresh checkout wants
 `git config push.followTags true`, and `git config --get push.followTags` is the
 check when a tag seems to have gone missing.
 
+**That makes a plain push a publishing act.** Since a pushed tag builds and
+publishes, `git push origin master` with an already-cut tag still local also
+releases it. That is the intent — the tag was cut to be released — but it means
+step 3's checks belong before the tag is created, not before it is pushed: by the
+time `git push` runs there is nothing left to catch.
+
 **A published tag is never moved or deleted.** A mistake is the next patch number.
 A tag that went missing is *repaired* rather than rewritten: an annotated tag on
 the bump commit, whose message says it is late and why and summarises the changes
@@ -102,3 +129,5 @@ Only for a version that really was released, and never an invented note.
 - The bump commit carries `VERSION` and nothing else, and its body reads as prose.
 - The annotated tag sits on that commit (`git describe --tags --exact-match HEAD`).
 - Nothing was pushed; the tag is local until the user asks.
+- Once it is pushed: the release page carries exactly three assets, and each one
+  reports the tag's version.

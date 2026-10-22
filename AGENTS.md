@@ -121,6 +121,12 @@ on Linux (the only platform that links, and the one `-tags webkit2_41` exists fo
 would be free to drift from it, so a change to the build belongs in the Makefile and is
 then picked up by every job.
 
+CI keeps nothing: no job uploads an artifact. **A pushed tag is what ships** —
+[`release.yml`](.github/workflows/release.yml) runs `make deb`, `make nsis` and
+`make dmg` for the tag, checks each artifact reports its version, and attaches the
+three to a GitHub Release whose notes are the tag's annotation. The `cut-release`
+skill has the consequences.
+
 `wails build` regenerates `frontend/wailsjs/go/models.ts`: after changing a Go
 struct that crosses the bridge, build (or `wails generate module`) **before**
 type-checking the frontend, or `tsc` fails on the missing field.
