@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   App,
   defaultManagedModel,
@@ -37,10 +37,29 @@ export function Settings() {
   const [tab, setTab] = useState<Tab>('general')
   const [draft, setDraft] = useState<config.Settings | null>(loaded)
   const [saving, setSaving] = useState(false)
+  const paneRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     setDraft(loaded)
   }, [loaded])
+
+  /*
+   * A tab switch starts at the top of the new tab.
+   *
+   * The pane is one element for every tab, so it keeps the scroll offset of the tab
+   * that was just left. The engine is expected to clamp that offset when the content
+   * that justified it is replaced by something shorter, and WebKitGTK does in the plain
+   * case — measured: leaving Backends at scrollTop 1954 for General, whose content ends
+   * at 215, lands on 10 with the heading in view. But the clamp follows the engine's own
+   * layout and scroll-animation timing, not the switch, and an offset that survives past
+   * the end of the new content paints an empty pane while the tab strip stays in place.
+   * That is the blank tab as reported, and why reopening Settings cures it: a fresh pane
+   * starts at 0. Resetting here, in a layout effect, runs after the new tab is committed
+   * and before the frame is painted, so the stale position is never shown at all.
+   */
+  useLayoutEffect(() => {
+    if (paneRef.current) paneRef.current.scrollTop = 0
+  }, [tab])
 
   if (!draft) return <div className="flex flex-1 items-center justify-center faint">{t('common.loading')}</div>
 
@@ -105,7 +124,7 @@ export function Settings() {
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin p-4">
+      <div ref={paneRef} className="min-h-0 flex-1 overflow-y-auto scroll-thin p-4">
         <div className="mx-auto max-w-3xl space-y-4">
           {tab === 'general' && <GeneralTab draft={draft} patch={patch} />}
           {tab === 'backends' && <BackendsTab draft={draft} patch={patch} onApply={save} />}
