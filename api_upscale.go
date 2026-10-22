@@ -15,6 +15,7 @@ import (
 	rt "kichat/internal/runtime"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/uimsg"
 )
 
 // UpscaleAttachment enlarges one picture and files the copy beside its source.
@@ -29,7 +30,7 @@ func (a *App) UpscaleAttachment(attachmentID string, req images.UpscaleRequest) 
 	}
 	service := a.currentToolService()
 	if service == nil || a.ctx == nil {
-		return store.Attachment{}, errors.New("App ist noch nicht bereit")
+		return store.Attachment{}, uimsg.Errorf("app.notReady")
 	}
 	release, ok := a.tryDraw()
 	if !ok {
@@ -81,7 +82,7 @@ func (a *App) GetUpscalerStatus() (tools.UpscalerStatus, error) {
 	}
 	service := a.currentToolService()
 	if service == nil {
-		return tools.UpscalerStatus{}, errors.New("App ist noch nicht bereit")
+		return tools.UpscalerStatus{}, uimsg.Errorf("app.notReady")
 	}
 	return service.UpscalerStatus(), nil
 }
@@ -94,7 +95,7 @@ func (a *App) TestUpscaler() (string, error) {
 	}
 	service := a.currentToolService()
 	if service == nil || a.ctx == nil {
-		return "", errors.New("App ist noch nicht bereit")
+		return "", uimsg.Errorf("app.notReady")
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 2*time.Minute)
 	defer cancel()
@@ -173,7 +174,7 @@ func (a *App) InstallUpscaler() error {
 	// — and they are checked here rather than in the goroutine, where a nil dereference
 	// takes the whole process down instead of failing one download.
 	if a.ctx == nil || a.upscalerInstaller == nil {
-		return errors.New("App ist noch nicht bereit")
+		return uimsg.Errorf("app.notReady")
 	}
 	build, err := a.upscalerAssetFor(goruntime.GOOS, goruntime.GOARCH)
 	if err != nil {
@@ -182,7 +183,7 @@ func (a *App) InstallUpscaler() error {
 	a.upscalerMu.Lock()
 	if a.upscalerBusy {
 		a.upscalerMu.Unlock()
-		return errors.New("ein Download läuft bereits")
+		return uimsg.Errorf("download.running")
 	}
 	a.upscalerBusy, a.upscalerPhase, a.upscalerErr = true, "", ""
 	a.upscalerDone, a.upscalerTotal = 0, build.Size
@@ -197,7 +198,7 @@ func (a *App) InstallUpscaler() error {
 // above covers, reported instead of dereferenced.
 func (a *App) upscalerAssetFor(goos, goarch string) (images.UpscalerBuild, error) {
 	if a.upscalerBuild == nil {
-		return images.UpscalerBuild{}, errors.New("App ist noch nicht bereit")
+		return images.UpscalerBuild{}, uimsg.Errorf("app.notReady")
 	}
 	return a.upscalerBuild(goos, goarch)
 }

@@ -1,7 +1,11 @@
 package main
 
 import (
+	"io/fs"
 	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -96,4 +100,92 @@ func TestEveryTranslatedNameExistsInEveryDictionary(t *testing.T) {
 			}
 		}
 	}
+}
+
+// errorCodePattern finds the codes the backend emits. internal/uimsg is the only
+// producer, so the call is what names them; a message built any other way is text,
+// not a code, and is left alone by design.
+var errorCodePattern = regexp.MustCompile(`uimsg\.Errorf\("([^"]+)"`)
+
+// The other half of the dictionary check, and the reason the codes exist at all: a
+// code with no sentence — or with a German sentence only — reads as `i18n:{…}` or as
+// German in an English or Chinese window. Walking the tree rather than listing files
+// means a new bridge file is covered the moment it emits its first code.
+func TestEveryBackendErrorCodeIsTranslated(t *testing.T) {
+	raw, err := os.ReadFile(frontendDictPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", frontendDictPath, err)
+	}
+	src := string(raw)
+	dicts := map[string]string{}
+	for lang, b := range map[string][2]string{
+		config.LangGerman:  {"const de = {", "const en"},
+		config.LangEnglish: {"const en:", "const zh"},
+		config.LangChinese: {"const zh:", "const dictionaries"},
+	} {
+		block, ok := dictBlock(src, b[0], b[1])
+		if !ok {
+			t.Fatalf("%s: cannot find the %q dictionary between %q and %q", frontendDictPath, lang, b[0], b[1])
+		}
+		dicts[lang] = block
+	}
+
+	codes := map[string]bool{}
+	err = filepath.WalkDir(".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "frontend", "scratch", "build", "packaging", "tools":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, match := range errorCodePattern.FindAllStringSubmatch(string(body), -1) {
+			codes[match[1]] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the tree for uimsg codes: %v", err)
+	}
+	if len(codes) == 0 {
+		t.Fatal("no uimsg codes found; did the bridge stop reporting through internal/uimsg?")
+	}
+
+	for _, code := range sorted(codes) {
+		key := "err." + code
+		for lang, block := range dicts {
+			if !strings.Contains(block, "'"+key+"':") {
+				t.Errorf("%s: %q has no %s sentence — the window would show the raw code", frontendDictPath, code, lang)
+			}
+		}
+	}
+
+	// And the other direction: a sentence no code asks for is a leftover that will
+	// never be read, and the next person to touch these strings has to work out
+	// whether it matters.
+	dictKeyPattern := regexp.MustCompile(`'err\.([A-Za-z0-9_.]+)':`)
+	for _, match := range dictKeyPattern.FindAllStringSubmatch(dicts[config.LangGerman], -1) {
+		if !codes[match[1]] {
+			t.Errorf("%s: 'error.%s' is translated but no Go code emits it", frontendDictPath, match[1])
+		}
+	}
+}
+
+func sorted(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for key := range set {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }

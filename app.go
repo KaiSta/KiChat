@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +23,7 @@ import (
 	"kichat/internal/secret"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/uimsg"
 )
 
 // Event names live in internal/events so the emitters and the frontend's
@@ -336,7 +336,7 @@ func (a *App) startManagedModel(backendID string) error {
 	settings := a.Settings()
 	mm, ok := settings.Runtime.Models[backendID]
 	if !ok {
-		return fmt.Errorf("für %s ist kein eigenes Modell eingerichtet", backendID)
+		return uimsg.Errorf("model.notConfigured", backendID)
 	}
 	binary, err := a.llamaServerPath(settings)
 	if err != nil {
@@ -395,10 +395,10 @@ func managedProjector(mm config.ManagedModel) (string, error) {
 		// looking for a file they can see.
 		info, statErr := os.Stat(named)
 		if statErr != nil {
-			return "", fmt.Errorf("die mmproj-Datei %s ist nicht vorhanden", named)
+			return "", uimsg.Errorf("runtime.mmprojMissing", named)
 		}
 		if info.IsDir() {
-			return "", fmt.Errorf("%s ist ein Ordner, keine mmproj-Datei", named)
+			return "", uimsg.Errorf("runtime.mmprojIsFolder", named)
 		}
 		return named, nil
 	}
@@ -429,7 +429,7 @@ func (a *App) llamaServerPath(settings config.Settings) (string, error) {
 	if _, binary := a.managedLauncher(settings); binary != "" {
 		return binary, nil
 	}
-	return "", errors.New("llama-server ist noch nicht installiert")
+	return "", uimsg.Errorf("runtime.notInstalled")
 }
 
 // managedLauncher resolves the build a managed start would run for the selected
@@ -925,11 +925,11 @@ const imageServerID = "images"
 func (a *App) captionImage(ctx context.Context, req images.CaptionRequest) (images.CaptionResult, error) {
 	turn, ok := tools.TurnFrom(ctx)
 	if !ok {
-		return images.CaptionResult{}, errors.New("kein Modell für die Bildbeschreibung verfügbar")
+		return images.CaptionResult{}, uimsg.Errorf("image.noCaptionModel")
 	}
 	provider, ok := a.currentRegistry().Provider(turn.BackendID)
 	if !ok {
-		return images.CaptionResult{}, fmt.Errorf("Backend %q ist nicht verfügbar", turn.BackendID)
+		return images.CaptionResult{}, uimsg.Errorf("model.backendUnavailable", turn.BackendID)
 	}
 	return chat.Caption(ctx, provider, turn.ModelID, req)
 }
@@ -1001,7 +1001,7 @@ func (a *App) startImageServer() error {
 	}
 	settings := a.Settings()
 	if !config.IsImageSD(settings.Images.Kind) {
-		return errors.New("die Bildgenerierung steht nicht auf dem lokalen Server")
+		return uimsg.Errorf("image.notLocalServer")
 	}
 	port, err := rt.FreePort()
 	if err != nil {

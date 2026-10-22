@@ -220,16 +220,16 @@ func TestARunningServerProtectsTheBuildItWasStartedFrom(t *testing.T) {
 	if err == nil {
 		t.Fatal("the build a running server was started from was deleted")
 	}
-	if !strings.Contains(err.Error(), "läuft") {
-		t.Errorf("refusal = %q, want it to say the build is running", err)
+	if code, args := refusalOf(t, err); code != "runtime.modelRunning" || len(args) != 1 || args[0] != "b11535-cpu" {
+		t.Errorf("refusal = %q, want the code naming the running build", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(root, "b11535-cpu", "llama-server")); statErr != nil {
 		t.Fatalf("the running build is gone from disk: %v", statErr)
 	}
 	if err := a.RemoveLlamaBuild("b11528-cpu"); err == nil {
 		t.Error("the build in use was deleted")
-	} else if !strings.Contains(err.Error(), "startet") {
-		t.Errorf("refusal = %q, want it to say KiChat starts that build", err)
+	} else if code, args := refusalOf(t, err); code != "runtime.buildInUse" || len(args) != 1 || args[0] != "b11528-cpu" {
+		t.Errorf("refusal = %q, want the code naming the build KiChat starts", err)
 	}
 
 	// One press on the cleanup, with both kinds of protected build among the
