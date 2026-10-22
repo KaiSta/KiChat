@@ -1,14 +1,14 @@
 package runtime
 
 import (
-	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"kichat/internal/uimsg"
 )
 
 // Build is one llama.cpp build in the installer's directory.
@@ -118,17 +118,17 @@ func isInstallLeftover(name string) bool {
 func (i *Installer) RemoveBuild(dir string) error {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
-		return errors.New("kein Build angegeben")
+		return uimsg.Errorf("runtime.noBuildGiven")
 	}
 	if dir != filepath.Base(dir) || dir == "." || dir == ".." {
-		return fmt.Errorf("kein Build-Verzeichnisname: %s", dir)
+		return uimsg.Errorf("runtime.noBuildDirName", dir)
 	}
 	path := filepath.Join(i.Dir, dir)
 	if launcher, _ := i.launcherUnder(path, launcherName()); launcher == "" && !isInstallLeftover(dir) {
-		return fmt.Errorf("in %s liegt kein llama.cpp-Build", dir)
+		return uimsg.Errorf("runtime.notABuild", dir)
 	}
 	if err := os.RemoveAll(path); err != nil {
-		return fmt.Errorf("Build entfernen: %w", err)
+		return uimsg.Errorf("runtime.removeBuild", err)
 	}
 	return nil
 }

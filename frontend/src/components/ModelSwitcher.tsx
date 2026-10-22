@@ -1014,7 +1014,7 @@ export function ModelSwitcher() {
                   the rest of the app does with a Go error. The two are not
                   interchangeable: this row stays on screen, and a German
                   sentence in a Chinese window is a bug the user cannot dismiss. */}
-              {check.reason === 'all-refused' ? t('model.checkRefusedAll') : check.error}
+              {check.reason === 'all-refused' ? t('model.checkRefusedAll') : errText(check.error)}
             </div>
           )}
 

@@ -530,9 +530,9 @@ function LocalModelSection({
             <span
               className="min-w-0 flex-1 truncate"
               style={{ color: 'var(--danger)' }}
-              title={status.update.error}
+              title={errText(status.update.error)}
             >
-              {status.update.error}
+              {errText(status.update.error)}
             </span>
           ) : status.update?.available ? (
             <>
@@ -1104,7 +1104,7 @@ function LocalModelSection({
       )}
       {mine?.error && (
         <div className="mt-2 whitespace-pre-wrap text-[11px]" style={{ color: 'var(--danger)' }}>
-          {mine.error}
+          {errText(mine.error)}
         </div>
       )}
       {error && (
@@ -1114,7 +1114,7 @@ function LocalModelSection({
       )}
       {status?.error && (
         <div className="mt-2 text-[11px]" style={{ color: 'var(--danger)' }}>
-          {status.error}
+          {errText(status.error)}
         </div>
       )}
       {state === 'starting' && mine?.log?.length ? (
@@ -1250,7 +1250,7 @@ export function BackendsTab({
               )}
               {status && status.enabled && !status.ok && (
                 <div className="mt-2 text-[11px]" style={{ color: 'var(--danger)' }}>
-                  {status.error}
+                  {errText(status.error)}
                 </div>
               )}
               {/* A key in an entry that is switched off is stored and then never

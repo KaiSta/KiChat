@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
 	"testing"
+
+	"kichat/internal/uimsg"
 )
 
 // The four names below are the published ones for b11538: two CUDA suites for Linux
@@ -268,8 +271,8 @@ func TestInstallRefusesACorruptRuntimeBundle(t *testing.T) {
 	}
 	if _, err := inst.Install(context.Background(), asset); err == nil {
 		t.Fatal("a runtime bundle with a wrong digest was installed")
-	} else if !strings.Contains(err.Error(), "Prüfsumme") {
-		t.Errorf("error = %q, want the digest named", err)
+	} else if message, ok := uimsg.Parse(err.Error()); !ok || message.Code != "runtime.checksumMismatch" || len(message.Args) != 2 {
+		t.Errorf("error = %q, want the checksum refusal naming expected and got", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "b1-cuda-13.4")); !os.IsNotExist(err) {
 		t.Errorf("a build directory was left behind after a failed install: %v", err)

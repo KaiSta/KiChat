@@ -5,9 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
+
+	"kichat/internal/uimsg"
 )
 
 // TestParseVersionOutput pins the shapes a launcher answers with. The measured one
@@ -103,7 +104,7 @@ func TestBinaryVersionRespectsItsDeadline(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("the probe ran for %s despite its deadline", elapsed)
 	}
-	if !strings.Contains(err.Error(), "Version von") {
+	if message, ok := uimsg.Parse(err.Error()); !ok || message.Code != "runtime.readVersion" || len(message.Args) != 2 || message.Args[0] != binary {
 		t.Fatalf("unhelpful error: %v", err)
 	}
 }

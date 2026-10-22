@@ -3,11 +3,11 @@ package runtime
 import (
 	"bytes"
 	"context"
-	"errors"
-	"fmt"
 	"os/exec"
 	"strings"
 	"time"
+
+	"kichat/internal/uimsg"
 )
 
 // BinaryVersion asks a llama-server what it is and returns the line it answers
@@ -25,7 +25,7 @@ import (
 // for arrived.
 func BinaryVersion(ctx context.Context, binary string) (string, error) {
 	if strings.TrimSpace(binary) == "" {
-		return "", errors.New("kein llama-server angegeben")
+		return "", uimsg.Errorf("runtime.noServerGiven")
 	}
 	cmd := exec.CommandContext(ctx, binary, "--version")
 	var out bytes.Buffer
@@ -48,9 +48,9 @@ func BinaryVersion(ctx context.Context, binary string) (string, error) {
 		return version, nil
 	}
 	if runErr != nil {
-		return "", fmt.Errorf("Version von %s lesen: %w", binary, runErr)
+		return "", uimsg.Errorf("runtime.readVersion", binary, runErr)
 	}
-	return "", fmt.Errorf("%s meldet keine Version", binary)
+	return "", uimsg.Errorf("runtime.noVersionReported", binary)
 }
 
 // parseVersionOutput picks the version out of what a launcher printed.

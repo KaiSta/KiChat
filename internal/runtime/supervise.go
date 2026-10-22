@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"kichat/internal/uimsg"
 )
 
 // Process states, as reported to the UI.
@@ -195,22 +196,22 @@ func probeHealth(ctx context.Context, url string) error {
 func (s *Server) Start(opts Options) error {
 	label := opts.label()
 	if opts.Binary == "" {
-		return fmt.Errorf("kein %s installiert", label)
+		return uimsg.Errorf("runtime.binaryMissing", label)
 	}
 	if opts.Model == "" {
-		return errors.New("kein Modell ausgewählt")
+		return uimsg.Errorf("model.noneSelected")
 	}
 	// Checked here rather than left to exec, so the user is told which of the two
 	// paths is wrong while the server is not yet involved.
 	if _, err := os.Stat(opts.Binary); err != nil {
-		return fmt.Errorf("%s nicht gefunden: %w", label, err)
+		return uimsg.Errorf("runtime.binaryNotFound", label, err)
 	}
 	model, err := os.Stat(opts.Model)
 	if err != nil {
-		return fmt.Errorf("Modell nicht gefunden: %w", err)
+		return uimsg.Errorf("model.notFound", err)
 	}
 	if model.IsDir() {
-		return fmt.Errorf("Modellpfad ist ein Ordner: %s", opts.Model)
+		return uimsg.Errorf("runtime.modelIsFolder", opts.Model)
 	}
 
 	if err := s.Stop(); err != nil {
@@ -225,7 +226,7 @@ func (s *Server) Start(opts Options) error {
 	if port == 0 {
 		port, err = FreePort()
 		if err != nil {
-			return fmt.Errorf("freien Port finden: %w", err)
+			return uimsg.Errorf("runtime.freePort", err)
 		}
 	}
 	opts.Port = port
@@ -264,7 +265,7 @@ func (s *Server) Start(opts Options) error {
 		// a status saying "starting" would have the panel poll for a model load that
 		// no process is performing, forever.
 		s.markStopped()
-		return fmt.Errorf("%s starten: %w", label, err)
+		return uimsg.Errorf("runtime.startServer", label, err)
 	}
 
 	url := fmt.Sprintf("http://%s:%d", host, port)
@@ -605,7 +606,7 @@ func FreePort() (int, error) {
 	defer l.Close()
 	addr, ok := l.Addr().(*net.TCPAddr)
 	if !ok {
-		return 0, errors.New("unerwartete Adresse für den freien Port")
+		return 0, uimsg.Errorf("runtime.unexpectedPortAddress")
 	}
 	return addr.Port, nil
 }

@@ -3,6 +3,8 @@ package runtime
 import (
 	"fmt"
 	"strings"
+
+	"kichat/internal/uimsg"
 )
 
 // The sources of llama-server a user can install.
@@ -135,7 +137,7 @@ func (d Distribution) variantFor(goos, goarch, accel string) (variant, error) {
 			return v, nil
 		}
 	}
-	return variant{}, fmt.Errorf("für %s/%s gibt es im %s-Build keinen %s-Build", goos, goarch, d.ID, accel)
+	return variant{}, uimsg.Errorf("runtime.noVariant", goos, goarch, d.ID, accel)
 }
 
 // PublishedAccelerators lists the families this source publishes for a platform, in

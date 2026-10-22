@@ -3,13 +3,13 @@ package runtime
 import (
 	"bytes"
 	"context"
-	"errors"
-	"fmt"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"kichat/internal/uimsg"
 )
 
 // Device is one compute device a launcher reported, with the memory it named.
@@ -56,7 +56,7 @@ var deviceEntry = regexp.MustCompile(`^([^:]+):\s*(.*?)\s*(?:\((\d+) MiB,\s*(\d+
 // answers `(none)`, and so does a GPU build whose runtime libraries are missing.
 func BinaryDevices(ctx context.Context, binary string) ([]Device, error) {
 	if strings.TrimSpace(binary) == "" {
-		return nil, errors.New("kein llama-server angegeben")
+		return nil, uimsg.Errorf("runtime.noServerGiven")
 	}
 	cmd := exec.CommandContext(ctx, binary, "--list-devices")
 	var out bytes.Buffer
@@ -76,7 +76,7 @@ func BinaryDevices(ctx context.Context, binary string) ([]Device, error) {
 	devices, err := parseDeviceList(out.String())
 	if err != nil {
 		if runErr != nil {
-			return nil, fmt.Errorf("Geräte von %s lesen: %w", binary, runErr)
+			return nil, uimsg.Errorf("runtime.readDevices", binary, runErr)
 		}
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func parseDeviceList(out string) ([]Device, error) {
 		}
 		return devices, nil
 	}
-	return nil, errors.New("keine Geräteliste in der Ausgabe")
+	return nil, uimsg.Errorf("runtime.noDeviceList")
 }
 
 // parseDeviceEntry splits one device line into its text and its memory. A line

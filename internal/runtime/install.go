@@ -27,7 +27,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,6 +34,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"kichat/internal/uimsg"
 )
 
 const (
@@ -203,6 +204,21 @@ type variant struct {
 	runtime string
 }
 
+// platformName spells a GOOS the way the user knows it, for the refusal that says
+// nothing is published for this machine. A message reading "publishes nothing for
+// darwin" names the build tag rather than the system the reader is sitting at.
+func platformName(goos string) string {
+	switch goos {
+	case "linux":
+		return "Linux"
+	case "darwin":
+		return "macOS"
+	case "windows":
+		return "Windows"
+	}
+	return goos
+}
+
 // upstreamVariants is the measured table of what upstream llama.cpp publishes, read
 // off release b11541 (36 assets). It is per platform and per architecture because the
 // releases are: ROCm, SYCL and OpenVINO are x64 only, the CUDA arm64 build exists
@@ -228,7 +244,7 @@ func upstreamVariants(goos, goarch string) ([]variant, error) {
 				{AcceleratorCUDA, "ubuntu-cuda-*-arm64", ".tar.gz", "cudart-llama-{tag}-bin-{platform}"},
 			}, nil
 		}
-		return nil, fmt.Errorf("für Linux auf %s wird llama.cpp nicht veröffentlicht", goarch)
+		return nil, uimsg.Errorf("runtime.platformUnpublished", platformName(goos), goarch)
 	case "darwin":
 		switch goarch {
 		case "arm64":
@@ -236,7 +252,7 @@ func upstreamVariants(goos, goarch string) ([]variant, error) {
 		case "amd64":
 			return []variant{{AcceleratorCPU, "macos-x64", ".tar.gz", ""}}, nil
 		}
-		return nil, fmt.Errorf("macOS auf %s wird nicht veröffentlicht", goarch)
+		return nil, uimsg.Errorf("runtime.platformUnpublished", platformName(goos), goarch)
 	case "windows":
 		switch goarch {
 		case "amd64":
@@ -256,9 +272,9 @@ func upstreamVariants(goos, goarch string) ([]variant, error) {
 				{AcceleratorOpenCL, "win-opencl-adreno-arm64", ".zip", ""},
 			}, nil
 		}
-		return nil, fmt.Errorf("für Windows auf %s wird llama.cpp nicht veröffentlicht", goarch)
+		return nil, uimsg.Errorf("runtime.platformUnpublished", platformName(goos), goarch)
 	}
-	return nil, fmt.Errorf("für %s wird llama.cpp nicht veröffentlicht", goos)
+	return nil, uimsg.Errorf("runtime.platformUnpublishedOS", platformName(goos))
 }
 
 // prismVariants is the measured table of what PrismML's fork publishes, read off
@@ -301,7 +317,7 @@ func prismVariants(goos, goarch string) ([]variant, error) {
 				{AcceleratorVulkan, "ubuntu-vulkan-arm64", ".tar.gz", ""},
 			}, nil
 		}
-		return nil, fmt.Errorf("für Linux auf %s wird der PrismML-Build nicht veröffentlicht", goarch)
+		return nil, uimsg.Errorf("runtime.forkUnpublished", platformName(goos), goarch)
 	case "darwin":
 		switch goarch {
 		case "arm64":
@@ -309,7 +325,7 @@ func prismVariants(goos, goarch string) ([]variant, error) {
 		case "amd64":
 			return []variant{{AcceleratorCPU, "macos-x64", ".tar.gz", ""}}, nil
 		}
-		return nil, fmt.Errorf("macOS auf %s wird nicht veröffentlicht", goarch)
+		return nil, uimsg.Errorf("runtime.platformUnpublished", platformName(goos), goarch)
 	case "windows":
 		switch goarch {
 		case "amd64":
@@ -326,9 +342,9 @@ func prismVariants(goos, goarch string) ([]variant, error) {
 				{AcceleratorCUDA, "win-cuda-*-arm64", ".zip", "cudart-llama-bin-{platform}"},
 			}, nil
 		}
-		return nil, fmt.Errorf("für Windows auf %s wird der PrismML-Build nicht veröffentlicht", goarch)
+		return nil, uimsg.Errorf("runtime.forkUnpublished", platformName(goos), goarch)
 	}
-	return nil, fmt.Errorf("für %s wird der PrismML-Build nicht veröffentlicht", goos)
+	return nil, uimsg.Errorf("runtime.forkUnpublishedOS", platformName(goos))
 }
 
 // matchAssetName reports whether a published name is this variant, and returns the
@@ -544,7 +560,7 @@ func (i *Installer) Latest(ctx context.Context, dist Distribution, goos, goarch,
 
 	resp, err := i.Client.Do(req)
 	if err != nil {
-		return Asset{}, fmt.Errorf("llama.cpp-Releases abfragen: %w", err)
+		return Asset{}, uimsg.Errorf("runtime.releaseQuery", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -552,14 +568,14 @@ func (i *Installer) Latest(ctx context.Context, dist Distribution, goos, goarch,
 		// and says so in a header. Naming it saves the user from reading a
 		// generic failure as "llama.cpp is unreachable".
 		if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
-			return Asset{}, errors.New("GitHub drosselt die Anfragen (Stundenlimit erreicht) — später erneut versuchen oder einen eigenen Build-Pfad angeben")
+			return Asset{}, uimsg.Errorf("runtime.rateLimited")
 		}
-		return Asset{}, fmt.Errorf("llama.cpp-Releases abfragen: HTTP %d", resp.StatusCode)
+		return Asset{}, uimsg.Errorf("runtime.releaseQueryStatus", resp.StatusCode)
 	}
 
 	var releases []release
 	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		return Asset{}, fmt.Errorf("Release-Liste lesen: %w", err)
+		return Asset{}, uimsg.Errorf("runtime.releaseListRead", err)
 	}
 	chosen, err := dist.variantFor(goos, goarch, accel)
 	if err != nil {
@@ -588,7 +604,7 @@ func (i *Installer) Latest(ctx context.Context, dist Distribution, goos, goarch,
 		}
 		if best < 0 {
 			if refused != "" {
-				return Asset{}, fmt.Errorf("kein %s-Build für diese Maschine möglich — %s", chosen.ID, refused)
+				return Asset{}, uimsg.Errorf("runtime.buildUnusable", chosen.ID, refused)
 			}
 			continue
 		}
@@ -605,7 +621,7 @@ func (i *Installer) Latest(ctx context.Context, dist Distribution, goos, goarch,
 		asset.Companion = i.companionFor(r, chosen, suite)
 		return asset, nil
 	}
-	return Asset{}, fmt.Errorf("kein %s-Build für %s/%s (%s) in den letzten %d Releases gefunden",
+	return Asset{}, uimsg.Errorf("runtime.noBuildInReleases",
 		dist.ID, goos, goarch, accel, len(releases))
 }
 
@@ -665,10 +681,10 @@ func companionName(template, tag, platform, suite string) string {
 // is complete, so an interrupted install leaves nothing that looks installed.
 func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 	if asset.Tag == "" || asset.URL == "" {
-		return "", errors.New("kein Build zum Installieren")
+		return "", uimsg.Errorf("runtime.noBuildToInstall")
 	}
 	if err := os.MkdirAll(i.Dir, 0o755); err != nil {
-		return "", fmt.Errorf("Laufzeitverzeichnis anlegen: %w", err)
+		return "", uimsg.Errorf("runtime.runtimeDir", err)
 	}
 
 	format, err := archiveFormatFor(asset.Name)
@@ -720,16 +736,16 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 	i.report(Progress{Phase: "extracting"})
 	if err := extract(archive, format, staging); err != nil {
 		os.RemoveAll(staging)
-		return "", fmt.Errorf("Archiv entpacken: %w", err)
+		return "", uimsg.Errorf("runtime.unpackArchive", err)
 	}
 	if err := flattenSingleRoot(staging); err != nil {
 		os.RemoveAll(staging)
-		return "", fmt.Errorf("Archivwurzel auflösen: %w", err)
+		return "", uimsg.Errorf("runtime.resolveArchiveRoot", err)
 	}
 	if companionArchive != "" {
 		if err := i.addRuntimeBundle(companionArchive, format, staging); err != nil {
 			os.RemoveAll(staging)
-			return "", fmt.Errorf("CUDA-Laufzeit entpacken: %w", err)
+			return "", uimsg.Errorf("runtime.unpackCudaRuntime", err)
 		}
 	}
 	// The launcher is made executable before the move, not after. A chmod that
@@ -744,7 +760,7 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 	if path, _ := i.launcherUnder(staging, launcher); path != "" {
 		if err := os.Chmod(path, 0o755); err != nil {
 			os.RemoveAll(staging)
-			return "", fmt.Errorf("%s ausführbar machen: %w", launcher, err)
+			return "", uimsg.Errorf("runtime.makeExecutable", launcher, err)
 		}
 	}
 	// A previous install of the same build is replaced wholesale: mixing files
@@ -754,7 +770,7 @@ func (i *Installer) Install(ctx context.Context, asset Asset) (string, error) {
 	}
 	if err := os.Rename(staging, final); err != nil {
 		os.RemoveAll(staging)
-		return "", fmt.Errorf("Build an seinen Platz verschieben: %w", err)
+		return "", uimsg.Errorf("runtime.moveBuild", err)
 	}
 
 	i.report(Progress{Phase: "done"})
@@ -822,11 +838,11 @@ func (i *Installer) download(ctx context.Context, asset Asset, base, total int64
 
 	resp, err := i.Client.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("Build herunterladen: %w", err)
+		return "", 0, uimsg.Errorf("runtime.download", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("Build herunterladen: HTTP %d", resp.StatusCode)
+		return "", 0, uimsg.Errorf("runtime.downloadStatus", resp.StatusCode)
 	}
 
 	// expected is this archive's own size, which is what the completeness check
@@ -842,7 +858,7 @@ func (i *Installer) download(ctx context.Context, asset Asset, base, total int64
 	path := filepath.Join(i.Dir, asset.Name+".part")
 	f, err := os.Create(path)
 	if err != nil {
-		return "", 0, fmt.Errorf("Download-Datei anlegen: %w", err)
+		return "", 0, uimsg.Errorf("runtime.downloadFile", err)
 	}
 
 	sum := sha256.New()
@@ -852,7 +868,7 @@ func (i *Installer) download(ctx context.Context, asset Asset, base, total int64
 	closeErr := f.Close()
 	if err != nil {
 		os.Remove(path)
-		return "", 0, fmt.Errorf("Build herunterladen: %w", err)
+		return "", 0, uimsg.Errorf("runtime.downloadInterrupted", err)
 	}
 	if closeErr != nil {
 		os.Remove(path)
@@ -862,14 +878,14 @@ func (i *Installer) download(ctx context.Context, asset Asset, base, total int64
 		// A truncated download that still ends cleanly would otherwise unpack
 		// into a broken install.
 		os.Remove(path)
-		return "", 0, fmt.Errorf("Download unvollständig: %d von %d Bytes", written, expected)
+		return "", 0, uimsg.Errorf("runtime.downloadIncomplete", written, expected)
 	}
 
 	if want := normaliseDigest(asset.Digest); want != "" {
 		got := hex.EncodeToString(sum.Sum(nil))
 		if !strings.EqualFold(got, want) {
 			os.Remove(path)
-			return "", 0, fmt.Errorf("Prüfsumme stimmt nicht: erwartet %s, erhalten %s", want, got)
+			return "", 0, uimsg.Errorf("runtime.checksumMismatch", want, got)
 		}
 	}
 	return path, written, nil
@@ -946,7 +962,7 @@ func archiveFormatFor(name string) (archiveFormat, error) {
 	case strings.HasSuffix(name, ".tar.gz"), strings.HasSuffix(name, ".tgz"):
 		return formatTarGz, nil
 	default:
-		return 0, fmt.Errorf("unbekanntes Archivformat: %s", filepath.Base(name))
+		return 0, uimsg.Errorf("runtime.unknownArchive", filepath.Base(name))
 	}
 }
 
@@ -986,7 +1002,7 @@ func extract(archive string, format archiveFormat, dst string) error {
 	case formatTarGz:
 		return extractTarGz(archive, dst)
 	default:
-		return fmt.Errorf("unbekanntes Archivformat: %s", filepath.Base(archive))
+		return uimsg.Errorf("runtime.unknownArchive", filepath.Base(archive))
 	}
 }
 
@@ -1038,7 +1054,7 @@ func extractTarGz(archive, dst string) error {
 		case tar.TypeReg:
 			total += hdr.Size
 			if total > maxExtractBytes {
-				return fmt.Errorf("Archiv zu groß: mehr als %d Bytes", int64(maxExtractBytes))
+				return uimsg.Errorf("runtime.archiveTooLarge", int64(maxExtractBytes))
 			}
 			if err := writeFile(path, tr, hdr.Size, fileMode(hdr.Mode)); err != nil {
 				return err
@@ -1079,7 +1095,7 @@ func extractZip(archive, dst string) error {
 		total += int64(f.UncompressedSize64)
 		if total > maxExtractBytes {
 			rc.Close()
-			return fmt.Errorf("Archiv zu groß: mehr als %d Bytes", int64(maxExtractBytes))
+			return uimsg.Errorf("runtime.archiveTooLarge", int64(maxExtractBytes))
 		}
 		// A zip carries no executable bit worth trusting, but a launcher that is
 		// not executable on Unix cannot start; the install chmods it anyway.
@@ -1117,7 +1133,7 @@ func rootEntryOnlyDirectory(name, path, root string, isDir bool) error {
 	if path != root || isDir {
 		return nil
 	}
-	return fmt.Errorf("Archiv-Eintrag ohne Namen: %s", name)
+	return uimsg.Errorf("runtime.entryUnnamed", name)
 }
 
 func writeFile(path string, r io.Reader, size int64, mode os.FileMode) error {
@@ -1161,10 +1177,10 @@ func entryPath(root, name string) (string, error) {
 		return root, nil
 	}
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("Archiv-Eintrag verlässt das Ziel: %s", name)
+		return "", uimsg.Errorf("runtime.entryEscapes", name)
 	}
 	if filepath.IsAbs(clean) {
-		return "", fmt.Errorf("Archiv-Eintrag mit absolutem Pfad: %s", name)
+		return "", uimsg.Errorf("runtime.entryAbsolute", name)
 	}
 	return filepath.Join(root, clean), nil
 }
