@@ -1,8 +1,12 @@
 package ingest
 
 import (
+	"archive/zip"
+	"bytes"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -106,5 +110,66 @@ func TestExtractXlsxRejectsSomethingThatIsNotAWorkbook(t *testing.T) {
 	}
 	if text != "" || sheets != 0 || warnings != nil {
 		t.Errorf("a rejected file should yield nothing, got text=%q sheets=%d warnings=%v", text, sheets, warnings)
+	}
+}
+
+// makeAbsurdRowXlsx writes the workbook the report describes: an ordinary first
+// row, then a <row> whose r is far past Excel's 1,048,576-row limit. Excelize's
+// own writer cannot produce that, so the parts are spelled out here.
+func makeAbsurdRowXlsx(t *testing.T, rowNum uint64) []byte {
+	t.Helper()
+	const head = `<?xml version="1.0" encoding="UTF-8"?>`
+	row := fmt.Sprintf("%d", rowNum)
+	parts := []struct{ name, body string }{
+		{"[Content_Types].xml", head + `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`},
+		{"_rels/.rels", head + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`},
+		{"xl/workbook.xml", head + `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>`},
+		{"xl/_rels/workbook.xml.rels", head + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`},
+		{"xl/worksheets/sheet1.xml", head + `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="` + row + `"><c r="A` + row + `"><v>2</v></c></row></sheetData></worksheet>`},
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, part := range parts {
+		w, err := zw.Create(part.name)
+		if err != nil {
+			t.Fatalf("zip entry %s: %v", part.name, err)
+		}
+		if _, err := w.Write([]byte(part.body)); err != nil {
+			t.Fatalf("write %s: %v", part.name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close archive: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// Reading used to cost one step per row *number*, not per row present: with
+// GetRows, r="2000000000" behind an ordinary first row took 8.271 s for this 1.6
+// KB file (measured on excelize v2.11.0), and the r="231999999999940" in Apache
+// POI's fuzz corpus works out at about eleven days of one core. The read is
+// streamed and bounded now, so the deadline is generous by three orders of
+// magnitude — and a regression fails here in seconds instead of hanging CI.
+func TestExtractXlsxIsNotSlowOnAnAbsurdRowNumber(t *testing.T) {
+	data := makeAbsurdRowXlsx(t, 2000000000)
+
+	start := time.Now()
+	text, sheets, warnings, err := extractXlsx(data)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("extractXlsx failed: %v", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("extractXlsx took %s for an absurd row number, which is the unbounded row walk coming back", elapsed)
+	}
+	if sheets != 1 {
+		t.Errorf("sheets = %d, want 1", sheets)
+	}
+	if !strings.Contains(text, "\n1\n") {
+		t.Errorf("the ordinary first row is missing from the output")
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "2000") {
+		t.Errorf("warnings = %v, want one naming the 2000-row budget", warnings)
 	}
 }

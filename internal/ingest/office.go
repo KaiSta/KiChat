@@ -163,22 +163,44 @@ func extractXlsx(data []byte) (text string, sheets int, warnings []string, err e
 	var sb strings.Builder
 	const maxRows = 2000
 	for _, sheet := range names {
-		rows, err := f.GetRows(sheet)
+		// Streamed rather than read with GetRows, because GetRows costs one step per
+		// row *number*, not per row present: a 1.6 KB workbook whose second <row>
+		// carries r="2000000000" took 8.271 s and returned one row (measured on
+		// v2.11.0 on this machine; the cost is linear, and the r="231999999999940"
+		// in Apache POI's fuzz corpus is about eleven days of one core). The limit
+		// is checked in Rows.Next but not in Rows.Columns, which sets the row number
+		// from the next element it consumes — so the bound below is what keeps a
+		// crafted attachment from parking a core forever. It also stops the whole
+		// sheet being materialised before the row budget throws most of it away.
+		it, err := f.Rows(sheet)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("Blatt %q nicht lesbar", sheet))
 			continue
 		}
 		fmt.Fprintf(&sb, "## Blatt: %s\n\n```csv\n", sheet)
-		truncated := false
-		for i, row := range rows {
-			if i >= maxRows {
+		read, truncated, failed := 0, false, false
+		for it.Next() {
+			if read >= maxRows {
 				truncated = true
+				break
+			}
+			row, err := it.Columns()
+			if err != nil {
+				failed = true
 				break
 			}
 			sb.WriteString(strings.Join(row, ","))
 			sb.WriteString("\n")
+			read++
 		}
+		if err := it.Error(); err != nil {
+			failed = true
+		}
+		_ = it.Close()
 		sb.WriteString("```\n\n")
+		if failed {
+			warnings = append(warnings, fmt.Sprintf("Blatt %q nicht lesbar", sheet))
+		}
 		if truncated {
 			warnings = append(warnings, fmt.Sprintf("Blatt %q auf %d Zeilen gekürzt", sheet, maxRows))
 		}
