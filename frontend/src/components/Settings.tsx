@@ -1845,6 +1845,41 @@ const SIZE_PRESETS: SizePreset[] = [
 // The second-pass bounds, mirrored from internal/images/limits.go. They are not bridge
 // constants — Go's exported names do not reach JavaScript — so the panel states its own
 // and the backend clamps again when the setting is saved.
+// The hosted model ids, spelled as the path segment NVIDIA's route takes
+// (`/v1/genai/<publisher>/<model>`). They are a constant rather than the status list because
+// the panel has to offer a model before any key exists: choosing one and adding the key are
+// the two things a user does here, in that order. The list is short on purpose — an id the
+// vendor does not serve answers 404, so guessing more names would only add broken choices.
+//
+// Order is the shipped default first: schnell is the Apache-2.0 one. Klein is second because
+// it is the hosted model measured to answer on a free-trial key.
+const NIM_MODELS = [
+  'black-forest-labs/flux.1-schnell',
+  'black-forest-labs/flux-3-image-klein',
+  'black-forest-labs/flux.1-dev',
+]
+
+/**
+ * The stored hosted id, then the offered ones.
+ *
+ * A `<select>` whose `value` matches no `<option>` shows the *first* option while leaving the
+ * state untouched. That is how a draw went out for `flux-3-image-klein` while the panel
+ * displayed `flux.1-schnell`: the stored id came from an earlier build of this field, no option
+ * matched it, and the only thing the user saw was NVIDIA's 404 naming a model they had never
+ * picked. Putting the stored value first makes the control say what will be sent.
+ */
+function nimModelOptions(stored: string | undefined): string[] {
+  const value = (stored ?? '').trim()
+  if (!value || NIM_MODELS.includes(value)) return NIM_MODELS
+  return [value, ...NIM_MODELS]
+}
+
+/** Whether a hosted id is one this build does not list, and therefore cannot vouch for. */
+function nimModelUnlisted(id: string | undefined): boolean {
+  const value = (id ?? '').trim()
+  return value !== '' && !NIM_MODELS.includes(value)
+}
+
 const IMAGE_HIRES_LIMITS = {
   minScale: 1.25,
   maxScale: 2,
@@ -2023,6 +2058,10 @@ function ImagesTab({
   // not a variant of the one-shot kind in the UI either — the fields are shared because the
   // flags are, but the process, the port and the lifetime are the server's own.
   const isSD = images.kind === 'sdserver'
+  // The hosted kind: nothing on this machine, no folder, no checkpoint — one HTTPS call with
+  // the account's NVIDIA key. It is neither local nor a server of the user's, which is why it
+  // gets its own branch rather than a fourth option behind the shared fields.
+  const isNIM = images.kind === 'nim'
   // Both local kinds are one build from one archive in two lifetimes, which is what makes the
   // folder and the whole model set *shared* rather than duplicated per kind: the same fields
   // feed `sd-cli -p …` and `sd-server --listen-port …`.
@@ -2456,13 +2495,16 @@ function ImagesTab({
           // The CLI backend has no listing to count, so its badge counts the files it will
           // load instead. Reporting "0 models" on a configured backend would read as a
           // broken setup rather than as a question this backend cannot be asked.
+          // The hosted kind counts models rather than checkpoints: nothing in its list is a
+          // file on this disk, and the wrong noun here sends a user looking for one.
           isCLI ? (
             <span className="badge badge-ok">
               {t('settings.images.ok')} · {status.files.length} {t('settings.images.files')}
             </span>
           ) : (
             <span className={`badge ${status.models.length > 0 ? 'badge-ok' : 'badge-warn'}`}>
-              {t('settings.images.ok')} · {status.models.length} {t('settings.images.models')}
+              {t('settings.images.ok')} · {status.models.length}{' '}
+              {isNIM ? t('settings.images.nimModels') : t('settings.images.models')}
             </span>
           )
         ) : (
@@ -2478,8 +2520,15 @@ function ImagesTab({
 
       {/* Profiles come before the fields rather than after them: picking one is how a user
           starts, and the row underneath is what the pick applies. Their own save commits
-          at once — see saveProfile — so the list is never only in the draft. */}
-      <div className="mb-3 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+          at once — see saveProfile — so the list is never only in the draft.
+
+          Hidden for the hosted kind, because a profile is a local model set: steps, a
+          guidance scale and a pipeline, none of which the vendor's route accepts. Offering
+          the row would let Apply change settings that nothing reads. */}
+      <div
+        className={isNIM ? 'hidden' : 'mb-3 border-t pt-3'}
+        style={{ borderColor: 'var(--border)' }}
+      >
         <div className="text-[12px]">{t('settings.images.profiles')}</div>
         <p className="faint mb-2 text-[11px]">{t('settings.images.profilesHint')}</p>
         <div className="flex flex-wrap items-center gap-2">
@@ -2577,18 +2626,28 @@ function ImagesTab({
           className="input"
           aria-label={t('settings.images.kind')}
           value={images.kind ?? ''}
-          onChange={(e) => update({ kind: e.target.value })}
+          onChange={(e) => {
+            const kind = e.target.value
+            // The hosted route has no second sampling pass, so a switch left on from a local
+            // kind would make every draw fail with "cannot run a second pass" the moment the
+            // kind changed. Turning it off with the kind is the one repair the panel can make
+            // without hiding a stored setting the user chose.
+            update(kind === 'nim' ? { kind, hiresEnabled: false } : { kind })
+          }}
         >
           <option value="">{t('settings.images.kindServer')}</option>
           <option value="cli">{t('settings.images.kindCLI')}</option>
           <option value="sdserver">{t('settings.images.kindSD')}</option>
+          <option value="nim">{t('settings.images.kindNIM')}</option>
         </select>
         <span className="faint flex-1 text-[11px]">
-          {isSD
-            ? t('settings.images.kindSDHint')
-            : isCLI
-              ? t('settings.images.kindCLIHint')
-              : t('settings.images.kindServerHint')}
+          {isNIM
+            ? t('settings.images.kindNIMHint')
+            : isSD
+              ? t('settings.images.kindSDHint')
+              : isCLI
+                ? t('settings.images.kindCLIHint')
+                : t('settings.images.kindServerHint')}
         </span>
       </div>
 
@@ -2598,8 +2657,9 @@ function ImagesTab({
           Automatic reads the diffusion model's own header, falling back to its file name only
           when that cannot be read, and the resolved name is shown here because a miss is
           otherwise silent — a generic profile captions nothing and draws at the build's
-          defaults. */}
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+          defaults. Hidden for the hosted kind, whose route takes a prompt, a size and a
+          seed and nothing a pipeline would change. */}
+      <div className={isNIM ? 'hidden' : 'mb-3 flex flex-wrap items-center gap-2'}>
         <span className="text-[12px]">{t('settings.images.pipeline')}</span>
         <select
           className="input"
@@ -2632,8 +2692,11 @@ function ImagesTab({
 
       {/* Who writes the caption a caption-trained model is drawn from. Empty is "the
           pipeline decides", which is how a FLUX 3 model gets one without the user finding
-          this row; "off" is the explicit no that overrides it. */}
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+          this row; "off" is the explicit no that overrides it.
+
+          Hidden for the hosted kind: captioning is a local pipeline's second model, and
+          build.nvidia.com has no such stage. */}
+      <div className={isNIM ? 'hidden' : 'mb-3 flex flex-wrap items-center gap-2'}>
         <span className="text-[12px]">{t('settings.images.captioning')}</span>
         <select
           className="input"
@@ -2890,6 +2953,37 @@ function ImagesTab({
               />
             </label>
           </>
+        ) : isNIM ? (
+          <>
+            <label className="text-[12px]">
+              {t('settings.images.nimModel')}
+              <select
+                className="input mt-1"
+                aria-label={t('settings.images.nimModel')}
+                value={images.nimModel || NIM_MODELS[0]}
+                onChange={(e) => update({ nimModel: e.target.value })}
+              >
+                {nimModelOptions(images.nimModel).map((m) => (
+                  <option key={m} value={m}>
+                    {nimModelUnlisted(m) ? `${m} — ${t('settings.images.nimModelUnlistedTag')}` : m}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {nimModelUnlisted(images.nimModel) ? (
+              <p className="faint text-[11px] sm:col-span-2">{t('settings.images.nimModelUnlisted')}</p>
+            ) : null}
+            {/* Where the key comes from, said plainly: this section has no field for it, so
+                a user who needs to replace it has to be told which tab holds it. */}
+            <div
+              className="text-[12px]"
+              style={{ color: status && !status.keySet ? 'var(--danger)' : 'var(--text-dim)' }}
+            >
+              {status?.keySet ? t('settings.images.nimKey') : t('settings.images.nimNoKey')}
+            </div>
+            <p className="faint text-[11px] sm:col-span-2">{t('settings.images.nimWhat')}</p>
+            <p className="faint text-[11px] sm:col-span-2">{t('settings.images.nimNoHires')}</p>
+          </>
         ) : (
           <>
             <label className="text-[12px]">
@@ -2931,8 +3025,8 @@ function ImagesTab({
         {/* The one sentence that says what this whole group does, where it can be read before
             a field is filled in: empty means the model chooses it per picture, and a typed
             value is fixed for every picture — including the ones the model did not ask for. */}
-        <p className="faint text-[11px] sm:col-span-2">{t('settings.images.pinHint')}</p>
-        <label className="text-[12px]" title={t('settings.images.pinHint')}>
+        <p className={isNIM ? 'hidden' : 'faint text-[11px] sm:col-span-2'}>{t('settings.images.pinHint')}</p>
+        <label className={isNIM ? 'hidden' : 'text-[12px]'} title={t('settings.images.pinHint')}>
           {t('settings.images.sampler')}
           <select
             className="input mt-1"
@@ -2947,7 +3041,7 @@ function ImagesTab({
             ))}
           </select>
         </label>
-        <label className="text-[12px]" title={t('settings.images.pinHint')}>
+        <label className={isNIM ? 'hidden' : 'text-[12px]'} title={t('settings.images.pinHint')}>
           {t('settings.images.steps')}
           <input
             className="input mt-1"
@@ -2959,7 +3053,7 @@ function ImagesTab({
             placeholder={t('settings.images.modelDecides')}
           />
         </label>
-        <label className="text-[12px]" title={t('settings.images.cfgHint')}>
+        <label className={isNIM ? 'hidden' : 'text-[12px]'} title={t('settings.images.cfgHint')}>
           {t('settings.images.cfgScale')}
           <input
             className="input mt-1"
@@ -3028,7 +3122,7 @@ function ImagesTab({
             })}
           </div>
         </label>
-        <label className="text-[12px] sm:col-span-2" title={t('settings.images.pinHint')}>
+        <label className={isNIM ? 'hidden' : 'text-[12px] sm:col-span-2'} title={t('settings.images.pinHint')}>
           {t('settings.images.negative')}
           <input
             className="input mt-1"
@@ -3042,7 +3136,7 @@ function ImagesTab({
             picture into a large one — a decision for the person paying for the GPU. Its
             two numbers stay stored while the switch is off, so flipping it back restores
             what was chosen instead of resetting it. */}
-        <div className="sm:col-span-2">
+        <div className={isNIM ? 'hidden' : 'sm:col-span-2'}>
           <label className="flex items-center gap-2 text-[12px]" title={t('settings.images.hiresHint')}>
             <input
               type="checkbox"
@@ -3260,7 +3354,7 @@ function ImagesTab({
         <button
           type="button"
           className="btn btn-sm"
-          disabled={testing || !images.enabled || (isSD && !sdRunning)}
+          disabled={testing || !images.enabled || (isSD && !sdRunning) || (isNIM && !status?.keySet)}
           onClick={() => void test()}
         >
           {testing ? t('settings.images.testing') : t('settings.images.test')}
@@ -3284,13 +3378,15 @@ function ImagesTab({
             on a CPU), and the managed server is already loaded — unless it is stopped, in
             which case the test is disabled and the Start button next to it is the action. */}
         <span className="faint text-[11px]">
-          {isSD
-            ? sdRunning
-              ? t('settings.images.sdTestHint')
-              : t('settings.images.sdStartFirst')
-            : isCLI
-              ? t('settings.images.cliDefaults')
-              : t('settings.images.defaults')}
+          {isNIM
+            ? t('settings.images.nimTestHint')
+            : isSD
+              ? sdRunning
+                ? t('settings.images.sdTestHint')
+                : t('settings.images.sdStartFirst')
+              : isCLI
+                ? t('settings.images.cliDefaults')
+                : t('settings.images.defaults')}
         </span>
       </div>
 

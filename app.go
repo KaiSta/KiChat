@@ -741,7 +741,7 @@ func (a *App) rebuildServices(settings config.Settings) {
 	// tool that can only ever fail.
 	var imageProvider images.Provider
 	if settings.Images.Enabled {
-		imageProvider = newImageProvider(settings, a.runningImageServerURL())
+		imageProvider = a.newImageProvider(settings, a.runningImageServerURL())
 	}
 	toolService := tools.New(a.store, chain, scraper)
 	toolService.Images = imageProvider
@@ -790,11 +790,11 @@ func (a *App) currentRegistry() *llm.Registry {
 
 // newImageProvider builds the backend the settings select.
 //
-// Two kinds, one settings section: the difference is where the work happens, not what the
-// panel configures. The server kind contacts an HTTP endpoint the user runs; the CLI kind
-// runs their binary once per picture. Everything downstream — the tool, the recipe, the
-// attachment — is written against images.Provider and cannot tell them apart, which is what
-// makes this a switch rather than a second feature.
+// Three kinds, one settings section: the difference is where the work happens, not what the
+// panel configures. The server kind contacts an HTTP endpoint the user runs, the two local
+// kinds run their binary, and the hosted kind calls build.nvidia.com. Everything downstream —
+// the tool, the recipe, the attachment — is written against images.Provider and cannot tell
+// them apart, which is what makes this a switch rather than a second feature.
 //
 // The CLI fields are named one per flag and are passed straight through, empty ones omitted,
 // so "which files does this pipeline load" is answered by the same panel that names them. The
@@ -803,7 +803,17 @@ func (a *App) currentRegistry() *llm.Registry {
 // must never do with it is hand it to a shell. CPU offload travels beside them as a typed
 // switch rather than as text, because a user flips it per model and a checkbox says that
 // better than remembering a flag.
-func newImageProvider(settings config.Settings, serverURL string) images.Provider {
+func (a *App) newImageProvider(settings config.Settings, serverURL string) images.Provider {
+	// The hosted kind answers with no local process at all, so its one prerequisite is a
+	// key: without one the provider is nil and the tool disappears, which is the same
+	// honest state a stopped managed server produces rather than a tool that can only fail.
+	if config.IsImageNIM(settings.Images.Kind) {
+		key := a.imageAPIKey(settings)
+		if key == "" {
+			return nil
+		}
+		return images.NewNIM("images", "NVIDIA NIM", images.NIMBaseURL, key, settings.Images.NIMModel)
+	}
 	if config.IsImageCLI(settings.Images.Kind) {
 		return imageCLI(settings)
 	}
@@ -826,6 +836,37 @@ func newImageProvider(settings config.Settings, serverURL string) images.Provide
 	}
 	return images.NewSDWebUI("images", "Stable Diffusion WebUI",
 		settings.Images.BaseURL, settings.Images.APIKey)
+}
+
+// imageAPIKey resolves the credential an image backend draws with.
+//
+// The hosted kind reads the *NVIDIA backend's* key and nothing else. Its field in the panel is
+// the one the user already pasted in the Backends tab, so there is a single token to rotate;
+// and the image section's own stored value is not a candidate, because it is the WebUI's
+// "user:pass" — sending that pair as a bearer token would produce a 401 from a setup that
+// looks configured. The local kinds read nothing here: their credential is that same pair.
+func (a *App) imageAPIKey(settings config.Settings) string {
+	if !config.IsImageNIM(settings.Images.Kind) {
+		return strings.TrimSpace(settings.Images.APIKey)
+	}
+	if a.secrets == nil {
+		return ""
+	}
+	// Found by *kind* rather than by the id "nvidia": the id is the user's to change, and a
+	// row they added themselves (a second account, a self-hosted NIM container on another
+	// port) is the same vendor and the same key format. The first row of that kind holding a
+	// stored key is what a chat draw would use, so it is what a picture uses.
+	for _, backend := range settings.Backends {
+		if backend.Kind != "nvidia" {
+			continue
+		}
+		if key, ok := a.secrets.Get(llm.BackendAPIKeyName(backend.ID)); ok {
+			if trimmed := strings.TrimSpace(key); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
 }
 
 // imageCLI builds the local-build client the *two* local kinds are described by: the
@@ -1073,7 +1114,16 @@ func (a *App) imageServerRestartNeeded() bool {
 // backend falls back to CPU sampling is hours of work rather than minutes, and a bound
 // written for the card would kill it after the sampling had already been paid for. See
 // images.DrawTimeout.
+//
+// The hosted kind is the exception to the scaling: its bound is about a *network* wait, not
+// about arithmetic on this machine, and a request the vendor accepted answers in seconds or
+// not at all (measured: one that returned no headers in 240 s). Three minutes is generous for
+// the slow case and short enough that a stuck queue reports itself instead of holding the draw
+// slot for ten.
 func imageDrawTimeout(settings config.Settings, req images.Request) time.Duration {
+	if config.IsImageNIM(settings.Images.Kind) {
+		return 3 * time.Minute
+	}
 	if config.IsImageCLI(settings.Images.Kind) {
 		return images.DrawTimeout(images.DefaultCLITimeout, req)
 	}

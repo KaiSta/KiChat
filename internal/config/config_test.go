@@ -1316,7 +1316,9 @@ func TestAnOlderSettingsBlobKeepsDrawingThroughTheServer(t *testing.T) {
 //
 // The managed kind is the one that must not be folded away: it is a process this app owns, so
 // losing the name at load time would silently swap the user's sd-server for whatever answers
-// on the stored HTTP address — the exact confusion the third kind was added to end.
+// on the stored HTTP address — the exact confusion the third kind was added to end. The
+// hosted kind joins it for the opposite reason: nothing about it is local, so a folded value
+// would silently spend the user's account quota on the WebUI's address instead.
 func TestImageKindKeepsTheSpellingsItHas(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -1329,6 +1331,9 @@ func TestImageKindKeepsTheSpellingsItHas(t *testing.T) {
 		{"  cli  ", "cli", "a value typed with spaces is trimmed"},
 		{"sdserver", "sdserver", "the managed server is stored as itself, or a restart would lose it"},
 		{"  sdserver ", "sdserver", "the same trim applies to it"},
+		{"nim", "nim", "the hosted kind is stored as itself, or the panel would lose the choice"},
+		{"  nim ", "nim", "the same trim applies to it"},
+		{"NIM", "", "the kind is a key, so case matters here too"},
 		{"sdcli", "", "a typo degrades to the backend that used to work"},
 		{"sd-server", "", "the kind is a key, not the program's file name"},
 		{"CLI", "", "the value is a key, so case matters"},
@@ -1340,5 +1345,65 @@ func TestImageKindKeepsTheSpellingsItHas(t *testing.T) {
 		if s.Images.Kind != tc.want {
 			t.Errorf("Kind %q normalised to %q, want %q (%s)", tc.in, s.Images.Kind, tc.want, tc.why)
 		}
+	}
+}
+
+// TestHostedImageModelDefaultsWithoutAMigration pins the two halves of the hosted model
+// setting: a blob written before the field exists keeps a model that can draw, and a value
+// the vendor adds later survives a save rather than being folded away.
+func TestHostedImageModelDefaultsWithoutAMigration(t *testing.T) {
+	s := Default()
+	if err := json.Unmarshal([]byte(`{"images":{"kind":"nim"}}`), &s); err != nil {
+		t.Fatalf("decode an older blob: %v", err)
+	}
+	if s.Images.NIMModel == "" {
+		t.Fatal("an older blob left the hosted model empty; the default did not survive the decode")
+	}
+	s.normalise()
+	if s.Images.NIMModel == "" {
+		t.Fatal("normalise emptied the hosted model")
+	}
+
+	// A model id this build has never heard of is kept: the vendor adds them faster than
+	// this app ships, and a folded id would be a setting the user cannot set.
+	s.Images.NIMModel = "  acme/obscure-model  "
+	s.normalise()
+	if s.Images.NIMModel != "acme/obscure-model" {
+		t.Errorf("NIMModel = %q, want the trimmed id kept as typed", s.Images.NIMModel)
+	}
+
+	// A bare name is completed to the publisher path the hosted route takes: an id without
+	// its publisher is a 404 there rather than a different model, so a value written that way
+	// must not be sent as-is.
+	// `flux-3-image-klein` is here because a stored blob really carried it: an early build of
+	// this field wrote the bare name, and a bare name is `404 page not found` on the hosted
+	// route rather than a different model.
+	for _, tc := range []struct{ in, want string }{
+		{"flux.1-schnell", "black-forest-labs/flux.1-schnell"},
+		{" flux.1-dev ", "black-forest-labs/flux.1-dev"},
+		{"flux-3-image-klein", "black-forest-labs/flux-3-image-klein"},
+		{"acme/obscure-model", "acme/obscure-model"},
+	} {
+		s.Images.NIMModel = tc.in
+		s.normalise()
+		if s.Images.NIMModel != tc.want {
+			t.Errorf("NIMModel %q became %q, want %q", tc.in, s.Images.NIMModel, tc.want)
+		}
+	}
+}
+
+// TestTheHostedKindDrawsWithItsOwnModel pins the rule that keeps a checkpoint field from
+// crossing kinds: the hosted route takes a model id, and the field a WebUI's checkpoint lives
+// in must not be sent to it.
+func TestTheHostedKindDrawsWithItsOwnModel(t *testing.T) {
+	s := Default()
+	s.Images.Model = "sdxl.safetensors [a1b2c3]"
+	s.Images.NIMModel = "black-forest-labs/flux.1-dev"
+	if got := s.Images.GenerationModel(); got != "sdxl.safetensors [a1b2c3]" {
+		t.Errorf("the server kind asked for %q, want its checkpoint", got)
+	}
+	s.Images.Kind = ImageKindNIM
+	if got := s.Images.GenerationModel(); got != "black-forest-labs/flux.1-dev" {
+		t.Errorf("the hosted kind asked for %q, want its own model id", got)
 	}
 }

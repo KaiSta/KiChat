@@ -229,6 +229,7 @@ export namespace config {
 	    esrganModel: string;
 	    esrganTile: number;
 	    kind: string;
+	    nimModel: string;
 	    startWithApp: boolean;
 	    cliBinary: string;
 	    cliFolder: string;
@@ -273,6 +274,7 @@ export namespace config {
 	        this.esrganModel = source["esrganModel"];
 	        this.esrganTile = source["esrganTile"];
 	        this.kind = source["kind"];
+	        this.nimModel = source["nimModel"];
 	        this.startWithApp = source["startWithApp"];
 	        this.cliBinary = source["cliBinary"];
 	        this.cliFolder = source["cliFolder"];

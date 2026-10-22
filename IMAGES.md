@@ -25,13 +25,14 @@ paints a picture instead of a chip. §4 is that argument in full.
 
 Two things it is **not**:
 
-- It is not a hosted image service. There is no API key, no metered endpoint, and
-  nothing leaves the machine. That is the same hard requirement the rest of the app
-  has, and it is why the first backend is a local one.
+- It is not a hosted image service *by default*. Nothing leaves the machine unless the
+  user picks the one hosted kind (§2, NVIDIA NIM), and that kind is off until it is
+  chosen. The local WebUI, `sd-cli` and managed `sd-server` need no key, no meter and no
+  network, which is why they are the backend the section starts on.
 - It is not `img2img`, inpainting or a LoRA browser. Those are routes on the same
   server, and adding them is a request field each rather than a new design.
 
-## 2. One client, three servers — and two more kinds that run locally
+## 2. One client, three servers — and three more kinds besides
 
 `internal/images/sdwebui.go` speaks **`/sdapi/v1/txt2img`**, and one client covers
 three servers because they share the route:
@@ -46,6 +47,12 @@ The API wiki documents `images` as a list of base64-encoded pictures
 (<https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/API>); sd-server
 documents the same compatibility route and shape
 (<https://github.com/leejet/stable-diffusion.cpp/blob/master/examples/server/api.md>).
+
+A **hosted** provider is none of these kinds, and there is exactly one: **NVIDIA NIM**
+(`ImageSettings.Kind = "nim"`, §2). It is the only backend here that costs nothing to
+install and leaves the machine to draw. What the other free cloud image APIs offer, what
+each allowance really is, and why only this one was built is surveyed in
+[`IMAGES-CLOUD.md`](IMAGES-CLOUD.md).
 
 Four details of that shape are handled rather than assumed, each because the wrong
 assumption produces a *wrong picture* instead of an error:
@@ -434,10 +441,129 @@ files are named on the command line, so the panel offers a file picker per field
 checkpoint list. `Health` checks paths — the binary is a file, is executable, and every named
 model exists — and runs `-h` only to prove the process starts at all, ignoring its exit code
 because a build that does not answer that option can still draw. The `Kind` is folded to the
-three spellings it has by `config.NormaliseImageClamps`: `cli` and `sdserver` are stored as
-themselves, and everything else — `server` written out in full included — becomes the empty
+four spellings it has by `config.NormaliseImageClamps`: `cli`, `sdserver` and `nim` are stored
+as themselves, and everything else — `server` written out in full included — becomes the empty
 string that already means the HTTP server, so a hand-edited blob degrades to the backend that
 used to work rather than to none at all.
+
+### The hosted kind: NVIDIA NIM, where nothing runs here
+
+`internal/images/nim.go` is the fourth provider, selected by `ImageSettings.Kind = "nim"`.
+It calls **build.nvidia.com** over HTTPS at
+`POST https://ai.api.nvidia.com/v1/genai/<publisher>/<model>` with `Authorization: Bearer …`
+and a body of `prompt`, `mode: "base"`, `width`, `height`, `steps` and `seed`; the picture
+comes back base64 in `artifacts[].base64`. The `data[].b64_json` / `data[].url` shapes are
+accepted too, because a model behind the same host can answer in the OpenAI form. Bytes
+decide the format either way (`SniffImage`), because the answer is not guaranteed to be a PNG.
+
+**The route is the hosted one, and that cost a real 404.** NVIDIA documents an
+OpenAI-compatible `POST /v1/images/generations`, but that route is the *self-hosted*
+container's (its Getting Started page runs it on `http://localhost:8000`). Measured on
+22 October 2026 with a valid key:
+
+| request | answer |
+| --- | --- |
+| `POST integrate.api.nvidia.com/v1/images/generations`, empty body | `400` `{"error":{"message":"model field is required"}}` |
+| …same route, `"model":"flux.1-schnell"`, `flux.1-dev`, `black-forest-labs/…`, `stable-diffusion-3.5-large`, `qwen-image` | `404 page not found` for every one |
+| `POST ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-schnell` (bad key) | `401` — the route is registered |
+| …same route, `…/flux.1-dev` | no 404, so it is registered too |
+| …same route, `…/flux-3-image-klein` (bad key) | `403` `{"status":403,"title":"Forbidden","detail":"Authorization failed"}` — registered |
+| …same route, `…/flux-3-image-klein-base`, or the bare `flux-3-image-klein` | `404 page not found` — not published at that path |
+| …same host, `black-forest-labs/flux_1-schnell`, `stabilityai/…`, `qwen/qwen-image`, `nvidia/sdxl-turbo` | `404` fast — not published at that path |
+
+The two answers are distinguishable, which is what makes the route check cheap: a path the
+vendor does not publish answers `404` before it looks at the credential, while a published one
+answers `401`/`403` for a junk key. That is how the model list below was checked without
+spending a draw on each name.
+
+So the address is a constant and not a settings field: it is the vendor's, never the user's,
+and a stored copy is one more value that can go stale. The model list is a constant too
+(`NIMModels`): the hosted model listing is the *chat* catalogue, and a picker built from it
+would offer a text model as a checkpoint. The three ids are the ones the route was measured to
+serve; anything else answers 404, which is an `ErrModelNotServed` naming the model *and* the
+ids this build offers rather than a broken-URL error. `black-forest-labs/flux.1-schnell` is
+the default because it is Apache-2.0 and four steps; `…/flux-3-image-klein` is second because
+it is the one measured to answer on a free-trial key (its weights are under the FLUX Kommunity
+License — free commercial use below US$5 M of annual revenue); `…/flux.1-dev` is offered
+because a user's own account may use it, but its licence is non-commercial for production. A
+bare `flux.1-schnell` or `flux-3-image-klein` in the settings blob is completed to the
+publisher path on load (`NormaliseImageClamps`), because an id without its publisher is a 404
+rather than a different model.
+
+**`mode` belongs to the model, not to the service.** FLUX.3 Klein rejects the FLUX.1 spelling
+outright: `mode: "base"` on its route answered `422
+{"detail":[{"type":"literal_error","loc":["body","mode"],"msg":"Input should be 't2i' or 'i2i'"}]}`
+in 0.5 s, while the FLUX.1 routes take `"base"`. So the client sends `t2i` for klein and
+`base` for everything else (`nimModes`), and a single constant — the obvious reading of "the
+vendor's examples send base" — makes one of the two models unusable.
+
+**A 200 is not always a picture.** Klein answered a harmless prompt (`a red bicycle leaning
+on a brick wall`) with `200`, an empty `base64` and `finishReason: "CONTENT_FILTERED"` in
+0.6 s. The client reports the vendor's reason, because "answered without a picture" would
+read as a bug in KiChat rather than as a prompt the service declined.
+
+**The key is the NVIDIA backend's key.** `imageAPIKey` walks `settings.Backends` for a row of
+kind `nvidia` and reads `llm.BackendAPIKeyName(row.ID)` — by *kind*, not by the literal id
+`nvidia`, because the id is the user's to change and a row they added themselves (a second
+account, a self-hosted NIM container on another port) is the same vendor with the same token
+format. So the Backends tab is the one place a token is pasted and the one place it is
+rotated. The image section's own stored value is deliberately *not* a candidate: that field is
+the WebUI's `user:pass`, and sending it as a bearer token would turn a configured-looking
+setup into a 401. With no key stored the provider is `nil` — the tool disappears from the
+model's list instead of existing only to fail, and the panel says which tab to open rather
+than showing an empty field.
+
+Three things the route cannot do, said rather than approximated:
+
+- **No negative prompt and no sampler are sent.** The hosted body has no such fields, so both
+  stay hidden for this kind rather than collecting values the client would drop. `steps` *is*
+  sent when one was chosen — it is a documented field of this route — and omitted otherwise, so
+  the model's own default applies (four for schnell).
+- **No second sampling pass.** `Generate` returns `ErrHiresUnsupported` instead of drawing
+  at base size and letting the caller believe it was enlarged; changing the kind also turns
+  the stored hires switch off, so the failure is not reachable by accident.
+- **No progress.** The provider does not implement `Progressive`, so the window shows an
+  indefinite spinner for the seconds the picture takes. A fake percentage would be worse.
+
+The client chooses and sends a seed when the request names none, because a picture whose
+seed was never recorded cannot be drawn again. A 401 or 403 is wrapped in `ErrKeyRejected`
+so the advice is "replace the key", not "the service is down", a 404 in `ErrModelNotServed`
+so the advice is the model picker, and a body that echoes the credential is redacted before it
+reaches a toast. `Health` checks the credential against the vendor's model listing (a GET that
+answers 401 for a bad key) rather than by drawing a billed picture. `GetImageStatus` reports
+the vendor's address, an empty program and folder, and counts *models* rather than
+checkpoints.
+
+**Measured, not assumed** — one free-trial key, 22 October 2026, same machine, same client
+shape:
+
+| draw | answer |
+| --- | --- |
+| `…/flux-3-image-klein`, `mode: "base"` | `422` in 0.5 s — `Input should be 't2i' or 'i2i'` |
+| `…/flux-3-image-klein`, `mode: "t2i"`, `a red bicycle leaning on a brick wall` | `200` in 0.6 s, `CONTENT_FILTERED`, no bytes |
+| `…/flux-3-image-klein`, `mode: "t2i"`, `a lighthouse on a cliff at dusk, painted` | `200` in **5.1 s** — 1024×1024 JPEG, 130 441 bytes, `finishReason: "SUCCESS"` |
+| `…/flux.1-schnell`, `mode: "base"` | no response headers within 240 s (twice) |
+
+So the route, the body, the envelope and the seed all work, and the only thing still unresolved
+is FLUX.1 on this account: 401/404 answer instantly, so the path is right, and what is left is
+that model's own queue on the free trial. That is why a hosted draw is bounded at three minutes
+and names the wait rather than sitting on a spinner — klein finishes in seconds, schnell did not
+finish at all. Whether the free allowance is ~1,000 requests is still community-reported: the
+successful draws were four, and the vendor reported nothing about a remaining quota.
+
+**A stored id the picker does not list used to be invisible.** An early build of this field
+wrote the bare `flux-3-image-klein`; the panel's `<select>` offered only the FLUX.1 ids, so the
+browser displayed the *first* option (`flux.1-schnell`) while the state kept klein — and the
+draw went out for klein, answering `404` for the missing publisher segment. What the user saw
+was "flux 1 is picked" and an error naming a model they had never chosen. Two changes close
+it: the stored value is completed to its publisher path on load, and the select now renders
+the stored id as its own option, marked as one this build does not list, so the control cannot
+say one model while another is sent.
+
+`internal/images/nim_test.go` pins the request body (including the keys that must be
+absent), the default model, klein's own `mode`, the chosen seed, the URL answer, the refused
+hires pass, the missing key, the redacted 401, the filtered answer and the 404 that names the
+offered ids.
 
 ## 3. Empty means "the model decides" — and then "leave it to your server"
 
@@ -1441,9 +1567,23 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
 - `internal/config/config_test.go` — the feature ships off, the fields stay empty, and
   the clamps hold; that now includes the second pass (off, with both numbers kept while it is
   off and defaulted to 1.5×/0.4 only when it is on) and the VAE tile side. `Kind` keeps
-  exactly the three spellings it has, so `cli` and `sdserver` survive as themselves and
+  exactly the four spellings it has, so `cli`, `sdserver` and `nim` survive as themselves and
   everything else — `server` written out in full included — folds to the empty value that
-  means the HTTP server.
+  means the HTTP server. The hosted model id also gets its own test
+  (`TestHostedImageModelDefaultsWithoutAMigration`): a blob written before the field exists
+  keeps a model that can draw, and an id this build has never heard of is kept as typed.
+- `internal/images/nim_test.go` — the hosted kind, against a stand-in server: the request is
+  `POST /v1/genai/black-forest-labs/flux.1-schnell` with the bearer token and a body of
+  `prompt`/`mode`/`width`/`height`/`steps`/`seed`, and *carries none of* the OpenAI route's
+  `size`/`n`/`response_format`/`sampler_name`/`negative_prompt`; an empty model draws the
+  default and a seed the client chose and reports back; unchosen numbers are omitted; both
+  answer envelopes (`artifacts[].base64`, `data[].b64_json`) and a stored `url` are read, with
+  the type sniffed from the bytes; a hires request is refused with `ErrHiresUnsupported`
+  before anything is sent; no key means `ErrNotConfigured` and no request; a 401 is wrapped in
+  `ErrKeyRejected` with the echoed key redacted; a 404 becomes `ErrModelNotServed` naming the
+  model; a request that never answers says so instead of reporting a raw deadline, while a
+  user's Stop stays `context.Canceled`; and `Models` offers only `publisher/model` ids while
+  `Samplers` is empty.
 - `internal/images/sdserver_test.go` — the managed kind's own unit: the model half of the
   command line with `--listen-ip`/`--listen-port` appended (the user's arguments first, the
   listener last so a typed `--listen-port` cannot outvote the port the app will probe), the two
@@ -1555,8 +1695,10 @@ imgs  (frontend)        MessageParts.MessageImages / MessageImage / LiveDraw /
   in), `?server=running|starting|failed|restart` (the process row: a loaded model with an
   address and a log, a start still loading — which is what the row's own polling interval is
   for — a start that died, whose log and reason the row shows, and the running row the saved
-  settings no longer describe), `?startwithapp=1`, and `?images=cli` / `?images=off` unchanged
-  for the other local kind. The `failed` row deliberately carries **no address**: the port is
+  settings no longer describe), `?startwithapp=1`, `?images=cli` / `?images=off` for the other
+  local kind, and `?images=nim` for the hosted one — no folder, no process and no program,
+  with the model select and the borrowed key, plus `&key=none` for the state before the
+  Backends key exists (red sentence, Test disabled). The `failed` row deliberately carries **no address**: the port is
   still in its log, because the start recorded it, but `url` is empty and `port` is `0` — the
   shape the supervisor's own `fail()` answers now (§2), because a live-looking link beside a
   red badge points at nothing. `StartImageServer`/`StopImageServer` are modelled as the
@@ -1860,10 +2002,14 @@ being coherent.
 
 ## 10. What it does not do yet
 
-- **ComfyUI** (§2), and any hosted image API (OpenAI's `/v1/images/generations` with
-  `b64_image`, Stability, fal, Replicate) behind the same `images.Provider` interface.
-  The interface was written for that: `Provider` has no HTTP in it. The CLI kind is the
-  second `Provider` and is what showed the interface holds two unlike backends at once.
+- **ComfyUI** (§2) and every *other* hosted image API — OpenAI's images route, Stability,
+  fal, Replicate, Cloudflare Workers AI. NVIDIA NIM is the one that was built (§2), because
+  the app already stores that key; the rest are surveyed in [`IMAGES-CLOUD.md`](IMAGES-CLOUD.md).
+  `Provider` has no HTTP in it, which is what let this be a fourth backend rather than a new
+  interface.
+- **A per-picture key for the hosted kind.** One NVIDIA token serves chat and pictures, on
+  purpose: two stored values for one account is two things to rotate, and the second would
+  usually be the WebUI's `user:pass` reused by mistake.
 - **A one-shot draw's model load is still silent.** Its sampling reports (§5) — the binary's
   own step lines and the `--preview` file it writes — but the load before the first step prints
   nothing this app can turn into a fraction, so a first draw on a CPU still spends minutes

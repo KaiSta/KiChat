@@ -2231,14 +2231,18 @@ func (a *App) GetImageStatus() (ImageStatus, error) {
 	// holds for it. A folder supplies one executable or the other: the one-shot kind
 	// runs sd-cli, the managed kind runs sd-server, and the resolved path is the one a
 	// start or a draw would really use rather than the one the folder is named after.
-	resolve, program := images.ResolveProgram, images.ProgramName(goruntime.GOOS)
-	if config.IsImageSD(settings.Images.Kind) {
-		resolve, program = images.ResolveServerProgram, images.ServerProgramName(goruntime.GOOS)
-	}
-	status.Program = program
-	if binary, err := resolve(settings.Images.CLIFolder, settings.Images.CLIBinary); err == nil {
-		status.Binary = binary
-		status.Build = images.AcceleratorOf(filepath.Dir(binary))
+	// The hosted kind runs no program at all, so there is no folder to read and no
+	// executable to name — reporting `sd-cli` for it would be a field about nothing.
+	if !config.IsImageNIM(settings.Images.Kind) {
+		resolve, program := images.ResolveProgram, images.ProgramName(goruntime.GOOS)
+		if config.IsImageSD(settings.Images.Kind) {
+			resolve, program = images.ResolveServerProgram, images.ServerProgramName(goruntime.GOOS)
+		}
+		status.Program = program
+		if binary, err := resolve(settings.Images.CLIFolder, settings.Images.CLIBinary); err == nil {
+			status.Binary = binary
+			status.Build = images.AcceleratorOf(filepath.Dir(binary))
+		}
 	}
 	// Reported whatever the selected kind is, and that is load-bearing rather than uniform:
 	// switching the kind away from the managed server while one is running leaves the process
@@ -2246,7 +2250,13 @@ func (a *App) GetImageStatus() (ImageStatus, error) {
 	// was only filled for `sdserver` would hide the one control that can stop it. A server
 	// with no row is several gigabytes of VRAM with nothing left to release it.
 	status.Server = a.imageServerStatus(settings)
-	_, status.KeySet = a.secrets.Get(config.ImageAPIKeyName)
+	// The hosted kind has no address of the user's to report, and its credential is the NVIDIA
+	// backend's rather than a field of this section. Both are resolved here so the panel shows
+	// what a draw would really use instead of what this section happens to store.
+	if config.IsImageNIM(settings.Images.Kind) {
+		status.BaseURL = images.NIMBaseURL
+	}
+	status.KeySet = a.imageAPIKey(settings) != ""
 
 	provider := a.currentImageProvider()
 	if provider == nil {
@@ -2298,6 +2308,9 @@ func (a *App) TestImageBackend() (string, error) {
 		if config.IsImageSD(settings.Images.Kind) {
 			return "", errors.New("der Bildserver läuft nicht — zuerst starten")
 		}
+		if config.IsImageNIM(settings.Images.Kind) {
+			return "", errors.New("kein NVIDIA-Schlüssel — im Backends-Tab unter NVIDIA eintragen")
+		}
 		return "", images.ErrNotConfigured
 	}
 	if a.ctx == nil {
@@ -2338,7 +2351,7 @@ func (a *App) TestImageBackend() (string, error) {
 		Steps:          settings.Images.Steps,
 		Sampler:        settings.Images.Sampler,
 		CfgScale:       settings.Images.CfgScale,
-		Model:          settings.Images.Model,
+		Model:          settings.Images.GenerationModel(),
 	}.Normalised())
 	if err != nil {
 		// The same split a redraw makes: this context is cancelled by the Stop button and by

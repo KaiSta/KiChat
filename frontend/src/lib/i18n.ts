@@ -524,7 +524,7 @@ const de = {
 
   'settings.images': 'Bildgenerierung',
   'settings.imagesHint':
-    'KiChat zeichnet über Software, die du selbst betreibst: eine Stable-Diffusion-WebUI (AUTOMATIC1111, Forge oder stable-diffusion.cpp) an einer Adresse, oder ein lokales Programm wie sd-cli, das für jedes Bild einmal startet. Kontaktiert wird nichts, solange die Funktion aus ist, und das Modell sieht das Werkzeug nur, wenn sie eingeschaltet und ein Backend eingerichtet ist. Ein Server muss mit aktivierter API laufen — bei AUTOMATIC1111 und Forge der Startparameter --api — und ein Checkpoint installiert sein.',
+    'KiChat zeichnet über Software, die du selbst betreibst: eine Stable-Diffusion-WebUI (AUTOMATIC1111, Forge oder stable-diffusion.cpp) an einer Adresse, oder ein lokales Programm wie sd-cli, das für jedes Bild einmal startet. Oder über NVIDIA NIM: dann zeichnet build.nvidia.com mit dem Schlüssel aus dem Backends-Tab, und hier ist nichts zu installieren. Kontaktiert wird nichts, solange die Funktion aus ist, und das Modell sieht das Werkzeug nur, wenn sie eingeschaltet und ein Backend eingerichtet ist. Ein eigener Server muss mit aktivierter API laufen — bei AUTOMATIC1111 und Forge der Startparameter --api — und ein Checkpoint installiert sein.',
   'settings.images.enabled': 'Bildgenerierung aktivieren',
   'settings.images.profiles': 'Profile',
   'settings.images.profilesHint':
@@ -644,6 +644,7 @@ const de = {
     'Aus heißt: das Modell hat das Werkzeug generate_image gar nicht. Es kann kein Bild anfordern, egal wie vollständig die Felder darunter sind.',
   'settings.images.noModels': 'Kein Checkpoint installiert',
   'settings.images.models': 'Checkpoints',
+  'settings.images.nimModels': 'Modelle',
   'settings.images.defaults': 'Leere Felder überlassen die Einstellung deinem Server',
   'settings.images.kind': 'Backend',
   'settings.images.captioning': 'Bildbeschreibung',
@@ -677,6 +678,20 @@ const de = {
     'Startet das Programm für jedes Bild neu: kein Dienst, keine Adresse, und alles, was die Kommandozeile kennt. Dafür lädt jedes Bild das Modell erneut.',
   'settings.images.kindSDHint':
     'Dasselbe Programm als Dienst: das Modell wird einmal geladen, jedes weitere Bild kostet nur das Sampling. KiChat startet und beendet den Server; solange er läuft, belegt das Modell seinen Speicher.',
+  'settings.images.kindNIM': 'NVIDIA NIM (gehostet)',
+  'settings.images.kindNIMHint':
+    'Kein Programm und kein Download: build.nvidia.com zeichnet mit dem Schlüssel aus dem Backends-Tab. Zum Ausprobieren kostenlos, ohne Dauerbudget.',
+  'settings.images.nimModel': 'Modell',
+  'settings.images.nimModelUnlistedTag': 'nicht in KiChats Liste',
+  'settings.images.nimModelUnlisted':
+    'Diese Modell-ID wird so gesendet, wie sie gespeichert ist. Antwortet NVIDIA mit 404, führt der Dienst dieses Modell nicht — dann eines der anderen Modelle wählen.',
+  'settings.images.nimKey': 'Verwendet den NVIDIA-Schlüssel aus dem Backends-Tab.',
+  'settings.images.nimNoKey':
+    'Kein NVIDIA-Schlüssel gefunden — im Backends-Tab unter NVIDIA eintragen. Ohne Schlüssel hat das Modell kein generate_image-Werkzeug.',
+  'settings.images.nimWhat':
+    'Gesendet werden Prompt, Größe und Seed. Kein Negativ-Prompt, kein zweiter Durchgang und kein Fortschritt: das kann die gehostete Schnittstelle nicht.',
+  'settings.images.nimNoHires': 'Gehostete Modelle haben keinen zweiten Durchgang; die Ausgabegröße kommt aus den Feldern oben.',
+  'settings.images.nimTestHint': 'Der Test zeichnet ein echtes Bild über den gehosteten Dienst',
   'settings.images.sdTitle': 'Lokaler Bildserver',
   'settings.images.sdHint':
     'KiChat startet sd-server aus demselben Ordner und mit demselben Modellsatz wie das lokale Programm. Der Port wird jedes Mal frei gewählt — sd-server würde sonst 1234 nehmen, dieselbe Adresse, auf der LM Studio hört — und nur an 127.0.0.1 gebunden.',
@@ -1304,7 +1319,7 @@ const en: Record<keyof typeof de, string> = {
 
   'settings.images': 'Image generation',
   'settings.imagesHint':
-    'KiChat draws through software you run yourself: a Stable Diffusion WebUI (AUTOMATIC1111, Forge or stable-diffusion.cpp) at an address, or a local program such as sd-cli that starts once per picture. Nothing is contacted while it is off, and the model only sees the tool while it is switched on and a backend is configured. A server has to be running with its API enabled — --api for AUTOMATIC1111 and Forge — and a checkpoint installed.',
+    'KiChat draws through software you run yourself: a Stable Diffusion WebUI (AUTOMATIC1111, Forge or stable-diffusion.cpp) at an address, or a local program such as sd-cli that starts once per picture. Or through NVIDIA NIM, where build.nvidia.com draws with the key from the Backends tab and there is nothing to install. Nothing is contacted while it is off, and the model only sees the tool while it is switched on and a backend is configured. Your own server has to be running with its API enabled — --api for AUTOMATIC1111 and Forge — and a checkpoint installed.',
   'settings.images.enabled': 'Enable image generation',
   'settings.images.profiles': 'Profiles',
   'settings.images.profilesHint':
@@ -1414,6 +1429,7 @@ const en: Record<keyof typeof de, string> = {
     'Off means the model has no generate_image tool at all. It cannot ask for a picture however completely the fields below are filled in.',
   'settings.images.noModels': 'No checkpoint installed',
   'settings.images.models': 'Checkpoints',
+  'settings.images.nimModels': 'models',
   'settings.images.defaults': 'Empty fields leave the setting to your server',
   'settings.images.kind': 'Backend',
   'settings.images.captioning': 'Caption',
@@ -1447,6 +1463,20 @@ const en: Record<keyof typeof de, string> = {
   'settings.images.kindSD': 'Local server (sd-server, started by KiChat)',
   'settings.images.kindSDHint':
     'The same program as a daemon: the model is loaded once and every further picture costs only the sampling. KiChat starts and stops it; while it runs, the model holds its memory.',
+  'settings.images.kindNIM': 'NVIDIA NIM (hosted)',
+  'settings.images.kindNIMHint':
+    'No program and nothing to download: build.nvidia.com draws with the key from the Backends tab. Free to try, no standing allowance.',
+  'settings.images.nimModel': 'Model',
+  'settings.images.nimModelUnlistedTag': 'not in KiChat’s list',
+  'settings.images.nimModelUnlisted':
+    'This model id is sent exactly as stored. If NVIDIA answers 404, the service does not serve it — pick one of the other models.',
+  'settings.images.nimKey': 'Uses the NVIDIA key from the Backends tab.',
+  'settings.images.nimNoKey':
+    'No NVIDIA key found — add it in the Backends tab under NVIDIA. Without one the model has no generate_image tool at all.',
+  'settings.images.nimWhat':
+    'Prompt, size and seed are sent. No negative prompt, no second pass and no progress: the hosted route has none of those.',
+  'settings.images.nimNoHires': 'Hosted models have no second pass; the output size comes from the fields above.',
+  'settings.images.nimTestHint': 'The test draws a real picture through the hosted service',
   'settings.images.sdTitle': 'Local picture server',
   'settings.images.sdHint':
     'KiChat starts sd-server from the same folder and with the same model set as the local program. The port is chosen free every time — sd-server would otherwise take 1234, the address LM Studio listens on — and it is bound to 127.0.0.1 only.',
@@ -2043,7 +2073,7 @@ const zh: Record<keyof typeof de, string> = {
 
   'settings.images': '图像生成',
   'settings.imagesHint':
-    'KiChat 通过你自己运行的软件绘图：某个地址上的 Stable Diffusion WebUI（AUTOMATIC1111、Forge 或 stable-diffusion.cpp），或像 sd-cli 这样每张图启动一次的本地程序。关闭时不会连接任何服务；只有开启并配置了后端，模型才会看到该工具。服务器必须以启用 API 的方式运行（AUTOMATIC1111 和 Forge 需要 --api 参数），并且已安装检查点。',
+    'KiChat 通过你自己运行的软件绘图：某个地址上的 Stable Diffusion WebUI（AUTOMATIC1111、Forge 或 stable-diffusion.cpp），或像 sd-cli 这样每张图启动一次的本地程序。也可以通过 NVIDIA NIM：由 build.nvidia.com 使用 Backends 标签页中的密钥绘图，本机无需安装任何东西。关闭时不会连接任何服务；只有开启并配置了后端，模型才会看到该工具。自己的服务器必须以启用 API 的方式运行（AUTOMATIC1111 和 Forge 需要 --api 参数），并且已安装检查点。',
   'settings.images.enabled': '启用图像生成',
   'settings.images.profiles': '配置档案',
   'settings.images.profilesHint':
@@ -2143,6 +2173,7 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.offHint': '关闭意味着模型完全没有 generate_image 工具。下面的字段填得再完整，它也无法请求绘图。',
   'settings.images.noModels': '未安装检查点',
   'settings.images.models': '检查点',
+  'settings.images.nimModels': '个模型',
   'settings.images.defaults': '留空的字段由你的服务器决定',
   'settings.images.kind': '后端',
   'settings.images.captioning': '画面描述',
@@ -2175,6 +2206,20 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.kindSD': '本地服务器（sd-server，由 KiChat 启动）',
   'settings.images.kindSDHint':
     '同一个程序以常驻服务运行：模型只加载一次，之后每张图只花采样时间。KiChat 负责启动和停止；只要它在运行，模型就一直占用内存。',
+  'settings.images.kindNIM': 'NVIDIA NIM（云端托管）',
+  'settings.images.kindNIMHint':
+    '无需程序，也无需下载：build.nvidia.com 使用 Backends 标签页里的密钥绘图。可免费试用，但没有固定额度。',
+  'settings.images.nimModel': '模型',
+  'settings.images.nimModelUnlistedTag': '不在 KiChat 列表中',
+  'settings.images.nimModelUnlisted':
+    '此模型 ID 会按存储原样发送。若 NVIDIA 返回 404，说明该服务不提供此模型——请改选其他模型。',
+  'settings.images.nimKey': '使用 Backends 标签页中的 NVIDIA 密钥。',
+  'settings.images.nimNoKey':
+    '未找到 NVIDIA 密钥——请在 Backends 标签页的 NVIDIA 一项中填写。没有密钥时，模型根本没有 generate_image 工具。',
+  'settings.images.nimWhat':
+    '只发送提示词、尺寸和种子。没有反向提示词、没有第二遍绘制、没有进度：托管接口不提供这些。',
+  'settings.images.nimNoHires': '托管模型没有第二遍绘制；输出尺寸来自上面的字段。',
+  'settings.images.nimTestHint': '测试会通过托管服务真正画一张图',
   'settings.images.sdTitle': '本地绘图服务器',
   'settings.images.sdHint':
     'KiChat 从同一个文件夹、用同一套模型启动 sd-server。端口每次都空闲选择——否则 sd-server 会占用 1234，也就是 LM Studio 监听的地址——并且只绑定到 127.0.0.1。',

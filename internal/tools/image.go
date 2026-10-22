@@ -128,8 +128,10 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 		CfgScale:       pinFloat(cfg.CfgScale, args.CfgScale),
 		// The checkpoint is a setting rather than an argument: which models are
 		// installed is a property of the machine, and a model that guessed a name
-		// would get a silent fallback to whatever was already loaded.
-		Model: cfg.Model,
+		// would get a silent fallback to whatever was already loaded. Which *field*
+		// holds it depends on the kind — a hosted id is not a checkpoint — so the
+		// answer comes from the settings rather than from this call site.
+		Model: cfg.GenerationModel(),
 		Seed:  seedFromValue(args.Seed),
 		// The second pass is a *setting* and not an argument, for the same reason the
 		// checkpoint is: it is a property of the machine (a CLI build either has

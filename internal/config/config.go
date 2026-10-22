@@ -200,6 +200,15 @@ type ImageSettings struct {
 	// installation that predates this field is, so an old settings blob keeps
 	// working without a migration — the same rule the other fields follow.
 	Kind string `json:"kind"`
+	// NIMModel names the hosted model build.nvidia.com draws with when Kind is
+	// ImageKindNIM. Empty is FLUX.1 [schnell], which is the Apache-2.0 one and the
+	// only model here that may sit behind a commercial feature by default; FLUX.3
+	// Klein and FLUX.1 [dev] are offered in the panel but carry their own licences.
+	//
+	// The hosted address is deliberately *not* a setting beside it: it is the
+	// vendor's own, never the user's, and a stored copy is one more value that can
+	// go stale or point at something else.
+	NIMModel string `json:"nimModel"`
 	// StartWithApp asks KiChat to start the managed server (ImageKindSD) whenever the
 	// app starts. It is off unless the user asks, and deliberately not implied by
 	// choosing the kind: a loaded model holds the VRAM it was loaded into for as long
@@ -344,6 +353,15 @@ const (
 	// the opposite one: a process, a port, and the VRAM a loaded model holds until it
 	// is stopped.
 	ImageKindSD = "sdserver"
+	// ImageKindNIM is build.nvidia.com's hosted inference: no process, no folder and
+	// no checkpoint to name, just an HTTPS call with the account's API key. It is the
+	// one kind that costs nothing to try and nothing to leave switched off, which is
+	// why it is a switch in the panel rather than a whole setup section.
+	//
+	// Its credential is the *NVIDIA backend's* key unless one was stored for images:
+	// the Backends tab already holds it, and asking a user to paste the same token
+	// twice would produce two rows that can disagree.
+	ImageKindNIM = "nim"
 )
 
 // IsImageCLI reports whether the one-shot program is selected. An empty or
@@ -353,6 +371,21 @@ func IsImageCLI(kind string) bool { return kind == ImageKindCLI }
 
 // IsImageSD reports whether the build is run as a server KiChat starts and stops.
 func IsImageSD(kind string) bool { return kind == ImageKindSD }
+
+// IsImageNIM reports whether the hosted NVIDIA endpoint draws.
+func IsImageNIM(kind string) bool { return kind == ImageKindNIM }
+
+// GenerationModel is the model a draw asks for, which is one question with two different
+// answers: the server's own checkpoint for the local kinds, and the hosted model id for the
+// hosted one. It lives here rather than at each call site because `Model` is the checkpoint
+// field of a server the user runs — sending a name like `sdxl.safetensors` to build.nvidia.com
+// produces a 404 that reads as a broken address.
+func (s ImageSettings) GenerationModel() string {
+	if IsImageNIM(s.Kind) {
+		return s.NIMModel
+	}
+	return s.Model
+}
 
 // DefaultImageBaseURL is AUTOMATIC1111's own default listen address, and is
 // also what Forge and stable-diffusion.cpp's sd-server use when left alone. It is
@@ -568,14 +601,41 @@ func NormaliseImageClamps(s *ImageSettings) bool {
 	// starts and stops, so losing the name on the next load would silently swap the user's
 	// own sd-server for whatever answers on the HTTP address.
 	kind := strings.TrimSpace(s.Kind)
-	if kind != ImageKindCLI && kind != ImageKindSD {
+	if kind != ImageKindCLI && kind != ImageKindSD && kind != ImageKindNIM {
 		kind = ""
 	}
 	if kind != s.Kind {
 		s.Kind = kind
 		changed = true
 	}
+	// The hosted model has one spelling per vendor id and an empty value that means the
+	// default; anything else is kept as typed, because the vendor adds models faster than
+	// this app ships and refusing an id it has not heard of would be a setting the user
+	// cannot set.
+	if model := strings.TrimSpace(s.NIMModel); model != s.NIMModel {
+		s.NIMModel = model
+		changed = true
+	}
+	// A bare name becomes the publisher path the hosted route takes. The hosted model is a
+	// path segment (`black-forest-labs/flux.1-schnell`), and an id without its publisher is a
+	// 404 rather than a different model — so a value typed that way, or written by an early
+	// build of this field, is completed instead of sent.
+	if model := strings.TrimSpace(s.NIMModel); model != "" && !strings.Contains(model, "/") {
+		if publisher := imageModelPublishers[model]; publisher != "" {
+			s.NIMModel = publisher + "/" + model
+			changed = true
+		}
+	}
 	return changed
+}
+
+// imageModelPublishers maps a bare hosted model name to the publisher segment its route
+// carries. Only the models this app ships a default or a picker entry for are listed; anything
+// else is left exactly as typed, because the vendor's catalogue grows faster than this table.
+var imageModelPublishers = map[string]string{
+	"flux.1-schnell":     "black-forest-labs",
+	"flux.1-dev":         "black-forest-labs",
+	"flux-3-image-klein": "black-forest-labs",
 }
 
 // RuntimeSettings configures the llama.cpp binaries KiChat installs and the
@@ -1134,6 +1194,7 @@ func Default() Settings {
 			UpscaleDefaultMethod: images.MethodLanczos,
 			UpscaleSharpen:       DefaultUpscaleSharpen,
 			ESRGANModel:          images.ESRGANDefaultModel,
+			NIMModel:             images.NIMModelSchnell,
 		},
 	}
 }

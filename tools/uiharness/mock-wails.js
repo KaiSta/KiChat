@@ -752,6 +752,24 @@ Verfügbare Tools: {{tool_list}}`,
   // is what switches the kind string and turns the process row on.
   const imagesSD = imagesParam === 'sdserver'
   const imagesLocal = imagesCLI || imagesSD
+  // ?images=nim is the *hosted* kind, and the first one with nothing on this machine: no
+  // folder, no program, no process — one HTTPS call with the key from the Backends tab. It
+  // is the fixture that exists to prove the panel drops every local field rather than
+  // leaving a folder box that nothing would read. `&key=none` is the state a user reaches
+  // before pasting that key: the one where Test is disabled and the panel has to name
+  // where the key goes instead of showing an empty field.
+  const imagesNIM = imagesParam === 'nim'
+  const nimKeyless = imagesNIM && new URLSearchParams(location.search).get('key') === 'none'
+  // `&nimModel=<id>` is the stored hosted id, which is how the state that cost a real 404 is
+  // reachable: a blob written by an earlier build held a bare `flux-3-image-klein`, no
+  // `<option>` matched it, and the select displayed schnell while the draw sent klein. The
+  // panel now adds the stored id as its own (marked) option; this flag is what renders that.
+  const nimModelParam = imagesNIM ? new URLSearchParams(location.search).get('nimModel') : ''
+  if (imagesNIM) {
+    console.warn(
+      `[harness] images=nim active: hosted backend, ${nimKeyless ? 'no key' : 'key borrowed from the Backends tab'}`,
+    )
+  }
   // The executable this kind runs. Both lifetimes come out of one archive, so the folder and
   // the model set are shared and only the program's name differs.
   const localProgram = imagesSD ? 'sd-server' : 'sd-cli'
@@ -994,7 +1012,9 @@ Verfügbare Tools: {{tool_list}}`,
       // state where the switch, the scale and the denoise boxes all hold a value: the same
       // rule as the size and step count above, and what makes "a fixed value beats the
       // model's own" renderable for these three fields too.
-      hiresEnabled: imagesPinned,
+      // Off for the hosted kind, which the panel enforces when the kind changes: the route
+      // has no second pass, and a stored switch would make every draw fail.
+      hiresEnabled: imagesNIM ? false : imagesPinned,
       hiresScale: imagesPinned ? 1.5 : 0,
       hiresDenoise: imagesPinned ? 0.4 : 0,
       // Enlarging. The resampler needs no setup; `?upscaler=on` is the neural state,
@@ -1009,7 +1029,10 @@ Verfügbare Tools: {{tool_list}}`,
       // The CLI kind's own fields. Empty here, because this fixture is the server
       // backend; `?images=cli` fills them in and switches the kind, which is what
       // makes the other half of the form renderable.
-      kind: imagesSD ? 'sdserver' : imagesCLI ? 'cli' : '',
+      kind: imagesNIM ? 'nim' : imagesSD ? 'sdserver' : imagesCLI ? 'cli' : '',
+      // The hosted model id, spelled as the path segment NVIDIA's route takes — the id is
+      // `publisher/model`, and a bare name would 404. Schnell is the Apache-2.0 default.
+      nimModel: imagesNIM ? nimModelParam || 'black-forest-labs/flux.1-schnell' : '',
       // The switch the user asked for: off unless it is asked for, because a loaded model
       // holds the memory it was loaded into until it is stopped. Off in every fixture but
       // `?startwithapp=1`, which is what makes the unticked box the default state to render.
@@ -3226,7 +3249,47 @@ Verfügbare Tools: {{tool_list}}`,
     // different field for each.
     GetImageStatus: () =>
       Promise.resolve(
-        imagesLocal
+        imagesNIM
+          ? {
+              enabled: true,
+              // The vendor's address, reported rather than typed: it is never the user's,
+              // and the panel shows it as a fact so it is clear which service draws. This
+              // is the *generation* host — the OpenAI-compatible one is a different host
+              // that serves no image model, which is the 404 this fixture's flag exercises.
+              baseURL: 'https://ai.api.nvidia.com',
+              // A keyless hosted backend is not a failure — nothing was contacted — which is
+              // the same early return the real GetImageStatus makes when the provider is
+              // nil, so the badge reads "not checked" rather than "failed".
+              ok: !nimKeyless,
+              // The ids this client offers, which is a constant rather than the vendor's
+              // model listing: that listing is the chat catalogue, and a picker built from
+              // it would put a text model in a picture setting.
+              models: nimKeyless
+                ? []
+                : [
+                    'black-forest-labs/flux.1-schnell',
+                    'black-forest-labs/flux-3-image-klein',
+                    'black-forest-labs/flux.1-dev',
+                  ],
+              // Empty by design: the hosted route has no sampler parameter, so offering
+              // names here would be values the request silently drops.
+              samplers: [],
+              // The NVIDIA entry in the Backends tab, which is the only place this kind's
+              // key lives: the panel has no field for it and names that tab instead.
+              keySet: !nimKeyless,
+              kind: 'nim',
+              // No program and no folder, because this kind runs nothing here. Reporting
+              // `sd-cli` would be a field about a file that will never be started.
+              program: '',
+              binary: '',
+              folder: '',
+              build: '',
+              builds: sdBuilds,
+              releasePage: sdReleasePage,
+              files: [],
+              server: imageServerRow(),
+            }
+          : imagesLocal
           ? {
               enabled: !imagesOff,
               baseURL: '',

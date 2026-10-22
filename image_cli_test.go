@@ -419,6 +419,14 @@ func TestTheCLIDrawBoundIsTheBackendsOwn(t *testing.T) {
 	if got := imageDrawTimeout(server, small); got != 10*time.Minute {
 		t.Errorf("server bound = %s, want 10m", got)
 	}
+	// The hosted kind is bounded by a network wait rather than by local sampling: it answers
+	// in seconds when it answers, so a stuck queue must report itself rather than hold the
+	// draw slot for the local server's ten minutes.
+	hosted := config.Default()
+	hosted.Images.Kind = config.ImageKindNIM
+	if got := imageDrawTimeout(hosted, small); got != 3*time.Minute {
+		t.Errorf("hosted bound = %s, want 3m", got)
+	}
 }
 
 // TestADrawThatFallsBackToTheCpuGetsTheTimeItNeeds pins the other half of the bound: the flat

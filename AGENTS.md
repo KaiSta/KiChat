@@ -211,6 +211,7 @@ instead of the result.
 | [`COMPACT.md`](COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
 | [`RESEARCH.md`](RESEARCH.md) | search and scraping: providers, refusals, guards, budgets |
 | [`IMAGES.md`](IMAGES.md) | picture generation: three server kinds, parameters, profiles, verification |
+| [`IMAGES-CLOUD.md`](IMAGES-CLOUD.md) | hosted picture backends: which free tiers exist, what each would cost, and the one that was built (NVIDIA NIM) |
 | [`UPSCALING.md`](UPSCALING.md) | enlarging a picture: the resampler, Real-ESRGAN, targets, the Enlarge panel |
 | [`LLAMACPP.md`](LLAMACPP.md) | the llama.cpp provider and managed runtime, projectors, ternary models |
 | [`GROQ.md`](GROQ.md) | the Groq backend: listing, ceiling, pacing, refusals |
