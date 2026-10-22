@@ -475,11 +475,21 @@ nsis: check-makensis windows
 
 check: fmt vet vet-windows vet-darwin test typecheck
 
+# main.go embeds `all:frontend/dist`, and go:embed fails at *compile* time when the
+# pattern matches nothing — so every target that compiles the root package (`vet`,
+# the two cross-OS vets, `test`) needs the directory to exist. It is gitignored
+# build output, so a fresh checkout has none, and `make check` on a clean CI runner
+# died with "pattern all:frontend/dist: no matching files found" before `make
+# build` ever ran. A placeholder is enough: nothing here ships the bundle, and the
+# first real `make build` replaces it (vite's emptyOutDir clears the directory).
+ensure-dist:
+	@test -d frontend/dist || { mkdir -p frontend/dist && : > frontend/dist/.placeholder; }
+
 fmt:
 	@out="$$($(GOFMT) -l .)"; if [ -n "$$out" ]; then echo "gofmt wants to rewrite:"; echo "$$out"; exit 1; fi
 	@echo "gofmt: clean"
 
-vet:
+vet: ensure-dist
 	$(GO) vet ./...
 
 # What keeps the Windows half honest, on a machine that has no Windows. `go vet`
@@ -488,7 +498,7 @@ vet:
 # compiling for Windows fails here, on Linux, instead of on a user's machine. It does
 # not need the Windows SDK and costs well under a second (measured: 0.86 s, exit 0, on
 # this machine).
-vet-windows:
+vet-windows: ensure-dist
 	GOOS=windows GOARCH=$(WINDOWS_ARCH) $(GO) vet ./...
 	@echo "vet: windows/$(WINDOWS_ARCH) compiles"
 
@@ -501,11 +511,11 @@ vet-windows:
 # DARWIN_VET_ARCH=amd64` can compile the other slice where that ever matters.
 DARWIN_VET_ARCH ?= arm64
 
-vet-darwin:
+vet-darwin: ensure-dist
 	GOOS=darwin GOARCH=$(DARWIN_VET_ARCH) $(GO) vet ./...
 	@echo "vet: darwin/$(DARWIN_VET_ARCH) compiles"
 
-test:
+test: ensure-dist
 	$(GO) test ./... -count=1
 
 typecheck: deps
