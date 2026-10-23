@@ -312,7 +312,12 @@ func toOllamaMessages(in []Message) []ollamaMessage {
 			Role:     string(m.Role),
 			Content:  m.Content,
 			Thinking: m.Reasoning,
-			Images:   m.Images,
+		}
+		// A picture is a user turn's part, the same rule the OpenAI wire follows:
+		// a generated picture is filed on the assistant row that asked for it, and
+		// no provider's assistant turn takes an image (GROQ.md §6).
+		if m.Role != RoleAssistant {
+			om.Images = m.Images
 		}
 		if m.Role == RoleTool {
 			om.ToolName = m.Name

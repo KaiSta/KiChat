@@ -217,6 +217,22 @@ vendor's body is the same either way and says nothing about where a key belongs,
 in the message the user sees. A wrong key is a key rather than a throttle, which is the
 distinction `RESEARCH.md` §5 makes for Brave's rejected token.
 
+A **validation 400** is a different family: the vendor rejecting the shape of the body before
+any model ran. The one this app produced itself was an image part on an assistant turn — a
+picture a tool generated is stored as an attachment of the assistant row that asked for it,
+and that row's content is empty because it only made the call, so the parts list began with
+the image (reported from a live chat on 2026-10-23, not measured on this account):
+
+```json
+{"error":{"message":"'messages.6' : for 'role:assistant' the following must be satisfied[('messages.6.content' : one of the following must be satisfied[('messages.6.content' : value must be a string) OR ('messages.6.content.0.type' : value is not one of the allowed values ['text'])])]","type":"invalid_request_error"}}
+```
+
+An image is a **user** turn's part; an assistant turn is a string plus its tool calls. The
+shared wire builder now leaves an assistant message's pictures out
+(`TestGroqNeverSeesAnImageOnAnAssistantTurn` pins both sides — a string on the assistant
+message, the user's picture still as parts), and `Assemble` keeps them out of the meter as
+well, since a cost that is not sent must not be charged.
+
 **The budget is the tight resource here, and it is per minute — and per model.** Every
 response carries `x-ratelimit-limit-requests`, `-limit-tokens`, `-remaining-*` and
 `-reset-*`; the vendor's own note on them is that the `requests` family always means the

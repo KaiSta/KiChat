@@ -828,6 +828,90 @@ func withImageAttachment(messages []store.Message, seq int, documentID string) [
 	return out
 }
 
+// TestAssembleKeepsAGeneratedPictureOffTheAssistantTurn: a picture a tool
+// generated is filed as an inline attachment of the assistant row that asked for
+// it, and that row only made the call, so its content is empty. Sending it as an
+// image part of the assistant turn is not a shape an OpenAI-compatible request
+// has, and Groq refuses the whole request for it:
+// "'messages.N.content.0.type' : value is not one of the allowed values ['text']".
+// The part and its cost stay out of the request; the attachment stays for the
+// transcript and the renderer.
+func TestAssembleKeepsAGeneratedPictureOffTheAssistantTurn(t *testing.T) {
+	const b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	messages := withImageAttachment([]store.Message{
+		msg(1, "user", "zeichne einen Hund"),
+		{ID: "calling", Seq: 2, Role: "assistant",
+			ToolCallsJSON: `[{"id":"call-1","name":"generate_image","arguments":"{}"}]`},
+		{ID: "result", Seq: 3, Role: "tool", Name: "generate_image", ToolCallID: "call-1",
+			Content: "Bild erstellt"},
+	}, 2, "img1")
+
+	assembly := Assemble(AssemblyInput{
+		Chat:     asmChat("Du bist ein Assistent."),
+		Messages: messages,
+		Limit:    100000, Reserve: 1000,
+		Documents: []store.Document{{ID: "img1", Title: "bild.png", Text: b64, TokenCount: 1024}},
+	})
+
+	for _, m := range assembly.Messages {
+		if len(m.Images) > 0 {
+			t.Fatalf("the generated picture was sent as an image part of %q: %v", m.Role, m.Images)
+		}
+	}
+	if assembly.Budget.Attachments != 0 {
+		t.Errorf("the unsent picture was still priced: %d attachment tokens", assembly.Budget.Attachments)
+	}
+}
+
+// TestAssembleDropsAnAssistantTurnThatProducedNothing is the Mistral 400: an
+// assistant message must carry content or tool_calls, and the app's own failure
+// paths leave rows with neither — a request that died before a token, a Stop
+// before the first one, and a reasoning-only reply (reasoning is not sent at all).
+// Each used to be replayed verbatim, so one failure refused every later send of
+// that chat with "Assistant message must have either content or tool_calls, but
+// not none" (code 3240), and each refusal wrote another empty row. The row stays
+// in the transcript; only the request leaves it out — and a tool-only turn, whose
+// content is empty on purpose, has to survive.
+func TestAssembleDropsAnAssistantTurnThatProducedNothing(t *testing.T) {
+	messages := []store.Message{
+		msg(1, "user", "erste Frage"),
+		{ID: "failed", Seq: 2, Role: "assistant", Status: store.StatusFailed, StopReason: "request_error"},
+		msg(3, "user", "zweite Frage"),
+		{ID: "thought", Seq: 4, Role: "assistant", Reasoning: "nur gedacht", Status: store.StatusComplete},
+		msg(5, "user", "dritte Frage"),
+		{ID: "calling", Seq: 6, Role: "assistant", Status: store.StatusComplete,
+			ToolCallsJSON: `[{"id":"call-1","name":"scrape_url","arguments":"{}"}]`},
+		{ID: "result", Seq: 7, Role: "tool", Name: "scrape_url", ToolCallID: "call-1", Content: "Seite"},
+		msg(8, "user", "vierte Frage"),
+	}
+
+	assembly := Assemble(AssemblyInput{
+		Chat:     asmChat("Du bist ein Assistent."),
+		Messages: messages,
+		Limit:    100000, LimitSource: "backend", Reserve: 1000,
+	})
+
+	assistants, calls := 0, 0
+	for _, m := range assembly.Messages {
+		if m.Role != llm.RoleAssistant {
+			continue
+		}
+		assistants++
+		if m.Content == "" && len(m.ToolCalls) == 0 {
+			t.Fatalf("an empty assistant turn reached the request: %+v", m)
+		}
+		calls += len(m.ToolCalls)
+	}
+	if assistants != 1 || calls != 1 {
+		t.Fatalf("assistants in the request = %d with %d calls, want the tool-only turn only: %+v",
+			assistants, calls, assembly.Messages)
+	}
+	// system + four user turns + the assistant call + its result
+	if got := len(assembly.Messages); got != 7 {
+		t.Fatalf("request has %d messages, want 7: %+v", got, assembly.Messages)
+	}
+}
+
 // TestAssembleMeasurementDelta covers the subtle accounting rule: the backend's
 // prompt_tokens describes the previous request, so messages added since must be
 // added on top rather than ignored.

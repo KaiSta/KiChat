@@ -637,7 +637,16 @@ func toWireMessages(messages []Message) []wireMessage {
 			Name:       m.Name,
 			ToolCallID: m.ToolCallID,
 		}
-		if len(m.Images) > 0 {
+		// A picture is a part of a *user* turn only. The schema has no image part for
+		// an assistant message, and a strict backend refuses the whole request when it
+		// finds one — Groq answers HTTP 400 "'messages.N.content.0.type' : value is
+		// not one of the allowed values ['text']" (GROQ.md §6). That was reachable:
+		// a picture a tool generated is stored as an inline attachment of the
+		// assistant row that asked for it, and that row's content is empty because it
+		// only made the call, so the parts list began with the image. The attachment
+		// stays in the transcript and the renderer; the model reads the call and its
+		// result instead.
+		if len(m.Images) > 0 && m.Role != RoleAssistant {
 			parts := []map[string]any{}
 			if m.Content != "" {
 				parts = append(parts, map[string]any{"type": "text", "text": m.Content})

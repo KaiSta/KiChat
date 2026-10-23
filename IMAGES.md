@@ -16,12 +16,13 @@ files it as an attachment of the reply that asked for it, and the window shows i
 
 It is the first part of KiChat that produces a file rather than text, and the design
 follows from one rule: **the picture is an image attachment, exactly like one the
-user uploaded.** Nothing downstream needed a new concept. The assembly already turns
-an inline image attachment into an image part of the request
-(`internal/chat/context.go`, `TestAssembleSendsImagesAsImageParts`), so a generated
-picture can be handed to a vision model on the next turn with no new plumbing; the
-frontend already renders a message's attachments, so it needed only a component that
-paints a picture instead of a chip. §4 is that argument in full.
+user uploaded.** Nothing downstream needed a new concept. The frontend already
+renders a message's attachments, so it needed only a component that paints a picture
+instead of a chip, and the recipe on the attachment is what makes the picture
+drawable again. One part of the uploaded shape does not carry over: an image reaches
+the model as a part of a **user** turn only, and a generated picture belongs to the
+assistant turn that asked for it, so it is stored, shown and redrawn but never sent
+back (§4, §10). §4 is that argument in full.
 
 Two things it is **not**:
 
@@ -960,9 +961,11 @@ attachments.kind = "image", mime = "image/png", placement = "inline"
 
 No schema change, and three properties fall out for free:
 
-1. **The assembly sends it to a vision model.** `context.go` already routes an inline
-   image attachment into `llm.Message.Images`, and `llm.EstimateImageTokens` prices it,
-   so the context meter counts a generated picture the way it counts an attached one.
+1. **The assembly prices an attached image, and leaves a generated one out.** An inline
+   image attachment of a *user* turn becomes `llm.Message.Images`, and
+   `llm.EstimateImageTokens` prices it. A generated picture belongs to the assistant
+   turn, which no image part can travel on (GROQ.md §6), so it is kept out of the
+   request and out of the meter — while still being stored, shown, saved and redrawn.
 2. **The frontend renders it.** `ChatView` already renders `message.attachments`; the
    new `MessageImages` component in `MessageParts.tsx` paints the ones whose kind or
    MIME is an image, and `AttachmentChips` skips those so nothing is listed twice.
@@ -2015,14 +2018,17 @@ being coherent.
   nothing this app can turn into a fraction, so a first draw on a CPU still spends minutes
   behind an indefinite spinner. On the managed server the same load is a `starting` row with a
   bound on it, which is the other half of the same problem.
-- **A picture KiChat drew travels in an *assistant* message, and that is unverified.**
-  `context.go` attaches a message's inline images to the message that owns them, which for a
-  generated picture is the assistant turn, and `openai.go`/`ollama.go` render image parts for
-  any role. The servers in the table commonly accept image content **only in user turns**, so
-  the failure mode is not "the model cannot see it" but "the next turn is refused" — and no
-  server was reachable from here to tell the two apart. Everything else about the picture
-  works: it is stored, shown, saved and redrawn. Deciding this properly is a per-backend
-  answer (send it, or name it in text), which is not written yet.
+- **A picture KiChat drew is not sent back to the model, and that is now decided.** It was
+  predicted here as unverified: `context.go` attached a message's inline images to the
+  message that owns them, which for a generated picture is the assistant turn, and
+  `openai.go` rendered an image part for any role. The failure was measured on Groq — the
+  next turn was refused with a validation 400, not silently starved of the picture
+  (GROQ.md §6) — so `Assemble` and `toWireMessages` keep an image off an assistant turn
+  altogether: the model reads its `generate_image` call and the tool result instead. The
+  picture is still stored, shown, saved and redrawn, and **no vision capability is needed to
+  call the tool** — which is what makes it available to every text-only model that can call
+  tools at all. Giving the picture back to a vision model on a later turn would mean filing
+  it on a user turn, which the transcript does not do.
 - **The store only knows about an export it recorded.** A picture saved before `saved_path`
   existed counts as unsaved (§6.1), and there is no per-picture delete in the panel: the whole
   unsaved set goes at once, with no list to pick from. A list would need a browsing surface

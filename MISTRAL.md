@@ -329,6 +329,22 @@ three distinct ones:
 Note the 401 uses a **different envelope shape** (`detail`, no `object`) from the chat
 errors — one more reason the code is what classifies and the wording is not.
 
+One 400 is not a verdict on the account but on the history's shape (reported from a live
+chat on 2026-10-23, not measured on this account):
+
+```json
+{"object":"error","message":"Assistant message must have either content or tool_calls, but not none.",
+ "type":"invalid_request_assistant_message","param":null,"code":"3240","raw_status_code":400}
+```
+
+An assistant message with `"content":""` and no `tool_calls` is tolerated by every other
+backend the app talks to and **validated here**. It is also what the app's own failure
+paths leave behind — a request that died before a token, a Stop before the first one, a
+reply that only thought (reasoning is not part of the wire format, §4) — so replaying it
+refused the whole turn and wrote another empty row, and one failure made every later send
+of that chat fail the same way. `Assemble` now leaves such a turn out of the request
+(`TestAssembleDropsAnAssistantTurnThatProducedNothing`); the row stays in the transcript.
+
 The 429 is **a per-model gate as much as a rate**. Measured on one free-tier key:
 
 | model | result |

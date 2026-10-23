@@ -86,8 +86,9 @@ func onePicture() images.Result {
 
 // TestGenerateImageFilesThePictureOnTheCallingMessage is the whole feature in one
 // test: the picture has to end up as an inline image attachment of the assistant
-// message that asked for it, because that is what the frontend renders and what
-// the assembly turns back into an image part for a vision model.
+// message that asked for it, because that is what the frontend renders and what a
+// redraw reads the recipe from. It is not sent back to the model: an image part
+// cannot travel on an assistant turn (GROQ.md §6).
 func TestGenerateImageFilesThePictureOnTheCallingMessage(t *testing.T) {
 	provider := &fakeImageProvider{result: onePicture()}
 	service, st, chatID := newImageService(t, provider, config.ImageSettings{
@@ -134,14 +135,14 @@ func TestGenerateImageFilesThePictureOnTheCallingMessage(t *testing.T) {
 		t.Errorf("sizeBytes = %d, want %d", got.SizeBytes, len(pictureBytes))
 	}
 	if got.Placement != store.PlacementInline {
-		t.Errorf("placement = %q, want inline — an image is passed to the model, not indexed", got.Placement)
+		t.Errorf("placement = %q, want inline — a picture is not indexed text", got.Placement)
 	}
 	if got.Filename != "a-red-fox-in-deep-snow-1.png" {
 		t.Errorf("filename = %q, want the prompt as a slug", got.Filename)
 	}
 
 	// The payload has to survive as base64 in the document, which is the shape
-	// the assembly reads back out as an image part.
+	// an attachment's payload is stored in.
 	document, err := st.GetDocument(got.DocumentID)
 	if err != nil {
 		t.Fatalf("GetDocument: %v", err)

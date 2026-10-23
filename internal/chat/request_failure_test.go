@@ -87,3 +87,55 @@ func TestARequestThatNeverStartedIsStoredAsFailed(t *testing.T) {
 		t.Error("the failed request was never reported to the UI")
 	}
 }
+
+// TestAFailedTurnIsNotReplayedAndTheChatStillSends is the refusal a Mistral chat
+// hit: the failed request above leaves an assistant row with empty content and no
+// calls, and replaying it is the one shape Mistral validates — HTTP 400, code 3240,
+// "Assistant message must have either content or tool_calls, but not none". The
+// refused turn writes another empty row, so the chat could never send again. The
+// transcript keeps the failed attempt; the next request must not carry it.
+func TestAFailedTurnIsNotReplayedAndTheChatStillSends(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	provider := &fakeProvider{
+		model:    llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+		refusals: []error{errors.New("400 Bad Request")},
+		replies:  [][]llm.StreamEvent{nil, {{Type: llm.EventDelta, Text: "Antwort"}}},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "erste Frage"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the failed turn did not finish")
+	}
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "zweite Frage"}); err != nil {
+		t.Fatalf("second Send: %v", err)
+	}
+	if !waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the second turn did not finish")
+	}
+
+	for _, m := range provider.lastRequest().Messages {
+		if m.Role == llm.RoleAssistant && m.Content == "" && len(m.ToolCalls) == 0 {
+			t.Fatalf("the failed turn was replayed to the backend: %+v", m)
+		}
+	}
+
+	// The row itself stays, so the transcript still shows what failed.
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := 0
+	for _, m := range messages {
+		if m.Role == string(llm.RoleAssistant) && m.Content == "" {
+			empty++
+		}
+	}
+	if empty != 1 {
+		t.Fatalf("stored empty assistant rows = %d, want the one failed attempt", empty)
+	}
+}

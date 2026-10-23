@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,89 @@ func (stubImageProvider) Models(context.Context) ([]images.Model, error) {
 func (stubImageProvider) Samplers(context.Context) ([]string, error) { return nil, nil }
 func (stubImageProvider) Generate(context.Context, images.Request) (images.Result, error) {
 	return images.Result{}, nil
+}
+
+// onePixelPNG is a real 1×1 PNG, so a draw in a test files a payload the store and
+// the renderer can actually use.
+const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+
+// drawingImageProvider answers a draw with one PNG, which is the fixture the tool
+// loop needs: the picture has to reach the store as an attachment of the calling row
+// for the round that follows to be the one this app got wrong.
+type drawingImageProvider struct{ stubImageProvider }
+
+func (drawingImageProvider) Generate(context.Context, images.Request) (images.Result, error) {
+	png, err := base64.StdEncoding.DecodeString(onePixelPNG)
+	if err != nil {
+		return images.Result{}, err
+	}
+	return images.Result{
+		Images: []images.Image{{Data: png, Mime: images.MimePNG, Ext: "png"}},
+		Seed:   7,
+	}, nil
+}
+
+// TestATextOnlyModelCanDrawAndKeepTalking is the report that started this: a model
+// with **no vision capability** called `generate_image`, the picture was drawn and
+// filed on its own assistant row, and the next round — the request that reads the
+// tool result — carried that picture as an image part. A backend refuses that request
+// outright (Groq: "'messages.N.content.0.type' : value is not one of the allowed
+// values ['text']"; GROQ.md §6), so a feature that needs no vision failed for the
+// lack of it. The picture is still drawn, stored and rendered; it is not sent back,
+// and the model answers on the round after it.
+func TestATextOnlyModelCanDrawAndKeepTalking(t *testing.T) {
+	provider, engine := imageToolEngine(t, []string{llm.CapTools}, drawingImageProvider{})
+	provider.replies = [][]llm.StreamEvent{
+		{{Type: llm.EventToolCall, ToolCall: &llm.ToolCall{
+			ID: "call-1", Name: tools.ToolGenerateImage,
+			Arguments: `{"prompt":"a red fox in deep snow"}`,
+		}}},
+		{{Type: llm.EventDelta, Text: "Das Bild ist fertig."}, {Type: llm.EventDone}},
+	}
+
+	if err := engine.Send(TurnRequest{ChatID: chatImageToolID, Text: "Zeichne mir einen Fuchs."}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return !engine.IsRunning(chatImageToolID) }) {
+		t.Fatal("the turn did not finish")
+	}
+
+	// The call round, then the answer that read its result: the turn did not stop at
+	// the picture, which is the half a refusal would have taken away.
+	if got := provider.requestCount(); got != 2 {
+		t.Fatalf("requests = %d, want the tool round and the answer after it", got)
+	}
+	for _, m := range provider.requestAt(1).Messages {
+		if len(m.Images) > 0 {
+			t.Fatalf("the picture was sent back to a text-only model on the %s turn", m.Role)
+		}
+	}
+
+	messages, err := engine.Store.ListMessages(chatImageToolID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var drew, answered bool
+	for _, m := range messages {
+		if m.Role != string(llm.RoleAssistant) {
+			continue
+		}
+		if strings.Contains(m.ToolCallsJSON, tools.ToolGenerateImage) {
+			if len(m.Attachments) != 1 || m.Attachments[0].Kind != "image" {
+				t.Fatalf("the picture is not filed on the row that asked for it: %+v", m.Attachments)
+			}
+			drew = true
+		}
+		if m.Content == "Das Bild ist fertig." {
+			answered = true
+		}
+	}
+	if !drew {
+		t.Error("no assistant row carries the draw's call")
+	}
+	if !answered {
+		t.Error("the model never got to answer after the picture")
+	}
 }
 
 // TestTheImageToolIsInvisibleUntilAServerIsConfigured is the contract the Settings

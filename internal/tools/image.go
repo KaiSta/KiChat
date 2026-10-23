@@ -386,10 +386,13 @@ func (s *Service) imageSettings() config.ImageSettings {
 // asked for it, in exactly the shape an uploaded image has: a Document whose text
 // is the base64 payload, and an inline image attachment pointing at it.
 //
-// Reusing that shape is the whole point. The assembly already turns an inline
-// image attachment back into an image part of the request, so a picture KiChat
-// generated can be handed to a vision model on a later turn without a single line
-// of new plumbing — and the frontend already renders a message's attachments.
+// Reusing that shape is the whole point: the frontend renders a message's
+// attachments, and an inline attachment of a *user* turn still reaches the request
+// as an image part. A generated picture belongs to the assistant turn that asked
+// for it, and no image part may travel there — the OpenAI-compatible schema has
+// none, and a backend that validates the shape refuses the whole request
+// (GROQ.md §6). The model reads its own call and the tool result instead; the
+// picture is stored, shown, saved and redrawn from the transcript.
 func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img images.Image, recipe *store.GenerationRecipe, derivation *store.Derivation) (store.Attachment, error) {
 	if s.Store == nil {
 		return store.Attachment{}, uimsg.Detailf("tools.noStore", "no storage is available, so the picture cannot be filed")

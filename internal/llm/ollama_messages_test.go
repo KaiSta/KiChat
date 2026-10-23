@@ -57,6 +57,24 @@ func TestUnreadableToolArgumentsAreNotReplacedByNothing(t *testing.T) {
 	}
 }
 
+// TestOllamaNeverSeesAnImageOnAnAssistantTurn is the same rule the shared OpenAI
+// wire enforces: an image is a user turn's part. A generated picture is filed as an
+// attachment of the assistant row that asked for it, so it must not reach the wire
+// there — no provider's assistant turn takes one.
+func TestOllamaNeverSeesAnImageOnAnAssistantTurn(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	msgs := toOllamaMessages([]Message{
+		{Role: RoleAssistant, Images: []string{png}},
+		{Role: RoleUser, Content: "Was ist das?", Images: []string{png}},
+	})
+	if len(msgs[0].Images) != 0 {
+		t.Errorf("the assistant turn carried an image: %v", msgs[0].Images)
+	}
+	if len(msgs[1].Images) != 1 {
+		t.Errorf("the user's picture was dropped: %v", msgs[1].Images)
+	}
+}
+
 // TestEmptyArgumentsStayEmpty keeps the two cases apart: a call that genuinely
 // took no arguments must not pick up the unreadable marker.
 func TestEmptyArgumentsStayEmpty(t *testing.T) {

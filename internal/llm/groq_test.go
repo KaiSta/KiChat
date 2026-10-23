@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -190,6 +191,68 @@ func TestGroqRequestIsTheSharedOpenAIOne(t *testing.T) {
 		if !strings.Contains(gotBody, want) {
 			t.Errorf("request body %s does not carry %s", gotBody, want)
 		}
+	}
+}
+
+// TestGroqNeverSeesAnImageOnAnAssistantTurn is a different fault from the same
+// chat: a picture a tool generated is an inline attachment of the assistant row
+// that asked for it, and that row's content is empty because it only made the
+// call. The shared builder therefore sent `content: [{"type":"image_url",…}]` on
+// an assistant message — a shape this vendor's schema does not have, refused with
+// HTTP 400, "'messages.6.content.0.type' : value is not one of the allowed values
+// ['text']". An assistant turn is a string plus its tool calls; a user turn keeps
+// its image parts.
+func TestGroqNeverSeesAnImageOnAnAssistantTurn(t *testing.T) {
+	var body struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+	p := newGroqProvider("groq", "Groq", srv.URL+"/openai/v1", "test-key")
+	stream, err := p.Chat(context.Background(), ChatRequest{
+		Model: "qwen/qwen3.8-27b",
+		Messages: []Message{
+			{Role: RoleUser, Content: "zeichne einen Hund"},
+			{Role: RoleAssistant, Images: []string{png},
+				ToolCalls: []ToolCall{{ID: "call-1", Name: "generate_image", Arguments: "{}"}}},
+			{Role: RoleTool, Name: "generate_image", ToolCallID: "call-1", Content: "Bild erstellt"},
+			{Role: RoleUser, Content: "Was ist auf dem Bild?", Images: []string{png}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	for range stream {
+	}
+
+	if len(body.Messages) != 4 {
+		t.Fatalf("request carried %d messages, want 4", len(body.Messages))
+	}
+	var assistant string
+	if err := json.Unmarshal(body.Messages[1].Content, &assistant); err != nil {
+		t.Fatalf("assistant content is not a string: %s", body.Messages[1].Content)
+	}
+	if strings.Contains(string(body.Messages[1].Content), "image_url") {
+		t.Errorf("the assistant turn carried an image part: %s", body.Messages[1].Content)
+	}
+	var parts []map[string]any
+	if err := json.Unmarshal(body.Messages[3].Content, &parts); err != nil {
+		t.Fatalf("a user turn's picture was not sent as parts: %s", body.Messages[3].Content)
+	}
+	if len(parts) != 2 || parts[0]["type"] != "text" || parts[1]["type"] != "image_url" {
+		t.Errorf("user parts = %v, want text then image_url", parts)
 	}
 }
 

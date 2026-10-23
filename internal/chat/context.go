@@ -271,10 +271,34 @@ func Assemble(in AssemblyInput) Assembly {
 		if m.Seq < firstVerbatim {
 			continue
 		}
+		lm := toLLMMessage(m)
+		// A picture is a part of a *user* turn only: the OpenAI-compatible schema has
+		// no image part for an assistant message, and a backend that validates the
+		// shape refuses the whole request for one (GROQ.md §6). It is reachable — a
+		// picture a tool generated is filed as an attachment of the assistant row
+		// that asked for it — so it is kept off the wire and out of the meter, which
+		// describes what is sent. The attachment stays in the transcript and the
+		// renderer.
+		if lm.Role != llm.RoleAssistant {
+			lm.Images = imagesByMessage[m.ID]
+		}
+		// An assistant turn that produced nothing is not sent. Reasoning is not part
+		// of the wire format, so a reply that only thought — or one a failed or
+		// stopped request left behind — reaches the backend as
+		// `{"role":"assistant","content":""}` with no calls. Mistral validates that
+		// shape and refuses the whole request (HTTP 400, code 3240; MISTRAL.md §6),
+		// and the refused turn then writes yet another empty row, so every later
+		// send of that chat is refused for a message the user cannot see or delete.
+		// The row stays in the transcript; it is only left out of the request. A
+		// turn that carries an inlined document is kept whatever its text, because
+		// the document is the message.
+		if lm.Role == llm.RoleAssistant && lm.Content == "" && len(lm.ToolCalls) == 0 &&
+			len(inlineByMessage[m.ID]) == 0 {
+			continue
+		}
 		if m.Seq > maxIncluded {
 			maxIncluded = m.Seq
 		}
-		lm := toLLMMessage(m)
 		// A seeded search is stored as a system message and belongs next to the
 		// question it was run for, but the template allows a system message only
 		// at position 0. It therefore travels as a user turn carrying the search
@@ -287,8 +311,7 @@ func Assemble(in AssemblyInput) Assembly {
 		// belongs to Attachments below, and counting it here as well made the
 		// meter read half again as large as the request it describes.
 		historyTokens := llm.EstimateTokens(lm.Content) + llm.EstimateTokens(lm.Reasoning)/2
-		if imgs := imagesByMessage[m.ID]; len(imgs) > 0 {
-			lm.Images = imgs
+		if imgs := lm.Images; len(imgs) > 0 {
 			tokens := llm.EstimateImageTokens(len(imgs))
 			budget.Attachments += tokens
 			budget.Segments = append(budget.Segments, ContextSegment{
