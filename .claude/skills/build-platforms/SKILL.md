@@ -17,6 +17,11 @@ tools from `PATH` with fallbacks.
 | `make dmg` | `build/dmg/kichat_<version>_<arch>.dmg` |
 | `make deb` | `build/deb/kichat_<version>_<arch>.deb` |
 | `make install` / `make uninstall` | into `$(PREFIX)` (default `/usr`), Linux only |
+| `make vet-arm64` | compiles the linux/arm64 and windows/arm64 halves on any host |
+
+The architecture is a variable rather than a constant: `WINDOWS_ARCH` (default
+`amd64`) and `DEB_ARCH` (from `dpkg --print-architecture`, default `amd64`) decide what
+is built and what the artifact is called, so the same recipes make the arm64 pair.
 
 The Debian-only targets (`install`, `uninstall`, `deb`, `lint-deb`) say so and exit
 on another host, rather than failing part-way through an `install -D` Windows does
@@ -48,6 +53,15 @@ resource, the manifest and the icon in pure Go, and nothing here needs cgo.
 Measured: a 22 MB PE32+ **GUI** executable (subsystem 2, no console window) at
 `build/bin/kichat.exe`. The platform is `windows/amd64` whatever the host is;
 `make windows TARGETARCH=arm64` overrides it.
+
+`make windows WINDOWS_ARCH=arm64` is the same cross-build and needs no ARM runner:
+nothing on the Windows path is cgo, and Wails writes the PE resource, the manifest and
+the icon in pure Go. Measured on an amd64 Linux host: 21.7 MB, `PE32+ executable (GUI)
+Aarch64`. `make nsis WINDOWS_ARCH=arm64` then renders an arm64-only installer from the
+same script — Wails passes `-DARG_WAILS_ARM64_BINARY` and the OutFile carries the arch —
+so the two installers sit beside each other as `kichat-amd64-installer.exe` and
+`kichat-arm64-installer.exe`. The executable is measured; **the arm64 installer's
+makensis run is not** (there is no makensis on this machine).
 
 The version resource comes from `build/windows/info.json`, whose values are
 `wails.json`'s `info` block — there is **no flag to override it**, so `make
@@ -131,6 +145,17 @@ generated `changelog.gz`, and writes `md5sums`. `Depends` is not guessed: it is 
 set of libraries the binary names in its own `DT_NEEDED`, with `t64` alternatives
 for the Ubuntu 24.04 rename, plus the libc floor the version symbols ask for.
 
+**arm64 needs an arm64 host.** The Linux build is cgo against webkit2gtk, so an arm64
+link needs the arm64 headers and an arm64 compiler; on an x64 host the arch64 assembly
+reaches gcc and is rejected — measured: `gcc_arm64.S:65: Error: no such instruction:
+ldp x23,x24,[sp,`. So `make deb` on `ubuntu-24.04-arm` is how
+`kichat_<version>_arm64.deb` is made; `DEB_ARCH` reads `dpkg --print-architecture`, the
+`Depends` names exist for arm64, and the only recipe change needed was the Tailwind
+binding, which is now named from the host arch (`NPM_ARCH`) rather than a literal
+`x64` — the literal installed an x64 binary on an arm64 host and stamped on it, so the
+canary stopped being a canary. `make vet-arm64` compiles the half on a machine that
+cannot run it.
+
 The .deb is the artifact with a **byte-identical rebuild**: `-trimpath` and a
 commit-date-derived build stamp are what make that true. The NSIS installer is not,
 for the timestamp reason above.
@@ -139,6 +164,8 @@ for the timestamp reason above.
 
 ```sh
 file build/bin/kichat.exe                 # PE32+ GUI, subsystem 2
+file build/bin/kichat.exe                 # add WINDOWS_ARCH=arm64: PE32+ GUI Aarch64
+dpkg-deb --field build/deb/*.deb Architecture   # amd64 or arm64, which the name must match
 dpkg-deb -c build/deb/*.deb               # the files, including the notices
 dpkg-deb -I build/deb/*.deb               # Version, Depends, Description
 /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' build/bin/kichat.app/Contents/Info.plist

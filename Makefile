@@ -19,6 +19,7 @@
 #	                GOOS=windows and GOOS=darwin compile of everything
 #	make run        start the built app, detached, logging to a file
 #	make deb        build a .deb installer into build/deb/ (Debian hosts only)
+#	make vet-arm64  compile the linux/arm64 and windows/arm64 halves on any host
 #	make help       the full list
 #
 # The shell stays bash: every recipe here is POSIX sh, and several are multi-line
@@ -158,8 +159,17 @@ NODE_DEPS := frontend/node_modules
 # has no glibc/musl choice to make. So the extra install is Linux's, and elsewhere
 # npm's own hidden lockfile is the stamp: it is written by every npm 7+ install and
 # missing exactly when the install did not run.
+# npm spells x86-64 "x64" where Go says "amd64", and the native binding's name carries
+# that spelling (`oxide-linux-x64-gnu`, `oxide-linux-arm64-gnu`). Naming it from
+# NPM_ARCH rather than a literal is what lets the recipe below run on an arm64 Linux
+# host — the machine a linux/arm64 .deb has to be built on, because that build is cgo
+# against webkit2gtk — and install *that* machine's binding, which is the one vite
+# loads. With the literal, arm64 would install an x64 binary and stamp on it, so the
+# canary would stop being a canary.
+NPM_ARCH := $(if $(filter amd64,$(HOSTARCH)),x64,$(HOSTARCH))
+
 ifeq ($(HOSTOS),linux)
-PEER_DEPS := $(NODE_DEPS)/@tailwindcss/oxide-linux-x64-gnu
+PEER_DEPS := $(NODE_DEPS)/@tailwindcss/oxide-linux-$(NPM_ARCH)-gnu
 else
 PEER_DEPS := $(NODE_DEPS)/.package-lock.json
 endif
@@ -214,8 +224,8 @@ INSTALL_FILES = install -D -m 0755 $(BIN) $(1)$(PREFIX)/bin/$(APP) && \
 	install -D -m 0644 build/appicon.png $(1)$(PREFIX)/share/pixmaps/$(APP).png
 
 .PHONY: all help deps frontend bindings icon build windows nsis check-makensis darwin dmg \
-        check-darwin-host check fmt vet vet-windows vet-darwin test typecheck run install \
-        uninstall deb lint-deb version-info clean distclean
+        check-darwin-host check fmt vet vet-windows vet-darwin vet-arm64 test typecheck \
+        run install uninstall deb lint-deb version-info clean distclean
 
 all: build
 
@@ -228,7 +238,7 @@ help:
 	@echo "  INSTALL_SCOPE=x  installer scope, machine (elevated) or user (no elevation)"
 	@echo "  darwin      build $(APPBUNDLE) for darwin/$(DARWIN_ARCH) (macOS hosts only)"
 	@echo "  dmg         the same + $(DMG_FILE)"
-	@echo "  check       gofmt, go vet, go test ./..., tsc --noEmit, GOOS=windows and GOOS=darwin compile"
+	@echo "  check       gofmt, go vet, go test ./..., tsc --noEmit, and GOOS/GOARCH windows, darwin and arm64 compiles"
 ifeq ($(HOSTOS),darwin)
 	@echo "  run         open $(APPBUNDLE)"
 else
@@ -262,7 +272,7 @@ ifeq ($(HOSTOS),linux)
 # install runs on, and only Linux needs naming at all.
 $(PEER_DEPS): frontend/package.json frontend/package-lock.json
 	cd frontend && $(NPM) install
-	cd frontend && $(NPM) i --no-save @tailwindcss/oxide-linux-x64-gnu@4.3.3
+	cd frontend && $(NPM) i --no-save @tailwindcss/oxide-linux-$(NPM_ARCH)-gnu@4.3.3
 else
 # npm 10+ reads the lockfile's platform packages itself, so there is no second step to
 # take here. The stamp is npm's own hidden lockfile, which every install writes.
@@ -473,7 +483,7 @@ nsis: check-makensis windows
 	fi
 # --- checks -----------------------------------------------------------------
 
-check: fmt vet vet-windows vet-darwin test typecheck
+check: fmt vet vet-windows vet-darwin vet-arm64 test typecheck
 
 # main.go embeds `all:frontend/dist`, and go:embed fails at *compile* time when the
 # pattern matches nothing — so every target that compiles the root package (`vet`,
@@ -514,6 +524,22 @@ DARWIN_VET_ARCH ?= arm64
 vet-darwin: ensure-dist
 	GOOS=darwin GOARCH=$(DARWIN_VET_ARCH) $(GO) vet ./...
 	@echo "vet: darwin/$(DARWIN_VET_ARCH) compiles"
+
+# The arm64 halves, which this project ships but cannot run here: `linux/arm64` is the
+# DGX Spark package and `windows/arm64` the RTX Spark laptops. CGO_ENABLED=0 is what
+# makes the Linux one a *compile* rather than a link — the webkit2gtk build is cgo, and
+# an arm64 link needs the arm64 headers and an arm64 compiler, which no x64 host has
+# (measured: without it, the arch64 assembly reaches gcc and fails with "no such
+# instruction: ldp"). That is the whole reason the package is built on ubuntu-24.04-arm
+# rather than cross-built. The Windows half needs no such flag: it is pure Go.
+#
+# Cheap enough to gate every build — `go vet` type-checks and compiles the test files,
+# so an `//go:build arm64` file or an arm64 row of the runtime's variant table that stops
+# compiling fails here, the way vet-windows and vet-darwin already do for their halves.
+vet-arm64: ensure-dist
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GO) vet ./...
+	GOOS=windows GOARCH=arm64 $(GO) vet ./...
+	@echo "vet: linux/arm64 and windows/arm64 compile"
 
 test: ensure-dist
 	$(GO) test ./... -count=1

@@ -1,11 +1,14 @@
 # The only workflow that publishes anything.
 #
 # ci.yml is the gate: it proves every platform compiles, links and type-checks, and
-# keeps nothing. This one turns a pushed tag into the three downloads a user picks
-# between — the Debian package, the Windows Setup.exe and the macOS disk image —
-# and attaches them to one GitHub Release. It runs the same Makefile targets the
-# release procedure has always run by hand, on the host each one needs: dpkg on
-# Ubuntu, makensis on Windows, hdiutil and the Apple toolchain on macOS. A
+# keeps nothing. This one turns a pushed tag into the five downloads a user picks
+# between — a Debian package and a Windows Setup.exe for each of amd64 and arm64, and
+# a universal macOS disk image — and attaches them to one GitHub Release. It runs the
+# same Makefile targets the release procedure has always run by hand, on the host each
+# one needs: dpkg on Ubuntu for both arches, because the Linux build is cgo against
+# webkit2gtk and an arm64 link cannot be made on an x64 host; makensis on Windows for
+# both, because the Windows path is pure Go and arm64 needs no second runner; hdiutil
+# and the Apple toolchain on macOS. A
 # workflow that spelled the packaging out itself would be a second copy of
 # Makefile recipes that can drift from the first, and drift is how a release
 # ships a binary that reports the wrong version.
@@ -176,6 +179,13 @@ jobs:
             echo "$deb says Version: $version, the tag is $RELEASE_TAG" >&2
             exit 1
           fi
+          # The arch, because two jobs now produce a .deb from the same tree and the
+          # name is the only thing that tells a user which machine it is for.
+          arch="$(dpkg-deb --field "$deb" Architecture)"
+          if [ "$arch" != "amd64" ]; then
+            echo "$deb says Architecture: $arch, this job builds amd64" >&2
+            exit 1
+          fi
           # Into a file, not a pipe into `grep -q`: grep exits on the first match,
           # dpkg-deb then dies of SIGPIPE, and pipefail turns a success into 141.
           # Measured: that reports "carries no /usr/bin/kichat" for a package that
@@ -197,12 +207,92 @@ jobs:
           # exists to make impossible.
           if-no-files-found: error
 
+  # The same package for arm64, and the one artifact that cannot be cross-built: the
+  # Linux build is cgo against webkit2gtk, so an arm64 link needs the arm64 headers and
+  # an arm64 compiler. The runner is Arm's own ubuntu-24.04-arm image, on which the
+  # same apt line installs arm64 headers and `dpkg --print-architecture` names the
+  # package arm64 — the recipe needed nothing but the Tailwind binding named by host
+  # arch. This is the package a DGX Spark installs, which ships DGX OS (Ubuntu).
+  deb-arm64:
+    name: .deb (linux/arm64)
+    needs: verify
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    env:
+      GOFLAGS: -tags=webkit2_41
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # gcc, because cgo needs a C compiler for the webkit2gtk layer and these images
+      # are Arm LLC's rather than GitHub's — the x64 image's gcc is not evidence about
+      # this one, and its absence would fail as `cgo: C compiler "gcc" not found`.
+      - name: Install the GTK and WebKit headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config gcc
+
+      - name: Install the Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: make deb
+        run: make deb
+
+      - name: Verify the package
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(build/deb/kichat_"$RELEASE_TAG"_*.deb)
+          if [ "${#debs[@]}" -ne 1 ]; then
+            echo "expected one .deb for $RELEASE_TAG, found ${#debs[@]} in build/deb:" >&2
+            ls -1 build/deb >&2
+            exit 1
+          fi
+          deb="${debs[0]}"
+          version="$(dpkg-deb --field "$deb" Version)"
+          if [ "$version" != "$RELEASE_TAG" ]; then
+            echo "$deb says Version: $version, the tag is $RELEASE_TAG" >&2
+            exit 1
+          fi
+          arch="$(dpkg-deb --field "$deb" Architecture)"
+          if [ "$arch" != "arm64" ]; then
+            echo "$deb says Architecture: $arch, this job builds arm64" >&2
+            exit 1
+          fi
+          listing="$(mktemp)"
+          dpkg-deb --contents "$deb" > "$listing"
+          grep -q '\./usr/bin/kichat$' "$listing" \
+            || { echo "$deb carries no /usr/bin/kichat" >&2; exit 1; }
+          rm -f "$listing"
+          echo "$deb ($(dpkg-deb --field "$deb" Installed-Size) KiB): Version $version, Architecture $arch"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb-arm64
+          path: build/deb/*.deb
+          if-no-files-found: error
+
   # The Setup.exe is built with makensis, which is in no platform's default
   # toolchain — and its absence is silent: Wails prints "Cannot create installer:
   # makensis not found" and exits 0. `make nsis` therefore checks for it before
   # building, and the recipe then fails if no installer was left behind.
   nsis:
-    name: Setup.exe (windows/amd64)
+    name: Setup.exe (windows/amd64 and windows/arm64)
     needs: verify
     runs-on: windows-latest
     timeout-minutes: 40
@@ -284,31 +374,54 @@ jobs:
         shell: msys2 {0}
         run: make nsis
 
+      # The arm64 Setup.exe, from the same cross-build: nothing on the Windows path needs
+      # cgo, so Wails produces a PE32+ AArch64 executable and renders an installer whose
+      # OutFile carries the arch (`kichat-arm64-installer.exe`) from the one define the
+      # arm64 target passes. The two installers coexist in build/bin, and the second run
+      # overwrites only the unsigned kichat.exe it embeds.
+      - name: make nsis (arm64)
+        shell: msys2 {0}
+        run: make nsis WINDOWS_ARCH=arm64
+
       # The Makefile already proves an MZ executable exists and computed its name;
       # this reads the version Wails rendered into the resource, which is the one
-      # thing a download's Properties dialog will show.
-      - name: Verify the installer
+      # thing a download's Properties dialog will show, for each architecture. The
+      # arch is in the *name*, not in the file: an NSIS installer's own PE is 32-bit
+      # whatever payload it carries, so there is nothing else to read it from.
+      - name: Verify the installers
         shell: pwsh
         run: |
           $tag = $env:RELEASE_TAG
-          $found = @(Get-ChildItem build/bin/*-installer.exe -ErrorAction SilentlyContinue)
-          if ($found.Count -ne 1) {
-            throw "expected one installer in build/bin, found $($found.Count)"
-          }
-          $exe = $found[0]
           # Windows version fields are numbers, so a Debian pre-release
           # (0.2.0~beta1) appears as its numeric head.
           $numeric = $tag.Split('~')[0]
-          $product = $exe.VersionInfo.ProductVersion
-          if (-not $product.StartsWith($numeric)) {
-            throw "$($exe.Name) reports ProductVersion $product, the tag is $tag"
+          $seen = 0
+          foreach ($arch in @('amd64', 'arm64')) {
+            $exe = Get-Item "build/bin/kichat-$arch-installer.exe" -ErrorAction SilentlyContinue
+            if (-not $exe) { throw "no build/bin/kichat-$arch-installer.exe was produced" }
+            $product = $exe.VersionInfo.ProductVersion
+            if (-not $product.StartsWith($numeric)) {
+              throw "$($exe.Name) reports ProductVersion $product, the tag is $tag"
+            }
+            Write-Host "$($exe.Name): $($exe.Length) bytes, ProductVersion $product"
+            $seen++
           }
-          Write-Host "$($exe.Name): $($exe.Length) bytes, ProductVersion $product"
+          $strays = @(Get-ChildItem build/bin/*-installer.exe | Where-Object { $_.Name -notmatch '^kichat-(amd64|arm64)-installer\.exe$' })
+          if ($strays.Count -ne 0) {
+            throw "unexpected installer names: $($strays.Name -join ', ')"
+          }
+          Write-Host "$seen installers, one per architecture"
 
       - uses: actions/upload-artifact@v7
         with:
           name: windows-installer
-          path: build/bin/*-installer.exe
+          path: build/bin/*-amd64-installer.exe
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer-arm64
+          path: build/bin/*-arm64-installer.exe
           if-no-files-found: error
 
   # The .dmg needs a Mac: `make dmg` refuses any other host, because Wails'
@@ -382,12 +495,12 @@ jobs:
           path: build/dmg/*.dmg
           if-no-files-found: error
 
-  # One release, three assets. It runs only after all three builds succeeded and
-  # verified their own artifacts, so a partial release is not a state this can
-  # reach: a failed build means no release page at all.
+  # One release, five assets. It runs only after every build succeeded and verified its
+  # own artifact, so a partial release is not a state this can reach: a failed build
+  # means no release page at all.
   publish:
     name: publish the GitHub Release
-    needs: [verify, deb, nsis, dmg]
+    needs: [verify, deb, deb-arm64, nsis, dmg]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -425,11 +538,27 @@ jobs:
         run: |
           set -euo pipefail
           assets=(dist/*)
-          if [ "${#assets[@]}" -ne 3 ]; then
-            echo "expected the .deb, the Setup.exe and the .dmg, found ${#assets[@]}:" >&2
+          # Named rather than counted: a count alone passes when two artifacts carry
+          # the same file, and the names are what a user picks a download by.
+          expected=(
+            "kichat_${RELEASE_TAG}_amd64.deb"
+            "kichat_${RELEASE_TAG}_arm64.deb"
+            "kichat-amd64-installer.exe"
+            "kichat-arm64-installer.exe"
+            "kichat_${RELEASE_TAG}_universal.dmg"
+          )
+          if [ "${#assets[@]}" -ne "${#expected[@]}" ]; then
+            echo "expected ${#expected[@]} assets, found ${#assets[@]}:" >&2
             printf '  %s\n' "${assets[@]}" >&2
             exit 1
           fi
+          for name in "${expected[@]}"; do
+            if [ ! -f "dist/$name" ]; then
+              echo "the release is missing $name" >&2
+              printf '  %s\n' "${assets[@]}" >&2
+              exit 1
+            fi
+          done
           printf 'asset: %s\n' "${assets[@]}"
           # A Debian pre-release is `~beta1`, never `-beta.1`, and it should not be
           # offered as the current release. `~` in a tag is legal git.

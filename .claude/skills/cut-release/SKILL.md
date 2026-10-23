@@ -129,5 +129,7 @@ Only for a version that really was released, and never an invented note.
 - The bump commit carries `VERSION` and nothing else, and its body reads as prose.
 - The annotated tag sits on that commit (`git describe --tags --exact-match HEAD`).
 - Nothing was pushed; the tag is local until the user asks.
-- Once it is pushed: the release page carries exactly three assets, and each one
-  reports the tag's version.
+- Once it is pushed: the release page carries exactly five assets — a `.deb` and a
+  Setup.exe for amd64 and for arm64, and the universal `.dmg` — and each one reports
+  the tag's version in the form its platform shows it (`.deb` Version, installer
+  ProductVersion, bundle CFBundleShortVersionString).

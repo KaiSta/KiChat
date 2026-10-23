@@ -102,13 +102,14 @@ history, including what upgrading the toolchain does and does not change, is in
 ## Checks that must pass
 
 ```sh
-make check                                  # the next six, in one step
+make check                                  # the next seven, in one step
 make build                                  # the last one, into build/bin/kichat
 
 gofmt -l .                                  # must print nothing
 go vet ./...
 GOOS=windows go vet ./...                   # the Windows half compiles
 GOOS=darwin go vet ./...                    # the macOS half compiles
+make vet-arm64                              # the linux/arm64 and windows/arm64 halves compile
 cd frontend && npx tsc --noEmit             # or: npm run build (tsc && vite build)
 go test ./... -count=1
 wails build -tags webkit2_41                # the last one, into build/bin/kichat
@@ -153,7 +154,11 @@ A Windows build cross-builds from Linux or macOS with no mingw; a macOS `.app` c
 only be built on a Mac, and Wails exits **0** having built nothing when asked
 otherwise — which is why the Makefile checks the host. `make nsis` needs
 `makensis` on `PATH` and fails loudly when it is missing, because Wails does not.
-The installer is not byte-reproducible; the .deb is. Everything measured about
+A `linux/arm64` package needs an arm64 host — the Linux build is cgo against
+webkit2gtk, and no x64 machine can link it — while `windows/arm64` cross-builds exactly
+like amd64, so the release ships a `.deb` and a Setup.exe per architecture and
+`make vet-arm64` compiles both halves anywhere. The installer is not
+byte-reproducible; the .deb is. Everything measured about
 these targets, including the version resource and the DMG, is in the
 [`build-platforms`](.claude/skills/build-platforms/SKILL.md) skill.
 

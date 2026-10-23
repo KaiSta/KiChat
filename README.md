@@ -308,6 +308,12 @@ toolchain from `PATH` with fallbacks.
 | macOS | `make darwin` | `build/bin/kichat.app` (universal) |
 | macOS disk image | `make dmg` | `build/dmg/kichat_<version>_<arch>.dmg` |
 
+The `<arch>` in a name is what that artifact was built for. `make deb` on an arm64 host
+writes `kichat_<version>_arm64.deb`; that architecture needs its own host, because the
+Linux build links against webkit2gtk and cannot be cross-linked. Windows on Arm is the
+other way round — `make windows WINDOWS_ARCH=arm64` and `make nsis WINDOWS_ARCH=arm64`
+cross-build from Linux or macOS like the x64 ones.
+
 `make help` lists the rest, including `make run`, `make clean` and `make check`.
 
 **Linux requires the `webkit2_41` build tag** on any distribution shipping only

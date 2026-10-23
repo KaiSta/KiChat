@@ -94,8 +94,85 @@ jobs:
       - name: make build
         run: make build
 
+  # linux/arm64 is the one artifact that cannot be cross-built, and so the one place a
+  # second architecture needs a second runner. The Linux build is cgo against
+  # webkit2gtk; an arm64 link needs the arm64 headers and an arm64 compiler, and on an
+  # x64 host gcc rejects the assembly (measured: `gcc_arm64.S:65: Error: no such
+  # instruction: 'ldp x23,x24,[sp,'`). The runner is Arm's own ubuntu-24.04-arm image,
+  # so the same apt line installs arm64 headers and `dpkg --print-architecture` makes
+  # `make deb` name the package arm64 — no Makefile change beyond naming the Tailwind
+  # binding by host arch, which is what this job proves. It is a *standard* runner, so
+  # its minutes come out of the plan's included allowance exactly as the x64 Linux
+  # job's do.
+  #
+  # No `make check` here: the x64 job is the gate, and this one answers the narrower
+  # question — does the arm64 package build and is it really arm64.
+  linux-arm64:
+    name: package (linux/arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    env:
+      GOFLAGS: -tags=webkit2_41
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # gcc is named rather than assumed: cgo needs a C compiler to build the
+      # webkit2gtk layer at all, and these images are Arm LLC's, not GitHub's — the x64
+      # image happens to ship gcc, which is not evidence about this one.
+      - name: Install the GTK and WebKit headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config gcc
+
+      - name: Install the Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@${WAILS_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: make deb
+        run: make deb
+
+      # The arch is read back out of the package rather than inferred from the runner:
+      # a .deb whose Architecture says amd64 is the wrong download for the machine it
+      # is offered to, and building it on an arm64 host is exactly the assumption that
+      # would hide that (the Makefile's DEB_ARCH is `?=`, so it can be overridden).
+      - name: The package is arm64 and carries the binary
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(build/deb/kichat_*_arm64.deb)
+          if [ "${#debs[@]}" -ne 1 ]; then
+            echo "expected one arm64 .deb, found ${#debs[@]} in build/deb:" >&2
+            ls -1 build/deb >&2
+            exit 1
+          fi
+          deb="${debs[0]}"
+          arch="$(dpkg-deb --field "$deb" Architecture)"
+          if [ "$arch" != "arm64" ]; then
+            echo "$deb says Architecture: $arch" >&2
+            exit 1
+          fi
+          listing="$(mktemp)"
+          dpkg-deb --contents "$deb" > "$listing"
+          grep -q '\./usr/bin/kichat$' "$listing" \
+            || { echo "$deb carries no /usr/bin/kichat" >&2; exit 1; }
+          rm -f "$listing"
+          echo "$deb: Architecture $arch, $(dpkg-deb --field "$deb" Installed-Size) KiB"
+
   windows:
-    name: build (windows/amd64)
+    name: build (windows/amd64 and windows/arm64)
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -152,6 +229,16 @@ jobs:
       - name: make windows
         shell: msys2 {0}
         run: make windows
+
+      # The arm64 executable needs no arm64 runner to build: nothing on the Windows
+      # path needs cgo and Wails writes the PE resource, the manifest and the icon in
+      # pure Go, so the same cross-build answers with a PE32+ AArch64 image (measured on
+      # an amd64 Linux host: 21.7 MB, `PE32+ executable (GUI) Aarch64`). It is the
+      # binary a Windows-on-Arm laptop runs, and this is where it stops compiling
+      # unnoticed. Packaged only by the release, which is the job that installs NSIS.
+      - name: make windows (arm64)
+        shell: msys2 {0}
+        run: make windows WINDOWS_ARCH=arm64
 
   darwin:
     name: build (darwin/universal)
