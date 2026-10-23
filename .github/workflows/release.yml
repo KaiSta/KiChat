@@ -13,6 +13,14 @@
 # Publishing is a tag push, so the tag is the one act that ships: `git tag -a
 # x.y.z` and `git push origin x.y.z` (cut-release has the rest). Nothing is
 # published until that push, and a tag that fails verification publishes nothing.
+#
+# The build jobs check out the tag rather than the ref the run was started from,
+# because the two differ for a manual run: a release repaired with
+# `workflow_dispatch` takes this workflow file from master — that is where a fix
+# to it lives — but the artifact still has to come from the commit the tag names.
+# VERSION and the commit sha are linked into the binary, and the .deb's changelog
+# names the sha it was built from, so building the branch would attribute a
+# release to the wrong commit.
 name: Release
 
 on:
@@ -114,7 +122,13 @@ jobs:
       # ships (4.1 only), the same way ci.yml's linux job does it.
       GOFLAGS: -tags=webkit2_41
     steps:
+      # The tag's tree, not the branch this run was started from: a re-run is
+      # dispatched from master, because that is where a fix to this file lives, but
+      # the artifact must still be built from the commit the tag names — VERSION and
+      # the sha are linked into the binary and the .deb's changelog.
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - uses: actions/setup-go@v6
         with:
@@ -200,7 +214,10 @@ jobs:
         shell: pwsh
         run: git config --global core.autocrlf false
 
+      # The tag's tree, not the branch this run started from — see the header.
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - uses: actions/setup-go@v6
         with:
@@ -224,11 +241,38 @@ jobs:
           install: make
           path-type: inherit
 
-      # makensis, on PATH through Chocolatey's shim directory, which is on the
-      # job's PATH from the start.
+      # NSIS, and then the directory it landed in appended to GITHUB_PATH. The
+      # install alone is what the first run of this workflow did, and `make nsis`
+      # still failed with check-makensis's "makensis (NSIS) is required ..." — NSIS
+      # installed, makensis on no shell's PATH. GITHUB_PATH is the PATH every later
+      # step inherits (the msys2 shell included), and Wails execs `makensis` itself
+      # rather than taking a path, so exporting a make variable would not help.
       - name: Install NSIS
         shell: pwsh
-        run: choco install nsis --no-progress -y
+        run: |
+          choco install nsis --no-progress -y
+          $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+          $makensis = @(
+            "$env:ProgramFiles\NSIS\makensis.exe",
+            "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $makensis) {
+            $makensis = Get-ChildItem -Path $roots -Filter makensis.exe -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $makensis) { throw "NSIS left no makensis.exe under: $($roots -join ', ')" }
+          # ascii, not utf8: nothing in an NSIS path is non-ASCII, and ascii cannot
+          # put a byte-order mark in front of the first entry the runner reads.
+          Split-Path $makensis | Out-File -FilePath $env:GITHUB_PATH -Encoding ascii -Append
+          & $makensis /VERSION
+
+      # The check that would have made the failure above say what it meant: from
+      # the shell `make nsis` actually uses, is makensis reachable?
+      - name: makensis is on the msys2 shell's PATH
+        shell: msys2 {0}
+        run: |
+          command -v makensis || { echo "makensis is not on this shell's PATH" >&2; exit 1; }
+          makensis -VERSION
 
       - name: Install the Wails CLI
         shell: pwsh
@@ -277,7 +321,10 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
+      # The tag's tree, not the branch this run started from — see the header.
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - uses: actions/setup-go@v6
         with:
