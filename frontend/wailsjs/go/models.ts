@@ -741,6 +741,134 @@ export namespace main {
 	        this.placement = source["placement"];
 	    }
 	}
+	export class BackupEntry {
+	    chatId: string;
+	    title: string;
+	    // Go type: time
+	    updatedAt: any;
+	    messages: number;
+	    attachments: number;
+	    bytes: number;
+	    state: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BackupEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.chatId = source["chatId"];
+	        this.title = source["title"];
+	        this.updatedAt = this.convertValues(source["updatedAt"], null);
+	        this.messages = source["messages"];
+	        this.attachments = source["attachments"];
+	        this.bytes = source["bytes"];
+	        this.state = source["state"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class BackupExportRequest {
+	    chatIds: string[];
+	    passphrase: string;
+	    title: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BackupExportRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.chatIds = source["chatIds"];
+	        this.passphrase = source["passphrase"];
+	        this.title = source["title"];
+	    }
+	}
+	export class BackupExportResult {
+	    path: string;
+	    chats: number;
+	    bytes: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new BackupExportResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.chats = source["chats"];
+	        this.bytes = source["bytes"];
+	    }
+	}
+	export class BackupImportResult {
+	    imported: string[];
+	    replaced: string[];
+	    skipped: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new BackupImportResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.imported = source["imported"];
+	        this.replaced = source["replaced"];
+	        this.skipped = source["skipped"];
+	    }
+	}
+	export class BackupPreview {
+	    path: string;
+	    app: string;
+	    // Go type: time
+	    exported: any;
+	    chats: BackupEntry[];
+	
+	    static createFrom(source: any = {}) {
+	        return new BackupPreview(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.app = source["app"];
+	        this.exported = this.convertValues(source["exported"], null);
+	        this.chats = this.convertValues(source["chats"], BackupEntry);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class ChatState {
 	    chat: store.Chat;
 	    messages: store.Message[];

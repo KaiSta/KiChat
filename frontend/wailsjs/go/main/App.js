@@ -38,6 +38,10 @@ export function DeleteCompaction(arg1, arg2) {
   return window['go']['main']['App']['DeleteCompaction'](arg1, arg2);
 }
 
+export function ExportBackup(arg1) {
+  return window['go']['main']['App']['ExportBackup'](arg1);
+}
+
 export function GetAppInfo() {
   return window['go']['main']['App']['GetAppInfo']();
 }
@@ -106,6 +110,10 @@ export function GetUpscalerStatus() {
   return window['go']['main']['App']['GetUpscalerStatus']();
 }
 
+export function ImportBackup(arg1) {
+  return window['go']['main']['App']['ImportBackup'](arg1);
+}
+
 export function InstallLlamaRuntime(arg1, arg2) {
   return window['go']['main']['App']['InstallLlamaRuntime'](arg1, arg2);
 }
@@ -136,6 +144,10 @@ export function ListModels(arg1) {
 
 export function ModelFolders() {
   return window['go']['main']['App']['ModelFolders']();
+}
+
+export function OpenBackup(arg1, arg2) {
+  return window['go']['main']['App']['OpenBackup'](arg1, arg2);
 }
 
 export function OpenExternal(arg1) {

@@ -110,6 +110,15 @@ export namespace main {
    * progress while one is running.
    */
   export type UpscalerInstall = Plain<Gen.main.UpscalerInstall>
+
+  /** A backup export: which chats, with which passphrase, under which dialog title. */
+  export type BackupExportRequest = Plain<Gen.main.BackupExportRequest>
+  export type BackupExportResult = Plain<Gen.main.BackupExportResult>
+  /** One chat inside an opened archive, with what importing it would do. */
+  export type BackupEntry = Plain<Gen.main.BackupEntry>
+  /** An opened archive waiting to be imported from. */
+  export type BackupPreview = Plain<Gen.main.BackupPreview>
+  export type BackupImportResult = Plain<Gen.main.BackupImportResult>
 }
 
 export namespace research {
@@ -149,6 +158,8 @@ export const App = {
   ...WailsApp,
   SaveSettings: (settings: config.Settings) =>
     WailsApp.SaveSettings(Gen.config.Settings.createFrom(settings)),
+  ExportBackup: (req: main.BackupExportRequest) =>
+    WailsApp.ExportBackup(Gen.main.BackupExportRequest.createFrom(req)),
   UpdateChat: (c: store.Chat) => WailsApp.UpdateChat(Gen.store.Chat.createFrom(c)),
   StartManagedModelWith: (backendID: string, mm: config.ManagedModel) =>
     WailsApp.StartManagedModelWith(backendID, Gen.config.ManagedModel.createFrom(mm)),

@@ -28,6 +28,8 @@ export function DeleteChat(arg1:string):Promise<void>;
 
 export function DeleteCompaction(arg1:string,arg2:string):Promise<void>;
 
+export function ExportBackup(arg1:main.BackupExportRequest):Promise<main.BackupExportResult>;
+
 export function GetAppInfo():Promise<main.AppInfo>;
 
 export function GetAttachmentImage(arg1:string):Promise<string>;
@@ -62,6 +64,8 @@ export function GetUpscalerInstall():Promise<main.UpscalerInstall>;
 
 export function GetUpscalerStatus():Promise<tools.UpscalerStatus>;
 
+export function ImportBackup(arg1:Array<string>):Promise<main.BackupImportResult>;
+
 export function InstallLlamaRuntime(arg1:string,arg2:string):Promise<void>;
 
 export function InstallUpscaler():Promise<void>;
@@ -77,6 +81,8 @@ export function ListLlamaBuilds():Promise<Array<main.InstalledBuild>>;
 export function ListModels(arg1:boolean):Promise<Array<llm.ModelInfo>>;
 
 export function ModelFolders():Promise<Array<runtime.ModelFolder>>;
+
+export function OpenBackup(arg1:string,arg2:string):Promise<main.BackupPreview>;
 
 export function OpenExternal(arg1:string):Promise<void>;
 

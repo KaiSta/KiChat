@@ -504,9 +504,16 @@ provider you use, and GitHub when you ask it to check for a llama.cpp update.
 | --- | --- |
 | Chats, messages, documents, FTS index, attachments, settings | `~/.config/kichat/kichat.db` (`~/Library/Application Support/kichat/kichat.db` on macOS, `%AppData%\kichat` on Windows) |
 | API keys and the image server's credential | the OS keyring; an encrypted `secrets.enc` beside the database when no keyring is available |
+| Chat backups you export | one `.kichat` file wherever you save it — AES-256-GCM under a passphrase KiChat never stores |
 
 The keyring is preferred because a key in a file is a key in a backup. Nothing is ever
 read from the working tree, and nothing is written into it.
+
+Backups leave the machine only when you ask: the Data tab writes the chats you pick
+into that one encrypted file, and importing it on another machine offers the same list
+back, chat by chat. Neither side talks to a server, so the file can live in whatever
+cloud folder you already trust. The passphrase is not stored anywhere — not in the
+file, not in the keyring — so forgetting it means the archive stays closed.
 
 Two things leave the machine by design, and both are visible when they happen: **web
 search** (the query goes to Brave or DuckDuckGo) and **hosted models** (the same prompt

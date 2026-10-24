@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"kichat/internal/backup"
 	"kichat/internal/chat"
 	"kichat/internal/config"
 	"kichat/internal/events"
@@ -66,6 +67,13 @@ type App struct {
 
 	settingsMu sync.RWMutex
 	settings   config.Settings
+
+	// pendingBackup is the archive OpenBackup decrypted and BackupImport writes. It is
+	// held between the two calls because the user chooses from it in between, and it is
+	// dropped as soon as the import finishes: a decrypted history should not outlive
+	// the sheet it was opened for.
+	backupMu      sync.Mutex
+	pendingBackup *backup.Archive
 
 	dataDir string
 

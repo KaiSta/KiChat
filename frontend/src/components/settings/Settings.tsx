@@ -8,8 +8,9 @@ import { PromptTab } from './PromptTab'
 import { ResearchTab } from './ResearchTab'
 import { PayloadTab } from './PayloadTab'
 import { ContextTab } from './ContextTab'
+import { DataTab } from './DataTab'
 
-type Tab = 'general' | 'backends' | 'images' | 'prompt' | 'research' | 'context' | 'payload'
+type Tab = 'general' | 'backends' | 'images' | 'prompt' | 'research' | 'context' | 'payload' | 'data'
 
 export function Settings() {
   const t = useStore((s) => s.t)
@@ -81,6 +82,9 @@ export function Settings() {
     // model has already read, this decides what a tool result becomes on its way in,
     // and the two are configured with a different model each.
     { id: 'payload', label: t('settings.payload') },
+    // Last, because it is about the installation rather than about how a chat behaves:
+    // everything above configures what KiChat does, this one moves it elsewhere.
+    { id: 'data', label: t('settings.data') },
   ]
 
   return (
@@ -127,6 +131,7 @@ export function Settings() {
           {tab === 'research' && <ResearchTab draft={draft} patch={patch} />}
           {tab === 'context' && <ContextTab draft={draft} patch={patch} />}
           {tab === 'payload' && <PayloadTab draft={draft} patch={patch} />}
+          {tab === 'data' && <DataTab />}
         </div>
       </div>
     </div>

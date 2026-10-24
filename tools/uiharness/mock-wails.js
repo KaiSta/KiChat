@@ -3437,6 +3437,58 @@ Verfügbare Tools: {{tool_list}}`,
       console.log('[harness] SaveAttachmentAs', id)
       return Promise.resolve('/home/user/Pictures/a-red-fox-in-deep-snow-1.png')
     },
+    // The backup panel's three calls. The export reports a path and a size; the preview
+    // deliberately contains one chat of each state, because the disabled "older" row is
+    // the part of that list that is easy to get wrong and impossible to see otherwise.
+    ExportBackup: (req) => {
+      console.log('[harness] ExportBackup', req.chatIds.length)
+      return Promise.resolve({
+        path: '/home/user/kichat-backup-2026-10-24.kichat',
+        chats: req.chatIds.length,
+        bytes: 184320,
+      })
+    },
+    OpenBackup: (passphrase) => {
+      console.log('[harness] OpenBackup', passphrase ? 'with passphrase' : 'no passphrase')
+      return Promise.resolve({
+        path: '/home/user/kichat-backup-2026-10-24.kichat',
+        app: '0.4.0',
+        exported: '2026-10-24T09:00:00Z',
+        chats: [
+          {
+            chatId: 'archive-cast-iron',
+            title: 'Cooking with a cast-iron pan',
+            updatedAt: '2026-10-23T18:20:00Z',
+            messages: 24,
+            attachments: 1,
+            bytes: 40960,
+            state: 'new',
+          },
+          {
+            chatId: chats[0]?.id ?? 'chat-1',
+            title: 'Quantisation trade-offs',
+            updatedAt: '2026-10-22T11:05:00Z',
+            messages: 12,
+            attachments: 0,
+            bytes: 16384,
+            state: 'newer',
+          },
+          {
+            chatId: chats[1]?.id ?? 'chat-2',
+            title: 'Trip planning',
+            updatedAt: '2026-10-20T08:00:00Z',
+            messages: 9,
+            attachments: 0,
+            bytes: 8192,
+            state: 'older',
+          },
+        ],
+      })
+    },
+    ImportBackup: (ids) => {
+      console.log('[harness] ImportBackup', ids.join(','))
+      return Promise.resolve({ imported: ids.slice(0, 1), replaced: ids.slice(1), skipped: [] })
+    },
     PickSaveFolder: () => Promise.resolve('/home/user/Pictures'),
     // The picture store's reading, and the one destructive call in the panel. Both are
     // modelled rather than stubbed, because the interesting state is the *pair*: the row

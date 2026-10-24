@@ -59,6 +59,7 @@ Two rules keep this useful:
 | `internal/ingest` | Attachments to text: PDF, office, chunking | `ingest.go` (dispatch), `pdf.go`, `office.go`, `chunk.go` | `ingest_test.go` |
 | `internal/tools` | What the model can call, native schema *and* text protocol, plus `generate_image` | `tools.go`, `image.go` | `tools_test.go`, `image_test.go` |
 | `internal/secret` | API keys: OS keyring, encrypted-file fallback | `secret.go` (`New`, `NewIsolated`) | `secret_test.go` |
+| `internal/backup` | The portable archive: a selection of chats as one passphrase-encrypted file (AES-256-GCM, Argon2id) | `backup.go` (`Encode`, `Decode`, `Manifest`) | `backup_test.go` |
 | `internal/events` | The names of every Wails event, so emitters and the frontend cannot drift | `events.go` | — |
 | `internal/uimsg` | A user-facing failure from Go as a dictionary key and its arguments, since Wails marshals a bound method's error as text; `Detailf` adds the sentence the model reads | `uimsg.go` | `uimsg_test.go` (and `i18n_test.go` in the root, for the dictionary half) |
 | `internal/version` | Build identity filled by `-ldflags -X` | `version.go` | `version_test.go` |
@@ -71,7 +72,7 @@ Two rules keep this useful:
 | `frontend/src/components/ChatView.tsx` | The conversation: message list, composer, attachments, context meter, stop |
 | `frontend/src/components/MessageParts.tsx` | How one message renders — the split between settled and streaming pieces |
 | `frontend/src/components/Markdown.tsx` | The markdown pipeline: remark/rehype, KaTeX, highlight.js |
-| `frontend/src/components/settings/` | The settings screen: `Settings.tsx` is the shell and tab strip, `shared.tsx` the `Section`/`Field` helpers, and one file per tab (`GeneralTab`, `BackendsTab`, `ImagesTab`, `PromptTab`, `ResearchTab`, `ContextTab`, `PayloadTab`) |
+| `frontend/src/components/settings/` | The settings screen: `Settings.tsx` is the shell and tab strip, `shared.tsx` the `Section`/`Field` helpers, and one file per tab (`GeneralTab`, `BackendsTab`, `ImagesTab`, `PromptTab`, `ResearchTab`, `ContextTab`, `PayloadTab`, `DataTab` for backup and import) |
 | `frontend/src/components/ModelSwitcher.tsx` | Model picker with capability badges and window size |
 | `frontend/src/lib/api.ts` | The typed wrapper over the generated `window.go` bindings |
 | `frontend/src/lib/i18n.ts` | Every user-facing string, in `de`, `en` and `zh` |
@@ -87,6 +88,10 @@ table is a new migration, never an edit of an old one.
 `chats`, `messages`, `compactions`, `tool_calls`, `attachments`, `documents`,
 `chunks` (+ `chunks_fts`, FTS5/BM25), `search_cache`, `scrape_cache`, `settings`
 (one JSON row — see `internal/config`), `model_overrides`, `counters`.
+
+Export and import of a chat is `internal/store/bundle.go` (`LoadChatBundle`,
+`SaveChatBundle`, one transaction per chat), wrapped in the archive format by
+`internal/backup` and exposed by `api_backup.go`.
 
 ## The request lifecycle
 
