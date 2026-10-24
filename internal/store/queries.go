@@ -88,7 +88,7 @@ func (s *Store) DeleteChat(id string) error {
 	if _, err := tx.Exec(`DELETE FROM chats WHERE id=?`, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndCheckpoint(tx)
 }
 
 const chatColumns = `id,title,created_at,updated_at,backend,model,system_prompt,
@@ -410,7 +410,7 @@ func (s *Store) DeleteMessagesFromSeq(chatID string, seq int) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return s.commitAndCheckpoint(tx)
 }
 
 // CountMessages returns how many messages a chat has.
@@ -516,7 +516,7 @@ func (s *Store) DeleteAttachment(id string) error {
 	if _, err := tx.Exec(`DELETE FROM attachments WHERE id=?`, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitAndCheckpoint(tx)
 }
 
 // PruneExpiredCaches deletes expired rows from the web caches and the condensation

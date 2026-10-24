@@ -118,6 +118,34 @@ func createOwnerOnly(path string) error {
 // Close releases the database.
 func (s *Store) Close() error { return s.db.Close() }
 
+// Checkpoint copies the write-ahead log into the database file and empties it.
+//
+// secure_delete zeroes a deleted row's page, but the page it wrote the row to still
+// lives in the `-wal` until SQLite checkpoints, and with WAL enabled that can be hours
+// later — the file is emptied on a clean close, which for a desktop app is whenever the
+// window is closed. So a chat the user deleted stayed readable in `kichat.db-wal` for
+// the rest of the session. TRUNCATE rather than PASSIVE is the point: PASSIVE copies
+// the log and leaves it as long as before.
+func (s *Store) Checkpoint() error {
+	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return fmt.Errorf("checkpoint the write-ahead log: %w", err)
+	}
+	return nil
+}
+
+// commitAndCheckpoint is how a deletion ends: the rows go first, then the log that held
+// the pages they came from.
+//
+// A failed checkpoint is reported rather than swallowed. The deletion itself is
+// committed by then, so the caller's data is still gone — what failed is the promise
+// that it is also gone from the file, and that is exactly what this store now claims.
+func (s *Store) commitAndCheckpoint(tx *sql.Tx) error {
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.Checkpoint()
+}
+
 // DB exposes the handle for packages that need custom queries.
 func (s *Store) DB() *sql.DB { return s.db }
 

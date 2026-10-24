@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -114,6 +116,51 @@ func TestSecureDeleteIsOn(t *testing.T) {
 	}
 	if on != 1 {
 		t.Errorf("secure_delete = %d, want 1", on)
+	}
+}
+
+// TestDeleteEmptiesTheWriteAheadLog pins the difference between "deleted" and "gone".
+//
+// secure_delete zeroes the row's page, but with WAL enabled the page it was written to
+// lives in kichat.db-wal until a checkpoint, and that used to happen only when the app
+// closed — so a deleted chat stayed readable in that file for the rest of the session.
+// The assertion is made while the store is still open, because that is the state the
+// user would call "deleted".
+func TestDeleteEmptiesTheWriteAheadLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	// A marker long enough that finding it by accident is not a possibility.
+	const marker = "SECRET-MARKER-4f8a2c9e-from-a-deleted-chat"
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatalf("CreateChat: %v", err)
+	}
+	if err := st.CreateChat(Chat{ID: "c2", Title: marker, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateChat c2: %v", err)
+	}
+	if err := st.CreateMessage(Message{ID: "m1", ChatID: "c2", Seq: 1, Role: "user", Content: marker}); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+	if err := st.DeleteChat("c2"); err != nil {
+		t.Fatalf("DeleteChat: %v", err)
+	}
+
+	for _, p := range []string{path, path + "-wal"} {
+		raw, err := os.ReadFile(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", filepath.Base(p), err)
+		}
+		if bytes.Contains(raw, []byte(marker)) {
+			t.Errorf("%s still contains the deleted chat", filepath.Base(p))
+		}
 	}
 }
 
