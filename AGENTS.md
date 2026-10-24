@@ -237,6 +237,7 @@ instead of the result.
 | [`NVIDIA.md`](NVIDIA.md) | the build.nvidia.com backend and its availability check |
 | [`MISTRAL.md`](MISTRAL.md) | the Mistral backend, alias collapse, typed chunks |
 | [`DEEPSEEK.md`](DEEPSEEK.md) | the DeepSeek backend, reasoning content, refusals |
+| [`ENCRYPTION.md`](ENCRYPTION.md) | the encrypted database: a plan — the chosen page-level design, the key, the migration, and the five designs that lost |
 | [`CODE_MAP.md`](CODE_MAP.md) | where the code is, and the extension points |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | pull requests, the CLA, commit style |
 
