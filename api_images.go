@@ -740,7 +740,9 @@ func (a *App) SaveAttachmentAs(attachmentID string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", nil // The user closed the dialog; not an error.
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	// 0600, like the database: this is a copy of a picture the user drew or attached, and
+	// a world-readable one would be the easiest way out of a private store.
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "", uimsg.Errorf("image.saveFailed", err)
 	}
 	// Recorded, because it is the whole difference between a picture its owner has a
