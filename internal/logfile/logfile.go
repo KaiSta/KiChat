@@ -34,7 +34,10 @@ const (
 // reporting something that has already gone wrong.
 func Open(dir string) (*log.Logger, func()) {
 	stderr := log.New(os.Stderr, "", log.LstdFlags)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// Owner-only, matching the database that will live beside this file: on a fresh
+	// install this is the first thing to create the data directory, so it must not be
+	// the one place that leaves it world-readable.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return stderr, func() {}
 	}
 

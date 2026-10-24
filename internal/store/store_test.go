@@ -2,7 +2,9 @@ package store
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +30,91 @@ func newStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { st.Close() })
 	return st
+}
+
+// assertMode is the assertion behind the three tests below: the store's only
+// protection is its filesystem mode, so the mode is what has to be checked.
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %#o, want %#o", path, got, want)
+	}
+}
+
+// TestOpenCreatesOwnerOnlyState pins the 0700/0600 pair. The database is not
+// encrypted, so this mode is the whole of the protection: on a shared machine a 0644
+// kichat.db hands the chat history to every other account, and a 0755 directory lets
+// them list what is there.
+func TestOpenCreatesOwnerOnlyState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no POSIX mode bits; os.Chmod only toggles the read-only flag")
+	}
+	dir := filepath.Join(t.TempDir(), "kichat")
+	path := filepath.Join(dir, "kichat.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	assertMode(t, dir, 0o700)
+	assertMode(t, path, 0o600)
+}
+
+// TestOpenRepairsLooseModes is the upgrade path: every installation made before the
+// modes existed has a 0755 directory and a 0644 database, and neither MkdirAll nor
+// SQLite changes a mode it finds already set. Opening such a database must leave it
+// owner-only.
+func TestOpenRepairsLooseModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no POSIX mode bits; os.Chmod only toggles the read-only flag")
+	}
+	dir := filepath.Join(t.TempDir(), "kichat")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	// Explicit, because the umask makes MkdirAll's second argument a request.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	path := filepath.Join(dir, "kichat.db")
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatalf("create old database: %v", err)
+	}
+	if err := file.Chmod(0o644); err != nil {
+		t.Fatalf("chmod old database: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close old database: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	assertMode(t, dir, 0o700)
+	assertMode(t, path, 0o600)
+}
+
+// TestSecureDeleteIsOn pins the pragma that makes a deletion a deletion. Nothing in
+// the app vacuums or checkpoints, so without it a removed chat stays readable in the
+// file's free pages until SQLite reuses them.
+func TestSecureDeleteIsOn(t *testing.T) {
+	st := newStore(t)
+	var on int
+	if err := st.DB().QueryRow("PRAGMA secure_delete").Scan(&on); err != nil {
+		t.Fatalf("read secure_delete: %v", err)
+	}
+	if on != 1 {
+		t.Errorf("secure_delete = %d, want 1", on)
+	}
 }
 
 func chatFixture(id string) Chat {

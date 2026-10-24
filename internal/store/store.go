@@ -23,19 +23,35 @@ type Store struct {
 }
 
 // Open opens (creating if needed) the database at path and runs migrations.
+//
+// The file and its directory are owner-only, because this database is not encrypted:
+// the mode is the only thing between the chat history and another local account on a
+// shared machine. Both chmod calls are there for installations made before that was
+// true — MkdirAll keeps an existing directory's mode, and so does SQLite for a file it
+// finds already there.
 func Open(path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create data dir: %w", err)
 		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("restrict data dir: %w", err)
+		}
+	}
+	if err := createOwnerOnly(path); err != nil {
+		return nil, err
 	}
 	// Pragma settings are passed both through the DSN and applied again on open,
 	// so behaviour does not depend on whether the driver keeps one connection.
+	//
+	// secure_delete is the nearest thing to a delete this app has: nothing vacuums, so
+	// without it a removed chat and every pruned cache row stay legible in the file.
 	dsn := "file:" + filepath.ToSlash(path) +
 		"?_pragma=busy_timeout(10000)" +
 		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=foreign_keys(ON)"
+		"&_pragma=foreign_keys(ON)" +
+		"&_pragma=secure_delete(ON)"
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -50,6 +66,7 @@ func Open(path string) (*Store, error) {
 		"PRAGMA journal_mode = WAL",
 		"PRAGMA synchronous = NORMAL",
 		"PRAGMA foreign_keys = ON",
+		"PRAGMA secure_delete = ON",
 	} {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
@@ -71,6 +88,31 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// createOwnerOnly creates the database file if it is absent and makes sure it is not
+// group- or world-readable.
+//
+// The file is created before SQLite opens it, rather than left to the driver: a driver
+// creates it with 0666&^umask, which is 0644 on a default account, and a mode cannot be
+// set by opening a file that already exists. An empty file is a database SQLite starts
+// from scratch, so pre-creating it changes nothing else.
+func createOwnerOnly(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("create database file: %w", err)
+	}
+	// The mode above only applied if this call created the file; every database that
+	// already exists carries whatever mode it was made with.
+	chmodErr := f.Chmod(0o600)
+	closeErr := f.Close()
+	if chmodErr != nil {
+		return fmt.Errorf("restrict database file: %w", chmodErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close new database file: %w", closeErr)
+	}
+	return nil
 }
 
 // Close releases the database.

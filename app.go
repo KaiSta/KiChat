@@ -258,7 +258,10 @@ func (a *App) init() error {
 		dir = "kichat"
 	}
 	a.dataDir = dir
-	if err := os.MkdirAll(a.dataDir, 0o755); err != nil {
+	// Owner-only: the directory holds the unencrypted database, the encrypted secret
+	// fallback and the log. store.Open repairs the mode of an installation that
+	// predates this, since MkdirAll leaves an existing directory alone.
+	if err := os.MkdirAll(a.dataDir, 0o700); err != nil {
 		return fmt.Errorf("Datenverzeichnis anlegen: %w", err)
 	}
 
