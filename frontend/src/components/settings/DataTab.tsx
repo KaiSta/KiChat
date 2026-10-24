@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { App, formatBytes, timeAgo, type main } from '../../lib/api'
 import { errText, useStore } from '../../store'
 import { Section, Field } from './shared'
@@ -40,6 +40,67 @@ export function DataTab() {
   const [importSelection, setImportSelection] = useState<string[]>([])
   const [importing, setImporting] = useState(false)
   const [result, setResult] = useState('')
+
+  // The database's own encryption, which is not a setting: the key either exists or
+  // the window would not be able to show this panel. What the panel can change is
+  // where the key is kept, and whether a passphrase would open the file if the
+  // keyring were lost.
+  const [db, setDb] = useState<main.DatabaseStatus | null>(null)
+  const [dbPass, setDbPass] = useState('')
+  const [dbConfirm, setDbConfirm] = useState('')
+  const [dbBusy, setDbBusy] = useState(false)
+
+  const loadDb = () => {
+    void App.GetDatabaseStatus()
+      .then(setDb)
+      .catch(() => undefined)
+  }
+  useEffect(() => {
+    loadDb()
+  }, [])
+
+  const dbMismatch = dbConfirm.length > 0 && dbPass !== dbConfirm
+  const canSaveDb = dbPass.length >= 8 && dbPass === dbConfirm && !dbBusy
+
+  const saveDbPass = async () => {
+    if (!canSaveDb) return
+    setDbBusy(true)
+    try {
+      await App.SetDatabasePassphrase(dbPass)
+      setDbPass('')
+      setDbConfirm('')
+      loadDb()
+      toast('info', t('settings.db.passphraseSaved'))
+    } catch (err) {
+      toast('error', errText(err))
+    } finally {
+      setDbBusy(false)
+    }
+  }
+
+  const removeDbPass = async () => {
+    setDbBusy(true)
+    try {
+      await App.RemoveDatabasePassphrase()
+      loadDb()
+    } catch (err) {
+      toast('error', errText(err))
+    } finally {
+      setDbBusy(false)
+    }
+  }
+
+  const removeKeyring = async () => {
+    setDbBusy(true)
+    try {
+      await App.RemoveDatabaseKeyring()
+      loadDb()
+    } catch (err) {
+      toast('error', errText(err))
+    } finally {
+      setDbBusy(false)
+    }
+  }
 
   const mismatch = confirm.length > 0 && passphrase !== confirm
   const canExport = selected.length > 0 && passphrase.length > 0 && passphrase === confirm && !exporting
@@ -122,6 +183,64 @@ export function DataTab() {
 
   return (
     <>
+      <Section title={t('settings.db.title')} hint={t('settings.db.hint')}>
+        {db && (
+          <ul className="mb-3 space-y-1 text-[12px]">
+            <li>{db.encrypted ? t('settings.db.encryptedOn') : t('settings.db.encryptedOff')}</li>
+            <li>
+              {!db.keyring
+                ? t('settings.db.keyringUnavailable')
+                : db.remembered
+                  ? t('settings.db.remembered')
+                  : t('settings.db.notRemembered')}
+            </li>
+            <li>{db.recovery ? t('settings.db.recoveryOn') : t('settings.db.recoveryOff')}</li>
+          </ul>
+        )}
+        <Field label={t('settings.db.passphrase')} hint={t('settings.db.passphraseHint')}>
+          <input
+            className="input"
+            type="password"
+            autoComplete="new-password"
+            value={dbPass}
+            onChange={(e) => setDbPass(e.target.value)}
+          />
+        </Field>
+        <Field label={t('settings.db.passphraseConfirm')}>
+          <input
+            className="input"
+            type="password"
+            autoComplete="new-password"
+            value={dbConfirm}
+            onChange={(e) => setDbConfirm(e.target.value)}
+          />
+        </Field>
+        {dbMismatch && (
+          <p className="mb-2 text-[12px]" style={{ color: 'var(--danger)' }}>
+            {t('data.passphraseMismatch')}
+          </p>
+        )}
+        <button className="btn btn-sm btn-primary" disabled={!canSaveDb} onClick={() => void saveDbPass()}>
+          {dbBusy ? '…' : t('settings.db.setPassphrase')}
+        </button>
+        <div className="mt-3 flex gap-2">
+          <button
+            className="btn btn-sm btn-ghost"
+            disabled={dbBusy || !db?.recovery || !db?.remembered}
+            onClick={() => void removeDbPass()}
+          >
+            {t('settings.db.removePassphrase')}
+          </button>
+          <button
+            className="btn btn-sm btn-ghost"
+            disabled={dbBusy || !db?.keyring || !db?.recovery}
+            onClick={() => void removeKeyring()}
+          >
+            {t('settings.db.removeKeyring')}
+          </button>
+        </div>
+      </Section>
+
       <Section title={t('data.exportTitle')} hint={t('data.exportHint')}>
         <div className="mb-2 flex items-center gap-2">
           <button className="btn btn-sm btn-ghost" onClick={() => setSelected(chats.map((c) => c.id))}>

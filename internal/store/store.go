@@ -1,35 +1,72 @@
 // Package store persists chats, messages, documents and caches in a single
-// SQLite file using the pure-Go modernc driver, so no C toolchain is needed to
-// build for any platform.
+// SQLite file, encrypted page by page when it is opened with a key.
+//
+// The driver is github.com/ncruces/go-sqlite3: pure Go (a WASM build of SQLite), so
+// no C toolchain is needed for any of the four targets, and its VFS layer is
+// writable, which is what makes encryption at rest possible at all. The previous
+// driver had no writable VFS.
 package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	sqlite3 "github.com/ncruces/go-sqlite3"
+	"github.com/ncruces/go-sqlite3/driver"
+	"github.com/ncruces/go-sqlite3/ext/fts5"
 )
 
 // Store wraps the database handle.
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
+	// encrypted records whether this handle was opened with a key, so Close can
+	// drop the key from the VFS table instead of leaving it installed.
+	encrypted bool
 	// FTS reports whether full-text search is available. It is probed at open
 	// time so a build without FTS5 degrades to "documents are still readable,
 	// just not searchable" instead of failing outright.
 	FTS bool
 }
 
-// Open opens (creating if needed) the database at path and runs migrations.
+// Open opens (creating if needed) the plaintext database at path and runs migrations.
 //
-// The file and its directory are owner-only, because this database is not encrypted:
-// the mode is the only thing between the chat history and another local account on a
-// shared machine. Both chmod calls are there for installations made before that was
-// true — MkdirAll keeps an existing directory's mode, and so does SQLite for a file it
-// finds already there.
-func Open(path string) (*Store, error) {
+// Tests use this one. The app opens every database through OpenKeyed, and the migration
+// reads its source through the immediate-transaction variant of this function.
+func Open(path string) (*Store, error) { return open(path, nil) }
+
+// OpenKeyed opens (creating if needed) the database at path with every page
+// encrypted under key.
+//
+// Without the key the file is noise: not a SQLite database to any other program,
+// including the sqlite3 shell. A plaintext file is not converted here — OpenKeyed on
+// one fails with ErrWrongKey — because converting has to copy, verify and replace, and
+// Encrypt is what does that.
+func OpenKeyed(path string, key []byte) (*Store, error) {
+	if len(key) != KeySize {
+		return nil, fmt.Errorf("database key must be %d bytes, got %d", KeySize, len(key))
+	}
+	return open(path, key)
+}
+
+// ErrWrongKey reports a file that did not decrypt: the key is not the one the
+// database was written with, or the file is damaged. SQLite cannot tell the two
+// apart, and calling a merely wrong key "corrupt" sends a user looking for a backup
+// they do not need.
+var ErrWrongKey = errors.New("store: wrong key or damaged database")
+
+func open(path string, key []byte) (*Store, error) { return openWith(path, key, false) }
+
+// openWith is open with one option more: immediate transactions.
+//
+// Encrypt uses it for its source so the copy runs under SQLite's write lock, which is
+// what keeps a second instance from writing to the file while it is being read.
+func openWith(path string, key []byte, immediate bool) (st *Store, err error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create data dir: %w", err)
@@ -41,19 +78,48 @@ func Open(path string) (*Store, error) {
 	if err := createOwnerOnly(path); err != nil {
 		return nil, err
 	}
-	// Pragma settings are passed both through the DSN and applied again on open,
-	// so behaviour does not depend on whether the driver keeps one connection.
-	//
-	// secure_delete is the nearest thing to a delete this app has: nothing vacuums, so
-	// without it a removed chat and every pruned cache row stay legible in the file.
-	dsn := "file:" + filepath.ToSlash(path) +
-		"?_pragma=busy_timeout(10000)" +
-		"&_pragma=journal_mode(WAL)" +
-		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=foreign_keys(ON)" +
-		"&_pragma=secure_delete(ON)"
+	// The key goes to the VFS for this path, not into the DSN: a URI parameter is
+	// readable through vfs.Filename.URIParameters and can reach an error string,
+	// and this app keeps a log file.
+	dsn := "file:" + filepath.ToSlash(path)
+	var params []string
+	if key != nil {
+		params = append(params, "vfs="+cryptVFSName)
+		encryption.install(path, key)
+		defer func() {
+			if st == nil {
+				encryption.forget(path)
+			}
+		}()
+	}
+	if immediate {
+		params = append(params, "_txlock=immediate")
+	}
+	if len(params) > 0 {
+		dsn += "?" + strings.Join(params, "&")
+	}
 
-	db, err := sql.Open("sqlite", dsn)
+	db, err := driver.Open(dsn, func(c *sqlite3.Conn) error {
+		// FTS5 is an extension in this driver rather than part of the build, and a
+		// missing registration does not fail loudly: the probe below then reports
+		// FTS = false and search degrades to nothing. A test asserts it is true.
+		if err := fts5.Register(c); err != nil {
+			return err
+		}
+		for _, pragma := range pragmas {
+			if err := c.Exec(pragma); err != nil {
+				return fmt.Errorf("apply %s: %w", pragma, err)
+			}
+		}
+		if key != nil {
+			// The VFS encrypts temporary files with random keys, so spilling is not
+			// a leak — only work for nothing.
+			if err := c.Exec("PRAGMA temp_store = memory"); err != nil {
+				return fmt.Errorf("apply temp_store: %w", err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -61,22 +127,12 @@ func Open(path string) (*Store, error) {
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
 
-	for _, pragma := range []string{
-		"PRAGMA busy_timeout = 10000",
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA synchronous = NORMAL",
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA secure_delete = ON",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("apply %s: %w", pragma, err)
-		}
-	}
-
-	s := &Store{db: db}
+	s := &Store{db: db, path: path, encrypted: key != nil}
 	if err := s.migrate(); err != nil {
 		db.Close()
+		if key != nil {
+			return nil, wrongKey(err)
+		}
 		return nil, err
 	}
 	// Housekeeping that has to happen on every start: nothing else ever removes a
@@ -115,8 +171,41 @@ func createOwnerOnly(path string) error {
 	return nil
 }
 
-// Close releases the database.
-func (s *Store) Close() error { return s.db.Close() }
+// pragmas are applied to every new connection, in this order.
+//
+// secure_delete is the nearest thing to a delete this app has: nothing vacuums, so
+// without it a removed chat and every pruned cache row stay legible in the file.
+var pragmas = []string{
+	"PRAGMA busy_timeout = 10000",
+	"PRAGMA journal_mode = WAL",
+	"PRAGMA synchronous = NORMAL",
+	"PRAGMA foreign_keys = ON",
+	"PRAGMA secure_delete = ON",
+}
+
+// wrongKey turns the driver's complaint about a file it cannot read into ErrWrongKey.
+//
+// A wrong key and a damaged file produce the same complaint from SQLite, and both
+// arrive here as "file is not a database". CANTOPEN is included because that is what
+// an encrypting VFS answers when it has no key at all.
+func wrongKey(err error) error {
+	msg := err.Error()
+	for _, want := range []string{"not a database", "unable to open database file", "encrypted"} {
+		if strings.Contains(msg, want) {
+			return fmt.Errorf("%w: %v", ErrWrongKey, err)
+		}
+	}
+	return err
+}
+
+// Close releases the database and drops its key from the process.
+func (s *Store) Close() error {
+	err := s.db.Close()
+	if s.encrypted {
+		encryption.forget(s.path)
+	}
+	return err
+}
 
 // Checkpoint copies the write-ahead log into the database file and empties it.
 //

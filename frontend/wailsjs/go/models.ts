@@ -931,6 +931,30 @@ export namespace main {
 	        this.toSeq = source["toSeq"];
 	    }
 	}
+	export class DatabaseStatus {
+	    locked: boolean;
+	    setup: boolean;
+	    encrypted: boolean;
+	    recovery: boolean;
+	    keyring: boolean;
+	    remembered: boolean;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DatabaseStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.locked = source["locked"];
+	        this.setup = source["setup"];
+	        this.encrypted = source["encrypted"];
+	        this.recovery = source["recovery"];
+	        this.keyring = source["keyring"];
+	        this.remembered = source["remembered"];
+	        this.reason = source["reason"];
+	    }
+	}
 	export class ImageCache {
 	    count: number;
 	    bytes: number;

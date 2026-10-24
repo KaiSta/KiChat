@@ -32,6 +32,36 @@
 ;(function () {
   'use strict'
 
+  /*
+   * Which database-lock state the harness starts in: "" (open), "needsPassphrase",
+   * "setup" (no keyring, so the passphrase creates the key) or "noKey" (neither place
+   * has the key). A flag rather than a simulated failure because the unlock screen is
+   * not reachable by clicking in a mock that always answers that it opened.
+   */
+  let locked = new URLSearchParams(location.search).get('locked') || ''
+  if (locked === '1') locked = 'needsPassphrase'
+
+  function databaseStatus() {
+    return {
+      locked: Boolean(locked),
+      setup: locked === 'setup',
+      encrypted: true,
+      recovery: locked === 'needsPassphrase' || locked === 'stale' || locked === '',
+      keyring: locked !== 'setup',
+      remembered: !locked,
+      reason:
+        locked === 'setup'
+          ? 'db.reason.noKeyring'
+          : locked === 'noKey'
+            ? 'db.reason.noKey'
+            : locked === 'stale'
+              ? 'db.reason.staleKeyring'
+              : locked
+                ? 'db.reason.needsPassphrase'
+                : '',
+    }
+  }
+
   const MARKDOWN_REPLY = [
     '## Tiefe des Mittelmeers',
     '',
@@ -3139,6 +3169,28 @@ Verfügbare Tools: {{tool_list}}`,
       followManagedServer('')
       return Promise.resolve(null)
     },
+    // The database's encryption state. The mock bridge always opens, so the unlock
+    // screen — which is drawn instead of the whole shell — is reachable only through a
+    // query flag: `?locked=1` asks for a passphrase, `?locked=setup` is the first
+    // launch with no keyring, and `?locked=noKey` is a database whose key is gone.
+    GetDatabaseStatus: () => Promise.resolve(databaseStatus()),
+    UnlockDatabase: (passphrase) => {
+      if (locked === 'setup' && (passphrase || '').length < 8) {
+        return Promise.reject(new Error('i18n:{"code":"db.shortPassphrase","args":["8"]}'))
+      }
+      if (locked === 'noKey') {
+        return Promise.reject(new Error('i18n:{"code":"db.wrongPassphrase"}'))
+      }
+      locked = ''
+      return Promise.resolve(null)
+    },
+    StartFreshDatabase: () => {
+      locked = 'setup'
+      return Promise.resolve(null)
+    },
+    SetDatabasePassphrase: () => Promise.resolve(null),
+    RemoveDatabasePassphrase: () => Promise.resolve(null),
+    RemoveDatabaseKeyring: () => Promise.resolve(null),
     // A plainly fake commit so a harness build is never mistaken for a release
     // in a pasted bug report, while still exercising the Settings About rows.
     GetAppInfo: () =>

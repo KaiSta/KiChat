@@ -40,6 +40,8 @@ export function GetChat(arg1:string):Promise<store.Chat>;
 
 export function GetChatState(arg1:string):Promise<main.ChatState>;
 
+export function GetDatabaseStatus():Promise<main.DatabaseStatus>;
+
 export function GetDocument(arg1:string):Promise<store.Document>;
 
 export function GetHealth():Promise<Array<llm.HealthStatus>>;
@@ -110,6 +112,10 @@ export function RegenerateImage(arg1:string,arg2:store.GenerationRecipe):Promise
 
 export function RemoveAttachment(arg1:string):Promise<void>;
 
+export function RemoveDatabaseKeyring():Promise<void>;
+
+export function RemoveDatabasePassphrase():Promise<void>;
+
 export function RemoveLlamaBuild(arg1:string):Promise<void>;
 
 export function RemoveOldLlamaBuilds():Promise<number>;
@@ -136,11 +142,15 @@ export function SetBackendAPIKey(arg1:string,arg2:string):Promise<void>;
 
 export function SetBraveKey(arg1:string):Promise<void>;
 
+export function SetDatabasePassphrase(arg1:string):Promise<void>;
+
 export function SetManagedModel(arg1:string,arg2:config.ManagedModel):Promise<void>;
 
 export function SetModelOverride(arg1:string,arg2:string,arg3:llm.ModelOverride):Promise<void>;
 
 export function Settings():Promise<config.Settings>;
+
+export function StartFreshDatabase():Promise<void>;
 
 export function StartImageServer():Promise<void>;
 
@@ -163,6 +173,8 @@ export function TestBraveKey(arg1:string):Promise<research.SearchOutcome>;
 export function TestImageBackend():Promise<string>;
 
 export function TestUpscaler():Promise<string>;
+
+export function UnlockDatabase(arg1:string):Promise<void>;
 
 export function UnresolvedPromptVars(arg1:string):Promise<Array<string>>;
 

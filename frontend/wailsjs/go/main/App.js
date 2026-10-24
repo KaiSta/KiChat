@@ -62,6 +62,10 @@ export function GetChatState(arg1) {
   return window['go']['main']['App']['GetChatState'](arg1);
 }
 
+export function GetDatabaseStatus() {
+  return window['go']['main']['App']['GetDatabaseStatus']();
+}
+
 export function GetDocument(arg1) {
   return window['go']['main']['App']['GetDocument'](arg1);
 }
@@ -202,6 +206,14 @@ export function RemoveAttachment(arg1) {
   return window['go']['main']['App']['RemoveAttachment'](arg1);
 }
 
+export function RemoveDatabaseKeyring() {
+  return window['go']['main']['App']['RemoveDatabaseKeyring']();
+}
+
+export function RemoveDatabasePassphrase() {
+  return window['go']['main']['App']['RemoveDatabasePassphrase']();
+}
+
 export function RemoveLlamaBuild(arg1) {
   return window['go']['main']['App']['RemoveLlamaBuild'](arg1);
 }
@@ -254,6 +266,10 @@ export function SetBraveKey(arg1) {
   return window['go']['main']['App']['SetBraveKey'](arg1);
 }
 
+export function SetDatabasePassphrase(arg1) {
+  return window['go']['main']['App']['SetDatabasePassphrase'](arg1);
+}
+
 export function SetManagedModel(arg1, arg2) {
   return window['go']['main']['App']['SetManagedModel'](arg1, arg2);
 }
@@ -264,6 +280,10 @@ export function SetModelOverride(arg1, arg2, arg3) {
 
 export function Settings() {
   return window['go']['main']['App']['Settings']();
+}
+
+export function StartFreshDatabase() {
+  return window['go']['main']['App']['StartFreshDatabase']();
 }
 
 export function StartImageServer() {
@@ -308,6 +328,10 @@ export function TestImageBackend() {
 
 export function TestUpscaler() {
   return window['go']['main']['App']['TestUpscaler']();
+}
+
+export function UnlockDatabase(arg1) {
+  return window['go']['main']['App']['UnlockDatabase'](arg1);
 }
 
 export function UnresolvedPromptVars(arg1) {

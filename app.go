@@ -15,6 +15,7 @@ import (
 	"kichat/internal/backup"
 	"kichat/internal/chat"
 	"kichat/internal/config"
+	"kichat/internal/dbkey"
 	"kichat/internal/events"
 	"kichat/internal/images"
 	"kichat/internal/ingest"
@@ -37,14 +38,32 @@ type App struct {
 	initOnce sync.Once
 	initErr  error
 
-	store     *store.Store
-	registry  *llm.Registry
-	engine    *chat.Engine
-	toolSvc   *tools.Service
-	chain     *research.Chain
-	scraper   *research.Scraper
-	extractor *ingest.Extractor
-	secrets   *secret.Store
+	store    *store.Store
+	registry *llm.Registry
+
+	// dbPath, keys and dbKey are the encryption state of the database: where it is,
+	// where its key may be kept, and the key this process opened it with (nil while
+	// locked). dbMu guards the switch from locked to open, which happens on a bound
+	// call while other bound calls may be arriving.
+	dbPath string
+	keys   *dbkey.Store
+	// newKeys and newSecrets are seams for tests. The real constructors probe the
+	// per-user keyring, and a test must never reach it: doing so once replaced a
+	// user's stored key with a fixture.
+	newKeys      func(dir string) *dbkey.Store
+	newSecrets   func(dir string) (*secret.Store, error)
+	dbKey        []byte
+	dbMu         sync.Mutex
+	locked       bool
+	lockSetup    bool
+	staleKeyring bool
+	lockReason   string
+	engine       *chat.Engine
+	toolSvc      *tools.Service
+	chain        *research.Chain
+	scraper      *research.Scraper
+	extractor    *ingest.Extractor
+	secrets      *secret.Store
 	// imageProvider is the picture server generate_image draws through, nil when
 	// image generation is switched off. It is rebuilt with the other services and
 	// read under the same lock, for the same reason: a settings save replaces it
@@ -220,8 +239,17 @@ func NewApp() *App { return &App{} }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	if err := a.ensure(); err != nil {
+	if err := a.ensureInit(); err != nil {
 		runtime.LogErrorf(ctx, "Initialisierung fehlgeschlagen: %v", err)
+		return
+	}
+	a.dbMu.Lock()
+	locked := a.locked
+	a.dbMu.Unlock()
+	if locked {
+		// A locked start is a prompt, not a failure: the unlock screen is the window,
+		// and the unlock itself starts what the settings ask for once a key is there.
+		return
 	}
 	a.startEnabledModels()
 	// The picture server is off unless the user asked for it, so this does nothing on
@@ -252,6 +280,23 @@ func (a *App) shutdown(ctx context.Context) {
 // ensure performs one-time initialisation. Every bound method calls it, so the
 // app works even if startup has not completed yet.
 func (a *App) ensure() error {
+	if err := a.ensureInit(); err != nil {
+		return err
+	}
+	a.dbMu.Lock()
+	locked := a.locked
+	a.dbMu.Unlock()
+	if locked {
+		// Every binding but the unlock screen refuses to work on a history it cannot
+		// read. The screen translates this key; see api_database.go.
+		return uimsg.Errorf("db.locked")
+	}
+	return nil
+}
+
+// ensureInit runs initialisation without requiring the database to be open. It is
+// what the unlock bindings call, and the only difference from ensure.
+func (a *App) ensureInit() error {
 	a.initOnce.Do(func() {
 		a.initErr = a.init()
 	})
@@ -266,26 +311,53 @@ func (a *App) init() error {
 		dir = "kichat"
 	}
 	a.dataDir = dir
-	// Owner-only: the directory holds the unencrypted database, the encrypted secret
-	// fallback and the log. store.Open repairs the mode of an installation that
-	// predates this, since MkdirAll leaves an existing directory alone.
+	// Owner-only: the directory holds the encrypted database, the passphrase-wrapped key
+	// beside it, the encrypted secret fallback and the log. store.Open repairs the mode
+	// of an installation that predates this, since MkdirAll leaves an existing directory
+	// alone.
 	if err := os.MkdirAll(a.dataDir, 0o700); err != nil {
 		return fmt.Errorf("Datenverzeichnis anlegen: %w", err)
 	}
 
-	st, err := store.Open(filepath.Join(a.dataDir, "kichat.db"))
-	if err != nil {
+	a.dbPath = filepath.Join(a.dataDir, "kichat.db")
+	if a.newKeys == nil {
+		a.newKeys = dbkey.New
+	}
+	a.keys = a.newKeys(a.dataDir)
+	// A migration interrupted between its two renames left the database under
+	// another name. Putting it back first is what makes the next start the one that
+	// completes the work instead of reporting a missing database.
+	if err := store.RecoverMigration(a.dbPath); err != nil {
 		return err
 	}
-	a.store = st
+	if err := a.openDatabase(); err != nil {
+		return err
+	}
+	if a.locked {
+		// Defaults, so the unlock screen has a language and a theme. Everything that
+		// needs the history stays unbuilt until a key is available.
+		a.settingsMu.Lock()
+		a.settings = config.Default()
+		a.settingsMu.Unlock()
+		return nil
+	}
+	return a.finishInit()
+}
 
-	secrets, err := secret.New(filepath.Join(a.dataDir, "secrets"))
+// finishInit builds what needs an open database: the secret store, the settings it
+// holds, and every service derived from them. The app is not usable until this has
+// run, which is why the unlock path ends here too.
+func (a *App) finishInit() error {
+	if a.newSecrets == nil {
+		a.newSecrets = secret.New
+	}
+	secrets, err := a.newSecrets(filepath.Join(a.dataDir, "secrets"))
 	if err != nil {
 		return err
 	}
 	a.secrets = secrets
 
-	settings, err := config.Load(st, secrets)
+	settings, err := config.Load(a.store, secrets)
 	if err != nil {
 		// A corrupt settings blob should not stop the app from starting.
 		settings = config.Default()
@@ -304,6 +376,11 @@ func (a *App) init() error {
 	a.servers = map[string]*rt.Server{}
 	a.turns = chat.NewTurnState()
 	a.rebuildServices(settings)
+	// Callers own dbMu (init runs under initOnce, the unlock path holds it for the
+	// whole switch), so this only clears the state it was waiting on.
+	a.locked = false
+	a.lockSetup = false
+	a.lockReason = ""
 	return nil
 }
 

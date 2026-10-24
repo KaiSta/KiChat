@@ -5,11 +5,13 @@ import { useStore } from './store'
 import { ChatView } from './components/ChatView'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Settings } from './components/settings/Settings'
+import { UnlockScreen } from './components/UnlockScreen'
 
 export default function App() {
   const bootstrap = useStore((s) => s.bootstrap)
   const ready = useStore((s) => s.ready)
   const bootError = useStore((s) => s.bootError)
+  const dbStatus = useStore((s) => s.dbStatus)
   const view = useStore((s) => s.view)
   // Declared above the early returns below, like every other hook here: a hook
   // that runs on some renders but not others changes the hook count and React
@@ -24,6 +26,13 @@ export default function App() {
     return (
       <div className="flex h-full items-center justify-center faint">…</div>
     )
+  }
+
+  // A locked database is not an error: it is a prompt. It comes before the error
+  // branch because ensure() would report the lock as a failed start, and the unlock
+  // screen is what makes that recoverable.
+  if (dbStatus?.locked) {
+    return <UnlockScreen status={dbStatus} />
   }
 
   if (bootError) {

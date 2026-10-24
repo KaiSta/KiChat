@@ -1,15 +1,20 @@
 # Encrypted database
 
-How KiChat's `kichat.db` gets encrypted at rest, why this shape was chosen over the five
-others that were considered, and what will have to be built. `AGENTS.md` is the index;
-`CODE_MAP.md` says where the code lives. Today the database is **plaintext**: the only
-things protecting it are the file modes and `secure_delete` (§1).
+How KiChat's `kichat.db` is encrypted at rest, why this shape was chosen over the five
+others that were considered, and how the build works. `AGENTS.md` is the index;
+`CODE_MAP.md` says where the code lives. Before this work the database was **plaintext**,
+with the file modes and `secure_delete` as the only protection (§1).
 
-**Status: a plan, nothing built yet.** Two decisions are taken — page-level encryption in
-the SQLite file (§3), and a keyring-held key with a passphrase-wrapped copy for recovery
-(§4). Everything below is either a measurement taken on this machine (§10), a fact read
-from the driver's documentation (§12), or work still to do. Where a number or a behaviour
-was not verified, the sentence says so.
+**Status: built.** The database is encrypted page by page in the SQLite file (§3), the
+key lives in the OS keyring by default with a passphrase-wrapped copy beside the database
+as the recovery path (§4), and an existing plaintext database is converted on the next
+start (§5). Both decisions survived implementation; one mechanical detail did not — the
+key cannot be supplied through a connection hook, and §3 records what the driver
+actually required and how it was measured.
+
+Where a number or a behaviour was not verified, the sentence says so. §10 keeps the
+measurements, §8 lists what the tests assert, and the parts that are still open are in
+§11.
 
 ## 1. The threat, and what it does and does not cover
 
@@ -80,41 +85,52 @@ the live database and this plan does not change it.
 
 `internal/store` keeps its `*sql.DB` shape, so every query, the migrations, the bundle
 code and the 34 `store.Open` call sites stay as they are. What changes is what is under
-`database/sql`:
+`database/sql`: the driver is `github.com/ncruces/go-sqlite3` (pure Go — a WASM build of
+SQLite, so all four targets still build without a C toolchain), and an encrypted store
+opens through a VFS wrapper that supplies the key:
 
 ```go
-import (
-    _ "github.com/ncruces/go-sqlite3/driver"
-    _ "github.com/ncruces/go-sqlite3/ext/fts5"      // separate module since v0.35.0
-    _ "github.com/ncruces/go-sqlite3/vfs/adiantum"  // registers the "adiantum" VFS
-)
-
-db, err := driver.Open(
-    "file:kichat.db?vfs=adiantum&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)…",
-    func(c *sqlite3.Conn) error { return c.Exec("PRAGMA hexkey='" + hex + "'") },
-)
+// internal/store/crypt.go — the "kichat" VFS wraps "adiantum".
+func (k *keyVFS) OpenFilename(name *vfs.Filename, flags vfs.OpenFlag) (vfs.File, vfs.OpenFlag, error) {
+	f, out, err := k.VFS.(vfs.VFSFilename).OpenFilename(name, flags)
+	if err != nil || flags&vfs.OPEN_MAIN_DB == 0 { return f, out, err }
+	if _, err := f.(vfs.FilePragma).Pragma("hexkey", hex.EncodeToString(k.key(name.String()))); err != nil {
+		f.Close()
+		return nil, out, err
+	}
+	return f, out, nil
+}
 ```
 
-Three details are load-bearing:
+Three details are load-bearing, and the first one contradicts this document's first draft:
 
-- **The key goes through the connect hook, not the DSN.** The VFS documentation warns
-  that a `key=`/`hexkey=` URI parameter is readable through `vfs.Filename.URIParameters`;
-  `driver.Open`'s callback runs on every new connection, which is also where the pragmas
-  already run. A key in a DSN is a key that can reach an error string, and this app keeps
-  a log file.
-- **`PRAGMA temp_store = memory`.** The VFS encrypts temporary files with random keys, so
-  spilling is not a leak — it is work for nothing.
-- **FTS5 is an import, not a built-in.** Forgetting `ext/fts5` does not fail loudly: the
-  probe in `Open` sets `FTS = false` and search silently degrades. A test asserts
-  `FTS == true` and a real hit after an import.
+- **The key cannot go through a connection hook.** Measured: `PRAGMA hexkey` executed from
+  `driver.Open`'s callback creates a database, and that database then reopens only as
+  *unable to open database file*. `sqlite3.Open` reads the first page before any statement
+  runs, so an encrypting VFS with no key at that moment either answers "empty file" — and
+  SQLite treats a populated database as new — or fails with CANTOPEN. The key has to be
+  installed during `OpenFilename`, before the first read. It is still not in the DSN: a URI
+  parameter is readable through `vfs.Filename.URIParameters` and can reach an error string,
+  and this app keeps a log file. The VFS holds one key per database path and drops it in
+  `Close`.
+- **`PRAGMA temp_store = memory`** on keyed connections. The VFS encrypts temporary files
+  with random keys, so spilling is not a leak — it is work for nothing.
+- **FTS5 is a registration, not just an import.** `ext/fts5` registers the extension on
+  each connection (`fts5.Register(c)`); without that call `CREATE VIRTUAL TABLE … fts5`
+  fails with "no such module", and the failure is quiet: the probe in `Open` sets
+  `FTS = false` and search degrades to nothing. A test asserts `FTS == true` and a real hit
+  after a migration.
 
-What the VFS covers: the database file, `-wal`, `-shm`, the rollback journal and temp
-files. That is the whole reason to prefer this to the memory design — the sidecars are
-where the last change always is, and they are encrypted in place.
+What the VFS covers: the database file, `-wal`, the rollback journal and temporary files.
+One correction to the earlier draft: the `-shm` file is **not** encrypted. It is mapped
+through `SharedMemory()` and holds only the WAL index — page numbers and checksums — never
+page content, which is what the sidecar test asserts by writing a marker and finding it in
+none of the three files.
 
-The file is **not SQLCipher format** and not readable by the `sqlite3` CLI. An export
-path is `VACUUM INTO` through the same VFS (which produces another encrypted file), or a
-read-through-copy into a plaintext database for a user who explicitly asks for one.
+The file is **not SQLCipher format** and not readable by the `sqlite3` CLI. There is no
+export to a plaintext database: `VACUUM INTO` through the same VFS would produce another
+encrypted file, and a read-through copy is the open question in §11. The encrypted backup
+archive (`internal/backup`) is what leaves the app today.
 
 The alternative in the same family is [`gosqlite.org/vfs/crypto`](https://gosqlite.com/docs/guides/encryption/),
 which also offers Adiantum and AES-XTS over a pure-Go driver, with a vault module for
@@ -175,55 +191,99 @@ magic is the test. The procedure, in order:
    encryption.
 
 A crash anywhere before step 4 leaves the plaintext database intact and the new file
-discarded; the migration is retried on the next start. It is **automatic on first launch
-with a notice**, not an opt-in setting: an opt-in leaves most installations unprotected,
-which is the opposite of the point.
+discarded. The names are `kichat.db.new` for the copy and `kichat.db.old` for the replaced
+file, and `store.RecoverMigration` runs before anything else is decided at startup: a
+database that is missing comes back from `.old`, a migration that completed has its
+leftover plaintext wiped, and an unfinished copy is discarded. Because the order is build,
+verify, rename aside, rename in, wipe, there is no moment in which neither file exists.
+
+It is **automatic on first launch**, not an opt-in setting: an opt-in leaves most
+installations unprotected, which is the opposite of the point. With a keyring present the
+whole conversion is silent — generate a key, store it, convert the file, open it. Without
+one, the unlock screen asks for the passphrase that will become the key before anything is
+converted.
+
+Two details the build had to get right, and neither is visible in the step list above:
+
+- **The `-wal` and `-shm` are named after the database, not the copy.** Renaming
+  `kichat.db` to `kichat.db.old` leaves them where they were — beside the *encrypted*
+  database, under its name, holding plaintext pages that SQLite would then try to replay
+  into the new file. They are wiped and removed before the rename, and
+  `TestEncryptRemovesTheOldSidecars` pins it.
+- **The copy runs under a write lock.** The source is opened with `_txlock=immediate`, so
+  the read happens inside a `BEGIN IMMEDIATE` transaction: a second instance starting at
+  the same moment cannot append to the file while it is being copied. Its own attempt to
+  write fails visibly against `busy_timeout` instead of being replayed into a file that is
+  about to disappear.
 
 ## 6. What the window has to show
 
-A key that is not in the keyring must be entered **before the database exists**, and today
-`app.init` opens the store before anything can ask. So:
+A key that is not in the keyring has to be entered **before the database exists**, and
+`app.init` used to open the store before anything could ask. What exists now:
 
-- `GetLockState` and `UnlockDatabase(passphrase)` are the only bindings that work while
-  locked; every other one keeps failing through `ensure()` as it does now.
-- An unlock screen that renders without settings — default language and theme — with
-  "forgot the passphrase" offering to move the database aside and start fresh, never a
-  silent delete.
-- Settings → Data gains **Change passphrase**, **Remove keyring copy** (and then it asks
-  every launch), and the one-time recovery step on first encryption: show the passphrase
-  requirement or confirm that the keyring only is accepted, because that is the last
-  moment the choice is free.
+- `GetDatabaseStatus`, `UnlockDatabase`, `StartFreshDatabase` and `GetAppInfo` are the
+  bindings that work while locked; every other one fails through `ensure()` with the
+  `db.locked` code, which the window translates.
+- `frontend/src/components/UnlockScreen.tsx` replaces the whole shell while locked. It
+  renders without settings, so its language is English and its theme is the default until
+  an unlock loads the real ones — a visible limitation, and the reason the strings are
+  English sentences rather than keys waiting for a dictionary that is not readable yet.
+  Setup mode has two fields and the 8-character rule; unlock mode has one, plus "move the
+  database aside and start fresh", which says what it does to the old file and takes a
+  second click.
+- Settings → Data has a **Database** section: whether the file is encrypted, whether the
+  keyring holds the key, whether a passphrase copy exists, the field that writes or
+  replaces that copy, and the two buttons that remove one. Each removal is refused when it
+  would leave no way in: the copy cannot go unless the keyring holds *the key this process
+  opened the database with* — an entry that opens nothing else is exactly what the
+  stale-keyring lock leaves behind, and deleting the last copy over it would strand the
+  history — and the keyring key cannot go without a copy.
 
-Every string in `de`, `en` and `zh`, as always.
+Every string in `de`, `en` and `zh`. The i18n test walks the Go tree for `uimsg` codes and
+fails when one has no sentence in a language, which is what kept `err.db.*` complete.
 
 ## 7. Failure modes
 
 | what happens | what the user sees |
 | --- | --- |
-| no keyring (headless Linux, no Secret Service) | passphrase mode is forced; the reason is stated once |
-| keyring entry exists but is stale/wrong | *wrong key or damaged database*, with the passphrase path offered; the entry is not overwritten until an open succeeds |
-| database copied without `kichat.key` and without the keyring | *this database needs its key*, with the recovery explanation |
-| wrong passphrase | *wrong passphrase* — distinct from damage |
+| no keyring, no database yet (headless Linux, no Secret Service) | lock in setup mode, `db.reason.noKeyring`: the passphrase creates the key |
+| keyring entry exists but does not open the file | `db.reason.staleKeyring`, and the passphrase is asked for; the entry is replaced only after an open succeeds |
+| encrypted database, no key in the keyring, `kichat.key` present | `db.reason.needsPassphrase` — the unlock screen |
+| encrypted database and neither place has the key | `db.reason.noKey`; the only way forward is moving it aside, which is offered and explains itself |
+| wrong passphrase | `db.wrongPassphrase` — one sentence for unwrapping and for a database that is not that key's |
 | disk full during a write | SQLite's own error, surfaced as it is today |
 | two instances | unchanged: SQLite locking, both need the key |
 
 ## 8. Tests
 
-- **Sidecars are ciphertext**: write a marker, then grep `kichat.db`, `-wal` and `-shm`
-  for it while the store is open. This is the test that proves the claim rather than the
-  intent, and it is the first one to write.
-- **Keyring mode leaves no key material in the data directory**: open, close, grep every
-  file for the hex key.
-- **Passphrase mode**: `kichat.key` unwraps; a wrong passphrase is its own error; the
-  header is authenticated (a flipped salt or ciphertext byte fails).
-- **Migration**: a fixture plaintext database arrives with identical row counts, a working
-  FTS hit, and no plaintext file left behind.
-- **`FTS == true`** on every store the app opens, so a missing `ext/fts5` import is a test
-  failure rather than a silent downgrade.
-- **The whole existing suite runs twice** — plaintext and keyed — which is the real safety
-  net for the driver swap, since almost every package opens a store.
-- Optional but worthwhile: a subprocess killed with SIGKILL mid-write, reopened, data
-  intact — the property the memory design gives up and this one keeps.
+- **Sidecars are ciphertext** (`TestKeyedSidecarsAreCiphertext`): a marker written into a
+  message is absent from `kichat.db`, `-wal` and `-shm` while the store is open, and the
+  main file does not start with the SQLite magic.
+- **The passphrase copy** (`internal/dbkey`): round trip, wrong passphrase as its own
+  error, a flipped salt, nonce or ciphertext byte, a foreign magic and a truncated file,
+  the 0600 mode, and the short-passphrase refusal writing nothing.
+- **The keyring path** against a fake, because a test must never reach the real keyring;
+  and that an isolated store reports no keyring and refuses to save a key.
+- **Migration** (`TestEncryptMigratesAndLeavesNothingReadable`): rows arrive, `FTS` is true
+  and a `MATCH` hits, the caches stay behind, no `.old`/`.new`/`-wal` survives, and the
+  ciphertext contains neither the marker nor the SQLite magic.
+- **A wrong key is refused** (`TestOpenKeyedRejectsTheWrongKey`) and the failed attempt
+  leaves the file openable by the right one; an already encrypted file is not rewritten;
+  a foreign file is left byte-for-byte alone.
+- **Interrupted migration** (`TestRecoverMigration`): a missing database comes back from
+  `.old`, an unfinished `.new` is discarded.
+- **The store suite twice**: `KICHAT_TEST_DBKEY=1 go test ./internal/store` opens every
+  test store encrypted, so all queries go through the VFS. Run it before a release; it is
+  the real safety net for the driver swap.
+- **The launch paths** (`database_lock_test.go`): first launch without a keyring locks in
+  setup mode and refuses everything else, a short passphrase writes nothing, a passphrase
+  encrypts the existing history and a second launch with the wrong passphrase changes
+  nothing; replacing a passphrase invalidates the old one; a database with no key can be
+  moved aside without deleting anything.
+
+Not covered yet: a subprocess killed with SIGKILL mid-write, reopened, data intact — the
+property the memory design gives up and this one keeps. Adiantum's crash behaviour is
+inherited from SQLite's WAL, but this app has not measured its own case.
 
 ## 9. Limits this design accepts
 
@@ -237,6 +297,10 @@ Every string in `de`, `en` and `zh`, as always.
 - **Old snapshots.** Cloud version history and backups taken before a deletion still hold
   the deleted chat, encrypted or not.
 - **Not SQLCipher-compatible**, so no third-party tool opens the file.
+- **An instance of the previous version that is already running** when the new one
+  migrates keeps its handle to the file now called `kichat.db.old`. The write lock closes
+  the window during the copy, not the window afterwards, so the correct habit is to quit
+  KiChat before upgrading — which the installer and the package do on their own paths.
 
 ## 10. Measurements
 
@@ -254,6 +318,7 @@ predict the app's performance.
 | writing 100 MiB | 241 ms into memory, 806 ms into a file |
 | `VACUUM INTO` a 100 MiB database | 316 ms |
 | `PRAGMA wal_checkpoint(TRUNCATE)` | 11 ms |
+| a key supplied by `PRAGMA hexkey` after the connection opened | the database reopens only as *unable to open database file* — the key has to be installed before the first page is read (§3) |
 
 What they decide: the passphrase prompt is free (23 ms), page encryption is noise next to
 a write (0.8 µs), and the memory design's flush is ~60 ms of CPU plus the disk write — so
@@ -261,13 +326,18 @@ its cost is the policy (how often, how much data, how much churn), not the crypt
 
 ## 11. Open questions
 
-- Does the first launch after migration **force** the recovery decision — save a
-  passphrase-wrapped copy or explicitly accept keyring-only — or is it a quiet default?
-  Current preference: force it once, because it is the only moment the choice is free.
-- Should unlock offer **"do not remember"** per launch (type the passphrase even when the
-  keyring holds the key)?
+- **The recovery decision is not forced.** The plan wanted one screen on first encryption
+  that made the user save a passphrase copy or accept the keyring-only risk; what exists is
+  the state list and the field in Settings → Data, with no interruption. That is the honest
+  gap: a keyring reset with no copy now ends at `db.reason.noKey` and a database moved
+  aside. The argument for forcing it — the choice is free only once — still holds, and it
+  is the first thing to add if the gap turns out to bite.
+- **"Do not remember" is persistent, not per launch.** Removing the keyring key in Settings
+  makes every launch ask; there is no checkbox on the unlock screen to skip the keyring for
+  one session while keeping it.
 - Does the encrypted file need an **export to plaintext** for a user who wants their data
-  back without KiChat, or is the encrypted archive (`internal/backup`) enough?
+  back without KiChat, or is the encrypted archive (`internal/backup`) enough? Unchanged;
+  the backup archive is still the only export.
 
 ## 12. What was read
 

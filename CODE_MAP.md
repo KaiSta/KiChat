@@ -32,6 +32,7 @@ Two rules keep this useful:
 | `main.go` | Wails bootstrap, window/menu options, `go:embed all:frontend/dist`, `--version` |
 | `app.go` | The `App` struct and the chat lifecycle: send, regenerate, stop, chats CRUD, `GetBudget` |
 | `api.go` | The bridge's own vocabulary: settings, backends and keys, app info, search status, `OpenExternal` — and the struct types the other bridge files return |
+| `api_database.go` | The encrypted database: `GetDatabaseStatus`, the lock state and key resolution at launch, `UnlockDatabase`, `StartFreshDatabase`, and the passphrase/keyring actions Settings → Data offers |
 | `api_runtime.go` | llama.cpp as the app installs and supervises it: builds, GPU families, model folders, start/stop, the image server's process |
 | `api_models.go` | Listing models and probing them, overrides, prompt variables, the model-file pickers |
 | `api_chat.go` | Compaction, attachments, chats' documents and chunk search, web search and scrape |
@@ -52,7 +53,8 @@ Two rules keep this useful:
 | `internal/chat` | Context assembly, the model/tool loop, compaction, throttling and pacing, search-first turns | `engine.go` (`Engine.Send`), `context.go` (`Assemble`), `compact.go` (`PlanCompaction`) | package tests + root engine tests |
 | `internal/llm` | The provider abstraction and every backend that speaks it | `types.go` (`Provider`, `ChatRequest`, `StreamEvent`), `registry.go` (`DefaultBackendConfigs`, `NewRegistry`), `openai.go` (shared compatible path) | one `<vendor>_test.go` per backend + `live_*_test.go` |
 | `internal/config` | `Settings`, its defaults, normalisation, prompts and presets | `config.go` (`Default`, `Load`, `Save`, `normalise`, `Clone`), `prompts.go` | `config_test.go`, `clone_test.go` |
-| `internal/store` | SQLite: schema and migrations, chats/messages/attachments/documents, FTS5 search, caches | `store.go` (schema + `Open`), `models.go` (types), `queries.go` (every query) | `store` tests |
+| `internal/store` | SQLite: schema and migrations, chats/messages/attachments/documents, FTS5 search, caches, and encryption at rest | `store.go` (schema, `Open`, `OpenKeyed`), `crypt.go` (the keyed VFS), `encrypt.go` (`Encrypt`, `IsEncrypted`, `RecoverMigration`), `models.go` (types), `queries.go` (every query) | `store` tests, including the `KICHAT_TEST_DBKEY=1` keyed run |
+| `internal/dbkey` | The database key: generation, the OS keyring entry, and `kichat.key` wrapped under an Argon2id-derived key | `dbkey.go` (`New`, `KeyringKey`, `SaveRecovery`, `OpenRecovery`) | `dbkey_test.go` |
 | `internal/images` | Picture generation: the `Provider` interface, the WebUI client, `sd-cli`, the managed `sd-server`, and the one hosted kind (NVIDIA NIM). Enlarging: the Lanczos kernel, EXIF orientation, Real-ESRGAN | `images.go` (`Provider`), `sdwebui.go`, `cli.go`, `sdserver.go`, `nim.go` (hosted), `locate.go`, `limits.go`, `upscale.go` (`Upscale`, `Fit`), `resample.go`, `exif.go`, `esrgan.go`, `upscaler_install.go` (the pinned archives) | `*_test.go` + `live_test.go`, `live_sdserver_test.go`, `live_esrgan_test.go` |
 | `internal/runtime` | llama.cpp as a thing KiChat installs and supervises: releases, GPU families, model folders, projector pairing, offload reading | `install.go`, `builds.go`/`distribution.go`, `supervise.go`, `discover.go`, `libs.go`, `offload.go` | `*_test.go` + `live_prism_test.go` |
 | `internal/research` | Brave and DuckDuckGo, the search-first context route, the scraper and its guards | `search.go`, `chain.go`, `brave.go`, `brave_context.go`, `duckduckgo.go`, `scrape.go` | `*_test.go` + `live_test.go` |
@@ -72,7 +74,8 @@ Two rules keep this useful:
 | `frontend/src/components/ChatView.tsx` | The conversation: message list, composer, attachments, context meter, stop |
 | `frontend/src/components/MessageParts.tsx` | How one message renders — the split between settled and streaming pieces |
 | `frontend/src/components/Markdown.tsx` | The markdown pipeline: remark/rehype, KaTeX, highlight.js |
-| `frontend/src/components/settings/` | The settings screen: `Settings.tsx` is the shell and tab strip, `shared.tsx` the `Section`/`Field` helpers, and one file per tab (`GeneralTab`, `BackendsTab`, `ImagesTab`, `PromptTab`, `ResearchTab`, `ContextTab`, `PayloadTab`, `DataTab` for backup and import) |
+| `frontend/src/components/settings/` | The settings screen: `Settings.tsx` is the shell and tab strip, `shared.tsx` the `Section`/`Field` helpers, and one file per tab (`GeneralTab`, `BackendsTab`, `ImagesTab`, `PromptTab`, `ResearchTab`, `ContextTab`, `PayloadTab`, `DataTab` for database encryption, backup and import) |
+| `frontend/src/components/UnlockScreen.tsx` | The window while the database is locked: enter the passphrase, or set one when no keyring exists |
 | `frontend/src/components/ModelSwitcher.tsx` | Model picker with capability badges and window size |
 | `frontend/src/lib/api.ts` | The typed wrapper over the generated `window.go` bindings |
 | `frontend/src/lib/i18n.ts` | Every user-facing string, in `de`, `en` and `zh` |
@@ -82,8 +85,10 @@ Two rules keep this useful:
 
 ## Storage
 
-One SQLite file. Schema and migrations are in `internal/store/store.go`; adding a
-table is a new migration, never an edit of an old one.
+One SQLite file, encrypted page by page (see `ENCRYPTION.md`). Schema and migrations are
+in `internal/store/store.go`; adding a table is a new migration, never an edit of an old
+one. The key is in the OS keyring by default; `kichat.key` beside the database is the
+passphrase-wrapped recovery copy, and `internal/dbkey` owns both.
 
 `chats`, `messages`, `compactions`, `tool_calls`, `attachments`, `documents`,
 `chunks` (+ `chunks_fts`, FTS5/BM25), `search_cache`, `scrape_cache`, `settings`

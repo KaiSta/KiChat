@@ -43,7 +43,7 @@ Linux build needs `-tags webkit2_41`** because only webkit2gtk-4.1 is installed.
 | `internal/images` | picture generation: WebUI, `sd-cli`, managed `sd-server`; and enlarging: Lanczos, optional Real-ESRGAN |
 | `internal/runtime` | llama.cpp install and supervision, GPU placement, model folders |
 | `internal/research`, `internal/tools`, `internal/ingest` | search/scrape, model tools, attachments |
-| `internal/store`, `internal/config`, `internal/secret`, `internal/events` | state, settings, keys, event names |
+| `internal/store`, `internal/config`, `internal/secret`, `internal/dbkey`, `internal/events` | state (encrypted at rest), settings, API keys, the database key and its recovery copy, event names |
 | `internal/uimsg` | a user-facing message from Go as a dictionary key (`i18n:` payload, `err.*` entries) |
 | `frontend/src` | the window; `lib/i18n.ts` holds every user-facing string |
 
@@ -237,7 +237,7 @@ instead of the result.
 | [`NVIDIA.md`](NVIDIA.md) | the build.nvidia.com backend and its availability check |
 | [`MISTRAL.md`](MISTRAL.md) | the Mistral backend, alias collapse, typed chunks |
 | [`DEEPSEEK.md`](DEEPSEEK.md) | the DeepSeek backend, reasoning content, refusals |
-| [`ENCRYPTION.md`](ENCRYPTION.md) | the encrypted database: a plan — the chosen page-level design, the key, the migration, and the five designs that lost |
+| [`ENCRYPTION.md`](ENCRYPTION.md) | the encrypted database: page-level encryption, the key and its recovery copy, the migration, the tests, and what the driver forced us to change |
 | [`CODE_MAP.md`](CODE_MAP.md) | where the code is, and the extension points |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | pull requests, the CLA, commit style |
 

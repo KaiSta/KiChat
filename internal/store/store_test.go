@@ -26,7 +26,17 @@ func rowCount(t *testing.T, st *Store, table, where string, args ...any) int {
 
 func newStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	path := filepath.Join(t.TempDir(), "test.db")
+	var st *Store
+	var err error
+	// KICHAT_TEST_DBKEY=1 runs the whole package against an encrypted store, so every
+	// query goes through the encrypting VFS. Plaintext stays the default because a few
+	// tests read the file's bytes, which is the point of those tests.
+	if os.Getenv("KICHAT_TEST_DBKEY") != "" {
+		st, err = OpenKeyed(path, testKey)
+	} else {
+		st, err = Open(path)
+	}
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

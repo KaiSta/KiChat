@@ -119,6 +119,9 @@ export namespace main {
   /** An opened archive waiting to be imported from. */
   export type BackupPreview = Plain<Gen.main.BackupPreview>
   export type BackupImportResult = Plain<Gen.main.BackupImportResult>
+
+  /** Whether the database is readable, and where its key is kept when it is. */
+  export type DatabaseStatus = Plain<Gen.main.DatabaseStatus>
 }
 
 export namespace research {

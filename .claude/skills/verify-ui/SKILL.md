@@ -46,6 +46,10 @@ Query flags, each of which exists because the state is otherwise unreachable:
 | `?upscaler=noarchive` | a platform with nothing published: the row says so where the button would be |
 | `?startwithapp=1` | the start-with-app switch |
 | `?missingmodel=1` | a chat pinned to a model the catalogue does not list: the notice above the composer and the switch it offers |
+| `?locked=1` | the unlock screen instead of the shell (the mock bridge always opens, so this state has no other way in) |
+| `?locked=setup` | the first launch with no keyring: the screen that creates the key, its length rule and the mismatch line |
+| `?locked=noKey` | an encrypted database whose key is gone: the reason line and the move-aside button |
+| `?locked=stale` | a keyring entry that does not open the database: the reason line, and the unlock screen rather than a failed start |
 
 `?server=restart` is computed from the stored command line rather than stored,
 which is what makes a save under a running server raise the badge. The runtime and

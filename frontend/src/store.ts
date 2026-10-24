@@ -100,6 +100,11 @@ export interface Toast {
 interface State {
   ready: boolean
   bootError: string | null
+  /**
+   * Whether the database can be read, and why not. Null until the first answer
+   * arrives; the app shows the unlock screen while it is locked.
+   */
+  dbStatus: main.DatabaseStatus | null
 
   lang: Lang
   theme: 'dark' | 'light'
@@ -209,6 +214,7 @@ export const useStore = create<State>((set, get) => {
   return {
     ready: false,
     bootError: null,
+    dbStatus: null,
 
     lang: 'en',
     theme: 'dark',
@@ -248,16 +254,38 @@ export const useStore = create<State>((set, get) => {
 
     bootstrap: async () => {
       try {
+        // The database has to answer before settings do: a locked one refuses every
+        // other binding, and the unlock screen is the whole window until it opens.
+        const dbStatus = await App.GetDatabaseStatus()
+        set({ dbStatus })
+        if (dbStatus.locked) {
+          set({ ready: true, bootError: null })
+          return
+        }
         const settings = await App.GetSettings()
         // Settings may carry a hand-edited or older language value.
         const lang: Lang = asLang(settings.language)
         const theme = settings.theme === 'light' ? 'light' : 'dark'
         applyTheme(theme)
         // The translator is replaced alongside the language it speaks, so every
-        // subscriber repaints.
-        set({ settings, lang, theme, ready: true, t: makeT(lang), tDynamic: makeTDynamic(lang) })
+        // subscriber repaints. bootError is cleared here because this run is a new
+        // attempt: after a locked start the unlock screen calls bootstrap again, and a
+        // stale error would replace the window it just opened.
+        set({
+          settings,
+          lang,
+          theme,
+          ready: true,
+          bootError: null,
+          t: makeT(lang),
+          tDynamic: makeTDynamic(lang),
+        })
 
-        wireEvents(set, get, clearStreaming, upsertMessage)
+        // The unlock screen calls bootstrap a second time, and a second wireEvents
+        // would subscribe every listener twice: each stream delta would be appended to
+        // the buffer twice and the reply would read double. Subscriptions are app-wide,
+        // not per bootstrap, so this is guarded.
+        wireEventsOnce(set, get, clearStreaming, upsertMessage)
 
         const [health, chats, models] = await Promise.all([
           App.GetHealth().catch(() => [] as llm.HealthStatus[]),
@@ -490,9 +518,23 @@ export const useStore = create<State>((set, get) => {
 })
 
 /**
- * Subscribe to backend events once. Wails keeps listeners for the lifetime of
- * the webview, so this is wired a single time during bootstrap.
+ * Subscribe to backend events once, however many times bootstrap runs. Wails keeps
+ * every listener for the lifetime of the webview, and bootstrap runs again after an
+ * unlock, so a second pass would double every stream delta.
  */
+let wired = false
+function wireEventsOnce(
+  set: (partial: Partial<State> | ((s: State) => Partial<State>)) => void,
+  get: () => State,
+  clearStreaming: (chatId: string) => void,
+  upsertMessage: (message: storeTypes.Message) => void,
+) {
+  if (wired) return
+  wired = true
+  wireEvents(set, get, clearStreaming, upsertMessage)
+}
+
+/** Subscribe to backend events. wireEventsOnce is what the app calls. */
 function wireEvents(
   set: (partial: Partial<State> | ((s: State) => Partial<State>)) => void,
   get: () => State,

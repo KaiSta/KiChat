@@ -1,0 +1,308 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"kichat/internal/config"
+	"kichat/internal/dbkey"
+	"kichat/internal/secret"
+	"kichat/internal/store"
+)
+
+// databaseTestEnv points config.DataDir at a temporary directory and returns a
+// constructor for Apps rooted there. The key store is isolated and the secret store is
+// isolated, because both real ones touch the per-user keyring.
+func databaseTestEnv(t *testing.T) func() *App {
+	t.Helper()
+	root := t.TempDir()
+	// os.UserConfigDir reads a different variable per platform, and getting this wrong
+	// on Windows would run these tests against the real ~/.config equivalent — the one
+	// thing a test must never touch.
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("AppData", root)
+	t.Setenv("HOME", root)
+	return func() *App {
+		a := &App{ctx: context.Background()}
+		a.newKeys = dbkey.NewIsolated
+		a.newSecrets = func(dir string) (*secret.Store, error) { return secret.NewIsolated(dir) }
+		return a
+	}
+}
+
+// TestFirstLaunchWithoutAKeyringAsksForAPassphrase walks the one path that creates a
+// key: no keyring, a plaintext database already on disk, and a passphrase that has to
+// do two jobs — become the key's only home, and carry the history across.
+func TestFirstLaunchWithoutAKeyringAsksForAPassphrase(t *testing.T) {
+	newApp := databaseTestEnv(t)
+	dir, err := config.DataDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "kichat.db")
+	plain, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := plain.DB().Exec(`INSERT INTO chats(id,title,created_at,updated_at) VALUES('c1','Kept',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := plain.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a := newApp()
+	if err := a.init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	status := a.GetDatabaseStatus()
+	if !status.Locked || !status.Setup {
+		t.Fatalf("status = %+v, want locked in setup mode", status)
+	}
+	if status.Keyring {
+		t.Fatal("the isolated key store reports a keyring")
+	}
+	if status.Reason != "db.reason.noKeyring" {
+		t.Errorf("reason = %q", status.Reason)
+	}
+	// Everything that needs the history refuses, and says so with a code the window
+	// can translate.
+	if err := a.ensure(); err == nil || !strings.Contains(err.Error(), "db.locked") {
+		t.Fatalf("ensure while locked = %v, want the db.locked code", err)
+	}
+	if _, err := a.ListChats(false); err == nil {
+		t.Fatal("ListChats worked while locked")
+	}
+	// A passphrase too short to be worth the KDF is refused before anything is
+	// written.
+	if err := a.UnlockDatabase("short"); err == nil {
+		t.Fatal("a short passphrase was accepted")
+	}
+	if a.GetDatabaseStatus().Recovery {
+		t.Fatal("a refused passphrase wrote a recovery file")
+	}
+
+	const passphrase = "a passphrase long enough"
+	if err := a.UnlockDatabase(passphrase); err != nil {
+		t.Fatalf("UnlockDatabase: %v", err)
+	}
+	status = a.GetDatabaseStatus()
+	if status.Locked || status.Setup || !status.Encrypted || !status.Recovery {
+		t.Fatalf("status after unlocking = %+v", status)
+	}
+	chats, err := a.ListChats(false)
+	if err != nil {
+		t.Fatalf("ListChats after unlocking: %v", err)
+	}
+	if len(chats) != 1 || chats[0].Title != "Kept" {
+		t.Fatalf("chats after migration = %+v, want the chat that was already there", chats)
+	}
+
+	// The file is ciphertext now, and the plaintext copy is gone.
+	if encrypted, err := store.IsEncrypted(dbPath); err != nil || !encrypted {
+		t.Fatalf("IsEncrypted = %v, %v", encrypted, err)
+	}
+	if _, err := store.Open(dbPath); err == nil {
+		t.Error("the database still opens as plaintext")
+	}
+
+	// A second launch starts locked and needs the same passphrase. The wrong one is
+	// refused without producing a new key, and the right one reopens the history.
+	b := newApp()
+	if err := b.init(); err != nil {
+		t.Fatalf("second init: %v", err)
+	}
+	if got := b.GetDatabaseStatus(); !got.Locked || got.Setup {
+		t.Fatalf("second status = %+v, want locked with a recovery key", got)
+	}
+	if err := b.UnlockDatabase("the wrong passphrase"); err == nil {
+		t.Fatal("a wrong passphrase opened the database")
+	}
+	if err := b.UnlockDatabase(passphrase); err != nil {
+		t.Fatalf("second UnlockDatabase: %v", err)
+	}
+	chats, err = b.ListChats(false)
+	if err != nil || len(chats) != 1 {
+		t.Fatalf("chats after the second unlock = %+v, %v", chats, err)
+	}
+}
+
+// TestAFailedUnlockKeepsTheKeyItMade covers the failure after the hard part: the key
+// has been generated, wrapped and used, and then building the services fails. The app
+// has to go back to a locked state that retries the *unlock* — not the setup path,
+// which would mint a second key and overwrite the only recovery copy.
+func TestAFailedUnlockKeepsTheKeyItMade(t *testing.T) {
+	newApp := databaseTestEnv(t)
+	a := newApp()
+	a.newSecrets = func(string) (*secret.Store, error) {
+		return nil, errors.New("no secret store")
+	}
+	if err := a.init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	const passphrase = "a passphrase long enough"
+	if err := a.UnlockDatabase(passphrase); err == nil {
+		t.Fatal("the unlock reported success although the services could not be built")
+	}
+	status := a.GetDatabaseStatus()
+	if !status.Locked || status.Setup {
+		t.Fatalf("status after a failed unlock = %+v, want locked and not in setup mode", status)
+	}
+	if !status.Encrypted || !status.Recovery {
+		t.Fatalf("status after a failed unlock = %+v, want the encrypted file and its copy", status)
+	}
+	dir, err := config.DataDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := os.ReadFile(filepath.Join(dir, dbkey.FileName))
+	if err != nil {
+		t.Fatalf("read the recovery key: %v", err)
+	}
+
+	a.newSecrets = func(dir string) (*secret.Store, error) { return secret.NewIsolated(dir) }
+	if err := a.UnlockDatabase(passphrase); err != nil {
+		t.Fatalf("retry with the same passphrase: %v", err)
+	}
+	if a.GetDatabaseStatus().Locked {
+		t.Fatal("still locked after a successful retry")
+	}
+	again, err := os.ReadFile(filepath.Join(dir, dbkey.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(wrapped, again) {
+		t.Error("the recovery key was rewritten, so the retry created a second key")
+	}
+	// And the database it opens is the one the first attempt encrypted.
+	if _, err := a.ListChats(false); err != nil {
+		t.Fatalf("ListChats after the retry: %v", err)
+	}
+}
+
+// TestPassphraseActionsRefuseToStrandTheDatabase pins the two refusals that keep a
+// user from deleting the only way into their history.
+func TestPassphraseActionsRefuseToStrandTheDatabase(t *testing.T) {
+	newApp := databaseTestEnv(t)
+	a := newApp()
+	if err := a.init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UnlockDatabase("a passphrase long enough"); err != nil {
+		t.Fatal(err)
+	}
+
+	// There is no keyring here, so removing the recovery copy would leave no key at
+	// all on the next launch.
+	if err := a.RemoveDatabasePassphrase(); err == nil || !strings.Contains(err.Error(), "db.needKeyring") {
+		t.Fatalf("RemoveDatabasePassphrase without a keyring = %v", err)
+	}
+	if err := a.RemoveDatabaseKeyring(); err == nil || !strings.Contains(err.Error(), "db.noKeyring") {
+		t.Fatalf("RemoveDatabaseKeyring without a keyring = %v", err)
+	}
+	// Replacing the passphrase keeps the same history readable.
+	if err := a.SetDatabasePassphrase("another passphrase here"); err != nil {
+		t.Fatalf("SetDatabasePassphrase: %v", err)
+	}
+	b := newApp()
+	if err := b.init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.UnlockDatabase("a passphrase long enough"); err == nil {
+		t.Fatal("the replaced passphrase still opens the database")
+	}
+	if err := b.UnlockDatabase("another passphrase here"); err != nil {
+		t.Fatalf("the new passphrase does not open the database: %v", err)
+	}
+}
+
+// TestStartFreshMovesAnUnreadableDatabaseAside is the last resort: an encrypted
+// database with no recovery copy and no keyring can never be opened, and the app has
+// to be usable again without deleting anything.
+func TestStartFreshMovesAnUnreadableDatabaseAside(t *testing.T) {
+	newApp := databaseTestEnv(t)
+	a := newApp()
+	if err := a.init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UnlockDatabase("a passphrase long enough"); err != nil {
+		t.Fatal(err)
+	}
+	// Written through the store rather than CreateChat: the bound method emits an
+	// event, and a Wails emit needs the real lifecycle context.
+	now := time.Now().UnixMilli()
+	if _, err := a.store.DB().Exec(`INSERT INTO chats(id,title,created_at,updated_at) VALUES('gone','Gone',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	dir := a.dataDir
+	if err := a.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Neither place has the key any more, which is the state a user reaches after a
+	// keyring reset with no passphrase.
+	if err := os.Remove(filepath.Join(dir, dbkey.FileName)); err != nil {
+		t.Fatal(err)
+	}
+	a.store = nil
+
+	b := newApp()
+	if err := b.init(); err != nil {
+		t.Fatal(err)
+	}
+	status := b.GetDatabaseStatus()
+	if !status.Locked || status.Reason != "db.reason.noKey" {
+		t.Fatalf("status = %+v, want locked with no key", status)
+	}
+	if status.Recovery {
+		t.Fatal("a recovery key is reported for a database that has none")
+	}
+	if err := b.UnlockDatabase("a passphrase long enough"); err == nil {
+		t.Fatal("a passphrase opened a database whose key is gone")
+	}
+	if err := b.StartFreshDatabase(); err != nil {
+		t.Fatalf("StartFreshDatabase: %v", err)
+	}
+	if got := b.GetDatabaseStatus(); !got.Locked || !got.Setup {
+		t.Fatalf("status after a fresh start = %+v, want setup mode", got)
+	}
+	if err := b.UnlockDatabase("a fresh passphrase"); err != nil {
+		t.Fatalf("UnlockDatabase after a fresh start: %v", err)
+	}
+	chats, err := b.ListChats(false)
+	if err != nil {
+		t.Fatalf("ListChats: %v", err)
+	}
+	if len(chats) != 0 {
+		t.Fatalf("a fresh database has %d chats", len(chats))
+	}
+	// Nothing was deleted: the old database and its key are beside the new one.
+	orphans, err := filepath.Glob(filepath.Join(dir, "kichat.db.*.orphaned"))
+	if err != nil || len(orphans) == 0 {
+		t.Fatalf("orphaned database not found: %v, %v", orphans, err)
+	}
+	// A recovery key that does exist is moved aside with the database, so a later
+	// attempt with that passphrase can still open the old file by hand.
+	c := newApp()
+	if err := c.init(); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.GetDatabaseStatus(); !got.Locked || !got.Recovery {
+		t.Fatalf("status before the second fresh start = %+v", got)
+	}
+	if err := c.StartFreshDatabase(); err != nil {
+		t.Fatalf("second StartFreshDatabase: %v", err)
+	}
+	if keys, _ := filepath.Glob(filepath.Join(dir, "kichat.key.*.orphaned")); len(keys) == 0 {
+		t.Error("the recovery key was not kept beside the orphaned database")
+	}
+}
