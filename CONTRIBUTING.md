@@ -58,11 +58,11 @@ go run ./tools/uiharness      # http://127.0.0.1:8791/
 - **User-facing strings go through [`frontend/src/lib/i18n.ts`](frontend/src/lib/i18n.ts)**
   in all three languages (English, German, Chinese). A hardcoded label is a
   bug.
-- **A vendor fact belongs in its system document** — [`GROQ.md`](GROQ.md),
-  [`NVIDIA.md`](NVIDIA.md), [`MISTRAL.md`](MISTRAL.md),
-  [`DEEPSEEK.md`](DEEPSEEK.md), [`LLAMACPP.md`](LLAMACPP.md),
-  [`IMAGES.md`](IMAGES.md), [`RESEARCH.md`](RESEARCH.md) — not duplicated in
-  the README.
+- **A vendor fact belongs in its system document** — [`GROQ.md`](documentation/GROQ.md),
+  [`NVIDIA.md`](documentation/NVIDIA.md), [`MISTRAL.md`](documentation/MISTRAL.md),
+  [`DEEPSEEK.md`](documentation/DEEPSEEK.md), [`LLAMACPP.md`](documentation/LLAMACPP.md),
+  [`IMAGES.md`](documentation/IMAGES.md), [`RESEARCH.md`](documentation/RESEARCH.md) —
+  not duplicated in the README.
 - **After changing a Go struct that crosses the bridge**, build before
   type-checking the frontend: `wails build` regenerates
   `frontend/wailsjs/go/models.ts`.

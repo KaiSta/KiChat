@@ -12,7 +12,7 @@ session, so it stays short and points at three places instead of repeating them:
 
 | Read | For |
 | --- | --- |
-| [`CODE_MAP.md`](CODE_MAP.md) | where any package, file or extension point lives, and the request lifecycle |
+| [`CODE_MAP.md`](documentation/CODE_MAP.md) | where any package, file or extension point lives, and the request lifecycle |
 | [`.claude/skills/`](.claude/skills) | the procedures — one per recurring task, loaded only when used |
 | the subsystem documents (bottom of this file) | the measured facts behind each backend or feature |
 
@@ -47,7 +47,7 @@ Linux build needs `-tags webkit2_41`** because only webkit2gtk-4.1 is installed.
 | `internal/uimsg` | a user-facing message from Go as a dictionary key (`i18n:` payload, `err.*` entries) |
 | `frontend/src` | the window; `lib/i18n.ts` holds every user-facing string |
 
-[`CODE_MAP.md`](CODE_MAP.md) has the per-file detail, the storage schema, and a
+[`CODE_MAP.md`](documentation/CODE_MAP.md) has the per-file detail, the storage schema, and a
 table mapping "to add X, touch Y" to the right skill.
 
 ## Skills
@@ -237,19 +237,19 @@ instead of the result.
 
 | Document | What it holds |
 | --- | --- |
-| [`PLAN.md`](PLAN.md) | the architecture, and the reasoning behind it |
-| [`COMPACT.md`](COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
-| [`RESEARCH.md`](RESEARCH.md) | search and scraping: providers, refusals, guards, budgets |
-| [`IMAGES.md`](IMAGES.md) | picture generation: three server kinds, parameters, profiles, verification |
-| [`IMAGES-CLOUD.md`](IMAGES-CLOUD.md) | hosted picture backends: which free tiers exist, what each would cost, and the one that was built (NVIDIA NIM) |
-| [`UPSCALING.md`](UPSCALING.md) | enlarging a picture: the resampler, Real-ESRGAN, targets, the Enlarge panel |
-| [`LLAMACPP.md`](LLAMACPP.md) | the llama.cpp provider and managed runtime, projectors, ternary models |
-| [`GROQ.md`](GROQ.md) | the Groq backend: listing, ceiling, pacing, refusals |
-| [`NVIDIA.md`](NVIDIA.md) | the build.nvidia.com backend and its availability check |
-| [`MISTRAL.md`](MISTRAL.md) | the Mistral backend, alias collapse, typed chunks |
-| [`DEEPSEEK.md`](DEEPSEEK.md) | the DeepSeek backend, reasoning content, refusals |
-| [`ENCRYPTION.md`](ENCRYPTION.md) | the encrypted database: page-level encryption, the key and its recovery copy, the migration, the tests, and what the driver forced us to change |
-| [`CODE_MAP.md`](CODE_MAP.md) | where the code is, and the extension points |
+| [`PLAN.md`](documentation/PLAN.md) | the architecture, and the reasoning behind it |
+| [`COMPACT.md`](documentation/COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
+| [`RESEARCH.md`](documentation/RESEARCH.md) | search and scraping: providers, refusals, guards, budgets |
+| [`IMAGES.md`](documentation/IMAGES.md) | picture generation: three server kinds, parameters, profiles, verification |
+| [`IMAGES-CLOUD.md`](documentation/IMAGES-CLOUD.md) | hosted picture backends: which free tiers exist, what each would cost, and the one that was built (NVIDIA NIM) |
+| [`UPSCALING.md`](documentation/UPSCALING.md) | enlarging a picture: the resampler, Real-ESRGAN, targets, the Enlarge panel |
+| [`LLAMACPP.md`](documentation/LLAMACPP.md) | the llama.cpp provider and managed runtime, projectors, ternary models |
+| [`GROQ.md`](documentation/GROQ.md) | the Groq backend: listing, ceiling, pacing, refusals |
+| [`NVIDIA.md`](documentation/NVIDIA.md) | the build.nvidia.com backend and its availability check |
+| [`MISTRAL.md`](documentation/MISTRAL.md) | the Mistral backend, alias collapse, typed chunks |
+| [`DEEPSEEK.md`](documentation/DEEPSEEK.md) | the DeepSeek backend, reasoning content, refusals |
+| [`ENCRYPTION.md`](documentation/ENCRYPTION.md) | the encrypted database: page-level encryption, the key and its recovery copy, the migration, the tests, and what the driver forced us to change |
+| [`CODE_MAP.md`](documentation/CODE_MAP.md) | where the code is, and the extension points |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | pull requests, the CLA, commit style |
 
 Each one distinguishes what was observed from what is expected. When you measure

@@ -10,7 +10,7 @@ Two rules keep this useful:
   probably belongs in a new package, not in the nearest one.
 - **The map points, it does not explain.** *Why* a thing is the way it is lives
   in the system document for that subsystem (see the table at the bottom of
-  [`AGENTS.md`](AGENTS.md)) or in the package's doc comment.
+  [`AGENTS.md`](../AGENTS.md)) or in the package's doc comment.
 
 ## The shape of the app
 
@@ -120,9 +120,9 @@ progress uses a name from `internal/events`.
 
 | To add… | Touch | Skill |
 | --- | --- | --- |
-| A chat backend (hosted API) | `internal/llm/<name>.go`, `registry.go`, `DefaultBackendConfigs`, `settings/BackendsTab.tsx` kind lists, docs | [`add-llm-backend`](.claude/skills/add-llm-backend/SKILL.md) |
-| An image backend | `internal/images/<name>.go` implementing `Provider`, `images.Provider` construction in `app.go`, settings | [`add-image-backend`](.claude/skills/add-image-backend/SKILL.md) |
-| A setting | `internal/config/config.go` (+ `clone_test.go`), the settings UI, i18n | [`change-settings`](.claude/skills/change-settings/SKILL.md) |
+| A chat backend (hosted API) | `internal/llm/<name>.go`, `registry.go`, `DefaultBackendConfigs`, `settings/BackendsTab.tsx` kind lists, docs | [`add-llm-backend`](../.claude/skills/add-llm-backend/SKILL.md) |
+| An image backend | `internal/images/<name>.go` implementing `Provider`, `images.Provider` construction in `app.go`, settings | [`add-image-backend`](../.claude/skills/add-image-backend/SKILL.md) |
+| A setting | `internal/config/config.go` (+ `clone_test.go`), the settings UI, i18n | [`change-settings`](../.claude/skills/change-settings/SKILL.md) |
 | An enlarging method | `internal/images/upscale.go` (`Method*`, the switch in `Upscale`), the Enlarge panel, i18n | [`UPSCALING.md`](UPSCALING.md) |
 | A tool the model can call | `internal/tools/tools.go` (`Definitions` + execution), `internal/chat` if it needs a round | — |
 | A tool result condensed before the model reads it | `internal/chat/digest.go` (the gate, cache and escape hatch), `toolOutputBudget.take` in `generate.go`, `config.DigestSettings` | [`COMPACT.md`](COMPACT.md) §17 |
@@ -135,7 +135,7 @@ progress uses a name from `internal/events`.
 | --- | --- | --- |
 | Unit | `*_test.go` beside the package | behaviour of one package, no network |
 | Bridge/JSON | `*_test.go` **at the repo root** | the shapes the frontend receives — `runtime_status_test.go` pins the null-vs-empty case |
-| Live | `live_*_test.go`, gated by `KICHAT_LIVE=1` | the real service, metered; see [`live-tests`](.claude/skills/live-tests/SKILL.md) |
+| Live | `live_*_test.go`, gated by `KICHAT_LIVE=1` | the real service, metered; see [`live-tests`](../.claude/skills/live-tests/SKILL.md) |
 | Renderer | `tools/streamcheck/check.mjs` | every prefix of a reply renders identically streaming and settled |
 | UI | `tools/uiharness` | rendering, state flow and event wiring against a mocked bridge |
 

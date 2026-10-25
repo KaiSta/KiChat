@@ -8,12 +8,12 @@ description: Use when adding a chat backend or changing how an existing one list
 Read the closest existing backend first. They are not identical, and which one is
 closest tells you the shape you need:
 
-- `GROQ.md` — a rich listing (window, modalities, features), a free-tier budget,
-  two entries that cannot stream. Start here for a hosted OpenAI-compatible API.
-- `NVIDIA.md` — a four-field listing that publishes no window, and an availability
-  check that hides what the account cannot call.
-- `MISTRAL.md` — an alias-collapsed catalogue and typed content chunks.
-- `DEEPSEEK.md` — `reasoning_content` and its refusals.
+- `documentation/GROQ.md` — a rich listing (window, modalities, features), a free-tier
+  budget, two entries that cannot stream. Start here for a hosted OpenAI-compatible API.
+- `documentation/NVIDIA.md` — a four-field listing that publishes no window, and an
+  availability check that hides what the account cannot call.
+- `documentation/MISTRAL.md` — an alias-collapsed catalogue and typed content chunks.
+- `documentation/DEEPSEEK.md` — `reasoning_content` and its refusals.
 
 ## Where a backend lives
 
@@ -61,10 +61,10 @@ closest tells you the shape you need:
    `KICHAT_LIVE` plus its own variable, skips cleanly without one, and asserts
    only what the live service can settle — see the `live-tests` skill.
 
-7. **Docs.** A new `<NAME>.md` following `GROQ.md`'s structure (what it adds,
-   turning it on, the listing, the stream, refusals, where the code is, how it is
-   verified, known gaps), a row in the README's provider table, a line in
-   `AGENTS.md`'s doc index.
+7. **Docs.** A new `documentation/<NAME>.md` following `documentation/GROQ.md`'s
+   structure (what it adds, turning it on, the listing, the stream, refusals, where the
+   code is, how it is verified, known gaps), a row in the README's provider table, a line
+   in `AGENTS.md`'s doc index.
 
 8. **Checks.** `make check`, then the live test with a real key.
 

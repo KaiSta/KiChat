@@ -27,7 +27,7 @@ OpenAI-compatible, so **nothing in the chat path is new**: streaming, tools, `ma
 cannot answer without a key, and a model listing that is sparse in a way no other backend's
 is — which is the whole of §3.
 
-The work is one file ([internal/llm/nvidia.go](internal/llm/nvidia.go)) plus a
+The work is one file ([internal/llm/nvidia.go](../internal/llm/nvidia.go)) plus a
 `flavourNvidia` branch in the shared listing mapper, a shipped-but-disabled entry in
 `DefaultBackendConfigs`, and the settings wiring. It follows the shape DeepSeek established:
 `requiresKey`, `ErrMissingAPIKey` reported instead of attempting a call with no credential,
@@ -54,7 +54,7 @@ to the secret store through `llm.BackendAPIKeyName("nvidia")` (`internal/secret`
 `build.nvidia.com`, and the field is marked required because nothing works without one.
 
 There is no migration. `normalise()`
-([internal/config/config.go:491](internal/config/config.go#L491)) appends the shipped entry
+([internal/config/config.go:491](../internal/config/config.go#L491)) appends the shipped entry
 to a settings blob that predates it and repairs an empty address from
 `llm.NvidiaDefaultBaseURL`, which is also what the settings field displays so it shows the
 address the app would actually use.
@@ -78,7 +78,7 @@ exactly four fields, and `created` is the same placeholder value on all 80:
 
 `GET /v1/models/<id>` is **not** a richer route — it answers the same four fields
 *(measured)* — so there is no per-model metadata to fetch either. `fromNvidiaEntry`
-([internal/llm/nvidia.go:121](internal/llm/nvidia.go#L121)) maps what there is:
+([internal/llm/nvidia.go:121](../internal/llm/nvidia.go#L121)) maps what there is:
 
 | field | becomes | note |
 | --- | --- | --- |
@@ -129,7 +129,7 @@ would be wrong in the direction that matters: it would hide a working model from
 that owns it. The row is offered, and a model the account cannot call fails on send with the
 vendor's own message — which `HTTPError` carries to the toast verbatim.
 `TestNvidiaAccountRefusalKeepsTheVendorDetail`
-([internal/llm/nvidia_test.go:268](internal/llm/nvidia_test.go#L268)) pins that, because the
+([internal/llm/nvidia_test.go:268](../internal/llm/nvidia_test.go#L268)) pins that, because the
 status alone would read as "the backend is broken" rather than "this model is not yours".
 
 The cost of that decision is a picker longer than the list of models that will answer, and it
@@ -166,7 +166,7 @@ Only a non-retryable refusal is evidence about the *model*. A throttle and a ser
 things that happen to a working model, and treating either as a verdict would blacklist a good
 model for as long as nobody noticed — the failure mode that makes an automatic filter worse
 than no filter. `TestProbeSeparatesARefusalFromATemporaryFailure`
-([internal/llm/probe_test.go:90](internal/llm/probe_test.go#L90)) pins the whole table,
+([internal/llm/probe_test.go:90](../internal/llm/probe_test.go#L90)) pins the whole table,
 including that a refused model is asked **once** while a throttled one carries the provider's
 own retries, and that a stopped sweep leaves the models it never reached with *no* verdict at
 all rather than with "not usable".
@@ -180,7 +180,7 @@ misconfiguration. It is reported as its own verdict (`ReasonAllRefused`) instead
 The result is stored, not re-derived: `HiddenModels` in the settings blob, keyed
 `backend/model` the way `ModelOverrides` is, because a check that costs 80 requests must
 survive a restart. It is consulted in `App.visibleModels`
-([app.go:761](app.go#L761), the filter itself at [app.go:773](app.go#L773)) rather than in
+([app.go:761](../app.go#L761), the filter itself at [app.go:773](../app.go#L773)) rather than in
 the provider — every listing path goes through
 that one function, so one filter covers the picker, the budget preview and the default model
 of a new chat, and the provider keeps reporting what the vendor really publishes. Hiding is a
@@ -189,7 +189,7 @@ resolves it, which `TestTheAvailabilityCheckHidesWhatTheAccountCannotCall` asser
 lists.
 
 No control in Settings edits the blacklist, so no draft the panel sends carries one;
-`SaveSettings` reads the recorded list instead ([api.go:84](api.go#L84)), the same way it does
+`SaveSettings` reads the recorded list instead ([api.go:84](../api.go#L84)), the same way it does
 for the installed llama.cpp build. Without that, saving the theme would put every hidden model
 back. `TestAnUnrelatedSaveKeepsTheHiddenModels` is the test.
 
@@ -205,7 +205,7 @@ with two models hidden so the footer is on screen, `?check=clear` is the zero ca
 ### Tools are claimed, thinking and vision are not
 
 Tools are appended unconditionally
-([internal/llm/nvidia.go:121](internal/llm/nvidia.go#L121)), the same claim DeepSeek makes
+([internal/llm/nvidia.go:121](../internal/llm/nvidia.go#L121)), the same claim DeepSeek makes
 and for the same reason: `engine.go` only uses the native tool protocol for a model that
 claims it, so leaving the claim off would silently cost every model here its tools. The live
 test is what keeps the claim honest — it asserts a real tool call streams.
@@ -271,27 +271,27 @@ passed through unedited.
 
 | file | symbol | what it does |
 | --- | --- | --- |
-| [internal/llm/nvidia.go:67](internal/llm/nvidia.go#L67) | `NvidiaDefaultBaseURL` | `https://integrate.api.nvidia.com/v1` — the `/v1` is part of the address |
-| [internal/llm/nvidia.go:71](internal/llm/nvidia.go#L71) | `newNvidiaProvider` | the provider: one chat path, `/models`, `flavourNvidia`, `requiresKey`, and the bare-host completion |
-| [internal/llm/nvidia.go:110](internal/llm/nvidia.go#L110) | `nvidiaModelEntry` | two fields read of the four sent; `object` and `created` are deliberately not decoded |
-| [internal/llm/nvidia.go:121](internal/llm/nvidia.go#L121) | `fromNvidiaEntry` | one entry → `ModelInfo`. No second return value: there is nothing to drop |
-| [internal/llm/nvidia.go:157](internal/llm/nvidia.go#L157) | `mapNvidiaEntries` | entry by entry; an entry with no id is skipped rather than offered nameless |
-| [internal/llm/openai.go:127](internal/llm/openai.go#L127) | `flavourNvidia` | the listing flavour, dispatched at [openai.go:274](internal/llm/openai.go#L274) |
-| [internal/llm/registry.go:115](internal/llm/registry.go#L115) | `Reconfigure` | `case "nvidia"` builds the provider |
-| [internal/llm/registry.go:418](internal/llm/registry.go#L418) | `DefaultBackendConfigs` | the shipped row: `nvidia`, disabled |
-| [internal/config/config.go:491](internal/config/config.go#L491) | `normalise` | restores the address for an entry saved without one |
-| [frontend/src/components/Settings.tsx:1412](frontend/src/components/Settings.tsx#L1412) | the backend row | `kind === 'nvidia'` gets the key field, with the field marked required |
-| [internal/llm/probe.go:82](internal/llm/probe.go#L82) | `ProbeModels` | the sweep: one token per model, bounded workers, the listing's order kept |
-| [internal/llm/probe.go:159](internal/llm/probe.go#L159) | `classifyProbeFailure` | §3's verdict table in one function — retryable first, then the refusal |
-| [api.go:1274](api.go#L1274) | `StartModelCheck` | starts the sweep and returns while it runs; `GetModelCheckStatus` ([api.go:1353](api.go#L1353)) is the poll |
-| [api.go:1384](api.go#L1384) | `applyModelProbes` | the verdicts, the all-refused guard, and the write to the settings blob |
-| [api.go:1461](api.go#L1461) | `ClearHiddenModels` | the undo behind the footer's button |
-| [app.go:773](app.go#L773) | `visibleModels` | where the blacklist is applied — one chokepoint for every listing |
-| [internal/config/config.go:50](internal/config/config.go#L50) | `HiddenModels` | the stored set; `normalise` deduplicates it |
-| [frontend/src/components/ModelSwitcher.tsx:402](frontend/src/components/ModelSwitcher.tsx#L402) | `runCheck` | the button, the progress label and the footer, all in the picker |
+| [internal/llm/nvidia.go:67](../internal/llm/nvidia.go#L67) | `NvidiaDefaultBaseURL` | `https://integrate.api.nvidia.com/v1` — the `/v1` is part of the address |
+| [internal/llm/nvidia.go:71](../internal/llm/nvidia.go#L71) | `newNvidiaProvider` | the provider: one chat path, `/models`, `flavourNvidia`, `requiresKey`, and the bare-host completion |
+| [internal/llm/nvidia.go:110](../internal/llm/nvidia.go#L110) | `nvidiaModelEntry` | two fields read of the four sent; `object` and `created` are deliberately not decoded |
+| [internal/llm/nvidia.go:121](../internal/llm/nvidia.go#L121) | `fromNvidiaEntry` | one entry → `ModelInfo`. No second return value: there is nothing to drop |
+| [internal/llm/nvidia.go:157](../internal/llm/nvidia.go#L157) | `mapNvidiaEntries` | entry by entry; an entry with no id is skipped rather than offered nameless |
+| [internal/llm/openai.go:127](../internal/llm/openai.go#L127) | `flavourNvidia` | the listing flavour, dispatched at [openai.go:274](../internal/llm/openai.go#L274) |
+| [internal/llm/registry.go:115](../internal/llm/registry.go#L115) | `Reconfigure` | `case "nvidia"` builds the provider |
+| [internal/llm/registry.go:418](../internal/llm/registry.go#L418) | `DefaultBackendConfigs` | the shipped row: `nvidia`, disabled |
+| [internal/config/config.go:491](../internal/config/config.go#L491) | `normalise` | restores the address for an entry saved without one |
+| [frontend/src/components/Settings.tsx:1412](../frontend/src/components/settings/BackendsTab.tsx) | the backend row | `kind === 'nvidia'` gets the key field, with the field marked required |
+| [internal/llm/probe.go:82](../internal/llm/probe.go#L82) | `ProbeModels` | the sweep: one token per model, bounded workers, the listing's order kept |
+| [internal/llm/probe.go:159](../internal/llm/probe.go#L159) | `classifyProbeFailure` | §3's verdict table in one function — retryable first, then the refusal |
+| [api.go:1274](../api.go#L1274) | `StartModelCheck` | starts the sweep and returns while it runs; `GetModelCheckStatus` ([api.go:1353](../api.go#L1353)) is the poll |
+| [api.go:1384](../api.go#L1384) | `applyModelProbes` | the verdicts, the all-refused guard, and the write to the settings blob |
+| [api.go:1461](../api.go#L1461) | `ClearHiddenModels` | the undo behind the footer's button |
+| [app.go:773](../app.go#L773) | `visibleModels` | where the blacklist is applied — one chokepoint for every listing |
+| [internal/config/config.go:50](../internal/config/config.go#L50) | `HiddenModels` | the stored set; `normalise` deduplicates it |
+| [frontend/src/components/ModelSwitcher.tsx:402](../frontend/src/components/ModelSwitcher.tsx#L402) | `runCheck` | the button, the progress label and the footer, all in the picker |
 
 `openAICompatProvider.modelsFlavour` gained `flavourNvidia`, and `mapModelEntries`
-([internal/llm/openai.go:274](internal/llm/openai.go#L274)) dispatches the whole list to
+([internal/llm/openai.go:274](../internal/llm/openai.go#L274)) dispatches the whole list to
 `mapNvidiaEntries` for that flavour rather than mapping entry by entry in place — the same
 shape Mistral's branch uses, so the "whole list, or one entry" split has one home.
 
@@ -371,7 +371,7 @@ discovering refusals, and the subset a given key can reach is not a fact about t
    forward the refusal it got from `compactWith`, which emits an `events.Warning` the UI turns
    into a toast — so a working NVIDIA chat showed *"Kontextfenster des Modells ist unbekannt"*
    on every single message, for as long as no override was set. The fix is in
-   [internal/chat/maintenance.go:168](internal/chat/maintenance.go#L168): an unknown window is a
+   [internal/chat/maintenance.go:168](../internal/chat/maintenance.go#L168): an unknown window is a
    standing fact about the model, not an incident, so the automatic path returns before
    `compactWith` and leaves the condition to the meter and the inspector, while the manual path
    keeps the explicit refusal because there the user asked. `COMPACT.md` §4 and §13 record the

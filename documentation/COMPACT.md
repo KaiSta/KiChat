@@ -1062,10 +1062,10 @@ bound that remains is the tool budget: a condensation still passes through
 
 ### 17.3 Where it plugs in
 
-`runTool` ([generate.go:341](internal/chat/generate.go#L341)) hands the result through
-`condenseToolOutput` ([digest.go:199](internal/chat/digest.go#L199)) immediately before
+`runTool` ([generate.go:341](../internal/chat/generate.go#L341)) hands the result through
+`condenseToolOutput` ([digest.go:199](../internal/chat/digest.go#L199)) immediately before
 `budget.take`, so the budget is charged for what the model actually receives. The call
-itself reuses `extractWithBudget` ([compact.go:673](internal/chat/compact.go#L673)) — the
+itself reuses `extractWithBudget` ([compact.go:673](../internal/chat/compact.go#L673)) — the
 retry that survives a reasoning model spending its cap on thinking is the same failure
 here — with its own prompt, the configured cap and thinking switched off where the
 backend allows it.

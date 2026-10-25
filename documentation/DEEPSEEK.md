@@ -56,7 +56,7 @@ asserted by `internal/config/config_test.go` (it sets the key in an isolated sec
 saves the settings, and reads the key back out).
 
 There is no migration. `normalise()`
-([internal/config/config.go:491](internal/config/config.go#L491)) appends any shipped
+([internal/config/config.go:491](../internal/config/config.go#L491)) appends any shipped
 backend that is missing and repairs an empty address, which is how the entry reaches an
 installation that predates it.
 
@@ -74,7 +74,7 @@ denominator OpenAI listing does. One entry, trimmed:
  "effort":{"supported_levels":["low","high","max"],"default_level":"high"}}
 ```
 
-`fromDeepSeekEntry` ([internal/llm/deepseek.go:75](internal/llm/deepseek.go#L75)) maps it:
+`fromDeepSeekEntry` ([internal/llm/deepseek.go:75](../internal/llm/deepseek.go#L75)) maps it:
 
 | field | becomes | note |
 | --- | --- | --- |
@@ -130,7 +130,7 @@ the finish frame or sends a usage-only frame after it.
 ## 5. The two chat paths
 
 `DeepSeekDefaultBaseURL` is `https://api.deepseek.com`, and `newDeepSeekProvider`
-([internal/llm/deepseek.go:32](internal/llm/deepseek.go#L32)) configures **both** routes:
+([internal/llm/deepseek.go:32](../internal/llm/deepseek.go#L32)) configures **both** routes:
 
 ```
 {base}/chat/completions        the documented path
@@ -165,19 +165,19 @@ test if the server is reached at all.
 
 | file | symbol | what it does |
 | --- | --- | --- |
-| [internal/llm/deepseek.go:22](internal/llm/deepseek.go#L22) | `DeepSeekDefaultBaseURL` | `https://api.deepseek.com` |
-| [internal/llm/deepseek.go:28](internal/llm/deepseek.go#L28) | `ErrMissingAPIKey` | the deliberate refusal, shared with Mistral |
-| [internal/llm/deepseek.go:32](internal/llm/deepseek.go#L32) | `newDeepSeekProvider` | both chat paths, the listing, `flavourDeepSeek`, `requiresKey` |
-| [internal/llm/deepseek.go:62](internal/llm/deepseek.go#L62) | `deepSeekModelEntry` | one listing entry, with the window and the modalities |
-| [internal/llm/deepseek.go:75](internal/llm/deepseek.go#L75) | `fromDeepSeekEntry` | entry → `ModelInfo`, including the unconditional tool claim |
-| [internal/llm/openai.go:103](internal/llm/openai.go#L103) | `flavourDeepSeek` | selects the mapper in `mapModelEntries` |
-| [internal/llm/registry.go:106](internal/llm/registry.go#L106) | `Reconfigure` | `case "deepseek"` builds the provider |
-| [internal/llm/registry.go:375](internal/llm/registry.go#L375) | `DefaultBackendConfigs` | the shipped row: `deepseek`, disabled |
-| [internal/config/config.go:491](internal/config/config.go#L491) | `normalise` | repairs an empty address for an existing install |
+| [internal/llm/deepseek.go:22](../internal/llm/deepseek.go#L22) | `DeepSeekDefaultBaseURL` | `https://api.deepseek.com` |
+| [internal/llm/deepseek.go:28](../internal/llm/deepseek.go#L28) | `ErrMissingAPIKey` | the deliberate refusal, shared with Mistral |
+| [internal/llm/deepseek.go:32](../internal/llm/deepseek.go#L32) | `newDeepSeekProvider` | both chat paths, the listing, `flavourDeepSeek`, `requiresKey` |
+| [internal/llm/deepseek.go:62](../internal/llm/deepseek.go#L62) | `deepSeekModelEntry` | one listing entry, with the window and the modalities |
+| [internal/llm/deepseek.go:75](../internal/llm/deepseek.go#L75) | `fromDeepSeekEntry` | entry → `ModelInfo`, including the unconditional tool claim |
+| [internal/llm/openai.go:103](../internal/llm/openai.go#L103) | `flavourDeepSeek` | selects the mapper in `mapModelEntries` |
+| [internal/llm/registry.go:106](../internal/llm/registry.go#L106) | `Reconfigure` | `case "deepseek"` builds the provider |
+| [internal/llm/registry.go:375](../internal/llm/registry.go#L375) | `DefaultBackendConfigs` | the shipped row: `deepseek`, disabled |
+| [internal/config/config.go:491](../internal/config/config.go#L491) | `normalise` | repairs an empty address for an existing install |
 
 The frontend needs nothing of its own: the API-key field and the "required" placeholder are
 driven by `backend.kind === 'deepseek'` in
-[frontend/src/components/Settings.tsx:1371](frontend/src/components/Settings.tsx#L1371), the
+[frontend/src/components/Settings.tsx:1371](../frontend/src/components/settings/BackendsTab.tsx), the
 same branch Mistral joined.
 
 ---

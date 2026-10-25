@@ -5,9 +5,9 @@ description: Use when adding a picture-generation backend, or changing the draw 
 
 # Adding an image backend
 
-Read `IMAGES.md` first — §2 (the three server kinds and the shared route), §3
-(parameters: model-decided, server default, or fixed in Settings), §5 (progress and
-stopping), §8 (how it is verified). The interface was written for this: it holds a
+Read `documentation/IMAGES.md` first — §2 (the three server kinds and the shared
+route), §3 (parameters: model-decided, server default, or fixed in Settings), §5
+(progress and stopping), §8 (how it is verified). The interface was written for this: it holds a
 WebUI client, a one-shot CLI and a managed server at once.
 
 ## The interface
@@ -84,4 +84,4 @@ Two optional interfaces, and they are optional on purpose:
 - A picture decodes to real bytes through `SniffImage`, with the right MIME type.
 - The tool disappears when the backend is not configured or the managed server is
   stopped, rather than failing at call time.
-- `IMAGES.md` names the new backend and what was measured.
+- `documentation/IMAGES.md` names the new backend and what was measured.

@@ -1,4 +1,4 @@
-# The gate PLAN.md §9 has asked for: every job here runs a Makefile target that
+# The gate documentation/PLAN.md §9 has asked for: every job here runs a Makefile target that
 # already exists. The recipes are where this project's environment traps are
 # recorded (webkit2gtk-4.1 only, the Wails CLI outside PATH, npm 9 unable to
 # install Tailwind's binding), so a workflow that spelled those commands out

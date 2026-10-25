@@ -37,8 +37,8 @@ documentation confirmed against a recorded live response (the delta `content` fi
 | The delta `content` field | A reasoning model sends a **list of typed chunks** where every other backend sends a string |
 | The base URL | The vendor documents a bare host while every route lives under `/v1` |
 
-The work is one new file ([internal/llm/mistral.go](internal/llm/mistral.go)) plus a
-change to the **shared** delta parser in [internal/llm/openai.go](internal/llm/openai.go) —
+The work is one new file ([internal/llm/mistral.go](../internal/llm/mistral.go)) plus a
+change to the **shared** delta parser in [internal/llm/openai.go](../internal/llm/openai.go) —
 which is the part that affects every provider, and the reason §4 is the longest section
 here.
 
@@ -54,7 +54,7 @@ chats.
 
 There is also no migration to run. The settings blob is decoded over a fully populated
 default and `normalise()` appends any shipped backend that is missing
-([internal/config/config.go:491](internal/config/config.go#L491)), so a Mistral row
+([internal/config/config.go:491](../internal/config/config.go#L491)), so a Mistral row
 appears in an installation that predates it, switched off, with its address filled in.
 That mechanism already existed for DeepSeek; this is its second user, and
 `TestNormaliseAddsMissingBackendsWithoutClobberingEdits` now asserts all five shipped
@@ -106,7 +106,7 @@ The separating flag is `completion_chat`, **not** `function_calling`:
 `mistral-ocr-*` is the whole argument in one row: it advertises function calling while
 being unable to hold a conversation. Filtering on the tool flag would have put OCR models
 in the model picker, where they fail on send. `fromMistralEntry`
-([internal/llm/mistral.go:189](internal/llm/mistral.go#L189)) returns `(ModelInfo, false)`
+([internal/llm/mistral.go:189](../internal/llm/mistral.go#L189)) returns `(ModelInfo, false)`
 for those, and the caller leaves them out of the catalogue entirely rather than offering
 a row that cannot work.
 
@@ -131,9 +131,9 @@ model's identity rather than the id. A per-entry mapper would have put 27 rows i
 picker for 8 models.
 
 So `mapMistralEntries`
-([internal/llm/mistral.go:117](internal/llm/mistral.go#L117)) reads the listing as a
+([internal/llm/mistral.go:117](../internal/llm/mistral.go#L117)) reads the listing as a
 whole, groups by `name`, and `preferredMistralID`
-([internal/llm/mistral.go:153](internal/llm/mistral.go#L153)) picks the survivor: the
+([internal/llm/mistral.go:153](../internal/llm/mistral.go#L153)) picks the survivor: the
 rolling `-latest` alias, shortest when a family has several, else the first id the
 listing named. A picker row should follow the vendor's release rather than pin a dated
 snapshot, and the alias reaches the same model either way.
@@ -190,7 +190,7 @@ Mistral-only one.
 
 ### What the code does now
 
-`deltaContent` ([internal/llm/openai.go:355](internal/llm/openai.go#L355)) accepts:
+`deltaContent` ([internal/llm/openai.go:355](../internal/llm/openai.go#L355)) accepts:
 
 | input | result |
 | --- | --- |
@@ -370,27 +370,27 @@ if the server is reached at all.
 
 | file | symbol | what it does |
 | --- | --- | --- |
-| [internal/llm/mistral.go:60](internal/llm/mistral.go#L60) | `MistralDefaultBaseURL` | `https://api.mistral.ai/v1` — the `/v1` is part of the address |
-| [internal/llm/mistral.go:64](internal/llm/mistral.go#L64) | `newMistralProvider` | the provider: one chat path, `/models`, `flavourMistral`, `requiresKey`, and the two vendor-specific names (`seedField: "random_seed"`, `reasoningEffortOff`) |
-| [internal/llm/mistral.go:106](internal/llm/mistral.go#L106) | `isBareHost` | decides whether the base URL may be completed with `/v1` |
-| [internal/llm/mistral.go:117](internal/llm/mistral.go#L117) | `mapMistralEntries` | whole-listing map: drop non-chat, collapse aliases |
-| [internal/llm/mistral.go:153](internal/llm/mistral.go#L153) | `preferredMistralID` | which alias of one model survives |
-| [internal/llm/mistral.go:189](internal/llm/mistral.go#L189) | `fromMistralEntry` | one entry → `ModelInfo`, or `false` if it cannot chat |
-| [internal/llm/openai.go:149](internal/llm/openai.go#L149) | `seedKey` | the shared builder's one flavour-dependent field name: `seed`, or `random_seed` |
-| [internal/llm/openai.go:629](internal/llm/openai.go#L629) | `retireReasoningEffort` | a 400/422 to `reasoning_effort` retires the field and the request is sent again without it |
-| [internal/llm/openai.go:355](internal/llm/openai.go#L355) | `deltaContent` | `content` as string **or** typed-chunk list; the shared fix |
-| [internal/llm/openai.go:436](internal/llm/openai.go#L436) | `openAIDelta.Content` | now `deltaContent` instead of `string` |
-| [internal/llm/openai.go:1037](internal/llm/openai.go#L1037) | `consume` | emits `delta.Content.Text`; reasoning first via `reasoningText()` |
-| [internal/llm/openai.go:1417](internal/llm/openai.go#L1417) | `mergeDeltas` | merges both halves of `deltaContent` (the empty-string guards became no-ops) |
-| [internal/llm/registry.go:113](internal/llm/registry.go#L113) | `Reconfigure` | `case "mistral"` builds the provider |
-| [internal/llm/registry.go:406](internal/llm/registry.go#L406) | `DefaultBackendConfigs` | the shipped row: `mistral`, disabled |
-| [internal/config/config.go:491](internal/config/config.go#L491) | `normalise` | repairs an empty address for an existing install |
-| [frontend/src/components/Settings.tsx:1373](frontend/src/components/Settings.tsx#L1373) | backend row | shows the key field and requires it |
-| [frontend/src/lib/i18n.ts:182](frontend/src/lib/i18n.ts#L182) | `settings.backendsHint` | the hint, all three languages (182/559/932) |
-| [tools/uiharness/mock-wails.js:287](tools/uiharness/mock-wails.js#L287) | harness fixture | the row the UI is verified against |
+| [internal/llm/mistral.go:60](../internal/llm/mistral.go#L60) | `MistralDefaultBaseURL` | `https://api.mistral.ai/v1` — the `/v1` is part of the address |
+| [internal/llm/mistral.go:64](../internal/llm/mistral.go#L64) | `newMistralProvider` | the provider: one chat path, `/models`, `flavourMistral`, `requiresKey`, and the two vendor-specific names (`seedField: "random_seed"`, `reasoningEffortOff`) |
+| [internal/llm/mistral.go:106](../internal/llm/mistral.go#L106) | `isBareHost` | decides whether the base URL may be completed with `/v1` |
+| [internal/llm/mistral.go:117](../internal/llm/mistral.go#L117) | `mapMistralEntries` | whole-listing map: drop non-chat, collapse aliases |
+| [internal/llm/mistral.go:153](../internal/llm/mistral.go#L153) | `preferredMistralID` | which alias of one model survives |
+| [internal/llm/mistral.go:189](../internal/llm/mistral.go#L189) | `fromMistralEntry` | one entry → `ModelInfo`, or `false` if it cannot chat |
+| [internal/llm/openai.go:149](../internal/llm/openai.go#L149) | `seedKey` | the shared builder's one flavour-dependent field name: `seed`, or `random_seed` |
+| [internal/llm/openai.go:629](../internal/llm/openai.go#L629) | `retireReasoningEffort` | a 400/422 to `reasoning_effort` retires the field and the request is sent again without it |
+| [internal/llm/openai.go:355](../internal/llm/openai.go#L355) | `deltaContent` | `content` as string **or** typed-chunk list; the shared fix |
+| [internal/llm/openai.go:436](../internal/llm/openai.go#L436) | `openAIDelta.Content` | now `deltaContent` instead of `string` |
+| [internal/llm/openai.go:1037](../internal/llm/openai.go#L1037) | `consume` | emits `delta.Content.Text`; reasoning first via `reasoningText()` |
+| [internal/llm/openai.go:1417](../internal/llm/openai.go#L1417) | `mergeDeltas` | merges both halves of `deltaContent` (the empty-string guards became no-ops) |
+| [internal/llm/registry.go:113](../internal/llm/registry.go#L113) | `Reconfigure` | `case "mistral"` builds the provider |
+| [internal/llm/registry.go:406](../internal/llm/registry.go#L406) | `DefaultBackendConfigs` | the shipped row: `mistral`, disabled |
+| [internal/config/config.go:491](../internal/config/config.go#L491) | `normalise` | repairs an empty address for an existing install |
+| [frontend/src/components/Settings.tsx:1373](../frontend/src/components/settings/BackendsTab.tsx) | backend row | shows the key field and requires it |
+| [frontend/src/lib/i18n.ts:182](../frontend/src/lib/i18n.ts#L182) | `settings.backendsHint` | the hint, all three languages (182/559/932) |
+| [tools/uiharness/mock-wails.js:287](../tools/uiharness/mock-wails.js#L287) | harness fixture | the row the UI is verified against |
 
 `openAICompatProvider.modelsFlavour` gained `flavourMistral`
-([internal/llm/openai.go:126](internal/llm/openai.go#L126)), and `mapModelEntries`
+([internal/llm/openai.go:126](../internal/llm/openai.go#L126)), and `mapModelEntries`
 dispatches the whole list to `mapMistralEntries` for that flavour rather than mapping
 entry by entry.
 
@@ -592,9 +592,9 @@ change; this pass changed no UI code.
 
 **The duplicate listing-path fallback.** For Mistral, DeepSeek *and* llama.cpp the rich
 listing path and the plain-OpenAI fallback path are the **same URL**
-([internal/llm/mistral.go:92](internal/llm/mistral.go#L92),
-[internal/llm/deepseek.go:53](internal/llm/deepseek.go#L53),
-[internal/llm/llamacpp.go:109](internal/llm/llamacpp.go#L109)). So a 404 makes
+([internal/llm/mistral.go:92](../internal/llm/mistral.go#L92),
+[internal/llm/deepseek.go:53](../internal/llm/deepseek.go#L53),
+[internal/llm/llamacpp.go:109](../internal/llm/llamacpp.go#L109)). So a 404 makes
 `ListModels` retry the identical address, and — if that retry ever answered — it would go
 through `listOpenAIModels`, the lowest-common-denominator mapper that knows nothing of the
 flavour. For Mistral that would mean **no chat filter, no alias collapse, no context

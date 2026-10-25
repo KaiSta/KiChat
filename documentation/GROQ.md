@@ -29,10 +29,10 @@ answer without a key, and a model listing that is the **richest** of the hosted 
 — richer than the plain OpenAI shape and the opposite of NVIDIA's four fields. That listing is
 what §3 is about.
 
-The work is one file ([internal/llm/groq.go](internal/llm/groq.go)) plus a `flavourGroq`
-branch in the shared listing mapper ([openai.go:280](internal/llm/openai.go#L280)), a shipped
-but disabled entry in `DefaultBackendConfigs` ([registry.go:427](internal/llm/registry.go#L427)),
-and the address repair in `normalise()` ([config.go:934](internal/config/config.go#L934)). It
+The work is one file ([internal/llm/groq.go](../internal/llm/groq.go)) plus a `flavourGroq`
+branch in the shared listing mapper ([openai.go:280](../internal/llm/openai.go#L280)), a shipped
+but disabled entry in `DefaultBackendConfigs` ([registry.go:427](../internal/llm/registry.go#L427)),
+and the address repair in `normalise()` ([config.go:934](../internal/config/config.go#L934)). It
 follows the shape DeepSeek established: `requiresKey`, `ErrMissingAPIKey` reported instead of
 attempting a call with no credential, and `State: loaded` on every model because a hosted
 model answers without a load step.
@@ -60,14 +60,14 @@ request.
 
 There is no migration. `normalise()` appends the shipped entry to a settings blob that
 predates it and repairs an empty address from `llm.GroqDefaultBaseURL`
-([groq.go:75](internal/llm/groq.go#L75)), which is also what the settings field shows, so it
+([groq.go:75](../internal/llm/groq.go#L75)), which is also what the settings field shows, so it
 displays the address the app would actually use.
 
 **The address trap is this vendor's alone.** `isBareHost` is the rule Mistral established for
 completing a typed base URL, and every other kind completes a bare host with `/v1`. This API
 lives under `/openai/v1`, so doing that here would build `https://api.groq.com/v1` — a path
 that does not exist — which is why the completion appends `/openai/v1`
-([groq.go:79](internal/llm/groq.go#L79)). A base URL that already carries a path is the user's
+([groq.go:79](../internal/llm/groq.go#L79)). A base URL that already carries a path is the user's
 own choice and is left exactly as typed; a gateway in front of the API is therefore an address
 edit, not a different kind.
 
@@ -124,7 +124,7 @@ The listing mixes four models that are not chat models into the eleven:
 | `canopylabs/orpheus-v1-english`, `canopylabs/orpheus-arabic-saudi` | `text` → `speech` | not a chat route at all |
 
 They are dropped, and the rule is the vendor's own: **an entry is offered only when its output
-modalities name `text`** (`fromGroqEntry`, [groq.go:148](internal/llm/groq.go#L148)). The
+modalities name `text`** (`fromGroqEntry`, [groq.go:148](../internal/llm/groq.go#L148)). The
 refusal above is the evidence, and it also says the reverse — a filter written from the *id*
 would be a guess, which is why the id is never consulted.
 
@@ -261,14 +261,14 @@ the image check opt-in (`KICHAT_GROQ_VISION_MODEL`).
 response, and — as §6.1 shows — a request larger than a whole minute of that allowance cannot
 succeed however long anyone waits. It is therefore also the largest **one request** the account
 may send, and it arrives with every response: the answer as much as the refusal. The app reads
-it (`ceilingFromHeaders`, [internal/llm/limits.go:136](internal/llm/limits.go#L136)) and keeps it
+it (`ceilingFromHeaders`, [internal/llm/limits.go:136](../internal/llm/limits.go#L136)) and keeps it
 per model as the ceiling the next request is planned under, which is what moves the fold of an
 over-long chat from *after* a refusal to *before* the request (§6.2 item 2) — and, with the
 remainder and the reset beside it, as the minute a turn is paced against (§6.4). Two boundaries
 on the ceiling are deliberate:
 
 - **Only for this backend.** The header is read on a request the Groq provider makes
-  (`modelsFlavour == flavourGroq`, [internal/llm/openai.go:1009](internal/llm/openai.go#L1009)),
+  (`modelsFlavour == flavourGroq`, [internal/llm/openai.go:1009](../internal/llm/openai.go#L1009)),
   never for another OpenAI-compatible service that happens to send one. What the number means
   here is a measurement of *this* vendor — a per-minute allowance that a single request may not
   exceed — and another service's rate-limit header is not evidence about the largest request it
@@ -286,10 +286,10 @@ Two exceptions are worth knowing about because the app maps them:
 - **HTTP 429** is a throttle, not a verdict: `HTTPError.Retryable` reports it, the availability
   check deliberately does **not** blacklist a model over it (see `internal/llm/probe.go`), and
   the wait it names is *obeyed* rather than guessed at. `retryHint`
-  ([internal/llm/httpclient.go:94](internal/llm/httpclient.go#L94)) reads `Retry-After` and, when
+  ([internal/llm/httpclient.go:94](../internal/llm/httpclient.go#L94)) reads `Retry-After` and, when
   that is missing or unparseable, the refusal's own sentence — the envelope above is why, since
   the number the vendor commits to is the one in prose — and `retryWait`
-  ([internal/llm/httpclient.go:133](internal/llm/httpclient.go#L133)) waits it out, up to one
+  ([internal/llm/httpclient.go:133](../internal/llm/httpclient.go#L133)) waits it out, up to one
   minute, which is the window these limits are defined over. The fixed 250 ms/500 ms backoff
   this replaced spent every attempt inside the minute that had just been refused, so a request
   the vendor had said to retry in ten seconds arrived at the user as a failure.
@@ -297,11 +297,11 @@ Two exceptions are worth knowing about because the app maps them:
 **And the wait is shown, because a silent one is indistinguishable from a hang.** A ten-second
 wait while nothing arrives on the wire looks exactly like a turn that has stalled, so the retry
 reports itself: `waitBeforeRetry`
-([internal/llm/httpclient.go:154](internal/llm/httpclient.go#L154)) tells a `RetryWatcher`
-([internal/llm/httpclient.go:180](internal/llm/httpclient.go#L180)) carried on the request's
+([internal/llm/httpclient.go:154](../internal/llm/httpclient.go#L154)) tells a `RetryWatcher`
+([internal/llm/httpclient.go:180](../internal/llm/httpclient.go#L180)) carried on the request's
 context how long it is about to sleep and what it is sleeping for. The engine puts one on the
 turn's own request — `watchingRetries`
-([internal/chat/throttle.go:22](internal/chat/throttle.go#L22)) — and it publishes a
+([internal/chat/throttle.go:22](../internal/chat/throttle.go#L22)) — and it publishes a
 `chat:status` event carrying `phase: "throttled"` with `waitMs`, then retracts it to `idle` when
 the wait ends, including when a Stop cuts it short. The panel renders that plus the number of
 seconds beside the composer, in all three languages. Only the turn's request is watched: the
@@ -359,7 +359,7 @@ turn. `internal/chat/oversize.go`:
    that was sent — what the app estimated. The estimator is a heuristic (§6.4), and on a ceiling
    that is a fraction of the window its error is the whole difference between a retry that fits
    and a *second* refusal, which ends the turn because a refusal is folded once. So the fold's
-   aim is `ceiling × estimated / Requested` (`sizeTargetWithCount`, [internal/chat/oversize.go](internal/chat/oversize.go)),
+   aim is `ceiling × estimated / Requested` (`sizeTargetWithCount`, [internal/chat/oversize.go](../internal/chat/oversize.go)),
    applied only when the vendor counted more than the app did and capped at 4× so a wild number
    cannot fold a chat to nothing. The same corrected ceiling budgets the summarisation call
    (`CompactOptions.SummaryCeiling`): it is a request against the same limit, and a transcript
@@ -380,7 +380,7 @@ turn. `internal/chat/oversize.go`:
      request of a session is now folded rather than sent: `x-ratelimit-limit-tokens` accompanies
      the **answer** as well as the refusal, so the first successful turn of a session already
      teaches the app the limit the second turn is planned under. `requestBudget`
-     ([internal/llm/openai.go:190](internal/llm/openai.go#L190)) is handed every response's
+     ([internal/llm/openai.go:190](../internal/llm/openai.go#L190)) is handed every response's
      headers by the shared client, before its body is read — a refusal's headers as much as a
      success's.
    - **The refusal's own sentence**, which is what a session whose *very first* request is
@@ -516,7 +516,7 @@ The meter is where the ceiling is visible, and it has to be, because the window 
 measure against is not the limit the request hits. `ContextBudget` therefore carries the ceiling,
 the source it came from, and `EffectiveLimit` — the smaller of the window and the ceiling — and
 **`Percent`, `ProjectedRatio` and `OverLimit` are all computed against the effective limit**
-([internal/chat/context.go:130](internal/chat/context.go#L130)). A chat at 9k tokens of a 131k
+([internal/chat/context.go:130](../internal/chat/context.go#L130)). A chat at 9k tokens of a 131k
 window under an 8k ceiling reads **108 %**, not 7 %: the old reading was room that did not
 exist. The switcher's inline meter shows `used / effective`, and its tooltip says which of the two
 is binding — *"One request may carry 8000 tokens; the model window is larger (131072)."* — while
@@ -550,7 +550,7 @@ whole shape of this section:
   **`x-ratelimit-remaining-tokens`** — what is left of the minute — and
   **`x-ratelimit-reset-tokens`** — how long that remainder lasts, as a duration (`7.66s`,
   `2m59.56s`). Together with the limit they are read by `budgetFromHeaders`
-  ([internal/llm/pace.go](internal/llm/pace.go)) into a per-model statement. A statement is not
+  ([internal/llm/pace.go](../internal/llm/pace.go)) into a per-model statement. A statement is not
   a counter: past its reset the whole allowance is back, which is what a rolling minute means,
   and the newest response is the freshest reading of a quantity that moves rather than a second
   opinion about a fixed one.
@@ -720,34 +720,34 @@ shared client waiting out a throttle if the fold lands on a spent minute.
 
 | file | what it holds |
 | --- | --- |
-| [internal/llm/groq.go:75](internal/llm/groq.go#L75) | `GroqDefaultBaseURL` — the documented address |
-| [internal/llm/groq.go:79](internal/llm/groq.go#L79) | `newGroqProvider` — the address rules, the single chat path, `requiresKey` |
-| [internal/llm/groq.go:118](internal/llm/groq.go#L118) | `groqModelEntry` — the listing's fields, with `active` a pointer so a missing field is not a `false` |
-| [internal/llm/groq.go:148](internal/llm/groq.go#L148) | `fromGroqEntry` — the mapping, the two drop rules, the capability claims |
-| [internal/llm/groq.go:205](internal/llm/groq.go#L205) | `mapGroqEntries` — entry by entry, keeping the vendor's order |
-| [internal/llm/openai.go:280](internal/llm/openai.go#L280) | `flavourGroq` — the branch that picks the mapper |
-| [internal/llm/limits.go](internal/llm/limits.go) | `ErrRequestTooLarge`, `classifyRequestTooLarge` — the phrases that tell an oversized request from a throttle, and the `Limit`/`Requested` read out of the refusal |
-| [internal/llm/limits.go:118](internal/llm/limits.go#L118) | `rateLimitTokensHeader`, `ceilingFromHeaders` — the per-request budget read out of a response |
-| [internal/llm/pace.go](internal/llm/pace.go) | `budgetFromHeaders`, `modelBudget`, `noteRequestBudget`, `paceRequest` — the minute, and the wait before a request it cannot pay for — and the turn's half of it: `Allowance`, `RequestAllowance`, `Allowance.Spread` |
-| [internal/chat/pace.go](internal/chat/pace.go) | `planTurnRequests`, `turnPacing.waitFor`, `holdRound` — a turn's rounds planned against the minute before its first request, and the wait that spreads them |
-| [internal/llm/httpclient.go:255](internal/llm/httpclient.go#L255) | `responseWatcher`, `withResponseWatcher`, `observeResponse` — every response's headers, before its body is read |
-| [internal/llm/openai.go:159](internal/llm/openai.go#L159) | `noteRequestCeiling` / `RequestCeiling` — the per-model ceiling, tightened rather than replaced, with `requestBudget` as the header's reader |
-| [internal/chat/compact.go](internal/chat/compact.go) | `automaticBound`, `atCeiling`, `ceilingRatio`, `ceilingTarget` — the ceiling as one of the two automatic bounds the planner compares, and the aim it folds to |
-| [internal/chat/oversize.go](internal/chat/oversize.go) | `foldForSize` (the recovery), `sizeTarget`, `turnFailureText` |
-| [internal/chat/context.go:37](internal/chat/context.go#L37) | `ContextBudget.Ceiling` / `CeilingSource` / `EffectiveLimit` — the limit the percentage is measured against |
-| [frontend/src/components/ModelSwitcher.tsx:23](frontend/src/components/ModelSwitcher.tsx#L23) | `ContextMeter` and `ContextInspector` — the effective budget, the note, and the row naming the ceiling's source |
-| [internal/chat/engine.go:330](internal/chat/engine.go#L330) | the `runTurn` wiring: the fold before the request, the one retry after a refusal, the message the user is shown |
-| [internal/chat/generate.go:80](internal/chat/generate.go#L80) | the tool loop: the minute's request allowance is read before the first round, and each round waits for its own moment |
-| [internal/chat/maintenance.go:270](internal/chat/maintenance.go#L270) | the summarisation budget clamped to the summariser's own ceiling |
-| [internal/llm/httpclient.go:94](internal/llm/httpclient.go#L94) | `retryHint` — the `Retry-After` header, and the wait a refusal writes in prose |
-| [internal/llm/httpclient.go:133](internal/llm/httpclient.go#L133) | `retryWait` — the hint obeyed up to one minute, the doubling backoff otherwise |
-| [internal/llm/httpclient.go:180](internal/llm/httpclient.go#L180) | `RetryWatcher`, `WithRetryWatcher`/`RetryWatcherOf` — how a wait is reported to whoever is painting a window |
-| [internal/chat/throttle.go:17](internal/chat/throttle.go#L17) | `throttledPhase`, `pacedPhase`, `spreadPhase`, `watchingRetries`, `emitWaiting` — the three waits as a `chat:status` phase, with their length |
-| [frontend/src/components/ChatView.tsx:348](frontend/src/components/ChatView.tsx#L348) | the line that renders the phase and the seconds it named, and the three sentences a wait can carry |
-| [internal/llm/registry.go:117](internal/llm/registry.go#L117) | the `case "groq"` that builds the provider |
-| [internal/llm/registry.go:427](internal/llm/registry.go#L427) | the shipped-but-disabled entry |
-| [internal/config/config.go:934](internal/config/config.go#L934) | the address repair in `normalise()` |
-| [frontend/src/components/Settings.tsx:1518](frontend/src/components/Settings.tsx#L1518) | the kind list that shows the key field, marked required |
+| [internal/llm/groq.go:75](../internal/llm/groq.go#L75) | `GroqDefaultBaseURL` — the documented address |
+| [internal/llm/groq.go:79](../internal/llm/groq.go#L79) | `newGroqProvider` — the address rules, the single chat path, `requiresKey` |
+| [internal/llm/groq.go:118](../internal/llm/groq.go#L118) | `groqModelEntry` — the listing's fields, with `active` a pointer so a missing field is not a `false` |
+| [internal/llm/groq.go:148](../internal/llm/groq.go#L148) | `fromGroqEntry` — the mapping, the two drop rules, the capability claims |
+| [internal/llm/groq.go:205](../internal/llm/groq.go#L205) | `mapGroqEntries` — entry by entry, keeping the vendor's order |
+| [internal/llm/openai.go:280](../internal/llm/openai.go#L280) | `flavourGroq` — the branch that picks the mapper |
+| [internal/llm/limits.go](../internal/llm/limits.go) | `ErrRequestTooLarge`, `classifyRequestTooLarge` — the phrases that tell an oversized request from a throttle, and the `Limit`/`Requested` read out of the refusal |
+| [internal/llm/limits.go:118](../internal/llm/limits.go#L118) | `rateLimitTokensHeader`, `ceilingFromHeaders` — the per-request budget read out of a response |
+| [internal/llm/pace.go](../internal/llm/pace.go) | `budgetFromHeaders`, `modelBudget`, `noteRequestBudget`, `paceRequest` — the minute, and the wait before a request it cannot pay for — and the turn's half of it: `Allowance`, `RequestAllowance`, `Allowance.Spread` |
+| [internal/chat/pace.go](../internal/chat/pace.go) | `planTurnRequests`, `turnPacing.waitFor`, `holdRound` — a turn's rounds planned against the minute before its first request, and the wait that spreads them |
+| [internal/llm/httpclient.go:255](../internal/llm/httpclient.go#L255) | `responseWatcher`, `withResponseWatcher`, `observeResponse` — every response's headers, before its body is read |
+| [internal/llm/openai.go:159](../internal/llm/openai.go#L159) | `noteRequestCeiling` / `RequestCeiling` — the per-model ceiling, tightened rather than replaced, with `requestBudget` as the header's reader |
+| [internal/chat/compact.go](../internal/chat/compact.go) | `automaticBound`, `atCeiling`, `ceilingRatio`, `ceilingTarget` — the ceiling as one of the two automatic bounds the planner compares, and the aim it folds to |
+| [internal/chat/oversize.go](../internal/chat/oversize.go) | `foldForSize` (the recovery), `sizeTarget`, `turnFailureText` |
+| [internal/chat/context.go:37](../internal/chat/context.go#L37) | `ContextBudget.Ceiling` / `CeilingSource` / `EffectiveLimit` — the limit the percentage is measured against |
+| [frontend/src/components/ModelSwitcher.tsx:23](../frontend/src/components/ModelSwitcher.tsx#L23) | `ContextMeter` and `ContextInspector` — the effective budget, the note, and the row naming the ceiling's source |
+| [internal/chat/engine.go:330](../internal/chat/engine.go#L330) | the `runTurn` wiring: the fold before the request, the one retry after a refusal, the message the user is shown |
+| [internal/chat/generate.go:80](../internal/chat/generate.go#L80) | the tool loop: the minute's request allowance is read before the first round, and each round waits for its own moment |
+| [internal/chat/maintenance.go:270](../internal/chat/maintenance.go#L270) | the summarisation budget clamped to the summariser's own ceiling |
+| [internal/llm/httpclient.go:94](../internal/llm/httpclient.go#L94) | `retryHint` — the `Retry-After` header, and the wait a refusal writes in prose |
+| [internal/llm/httpclient.go:133](../internal/llm/httpclient.go#L133) | `retryWait` — the hint obeyed up to one minute, the doubling backoff otherwise |
+| [internal/llm/httpclient.go:180](../internal/llm/httpclient.go#L180) | `RetryWatcher`, `WithRetryWatcher`/`RetryWatcherOf` — how a wait is reported to whoever is painting a window |
+| [internal/chat/throttle.go:17](../internal/chat/throttle.go#L17) | `throttledPhase`, `pacedPhase`, `spreadPhase`, `watchingRetries`, `emitWaiting` — the three waits as a `chat:status` phase, with their length |
+| [frontend/src/components/ChatView.tsx:348](../frontend/src/components/ChatView.tsx#L348) | the line that renders the phase and the seconds it named, and the three sentences a wait can carry |
+| [internal/llm/registry.go:117](../internal/llm/registry.go#L117) | the `case "groq"` that builds the provider |
+| [internal/llm/registry.go:427](../internal/llm/registry.go#L427) | the shipped-but-disabled entry |
+| [internal/config/config.go:934](../internal/config/config.go#L934) | the address repair in `normalise()` |
+| [frontend/src/components/Settings.tsx:1518](../frontend/src/components/settings/BackendsTab.tsx) | the kind list that shows the key field, marked required |
 
 ---
 
@@ -778,7 +778,7 @@ Against a listing served by a test server, in the shape measured on the live API
 - `TestShippedGroqBackendIsOffByDefault` — the shipped entry is off, named `Groq`, and
   carries `/openai/v1` rather than the bare host every other hosted entry here uses.
 
-And one in the root package, [groq_model_check_test.go](groq_model_check_test.go), where the
+And one in the root package, [groq_model_check_test.go](../groq_model_check_test.go), where the
 app's own sweep is driven against a Groq-shaped fixture:
 
 - `TestTheAvailabilityCheckHidesGroqsStreamingRefusal` — the two halves of §3's decision
@@ -903,7 +903,7 @@ entries, with the four non-chat ids asserted absent), the chosen model is `loade
 `prompt_tokens`, a real tool call streams, and a fake key is refused with HTTP 401 carrying
 `invalid_api_key` — a key rather than a throttle. It also asserts the header reading against
 real headers: **an ordinary answer must leave a ceiling behind**
-([internal/llm/live_groq_test.go:209](internal/llm/live_groq_test.go#L209)), with
+([internal/llm/live_groq_test.go:209](../internal/llm/live_groq_test.go#L209)), with
 `CeilingFromHeader` as its source and a number of its own rather than the window the listing
 publishes — which is the one claim §6's header route rests on that no fixture can stand in for,
 and the run logs the number it read. The image check is opt-in and asserts a real

@@ -1197,7 +1197,7 @@ No progress callback is wired to that id, so a test draw never paints a progress
 A picture a CPU server takes minutes over has to be abandonable, and `StopImageDraw` does
 it in **two halves that each do something the other cannot**:
 
-- It **cancels the request's context** ([`api.go`](api.go) → `tools.Service.Regenerate` →
+- It **cancels the request's context** ([`api.go`](../api.go) → `tools.Service.Regenerate` →
   `http.NewRequestWithContext`). That is what ends the *wait*, on every server, at the
   click — the ten-minute bound on the call is a guard against a wedged server, not a
   promise the user is held to.

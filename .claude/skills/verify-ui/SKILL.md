@@ -42,7 +42,7 @@ Query flags, each of which exists because the state is otherwise unreachable:
 | `?images=nim&nimModel=<id>` | that same panel with a stored hosted id — the state where the select used to show schnell while the draw sent an id from an older build; `<id>` outside the offered list renders the extra, marked option and its warning line |
 | `?upscale=esrgan` | the neural method switched on and found; add `&missing=1` for switched on but not installed |
 | `?upscale=esrgan&upscalehold=1` | a neural enlargement still running: the phase row and the Stop that ends it |
-| `?upscaler=install` | the Real-ESRGAN download row with its button and its size; pressing it runs a four‑step fake download and ends with the switch on (see `UPSCALING.md` §6) |
+| `?upscaler=install` | the Real-ESRGAN download row with its button and its size; pressing it runs a four‑step fake download and ends with the switch on (see `documentation/UPSCALING.md` §6) |
 | `?upscaler=noarchive` | a platform with nothing published: the row says so where the button would be |
 | `?startwithapp=1` | the start-with-app switch |
 | `?missingmodel=1` | a chat pinned to a model the catalogue does not list: the notice above the composer and the switch it offers |
@@ -53,8 +53,8 @@ Query flags, each of which exists because the state is otherwise unreachable:
 
 `?server=restart` is computed from the stored command line rather than stored,
 which is what makes a save under a running server raise the badge. The runtime and
-Backends fixtures have their own table in `LLAMACPP.md` §6, and the picture-server
-rows in `IMAGES.md` §8 — update those when a flag changes.
+Backends fixtures have their own table in `documentation/LLAMACPP.md` §6, and the
+picture-server rows in `documentation/IMAGES.md` §8 — update those when a flag changes.
 
 **An unmodelled binding resolves and logs `unmodelled binding called: X`.** If the
 console shows that, the mock needs X when you exercise that path — add it rather

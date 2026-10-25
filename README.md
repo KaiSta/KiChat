@@ -516,7 +516,7 @@ older, unencrypted database is converted on the first start.
 
 What this protects is the file: copied, disk-imaged or synced into a cloud folder, it is
 useless without the key. It does not protect you from someone using the app on an unlocked
-machine, or from malware running as you — [`ENCRYPTION.md`](ENCRYPTION.md) has the full list
+machine, or from malware running as you — [`ENCRYPTION.md`](documentation/ENCRYPTION.md) has the full list
 of limits.
 
 If the keyring entry is missing, KiChat asks for that passphrase instead of opening your
@@ -786,20 +786,20 @@ document, and each one distinguishes what was observed from what is expected.
 
 | Document | What it covers |
 | --- | --- |
-| [`PLAN.md`](PLAN.md) | the architecture and the reasoning behind it |
-| [`COMPACT.md`](COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
-| [`RESEARCH.md`](RESEARCH.md) | web search and scraping: providers, refusals, SSRF and robots guards, budgets |
-| [`IMAGES.md`](IMAGES.md) | picture generation: the three server kinds and the hosted one, parameters, profiles, verification |
-| [`IMAGES-CLOUD.md`](IMAGES-CLOUD.md) | hosted picture backends: what each free tier really is, and why NVIDIA NIM was the one built |
-| [`UPSCALING.md`](UPSCALING.md) | enlarging a picture: the Lanczos resampler, Real-ESRGAN, targets, the Enlarge panel |
-| [`ENCRYPTION.md`](ENCRYPTION.md) | the encrypted database: page-level encryption, the key and its recovery copy, the migration, and what it cannot protect |
-| [`LLAMACPP.md`](LLAMACPP.md) | the llama.cpp provider, the managed runtime, projector pairing, ternary models |
-| [`GROQ.md`](GROQ.md) | the Groq backend, its listings, refusals, ceilings and pacing |
-| [`NVIDIA.md`](NVIDIA.md) | the build.nvidia.com backend and its availability check |
-| [`MISTRAL.md`](MISTRAL.md) | the Mistral backend, alias collapse, typed content chunks |
-| [`DEEPSEEK.md`](DEEPSEEK.md) | the DeepSeek backend, reasoning content, refusals |
+| [`PLAN.md`](documentation/PLAN.md) | the architecture and the reasoning behind it |
+| [`COMPACT.md`](documentation/COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
+| [`RESEARCH.md`](documentation/RESEARCH.md) | web search and scraping: providers, refusals, SSRF and robots guards, budgets |
+| [`IMAGES.md`](documentation/IMAGES.md) | picture generation: the three server kinds and the hosted one, parameters, profiles, verification |
+| [`IMAGES-CLOUD.md`](documentation/IMAGES-CLOUD.md) | hosted picture backends: what each free tier really is, and why NVIDIA NIM was the one built |
+| [`UPSCALING.md`](documentation/UPSCALING.md) | enlarging a picture: the Lanczos resampler, Real-ESRGAN, targets, the Enlarge panel |
+| [`ENCRYPTION.md`](documentation/ENCRYPTION.md) | the encrypted database: page-level encryption, the key and its recovery copy, the migration, and what it cannot protect |
+| [`LLAMACPP.md`](documentation/LLAMACPP.md) | the llama.cpp provider, the managed runtime, projector pairing, ternary models |
+| [`GROQ.md`](documentation/GROQ.md) | the Groq backend, its listings, refusals, ceilings and pacing |
+| [`NVIDIA.md`](documentation/NVIDIA.md) | the build.nvidia.com backend and its availability check |
+| [`MISTRAL.md`](documentation/MISTRAL.md) | the Mistral backend, alias collapse, typed content chunks |
+| [`DEEPSEEK.md`](documentation/DEEPSEEK.md) | the DeepSeek backend, reasoning content, refusals |
 | [`AGENTS.md`](AGENTS.md) | the index: rules, the checks that must pass, the live-test matrix, and a skill per recurring task |
-| [`CODE_MAP.md`](CODE_MAP.md) | where every package, file and extension point lives, and the request lifecycle |
+| [`CODE_MAP.md`](documentation/CODE_MAP.md) | where every package, file and extension point lives, and the request lifecycle |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | pull requests, the CLA, commit style, the harness |
 
 ## Versioning

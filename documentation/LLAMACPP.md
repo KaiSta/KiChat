@@ -77,7 +77,7 @@ system prompt. So:
 | `/props` `n_ctx` | `ContextLimit` | the window the server actually allocated |
 | neither | the app's own conservative default | the safe way round |
 
-`propsFor` ([internal/llm/llamacpp.go:346](internal/llm/llamacpp.go#L346)) caches the
+`propsFor` ([internal/llm/llamacpp.go:346](../internal/llm/llamacpp.go#L346)) caches the
 reading, and treats the two failure shapes differently: a **404 is remembered**, because a
 build without `/props` will not grow one, while **any other failure is not**, so a server
 that was merely still loading its model is asked again instead of being written off for the
@@ -87,7 +87,7 @@ rest of the session.
 
 This is the part that is easy to get wrong, and it is **not the same question** for the two
 shapes of server this kind reaches. `enrichLlamaCpp`
-([internal/llm/llamacpp.go:237](internal/llm/llamacpp.go#L237)) splits them:
+([internal/llm/llamacpp.go:237](../internal/llm/llamacpp.go#L237)) splits them:
 
 - **A direct server** (`llama-server -m model.gguf`) serves exactly one model, does not
   answer before its weights are resident, and loads it with the window `/props` reports.
@@ -99,7 +99,7 @@ shapes of server this kind reaches. `enrichLlamaCpp`
   refuse, so with more than one row only the row `/props` names is marked loaded and only
   that row gets the window; the rest fall back to the conservative default.
 
-`llamaCppLoadedIndex` ([internal/llm/llamacpp.go:310](internal/llm/llamacpp.go#L310)) names
+`llamaCppLoadedIndex` ([internal/llm/llamacpp.go:310](../internal/llm/llamacpp.go#L310)) names
 that row: the id is compared first and the file name second, because a row's id *is* the
 model path unless `--alias` replaced it. An alias therefore matches neither and leaves the
 reading unused — a conservative default rather than one belonging to a different model.
@@ -142,7 +142,7 @@ top-level (`llamaCppThinkingOff`). And it is **guarded**: llama.cpp validates th
 a request hands to a template, so offering one the template never reads is a rejected
 request rather than an ignored extra — a hard-coded toggle would break every model whose
 template lacks it. `llamaCppTemplateTogglesThinking`
-([internal/llm/llamacpp.go:390](internal/llm/llamacpp.go#L390)) reads the template source and
+([internal/llm/llamacpp.go:390](../internal/llm/llamacpp.go#L390)) reads the template source and
 looks for the parameter's own name, which a template that honours it has to mention.
 
 A server that cannot be asked answers **false**, so the request goes out without the
@@ -152,7 +152,7 @@ exactly this case.
 
 ### 2.6 The address: 9931
 
-`LlamaCppDefaultBaseURL` ([internal/llm/llamacpp.go:63](internal/llm/llamacpp.go#L63)) is
+`LlamaCppDefaultBaseURL` ([internal/llm/llamacpp.go:63](../internal/llm/llamacpp.go#L63)) is
 `http://127.0.0.1:9931`, because `--host` defaults to `127.0.0.1` and `--port` to 9931.
 
 The port was 8080 for years and moved in the b10240 build, to a number whose neighbours on a
@@ -205,7 +205,7 @@ Measured while verifying it, in case a number is ever needed again:
   `llama-server` is a launcher whose code is in a sibling `libllama-server-impl.so`. The
   install flattens the wrapper and **keeps the siblings** — a build that lists models but
   cannot start is what the alternative produces. `launcherUnder`
-  ([internal/runtime/install.go:463](internal/runtime/install.go#L463)) is how the launcher
+  ([internal/runtime/install.go:463](../internal/runtime/install.go#L463)) is how the launcher
   is found, and it is also what the cleanup list and `RemoveBuild` use to decide a directory
   is a build at all.
 
@@ -229,7 +229,7 @@ cudart-llama-… (a different asset, with the CUDA runtime folded in)
 
 ROCm, SYCL and OpenVINO are **x64 only**, so the picker is filled from
 `Distribution.PublishedAccelerators(goos, goarch)`
-([internal/runtime/distribution.go:147](internal/runtime/distribution.go#L147)) — the
+([internal/runtime/distribution.go:147](../internal/runtime/distribution.go#L147)) — the
 *source's* own answer, since the two do not publish the same families — rather than from a
 list of its own. A family's suite is matched with a `*`, and the newest match wins.
 
@@ -255,7 +255,7 @@ A source is not a flag. Its releases live at a different repository, its build t
 different shape, and its archives have different names and contents — so *which source* is
 part of every question `internal/runtime` answers: what is the newest build, what is
 installed here, is there an update. All of it is one value, `Distribution`
-([internal/runtime/distribution.go:71](internal/runtime/distribution.go#L71)), and the two
+([internal/runtime/distribution.go:71](../internal/runtime/distribution.go#L71)), and the two
 instances are the whole difference (plus a per-source table of families).
 
 - **The fork is what runs a ternary model, and a mainline build cannot.**
@@ -282,7 +282,7 @@ instances are the whole difference (plus a per-source table of families).
   assets are the **Windows** zips, so its Linux CUDA row has no companion to attach and a
   machine with the driver but no toolkit ends up with a backend that cannot load; the panel
   names exactly that, because `MissingLibraries`
-  ([internal/runtime/libs.go:69](internal/runtime/libs.go#L69)) reads the loader's answer for
+  ([internal/runtime/libs.go:69](../internal/runtime/libs.go#L69)) reads the loader's answer for
   the build directory. Attaching upstream's Linux bundle would cross both sources and
   suites, so it is documented rather than done — a size reading of 175–311 MB is *not*
   evidence that the runtime is inside, which is the mistake this bullet was written from.
@@ -290,7 +290,7 @@ instances are the whole difference (plus a per-source table of families).
   `cudart-llama-bin-win-cuda-13.3-x64.zip` 372.9 MB).
 - **The fork's archive opens with a `./` entry, and that used to abort the install.** Its
   first tar entry is the extraction root itself (`.`), which `entryPath`
-  ([internal/runtime/install.go:1128](internal/runtime/install.go#L1128)) refused with
+  ([internal/runtime/install.go:1128](../internal/runtime/install.go#L1128)) refused with
   "Archiv-Eintrag ohne Namen" — upstream's archives carry no such entry, so nothing had
   found it. The root entry now resolves to the extraction root and is skipped, while an
   entry that resolves there and is *not* a directory is still refused. Found by the live
@@ -305,7 +305,7 @@ upstream's are `b11541`. A helper that read a directory name as "everything befo
 `prism-b10770-6684606` that is "different, therefore newer", so the installed build was
 offered as an update over itself on every poll.
 
-`Distribution.TagOfDir` ([internal/runtime/distribution.go:250](internal/runtime/distribution.go#L250))
+`Distribution.TagOfDir` ([internal/runtime/distribution.go:250](../internal/runtime/distribution.go#L250))
 therefore strips the family and suite by looking for the source's *whole* tag shape from the
 right (`prism-b10770-6684606-cpu` → `prism-b10770-6684606`, `b11541-vulkan-10.0` →
 `b11541`), and a name of the other source reduces to no tag at all — which is what keeps a
@@ -314,9 +314,9 @@ fork build out of an upstream comparison and the reverse. Pinned by
 `TestCheckRuntimeUpdateReadsTheSelectedSource`.
 
 **An update check is a request, and a release tag is per release, not per family.**
-`CheckLlamaRuntimeUpdate` ([api.go:473](api.go#L473)) asks the release list for the newest
+`CheckLlamaRuntimeUpdate` ([api.go:473](../api.go#L473)) asks the release list for the newest
 build of the family the app installs and caches the reading; `GetRuntimeStatus`
-([api.go:820](api.go#L820)) only reports the cached copy, because that status is polled every
+([api.go:820](../api.go#L820)) only reports the cached copy, because that status is polled every
 **1.2 s** while a model loads and the API allows 60 unauthenticated requests an hour per
 address.
 
@@ -335,7 +335,7 @@ sorts below `b999` as text. And a lookup that failed reports the API's reason ra
   shows what `llama-server --version` answers (`0.6.0-dev (build 11535, commit f39148a95)`
   for `b11535`), read once per path and again after a save, because the status it belongs to
   is polled every 1.2 s while a model loads. `BinaryVersion`
-  ([internal/runtime/version.go:26](internal/runtime/version.go#L26)) carries a deadline
+  ([internal/runtime/version.go:26](../internal/runtime/version.go#L26)) carries a deadline
   because a launcher that hangs must not hold a status call open, and a build that prints its
   version and exits non-zero still counts: what was asked for arrived. `parseVersionOutput`
   **searches** rather than reading the first line, because llama.cpp writes other things
@@ -359,7 +359,7 @@ sorts below `b999` as text. And a lookup that failed reports the API's reason ra
   collected through, so `Wait` would sit there until it exits. Measured with a launcher that
   sleeps: without it the probe returned after **30 s**.
 - The probe runs with the same environment a server is started with (`serverEnv`,
-  [internal/runtime/gpu.go:407](internal/runtime/gpu.go#L407)), because a HIP build cannot
+  [internal/runtime/gpu.go:407](../internal/runtime/gpu.go#L407)), because a HIP build cannot
   load its backend without the ROCm library path and a probe that answered "no version" would
   be reading its own environment rather than the build's. `serverEnv` adds `/opt/rocm/lib`
   for a build carrying `libggml-hip`.
@@ -397,7 +397,7 @@ reporting `0/65` layers, so the id is dropped.
 **The lines are written while the weights load**, about 80 lines before the end of a 250-line
 log, while the ring holds 40 and the status returns the last 12 — so the supervisor consumes
 them as they arrive (the ring's `watch` hook, wired to `Server.observeOffload`
-([internal/runtime/supervise.go:455](internal/runtime/supervise.go#L455))) instead of
+([internal/runtime/supervise.go:455](../internal/runtime/supervise.go#L455))) instead of
 reading the tail afterwards, and only from a
 server that is starting or running, because output can arrive after exec has reaped the
 process and a reading on a stopped row is a claim about a model nothing is loading. The
@@ -433,16 +433,16 @@ mode in all three dictionaries.
 ### 3.8 Cleanup
 
 **Nothing removes the build an update replaces, so the cleanup list has to.**
-`Installer.Builds` ([internal/runtime/builds.go:47](internal/runtime/builds.go#L47)) walks
+`Installer.Builds` ([internal/runtime/builds.go:47](../internal/runtime/builds.go#L47)) walks
 the runtime directory, measures each build (a symlink is counted as the link it is, or the
 versioned library beside it counts twice) and reports what an interrupted install left behind
 — the `<dir>.installing` staging directory, which no other code will ever clean up.
 
-`RemoveBuild` ([internal/runtime/builds.go:118](internal/runtime/builds.go#L118)) refuses a
+`RemoveBuild` ([internal/runtime/builds.go:118](../internal/runtime/builds.go#L118)) refuses a
 name that is not a single directory name and a directory with no launcher in it, and the App
 refuses the build in use and the build a *running* server was started from — the latter is
 why `Server` records the launcher it started
-([internal/runtime/supervise.go:471](internal/runtime/supervise.go#L471)), since the status
+([internal/runtime/supervise.go:471](../internal/runtime/supervise.go#L471)), since the status
 itself carries no path. A launcher the user supplied protects nothing: it lives outside the
 runtime directory, and `buildDirOf` says so rather than matching on a substring of the path.
 
@@ -470,8 +470,8 @@ projectors beside it.
 
 So the folder to offer first is the one LM Studio's own setting names, not the first
 candidate that exists. `LMStudioFolders`
-([internal/runtime/discover.go:80](internal/runtime/discover.go#L80)) returns them in order
-and `ScanModelFolder` ([internal/runtime/discover.go:155](internal/runtime/discover.go#L155))
+([internal/runtime/discover.go:80](../internal/runtime/discover.go#L80)) returns them in order
+and `ScanModelFolder` ([internal/runtime/discover.go:155](../internal/runtime/discover.go#L155))
 reads one; the whole thing is unit-tested against temporary homes.
 
 **And one remembered folder is not enough to make the choice cheap.** A user with LM Studio's
@@ -481,17 +481,17 @@ keeps the folders it was pointed at instead: `modelDirs` in the settings blob, m
 picked first, drawn as one chip per folder, with the folder in use always one of them (it is
 added at the head when a list arrives without it, which is what a blob written before the list
 existed carries). `NormaliseModelDirs`
-([internal/config/config.go:641](internal/config/config.go#L641)) trims, drops duplicates and
+([internal/config/config.go:641](../internal/config/config.go#L641)) trims, drops duplicates and
 bounds the list at eight, and is run both on load and in `SaveSettings` — a path typed straight
 into the text box never went through the picker, and the store the row reads back has to
-carry it. `ModelFolders` ([api.go:1140](api.go#L1140)) then answers with those folders first
+carry it. `ModelFolders` ([api.go:1140](../api.go#L1140)) then answers with those folders first
 and LM Studio's after, one entry per path, and a fourth place models can come from is now
 reachable in one click rather than a dialog.
 
 Two smaller consequences of the same shape:
 
 - **An empty field falls back to the remembered library**, not to LM Studio's directory
-  (`defaultModelDir`, [api.go:1210](api.go#L1210)): the panel's placeholder names that same
+  (`defaultModelDir`, [api.go:1210](../api.go#L1210)): the panel's placeholder names that same
   folder, so scanning somewhere else would list one library under another one's path.
 - **A folder can be forgotten**, and forgetting means the *list*, not the disk. The chips are
   drawn from the draft's list rather than from the backend's answer — a chip re-derived from
@@ -503,7 +503,7 @@ Two smaller consequences of the same shape:
 carries an `in use` badge — `loading` while the model is still coming in — when the running
 `llama-server` was started with that file. The path is the one the supervisor keeps in
 `rt.Status.Model`, and it crosses the bridge as `ManagedStatus.LoadedModel`
-([api.go:302](api.go#L302)), filled only while that server is running or starting.
+([api.go:302](../api.go#L302)), filled only while that server is running or starting.
 
 It is deliberately **not** `ModelPath`, and the difference is the reason the field exists: a
 save does not restart anything — the rule `PLAN.md` states as *Saving a model does not start
@@ -511,7 +511,7 @@ it* — so picking another model moves the stored path while the process keeps s
 it loaded, and the two differ until a start. A listing that marked the selection as loaded would
 claim a switch that has not happened, which is why the row names the model the server *still*
 serves once the two part ways.
-`TestTheRowNamesTheFileTheRunningServerLoaded` ([loaded_model_test.go](loaded_model_test.go))
+`TestTheRowNamesTheFileTheRunningServerLoaded` ([loaded_model_test.go](../loaded_model_test.go))
 drives a real managed start to pin all three states: nothing while idle, the started file while
 running, and that file still after a re-pick — then stops the server, because the supervisor
 keeps the model in its status once the process is gone and the state is what the field is
@@ -532,7 +532,7 @@ waiting out the load, and coming back to pick the model. Three screens for one i
 the panel whose whole job is picking a model.
 
 The picker carries that intention itself now, as a collapsed section at the head of its list
-(`LocalModelStart`, [frontend/src/components/ModelSwitcher.tsx:908](frontend/src/components/ModelSwitcher.tsx#L908)):
+(`LocalModelStart`, [frontend/src/components/ModelSwitcher.tsx:908](../frontend/src/components/ModelSwitcher.tsx#L908)):
 the entry KiChat runs (`kind == "llamacpp"`, the one kind whose server this app starts and
 stops), the folder it would read — `ScanModelFolder("")`, so the same folder §3.10 describes,
 loaded when the section is opened rather than when the panel is — and, on a click, the GGUFs
@@ -540,7 +540,7 @@ in it with their sizes. The state rides in the header while a load runs, because
 minutes long and a header that said nothing would read as a click that did nothing.
 
 **The two clicks are not the same click.** A file that is not loaded goes through
-`StartManagedModelWith` ([api.go:1303](api.go#L1303)): the stored entry with another
+`StartManagedModelWith` ([api.go:1303](../api.go#L1303)): the stored entry with another
 `modelPath` and never a fresh entry, so a context size, a KV cache type or an offload choice
 made in Settings survives a pick in the chat. The chat is then re-pointed at it **after** the
 server reports `running` — a switch made while the weights are still coming in fails the next
@@ -556,7 +556,7 @@ would leave the chat on a model the panel does not name and the next launch on a
 so a pick is a selection with a side effect: the entry KiChat would start at launch becomes
 the file that was picked. `enabled` is left as it is — which is why a first pick from the
 chat, an entry that does not exist yet, sends the panel's own defaults with `enabled: false`
-(`defaultManagedModel`, [frontend/src/lib/api.ts:151](frontend/src/lib/api.ts#L151)) and so
+(`defaultManagedModel`, [frontend/src/lib/api.ts:151](../frontend/src/lib/api.ts#L151)) and so
 starts the model *now* without promising to start it on every launch. That switch stays a
 Settings decision, and the entry's row there shows it.
 
@@ -578,7 +578,7 @@ the list, and the rows come back enabled, so the file is one click away. Nothing
 by a start that failed, because a stored path that is not there fails every later start
 too — including the automatic one at launch. `TestStartingFromThePickerNamesTheFileWithoutEnablingIt`,
 `TestASecondPickRestartsOntoTheOtherFile` and `TestOnlyTheEntryKiChatRunsCanBeStartedThisWay`
-([start_with_model_test.go](start_with_model_test.go)) pin the three
+([start_with_model_test.go](../start_with_model_test.go)) pin the three
 that matter: the file is stored and `enabled` is not touched, a second pick restarts onto the
 other file rather than storing a path the process is not serving, and an entry KiChat only
 talks to — LM Studio — is refused with its name in the message rather than silently started.
@@ -586,7 +586,7 @@ talks to — LM Studio — is refused with its name in the message rather than s
 **And the same section gives the memory back.** A managed server holds the whole file in
 memory, and the panel whose click put it there is where releasing that belongs: the state
 line at the top of the expanded section carries the state word, the file the process is
-serving, and a **Stop** — `StopManagedModel` ([api.go:1358](api.go#L1358)), the binding
+serving, and a **Stop** — `StopManagedModel` ([api.go:1358](../api.go#L1358)), the binding
 Settings' own Stop button calls, so there is no second way to end a process. It is offered
 whenever the state is not `stopped`, which is what makes it the way out of a load begun by
 mistake as well: an abort is the same stop, and a 27B file takes minutes to come in.
@@ -596,7 +596,7 @@ makes a stopped model one click from running again; `enabled` stays a Settings d
 about the next launch, and stopping a model is not that decision. What changes is the state
 line's own reading: the mark, the port and the address go with the process, and the
 "in use" badge in the file list goes with them. `TestStoppingFromThePickerKeepsTheEntryStartable`
-([stop_model_test.go](stop_model_test.go)) drives a real picker start and then a stop on the
+([stop_model_test.go](../stop_model_test.go)) drives a real picker start and then a stop on the
 stand-in launcher: the entry still names the file with `enabled` untouched, the loaded model
 and the port are gone, a second stop answers nil — the stale reading a button can be offered
 on — and the panel's own start works on what survived.
@@ -629,7 +629,7 @@ unexpected, you may need to provide the mmproj","type":"server_error"}}
 Measured on this machine's own Qwen3-VL-8B through the app's supervisor (the `Q4_K_M` weights
 with the `F16` projector beside them), same build, same 64×64 PNG, one flag apart — first by
 hand on `prism-b10777-e3de715-rocm-7.2`, and since then by
-[`TestLiveProjectorIsWhatMakesAVisionModelSee`](projector_live_test.go), which re-runs the whole
+[`TestLiveProjectorIsWhatMakesAVisionModelSee`](../projector_live_test.go), which re-runs the whole
 table on demand:
 
 | start | `/props` `modalities` | image request |
@@ -648,7 +648,7 @@ see. A detected file is never written back into the settings: an empty field has
 "the one beside the model" or a replaced quant would need the field cleared by hand.
 
 The folder is read, not guessed, and `MatchProjector`
-([internal/runtime/discover.go:327](internal/runtime/discover.go#L327)) answers `""` rather than
+([internal/runtime/discover.go:327](../internal/runtime/discover.go#L327)) answers `""` rather than
 picking:
 
 | folder | answer, and why |
@@ -670,10 +670,10 @@ with where the model is, so a path with no folder is answered with nothing rathe
 
 **The consequence upstream of this: the model reports itself as text-only, and the app believed
 it.** `/props` `modalities.vision` is read by the provider
-([internal/llm/llamacpp.go:294](internal/llm/llamacpp.go#L294)), so a projector-less start is
+([internal/llm/llamacpp.go:294](../internal/llm/llamacpp.go#L294)), so a projector-less start is
 listed as an `llm` with no `vision` capability — while the chat context attaches an image to a
 turn regardless of capability
-([internal/chat/context.go:255](internal/chat/context.go#L255)), with only the ingest warning
+([internal/chat/context.go:255](../internal/chat/context.go#L255)), with only the ingest warning
 as notice. That combination is how the 500 above reaches the transcript as the server's own
 words instead of a sentence from the app.
 
@@ -725,42 +725,42 @@ reports it in the panel — `On Vulkan0: 65 of 65 layers on the GPU`.
 
 | file | symbol | what it does |
 | --- | --- | --- |
-| [internal/llm/llamacpp.go:63](internal/llm/llamacpp.go#L63) | `LlamaCppDefaultBaseURL` | `http://127.0.0.1:9931`, and why not 8080 |
-| [internal/llm/llamacpp.go:67](internal/llm/llamacpp.go#L67) | `newLlamaCppProvider` | the two chat paths, `/v1/models`, `/props`, `flavourLlamaCpp` |
-| [internal/llm/llamacpp.go:121](internal/llm/llamacpp.go#L121) | `llamaCppProps` | the part of `/props` the app acts on, caps as a map |
-| [internal/llm/llamacpp.go:182](internal/llm/llamacpp.go#L182) | `fromLlamaCppEntry` | entry → `ModelInfo`, with `n_ctx_train` as the ceiling only |
-| [internal/llm/llamacpp.go:237](internal/llm/llamacpp.go#L237) | `enrichLlamaCpp` | folds `/props` in; direct server vs router |
-| [internal/llm/llamacpp.go:310](internal/llm/llamacpp.go#L310) | `llamaCppLoadedIndex` | which row a `/props` reading belongs to |
-| [internal/llm/llamacpp.go:346](internal/llm/llamacpp.go#L346) | `propsFor` | caches the reading; 404 remembered, other failures not |
-| [internal/llm/llamacpp.go:390](internal/llm/llamacpp.go#L390) | `llamaCppTemplateTogglesThinking` | the guard on sending `chat_template_kwargs` |
-| [internal/runtime/distribution.go:71](internal/runtime/distribution.go#L71) | `Distributions` | the two sources |
-| [internal/runtime/distribution.go:147](internal/runtime/distribution.go#L147) | `PublishedAccelerators` | the source's own answer per platform |
-| [internal/runtime/distribution.go:167](internal/runtime/distribution.go#L167) | `AssetName` | tag + platform + family → the archive |
-| [internal/runtime/distribution.go:250](internal/runtime/distribution.go#L250) | `TagOfDir` | the whole tag shape, from the right |
-| [internal/runtime/install.go:150](internal/runtime/install.go#L150) | `NewInstaller` | owns the runtime directory |
-| [internal/runtime/install.go:642](internal/runtime/install.go#L642) | `Installer.Install` | download, verify, extract, flatten, move into place |
-| [internal/runtime/install.go:1128](internal/runtime/install.go#L1128) | `entryPath` | tar entries; the fork's `./` root entry |
-| [internal/runtime/builds.go:47](internal/runtime/builds.go#L47) | `Installer.Builds` | the cleanup list, with sizes |
-| [internal/runtime/builds.go:118](internal/runtime/builds.go#L118) | `RemoveBuild` | refuses a non-build |
-| [internal/runtime/supervise.go:149](internal/runtime/supervise.go#L149) | `NewServer` | one supervisor per managed model |
-| [internal/runtime/supervise.go:195](internal/runtime/supervise.go#L195) | `Server.Start` | free port, `-lv 4`, readiness |
-| [internal/runtime/supervise.go:375](internal/runtime/supervise.go#L375) | `Server.Stop` | |
-| [internal/runtime/supervise.go:471](internal/runtime/supervise.go#L471) | `Server.Binary` | which launcher started it |
-| [internal/runtime/gpu.go:407](internal/runtime/gpu.go#L407) | `serverEnv` | the ROCm library path |
-| [internal/runtime/libs.go:69](internal/runtime/libs.go#L69) | `MissingLibraries` | the loader's answer for a build directory |
-| [internal/runtime/discover.go:80](internal/runtime/discover.go#L80) | `LMStudioFolders` | which folder to offer first |
-| [internal/runtime/discover.go:155](internal/runtime/discover.go#L155) | `ScanModelFolder` | the `.gguf` files in one |
-| [internal/config/config.go:641](internal/config/config.go#L641) | `NormaliseModelDirs` | the folders the row remembers: trimmed, deduped, bounded, and holding the folder in use |
-| [api.go:1140](api.go#L1140) | `ModelFolders` | the remembered folders first, then LM Studio's, one entry per path |
-| [api.go:302](api.go#L302) | `ManagedStatus.LoadedModel` | the file the running server was started with; empty unless one is running |
-| [api.go:1210](api.go#L1210) | `defaultModelDir` | which folder an empty field means |
-| [api.go:1303](api.go#L1303) | `StartManagedModelWith` | the chat picker's start: the stored entry with another file, checked, then started |
-| [internal/runtime/discover.go:283](internal/runtime/discover.go#L283) | `ProjectorsBeside` | the projector GGUFs sitting in the model's own folder |
-| [internal/runtime/discover.go:327](internal/runtime/discover.go#L327) | `MatchProjector` | which of them belongs to that model, or none when the folder does not answer |
-| [app.go:350](app.go#L350) | `managedProjector` | the typed projector, else the detected one; a typed file that is gone — or that is a folder — refuses the start |
-| [internal/runtime/version.go:26](internal/runtime/version.go#L26) | `BinaryVersion` | `--version`, with a deadline and `WaitDelay` |
-| [api.go:473](api.go#L473) | `CheckLlamaRuntimeUpdate` | one request, cached |
-| [api.go:820](api.go#L820) | `GetRuntimeStatus` | reports the cached copy; clears before start |
+| [internal/llm/llamacpp.go:63](../internal/llm/llamacpp.go#L63) | `LlamaCppDefaultBaseURL` | `http://127.0.0.1:9931`, and why not 8080 |
+| [internal/llm/llamacpp.go:67](../internal/llm/llamacpp.go#L67) | `newLlamaCppProvider` | the two chat paths, `/v1/models`, `/props`, `flavourLlamaCpp` |
+| [internal/llm/llamacpp.go:121](../internal/llm/llamacpp.go#L121) | `llamaCppProps` | the part of `/props` the app acts on, caps as a map |
+| [internal/llm/llamacpp.go:182](../internal/llm/llamacpp.go#L182) | `fromLlamaCppEntry` | entry → `ModelInfo`, with `n_ctx_train` as the ceiling only |
+| [internal/llm/llamacpp.go:237](../internal/llm/llamacpp.go#L237) | `enrichLlamaCpp` | folds `/props` in; direct server vs router |
+| [internal/llm/llamacpp.go:310](../internal/llm/llamacpp.go#L310) | `llamaCppLoadedIndex` | which row a `/props` reading belongs to |
+| [internal/llm/llamacpp.go:346](../internal/llm/llamacpp.go#L346) | `propsFor` | caches the reading; 404 remembered, other failures not |
+| [internal/llm/llamacpp.go:390](../internal/llm/llamacpp.go#L390) | `llamaCppTemplateTogglesThinking` | the guard on sending `chat_template_kwargs` |
+| [internal/runtime/distribution.go:71](../internal/runtime/distribution.go#L71) | `Distributions` | the two sources |
+| [internal/runtime/distribution.go:147](../internal/runtime/distribution.go#L147) | `PublishedAccelerators` | the source's own answer per platform |
+| [internal/runtime/distribution.go:167](../internal/runtime/distribution.go#L167) | `AssetName` | tag + platform + family → the archive |
+| [internal/runtime/distribution.go:250](../internal/runtime/distribution.go#L250) | `TagOfDir` | the whole tag shape, from the right |
+| [internal/runtime/install.go:150](../internal/runtime/install.go#L150) | `NewInstaller` | owns the runtime directory |
+| [internal/runtime/install.go:642](../internal/runtime/install.go#L642) | `Installer.Install` | download, verify, extract, flatten, move into place |
+| [internal/runtime/install.go:1128](../internal/runtime/install.go#L1128) | `entryPath` | tar entries; the fork's `./` root entry |
+| [internal/runtime/builds.go:47](../internal/runtime/builds.go#L47) | `Installer.Builds` | the cleanup list, with sizes |
+| [internal/runtime/builds.go:118](../internal/runtime/builds.go#L118) | `RemoveBuild` | refuses a non-build |
+| [internal/runtime/supervise.go:149](../internal/runtime/supervise.go#L149) | `NewServer` | one supervisor per managed model |
+| [internal/runtime/supervise.go:195](../internal/runtime/supervise.go#L195) | `Server.Start` | free port, `-lv 4`, readiness |
+| [internal/runtime/supervise.go:375](../internal/runtime/supervise.go#L375) | `Server.Stop` | |
+| [internal/runtime/supervise.go:471](../internal/runtime/supervise.go#L471) | `Server.Binary` | which launcher started it |
+| [internal/runtime/gpu.go:407](../internal/runtime/gpu.go#L407) | `serverEnv` | the ROCm library path |
+| [internal/runtime/libs.go:69](../internal/runtime/libs.go#L69) | `MissingLibraries` | the loader's answer for a build directory |
+| [internal/runtime/discover.go:80](../internal/runtime/discover.go#L80) | `LMStudioFolders` | which folder to offer first |
+| [internal/runtime/discover.go:155](../internal/runtime/discover.go#L155) | `ScanModelFolder` | the `.gguf` files in one |
+| [internal/config/config.go:641](../internal/config/config.go#L641) | `NormaliseModelDirs` | the folders the row remembers: trimmed, deduped, bounded, and holding the folder in use |
+| [api.go:1140](../api.go#L1140) | `ModelFolders` | the remembered folders first, then LM Studio's, one entry per path |
+| [api.go:302](../api.go#L302) | `ManagedStatus.LoadedModel` | the file the running server was started with; empty unless one is running |
+| [api.go:1210](../api.go#L1210) | `defaultModelDir` | which folder an empty field means |
+| [api.go:1303](../api.go#L1303) | `StartManagedModelWith` | the chat picker's start: the stored entry with another file, checked, then started |
+| [internal/runtime/discover.go:283](../internal/runtime/discover.go#L283) | `ProjectorsBeside` | the projector GGUFs sitting in the model's own folder |
+| [internal/runtime/discover.go:327](../internal/runtime/discover.go#L327) | `MatchProjector` | which of them belongs to that model, or none when the folder does not answer |
+| [app.go:350](../app.go#L350) | `managedProjector` | the typed projector, else the detected one; a typed file that is gone — or that is a folder — refuses the start |
+| [internal/runtime/version.go:26](../internal/runtime/version.go#L26) | `BinaryVersion` | `--version`, with a deadline and `WaitDelay` |
+| [api.go:473](../api.go#L473) | `CheckLlamaRuntimeUpdate` | one request, cached |
+| [api.go:820](../api.go#L820) | `GetRuntimeStatus` | reports the cached copy; clears before start |
 
 ---
 
@@ -839,8 +839,8 @@ downloaded archive is needed. Nothing takes that path unless the variable is set
 that skips on Windows (the launcher is a shell script) is the only user of it.
 
 The same stand-in is what lets the picker's start
-([start_with_model_test.go](start_with_model_test.go)) and the loaded mark
-([loaded_model_test.go](loaded_model_test.go)) be asserted on a server that is really running
+([start_with_model_test.go](../start_with_model_test.go)) and the loaded mark
+([loaded_model_test.go](../loaded_model_test.go)) be asserted on a server that is really running
 rather than on a stub: the file is written to a temporary directory, the start goes through
 `Server.Start`, and what is checked is the *status* — the stored path, `enabled` untouched, the
 `LoadedModel` of a running entry, the second pick that replaces it, and the refusal of an entry
