@@ -349,6 +349,27 @@ asked for (`TestScrapeAppliesTokenBudgetToCachedContent`).
 "…[gekürzt: ca. N weitere Tokens nicht übernommen]", so the model knows it was cut rather
 than merely ending. The tool service's default budget is 12,000 tokens.
 
+**A PDF is downloaded in full; only a page is bounded at 5 MB.** The two limits exist for
+different reasons and used to share one value, which cut a 9.7 MB, 56-page heat-pump manual
+at 5 MB. The cut file lost its trailer cross-reference, the built-in parser answered "not a
+PDF file: missing %%EOF", and the app blamed the website for a download it had truncated
+itself. A PDF therefore gets `PDFMaxBytes` — 64 MB, the same bound `AddAttachment` puts on
+one read from disk — and a PDF past it is refused with `research.pdfTooLarge`, naming the
+limit, rather than handed to a parser as a partial file. The read counts one byte past the
+limit so "complete" and "cut at the limit" are distinguishable; a page that really is
+larger than 5 MB now says so in the result's warning instead of just ending.
+
+**A document too large to inline is indexed, not sliced.** `scrape_url` fetches through
+`ScrapeDocument` (no token bound) and hands the model a bounded excerpt plus chunk
+navigation, so a 20-page document is reachable end to end through `search_documents` and
+`read_pages`; `ScrapeIntoChat` follows the same size rule, which is `AddAttachment`'s
+(`AutoIndexThreshold`, 8000 tokens). Below it nothing is indexed — two extra tool calls for
+a paragraph that used to arrive in one would be a regression. The scraped document is
+written with its `source_url`, so the index says where the text came from.
+
+What this does not fix: a PDF that genuinely arrives truncated from the server still fails
+in the parser, and the answer is still the parser's wording.
+
 ---
 
 ## 7. Search-first: the seeded turn

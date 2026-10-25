@@ -19,11 +19,23 @@ import (
 
 	"kichat/internal/llm"
 	"kichat/internal/store"
+	"kichat/internal/uimsg"
 )
 
 // ScrapeOptions configures the scraper.
 type ScrapeOptions struct {
-	MaxBytes          int64
+	// MaxBytes bounds an HTML (or plain-text, or JSON) download. It exists because
+	// converting and reading a page is work in proportion to its size, not because the
+	// bytes are precious.
+	MaxBytes int64
+	// PDFMaxBytes bounds a PDF download separately, and generously: a manual or a
+	// report is routinely tens of megabytes. Cutting one at MaxBytes produced a file
+	// whose trailer cross-reference was gone, and the parser's answer — "not a PDF
+	// file: missing %%EOF" — blamed the website for a download we had truncated
+	// ourselves. A measured case: novelan.com's 56-page Helox 5/8 manual is 9.7 MB
+	// and reported exactly that. It matches the attachment cap in AddAttachment, so a
+	// PDF read from the web and one added from disk are bounded alike.
+	PDFMaxBytes       int64
 	Timeout           time.Duration
 	RespectRobots     bool
 	AllowPrivateHosts bool
@@ -80,6 +92,9 @@ const maxRedirects = 3
 func (s *Scraper) Configure(opts ScrapeOptions) {
 	if opts.MaxBytes <= 0 {
 		opts.MaxBytes = 5 << 20
+	}
+	if opts.PDFMaxBytes <= 0 {
+		opts.PDFMaxBytes = 64 << 20
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 20 * time.Second
@@ -166,6 +181,21 @@ func (s *Scraper) options() ScrapeOptions {
 
 // Scrape fetches a URL and returns clean Markdown trimmed to maxTokens.
 func (s *Scraper) Scrape(ctx context.Context, rawURL string, maxTokens int) (ScrapeResult, error) {
+	return s.scrape(ctx, rawURL, maxTokens)
+}
+
+// ScrapeDocument fetches a URL and returns its whole extracted text, unbounded by a
+// token budget.
+//
+// It is for the caller that indexes the result: a 56-page manual is ~98k tokens,
+// more than fits in a model's context, so handing it back trimmed would leave the
+// rest of the document unreachable. The caller chunks the text and lets the model
+// read it with read_pages instead.
+func (s *Scraper) ScrapeDocument(ctx context.Context, rawURL string) (ScrapeResult, error) {
+	return s.scrape(ctx, rawURL, 0)
+}
+
+func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (ScrapeResult, error) {
 	clean := normaliseURL(strings.TrimSpace(rawURL))
 	if clean == "" {
 		return ScrapeResult{}, fmt.Errorf("leere URL")
@@ -231,9 +261,25 @@ func (s *Scraper) Scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 	}
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	body, err := io.ReadAll(io.LimitReader(resp.Body, opts.MaxBytes))
+	isPDF := strings.Contains(contentType, "application/pdf") ||
+		strings.HasSuffix(strings.ToLower(parsed.Path), ".pdf")
+
+	// The limit is chosen before the body is read, because a PDF and a page are cut
+	// for different reasons and at very different sizes.
+	limit := opts.MaxBytes
+	if isPDF {
+		limit = opts.PDFMaxBytes
+	}
+	body, bodyCut, err := readBody(resp.Body, limit)
 	if err != nil {
 		return ScrapeResult{}, fmt.Errorf("Lesen fehlgeschlagen: %w", err)
+	}
+	if isPDF && bodyCut {
+		// Never hand the extractor a cut file: its answer names a missing trailer,
+		// which reads as a broken PDF on the site rather than a limit of ours.
+		return ScrapeResult{}, uimsg.Detailf("research.pdfTooLarge",
+			fmt.Sprintf("the PDF is larger than the %d MB download limit and cannot be read in full", limit>>20),
+			limit>>20)
 	}
 
 	result := ScrapeResult{
@@ -241,9 +287,14 @@ func (s *Scraper) Scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 		FinalURL:    resp.Request.URL.String(),
 		ContentType: contentType,
 	}
+	if bodyCut {
+		// A page this large is rare, but cutting one silently is what made the PDF
+		// limit look like a broken download. The model is told the text stops early.
+		result.Warning = fmt.Sprintf("Seite war größer als %d MB und wurde beim Abruf gekürzt", limit>>20)
+	}
 
 	switch {
-	case strings.Contains(contentType, "application/pdf") || strings.HasSuffix(strings.ToLower(parsed.Path), ".pdf"):
+	case isPDF:
 		if s.pdf == nil {
 			return ScrapeResult{}, fmt.Errorf("PDF gefunden, aber keine PDF-Extraktion verfügbar")
 		}
@@ -357,6 +408,32 @@ func cleanMarkdown(md string) string {
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
 	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+// TrimToTokens applies the token bound to a scraped result, with an explicit marker
+// so a reader knows the text was cut rather than just ending.
+//
+// Exported for the caller that scraped a whole document to index it: it hands the
+// model a bounded excerpt of the same result and points at the indexed chunks for
+// the rest.
+func TrimToTokens(result *ScrapeResult, maxTokens int) {
+	trimToTokens(result, maxTokens)
+}
+
+// readBody reads at most limit bytes and reports whether the body was longer.
+//
+// The extra byte is the whole point: reading `limit` bytes and stopping cannot tell
+// a file that ends there from one that continues, which is how a cut PDF became an
+// "invalid PDF".
+func readBody(body io.Reader, limit int64) (data []byte, cut bool, err error) {
+	data, err = io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > limit {
+		return data[:limit], true, nil
+	}
+	return data, false, nil
 }
 
 // trimToTokens applies the token bound with an explicit marker, so the model

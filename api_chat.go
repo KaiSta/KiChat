@@ -352,6 +352,10 @@ func (a *App) Scrape(url string, maxTokens int) (research.ScrapeResult, error) {
 
 // ScrapeIntoChat scrapes a page and attaches it to a chat as an indexed or
 // inline document, which is how "read this page" becomes permanent context.
+//
+// The page is fetched whole and then either inlined or indexed by size, the rule
+// AddAttachment follows. It used to be trimmed to maxTokens and always inlined,
+// which turned a 56-page manual into its first pages with no way to read the rest.
 func (a *App) ScrapeIntoChat(chatID, pageURL string, maxTokens int) (store.Attachment, error) {
 	if err := a.ensure(); err != nil {
 		return store.Attachment{}, err
@@ -361,24 +365,38 @@ func (a *App) ScrapeIntoChat(chatID, pageURL string, maxTokens int) (store.Attac
 	if maxTokens <= 0 {
 		maxTokens = 12000
 	}
-	result, err := a.currentScraper().Scrape(ctx, pageURL, maxTokens)
+	result, err := a.currentScraper().ScrapeDocument(ctx, pageURL)
 	if err != nil {
 		return store.Attachment{}, err
+	}
+
+	placement := store.PlacementInline
+	if result.Tokens > AutoIndexThreshold {
+		placement = store.PlacementIndexed
+	} else {
+		// Small enough to send whole; the budget only bites above the threshold,
+		// where the text is indexed instead.
+		research.TrimToTokens(&result, maxTokens)
 	}
 
 	title := result.Title
 	if title == "" {
 		title = result.FinalURL
 	}
+	kind, mime := "web", "text/markdown"
+	if strings.Contains(result.ContentType, "application/pdf") || result.Pages > 0 {
+		kind, mime = "pdf", "application/pdf"
+	}
 	attachment := store.Attachment{
 		ID:            newID(),
 		ChatID:        chatID,
-		Kind:          "web",
+		Kind:          kind,
 		Filename:      title,
-		Mime:          "text/markdown",
+		Mime:          mime,
 		SizeBytes:     int64(len(result.Markdown)),
+		Pages:         result.Pages,
 		TokenEstimate: result.Tokens,
-		Placement:     store.PlacementInline,
+		Placement:     placement,
 		CreatedAt:     time.Now(),
 	}
 	if result.Warning != "" {
@@ -391,6 +409,7 @@ func (a *App) ScrapeIntoChat(chatID, pageURL string, maxTokens int) (store.Attac
 		Title:        title,
 		Text:         result.Markdown,
 		TokenCount:   result.Tokens,
+		PageCount:    result.Pages,
 		SourceURL:    result.FinalURL,
 		CreatedAt:    time.Now(),
 	}
@@ -398,7 +417,33 @@ func (a *App) ScrapeIntoChat(chatID, pageURL string, maxTokens int) (store.Attac
 		return store.Attachment{}, err
 	}
 	attachment.DocumentID = document.ID
+	if placement == store.PlacementIndexed {
+		chunks := ingest.ChunkDocument(result.Markdown, ingest.DefaultChunkSpec())
+		out := make([]store.Chunk, 0, len(chunks))
+		for _, c := range chunks {
+			out = append(out, store.Chunk{
+				DocumentID: document.ID,
+				ChatID:     chatID,
+				Ordinal:    c.Ordinal,
+				Heading:    c.Heading,
+				Page:       c.Page,
+				Text:       c.Text,
+				Tokens:     c.Tokens,
+			})
+		}
+		if err := a.store.InsertChunks(out); err != nil {
+			if cleanupErr := a.store.DeleteDocument(document.ID); cleanupErr != nil {
+				return store.Attachment{}, uimsg.Errorf("attachment.cleanupFailed",
+					err, document.ID, cleanupErr)
+			}
+			return store.Attachment{}, err
+		}
+	}
 	if err := a.store.CreateAttachment(attachment); err != nil {
+		if cleanupErr := a.store.DeleteDocument(document.ID); cleanupErr != nil {
+			return store.Attachment{}, uimsg.Errorf("attachment.cleanupFailed",
+				err, document.ID, cleanupErr)
+		}
 		return store.Attachment{}, err
 	}
 	a.emit(events.Attachments, map[string]any{"chatId": chatID})

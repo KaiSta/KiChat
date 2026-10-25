@@ -921,6 +921,8 @@ const de = {
   'err.runtime.notManaged': '{{1}} wird nicht von KiChat gestartet',
   'err.model.notFound': 'Modell nicht gefunden: {{1}}',
   'err.search.noBraveKey': 'kein Brave API-Key angegeben',
+  'err.research.pdfTooLarge':
+    'Das PDF ist größer als das Download-Limit von {{1}} MB und kann nicht vollständig gelesen werden',
   'err.model.backendOff': 'Backend {{1}} ist nicht konfiguriert oder ausgeschaltet',
   'err.model.backendUnreachable': 'Backend {{1}} ist nicht erreichbar: {{2}}',
   'err.model.listFailed': 'Modellliste von {{1}}: {{2}}',
@@ -1970,6 +1972,8 @@ const en: Record<keyof typeof de, string> = {
   'err.runtime.notManaged': '{{1}} is not started by KiChat',
   'err.model.notFound': 'model not found: {{1}}',
   'err.search.noBraveKey': 'no Brave API key set',
+  'err.research.pdfTooLarge':
+    'the PDF is larger than the {{1}} MB download limit and cannot be read in full',
   'err.model.backendOff': 'backend {{1}} is not configured or switched off',
   'err.model.backendUnreachable': 'backend {{1}} is unreachable: {{2}}',
   'err.model.listFailed': 'model list from {{1}}: {{2}}',
@@ -2948,6 +2952,7 @@ const zh: Record<keyof typeof de, string> = {
   'err.runtime.notManaged': '{{1}} 不是由 KiChat 启动的',
   'err.model.notFound': '未找到模型：{{1}}',
   'err.search.noBraveKey': '未设置 Brave API 密钥',
+  'err.research.pdfTooLarge': 'PDF 超过 {{1}} MB 的下载上限，无法完整读取',
   'err.model.backendOff': '后端 {{1}} 未配置或已关闭',
   'err.model.backendUnreachable': '无法访问后端 {{1}}：{{2}}',
   'err.model.listFailed': '{{1}} 的模型列表：{{2}}',

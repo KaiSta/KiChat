@@ -877,6 +877,9 @@ func (a *App) rebuildServices(settings config.Settings) {
 	toolService := tools.New(a.store, chain, scraper)
 	toolService.Images = imageProvider
 	toolService.Settings = a.Settings
+	// The same size rule the attachment path uses, so a document is inlined or
+	// indexed by its size and not by how it arrived.
+	toolService.IndexThreshold = AutoIndexThreshold
 	// A draw is watched and stoppable wherever it starts. The tool path registers itself here
 	// (under the message the call belongs to, which is the row the view shows it on); a redraw
 	// registers in RegenerateImage under its attachment. One registry, so one Stop works for
