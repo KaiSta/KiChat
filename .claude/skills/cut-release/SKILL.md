@@ -22,12 +22,12 @@ newer-looking final.
 ## 2. One commit, `build: release x.y.z`, carrying `VERSION` and the `wails.json`
 info block it rewrites — nothing else
 
-Its body is the release note: what changed **since the previous bump commit**,
-written as prose from `git log <previous bump>..HEAD` with the measured numbers in
-it, not a list of files. Open with the standing paragraph the 0.3.x releases and
-0.4.1 use — `VERSION` is the one authored number, so a release is this line and
-nothing else, and the tag has to sit on the commit that carries it — then the
-changes.
+Its body is the release note that gets published, so it is written for the person
+installing the build rather than for the reader of the diff: **short, and a bullet
+list** of what changed since the previous bump commit, each bullet a change they can
+observe. `git log <previous bump>..HEAD` is the source to read, not text to copy —
+no file names, package names, measurements or internal reasoning. A release with
+nothing a user can see says so in one bullet.
 
 Not `release: bump version to …`: 0.4.0 is the outlier that did that.
 
@@ -126,7 +126,8 @@ Only for a version that really was released, and never an invented note.
 
 - `VERSION`, `wails.json`'s `comments`/`productVersion`, the binary's `--version`
   and the `.deb`'s control all agree.
-- The bump commit carries `VERSION` and nothing else, and its body reads as prose.
+- The bump commit carries `VERSION` and nothing else, and its body is the short,
+  user-facing bullet list that the release page will show.
 - The annotated tag sits on that commit (`git describe --tags --exact-match HEAD`).
 - Nothing was pushed; the tag is local until the user asks.
 - Once it is pushed: the release page carries exactly five assets — a `.deb` and a

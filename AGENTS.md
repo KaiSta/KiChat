@@ -180,6 +180,14 @@ the macOS bundle version come from. Three traps:
   timestamp would break the byte-identical rebuilds `-trimpath` otherwise
   guarantees.
 
+**The release commit is written for users, as a short bullet list.** Its body becomes
+the tag's annotation and therefore the GitHub release page, so it is the changelog
+somebody reads before installing: a handful of bullets, each a change they can
+observe, in plain language. No file or package names, no measurements, no reasoning —
+those belong in the commits that made the change and in the subsystem documents.
+Short is the point: a reader should learn what arrives in this version without
+opening anything else. A release with nothing a user can see says so in one bullet.
+
 The release procedure itself (the commit, the tag, the push rules, the repair of a
 missing tag) is the [`cut-release`](.claude/skills/cut-release/SKILL.md) skill.
 
@@ -217,6 +225,9 @@ The body is prose, not a changelog: the failure or limitation that motivated the
 change, what was measured, what changed and why, and which checks stayed green.
 Numbers go in where they exist; a body that only lists the files is a stub. One
 commit is one coherent change, and files are staged explicitly, never `git add -A`.
+The exception is the `build: release x.y.z` commit: its body is the user-facing
+bullets described under [Versioning](#versioning), because it is published as the
+release note.
 
 **Always `--no-pager`.** `git log`, `git diff` and `git show` open a pager that
 blocks a non-interactive shell — it looks hung, and the output lands in a temp file
