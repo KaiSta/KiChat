@@ -95,7 +95,7 @@ func (s *Service) Definitions() []llm.ToolDefinition {
 					},
 					"count": map[string]any{
 						"type":        "integer",
-						"description": "Anzahl der Ergebnisse (1-20, Standard 8).",
+						"description": "Anzahl der Ergebnisse (1-20). Weglassen: die in den Einstellungen festgelegte Anzahl.",
 					},
 					"freshness": map[string]any{
 						"type":        "string",
@@ -283,8 +283,11 @@ func (s *Service) searchWeb(ctx context.Context, argsJSON string) (string, error
 	if s.Chain == nil {
 		return "", uimsg.Detailf("tools.noSearch", "web search is not configured, so this tool cannot run")
 	}
+	// No count from the model means the user's setting, so the fallback is 0:
+	// the chain fills in Options.ResultCount. A hardcoded 8 here silently
+	// overrode "Results per search" for every search the model ran itself.
 	outcome, err := s.Chain.Search(ctx, args.Query, research.SearchRequest{
-		Count:     looseInt(args.Count, 8),
+		Count:     looseInt(args.Count, 0),
 		Freshness: strings.TrimSpace(args.Freshness),
 	})
 	if err != nil {

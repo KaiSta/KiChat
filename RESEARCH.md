@@ -98,6 +98,12 @@ Request parameters, and the reason for the odd-looking ones:
 | `country` | uppercased | |
 | `freshness`, `search_lang` | passed through | |
 
+`req.Count` is the user's **Results per search** setting
+(`settings.Search.ResultCount`) everywhere the app searches: the settings screen's own
+search, the search-first seed, and the model's `search_web` call, which passes `0` when the
+model leaves `count` out so the chain fills in the configured number. A hardcoded fallback
+in the tool would silently override the setting for exactly the searches a chat makes.
+
 **The rate limiter is set slightly under the lowest published tier** — `0.9` queries per
 second, against a documented "about one query per second"
 ([internal/research/brave.go:48](internal/research/brave.go#L48)). It is a floor for the
