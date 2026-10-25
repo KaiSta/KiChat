@@ -13,6 +13,7 @@ import (
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/trace"
 	"kichat/internal/uimsg"
 )
 
@@ -25,6 +26,9 @@ type generateInput struct {
 	Settings    config.Settings
 	UseNative   bool
 	MaxToolIter int
+	// Turn is the trace's number for this turn, carried so a provider request and a
+	// tool call can be read together with the turn they belong to.
+	Turn string
 	// Sources is the turn's numbering of the web sources, shared with the pre-flight
 	// search so every list the model reads continues one sequence.
 	Sources *tools.SourceList
@@ -207,8 +211,18 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 
 		// The request carries a watcher, so a retry that has to wait out a backend's
 		// own rate limit shows up as a phase instead of a turn that looks hung.
+		// One line per round before it goes out, so a request that never returns is
+		// still visible — the failure this trace exists for is usually the one that
+		// leaves the window waiting.
+		e.Trace.Record(trace.Event{
+			Event: trace.EvLLMRequest, Turn: in.Turn, Chat: in.Chat.ID, Message: row.ID,
+			Backend: in.BackendID, Model: in.ModelID, Count: iteration,
+		})
+		requestStart := time.Now()
 		events, err := in.Provider.Chat(e.watchingRetries(ctx, in.Chat.ID), req)
+		requestMS := time.Since(requestStart).Milliseconds()
 		if err != nil {
+			e.traceReply(in, row.ID, requestMS, nil, err)
 			// The request never produced a byte, so there is no partial answer to
 			// keep: the row is a failure. It used to be stored as "cancelled",
 			// which is the status of a tool call the *user* abandoned — a backend
@@ -223,6 +237,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		}
 
 		text, reasoning, calls, stats, usage, streamErr := e.consume(ctx, in.Chat.ID, row.ID, events)
+		e.traceReply(in, row.ID, time.Since(requestStart).Milliseconds(), usage, streamErr)
 
 		// A model that cannot call tools natively may have emitted a tool call in
 		// text form; parse it out and hide the protocol from the user.
@@ -346,6 +361,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			e.runTool(ctx, in.Chat.ID, row, call, toolBudget, tools.TurnRef{
 				BackendID: in.BackendID,
 				ModelID:   in.ModelID,
+				Turn:      in.Turn,
 				Sources:   in.Sources,
 			})
 		}
@@ -366,6 +382,29 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			"Ergebnisse auswertet.", maxIter, extra),
 	})
 	return result, nil
+}
+
+// traceReply records one provider round: how long it took, what it cost and, when it
+// failed, only the classified kind of the failure.
+//
+// A reply that died mid-stream is reported like any other failure — that is what a
+// "the answer just stops" report is — while the text that did arrive is not touched.
+func (e *Engine) traceReply(in generateInput, messageID string, ms int64, usage *llm.Usage, err error) {
+	ok := err == nil
+	ev := trace.Event{
+		Event: trace.EvLLMResponse, Turn: in.Turn, Chat: in.Chat.ID, Message: messageID,
+		Backend: in.BackendID, Model: in.ModelID, MS: ms, OK: &ok,
+	}
+	if usage != nil {
+		ev.Tokens = usage.PromptTokens
+		ev.Out = usage.CompletionTokens
+	}
+	if err != nil {
+		ev.Level = trace.LevelError
+		ev.Kind = trace.KindOf(err)
+		ev.Status = trace.StatusOf(err)
+	}
+	e.Trace.Record(ev)
 }
 
 // runTool executes one tool call and records both the call and its result.
@@ -390,6 +429,19 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 	start := time.Now()
 	output, execErr := e.executeTool(ctx, chatID, row.ID, call, turn)
 	record.DurationMs = time.Since(start).Milliseconds()
+
+	// The tool's name, how long it took and how much it returned — the three things
+	// that explain a slow or empty round. The result itself stays out of the trace.
+	ok := execErr == nil
+	toolEvent := trace.Event{
+		Event: trace.EvToolCall, Turn: turn.Turn, Chat: chatID, Message: row.ID,
+		Tool: call.Name, MS: record.DurationMs, Bytes: int64(len(output)), OK: &ok,
+	}
+	if execErr != nil {
+		toolEvent.Level = trace.LevelError
+		toolEvent.Kind = trace.KindOf(execErr)
+	}
+	e.Trace.Record(toolEvent)
 
 	// A tool that produced a picture filed it as an attachment of the message
 	// that asked for it, and the frontend renders a message's attachments — so it

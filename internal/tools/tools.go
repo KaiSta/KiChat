@@ -11,12 +11,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"kichat/internal/config"
 	"kichat/internal/images"
 	"kichat/internal/llm"
 	"kichat/internal/research"
 	"kichat/internal/store"
+	"kichat/internal/trace"
 	"kichat/internal/uimsg"
 )
 
@@ -68,6 +70,10 @@ type Service struct {
 	// copy so a settings save takes effect on the next tool call, the same way the
 	// engine's own Settings does — a Service outlives one settings blob.
 	Settings func() config.Settings
+	// Trace records the shape of a search — provider, result count, whether it was
+	// cached, how long it took and the classified kind of a failure — never the query
+	// or a result. Nil is a no-op, which is what a service built without an app gets.
+	Trace *trace.Logger
 
 	// ScrapeMaxTokens bounds a single scraped page.
 	ScrapeMaxTokens int
@@ -286,10 +292,12 @@ func (s *Service) searchWeb(ctx context.Context, argsJSON string) (string, error
 	// No count from the model means the user's setting, so the fallback is 0:
 	// the chain fills in Options.ResultCount. A hardcoded 8 here silently
 	// overrode "Results per search" for every search the model ran itself.
+	started := time.Now()
 	outcome, err := s.Chain.Search(ctx, args.Query, research.SearchRequest{
 		Count:     looseInt(args.Count, 0),
 		Freshness: strings.TrimSpace(args.Freshness),
 	})
+	s.traceSearch(ctx, started, outcome, err)
 	if err != nil {
 		return "", err
 	}
@@ -325,6 +333,26 @@ func (s *Service) searchWeb(ctx context.Context, argsJSON string) (string, error
 	sb.WriteString("Zitiere diese Quellen in deiner Antwort mit Nummer und Link. " +
 		"Nutze scrape_url, wenn eine Quelle genauer gelesen werden muss.")
 	return sb.String(), nil
+}
+
+// traceSearch records one web search: which provider answered, how many hits came
+// back, whether it was a cache hit, how long it took and, on failure, only the kind.
+// The query and the results stay out of the trace.
+func (s *Service) traceSearch(ctx context.Context, started time.Time, outcome research.SearchOutcome, err error) {
+	turn, _ := TurnFrom(ctx)
+	ok := err == nil
+	ev := trace.Event{
+		Event: trace.EvSearch, Turn: turn.Turn, Provider: outcome.Provider,
+		Count: len(outcome.Results), MS: time.Since(started).Milliseconds(), OK: &ok,
+	}
+	if outcome.Cached {
+		ev.Phase = "cached"
+	}
+	if err != nil {
+		ev.Level = trace.LevelError
+		ev.Kind = trace.KindOf(err)
+	}
+	s.Trace.Record(ev)
 }
 
 type scrapeArgs struct {

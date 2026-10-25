@@ -3201,6 +3201,9 @@ Verfügbare Tools: {{tool_list}}`,
         goVersion: 'go mock',
         platform: 'mock/harness',
       }),
+    // The diagnostic trace's location, as Settings -> About shows it. A mock path,
+    // because the harness never writes one.
+    GetTracePath: () => Promise.resolve('/home/mock/.config/kichat/kichat-trace.jsonl'),
     SetBraveKey: (key) => {
       braveKeySet = Boolean(key && key.trim())
       searchStatus.providers.brave = braveKeySet

@@ -62,6 +62,8 @@ export function GetSecretStatus():Promise<main.SecretStatus>;
 
 export function GetSettings():Promise<config.Settings>;
 
+export function GetTracePath():Promise<string>;
+
 export function GetUpscalerInstall():Promise<main.UpscalerInstall>;
 
 export function GetUpscalerStatus():Promise<tools.UpscalerStatus>;

@@ -15,6 +15,7 @@ import (
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/trace"
 	"kichat/internal/uimsg"
 )
 
@@ -55,6 +56,10 @@ type Engine struct {
 	Tools    *tools.Service
 	Settings func() config.Settings
 	Emit     func(name string, payload any)
+	// Trace records the shape of a turn — backend, model, timings, token counts and
+	// the classified kind of a failure — and never its content. Nil is a no-op, which
+	// is what a test engine gets.
+	Trace *trace.Logger
 
 	turns *TurnState
 
@@ -188,9 +193,28 @@ func (e *Engine) Send(req TurnRequest) error {
 
 // runTurn performs one full exchange, including any tool iterations.
 func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
+	started := time.Now()
+	turnID := e.Trace.Turn()
+	// The end event is built as the turn goes and written by the deferred call, so a
+	// turn that fails before it reaches the model is still one line in the trace. That
+	// is the case a bug report usually brings: "it says no model is configured", and
+	// the trace says whether the chat's row or the picker was the empty side.
+	end := trace.Event{Event: trace.EvTurnEnd, Turn: turnID, Chat: req.ChatID}
+	fail := func(err error) {
+		end.Level = trace.LevelError
+		end.Phase = "failed"
+		end.Kind = trace.KindOf(err)
+		end.Status = trace.StatusOf(err)
+	}
+	defer func() {
+		end.MS = time.Since(started).Milliseconds()
+		e.Trace.Record(end)
+	}()
+
 	settings := e.Settings()
 	chat, err := e.Store.GetChat(req.ChatID)
 	if err != nil {
+		fail(err)
 		e.emit(events.Error, map[string]any{"chatId": req.ChatID, "error": err.Error()})
 		return
 	}
@@ -203,26 +227,34 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		modelID = req.Model
 	}
 	if backendID == "" || modelID == "" {
+		err := uimsg.Errorf("chat.noModelInChat")
+		fail(err)
 		e.emit(events.Error, map[string]any{
 			"chatId": req.ChatID,
-			"error":  uimsg.Errorf("chat.noModelInChat").Error(),
+			"error":  err.Error(),
 		})
 		return
 	}
 	provider, ok := e.Registry.Provider(backendID)
 	if !ok {
+		fail(fmt.Errorf("backend %q is not configured", backendID))
 		e.emit(events.Error, map[string]any{
 			"chatId": req.ChatID,
 			"error":  fmt.Sprintf("Backend %q ist nicht konfiguriert.", backendID),
 		})
 		return
 	}
-
+	end.Backend, end.Model = backendID, modelID
+	e.Trace.Record(trace.Event{
+		Event: trace.EvTurnStart, Turn: turnID, Chat: req.ChatID,
+		Backend: backendID, Model: modelID,
+	})
 	modelInfo := e.resolveModel(ctx, backendID, modelID, settings)
 
 	// A manual regenerate drops the previous assistant reply first.
 	if req.Regenerate {
 		if err := e.dropTrailingAssistant(req.ChatID); err != nil {
+			fail(err)
 			e.emit(events.Error, map[string]any{"chatId": req.ChatID, "error": err.Error()})
 			return
 		}
@@ -231,6 +263,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	// Persist the user message before generating, so a crash never loses it.
 	if strings.TrimSpace(req.Text) != "" || len(req.AttachmentIDs) > 0 {
 		if err := e.appendUserMessage(req, backendID, modelID); err != nil {
+			fail(err)
 			e.emit(events.Error, map[string]any{"chatId": req.ChatID, "error": err.Error()})
 			return
 		}
@@ -285,6 +318,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		Provider:    provider,
 		BackendID:   backendID,
 		ModelID:     modelID,
+		Turn:        turnID,
 		Model:       modelInfo,
 		Settings:    settings,
 		UseNative:   useNativeTools,
@@ -340,7 +374,16 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		}
 	}
 
+	// What the turn became, for the end event the defer writes. Only a failure is
+	// classified: a turn the user stopped is an interruption, not an error.
+	end.Phase = status
+	end.Count = len(result.ToolCalls)
+	if result.Usage != nil {
+		end.Tokens = result.Usage.PromptTokens
+		end.Out = result.Usage.CompletionTokens
+	}
 	if genErr != nil && ctx.Err() == nil {
+		fail(genErr)
 		e.emit(events.Error, map[string]any{
 			"chatId":    req.ChatID,
 			"messageId": result.PrimaryMessageID,

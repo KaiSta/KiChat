@@ -181,6 +181,13 @@ export function GeneralTab({
 function AboutSection({ info }: { info: main.AppInfo | null }) {
   const t = useStore((s) => s.t)
   const [copied, setCopied] = useState(false)
+  const [copiedTrace, setCopiedTrace] = useState(false)
+  const [tracePath, setTracePath] = useState('')
+  // The trace belongs to the start rather than to a chat, so it is asked for once
+  // and shown even when no model is configured yet.
+  useEffect(() => {
+    void App.GetTracePath().then(setTracePath).catch(() => undefined)
+  }, [])
   // The row only appears once the backend has answered, so a failed bridge
   // shows nothing rather than a row of blanks.
   if (!info) return null
@@ -223,6 +230,35 @@ function AboutSection({ info }: { info: main.AppInfo | null }) {
       >
         {copied ? t('chat.copied') : t('settings.copyVersion')}
       </button>
+
+      {tracePath && (
+        <div className="mt-4 border-t pt-3 text-[12px]" style={{ borderColor: 'var(--border)' }}>
+          <div className="flex items-center gap-3">
+            <span className="faint w-24 shrink-0">{t('settings.trace')}</span>
+            <span className="mono min-w-0 flex-1 truncate" title={tracePath}>
+              {tracePath}
+            </span>
+          </div>
+          {/* Says what the file is for and, in the same breath, what it never holds:
+              the promise is the reason it can be handed over in a bug report. */}
+          <p className="faint mt-1">{t('settings.traceNote')}</p>
+          <button
+            type="button"
+            className="btn btn-sm mt-2"
+            onClick={() => {
+              navigator.clipboard?.writeText(tracePath).then(
+                () => {
+                  setCopiedTrace(true)
+                  window.setTimeout(() => setCopiedTrace(false), 1500)
+                },
+                () => undefined,
+              )
+            }}
+          >
+            {copiedTrace ? t('chat.copied') : t('settings.copyTrace')}
+          </button>
+        </div>
+      )}
     </Section>
   )
 }

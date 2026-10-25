@@ -252,6 +252,20 @@ func (a *App) GetAppInfo() AppInfo {
 	}
 }
 
+// GetTracePath returns the diagnostic trace's file.
+//
+// Settings -> About shows it and copies it, because the usual way to report "it
+// failed yesterday" is a file the user cannot find on their own. The path is
+// answered even when the database is locked: the trace belongs to the start, not
+// to the history, and a failed unlock is exactly when it is worth reading.
+func (a *App) GetTracePath() string {
+	_ = a.ensureInit()
+	if a.trace == nil {
+		return ""
+	}
+	return a.trace.Path()
+}
+
 // setBackendAPIKey stores one backend's key in the secret store and rebuilds the
 // registry so the change takes effect at once. The secret store owns the key, so
 // it never reaches the settings blob or the bridge.

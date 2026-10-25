@@ -302,6 +302,25 @@ inherited from SQLite's WAL, but this app has not measured its own case.
   the window during the copy, not the window afterwards, so the correct habit is to quit
   KiChat before upgrading — which the installer and the package do on their own paths.
 
+### What is still plaintext beside the database
+
+Encryption covers `kichat.db`, not the directory around it. In the same owner-only
+directory (`0700`) live `kichat.log` (the launch and why it ended, `0644`, rolled at
+1 MiB), `kichat.key` (the passphrase-wrapped copy of the key, useless without the
+passphrase, §4), and `kichat-trace.jsonl` (the diagnostic trace, `0600`, rolled at
+2 MiB with one previous file). The keyring entry is outside the directory altogether.
+
+The trace is the one that could have been a leak, so its schema is **closed rather than
+redacted**: `internal/trace.Event` has 21 fields, every one an identifier, a count, a
+duration, an enum or a public name, and `KindOf` maps an error to one of twelve words
+instead of copying its sentence. There is no field that could hold a prompt, a reply, a
+query, a URL, a file path, a chat title or a provider's error body. The guarantee is
+pinned twice: `trace_test.go` compares the serialised field set against an allowlist,
+and `TestTurnTraceKeepsTheShapeAndNotTheText` refuses a turn with an error quoting the
+user and reads the file back to check the sentence is not in it. The chat and message
+IDs that do appear point at rows that are ciphertext without the key, which is what
+makes the file safe to attach to a bug report.
+
 ## 10. Measurements
 
 Taken on this machine on 24 October 2026 (Linux x86-64, Go 1.26, `modernc.org/sqlite`

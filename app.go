@@ -25,7 +25,9 @@ import (
 	"kichat/internal/secret"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/trace"
 	"kichat/internal/uimsg"
+	"kichat/internal/version"
 )
 
 // Event names live in internal/events so the emitters and the frontend's
@@ -95,6 +97,10 @@ type App struct {
 	pendingBackup *backup.Archive
 
 	dataDir string
+	// trace is the content-free diagnostic log beside the encrypted database. It is
+	// created before the database is opened, so a start that cannot open the database
+	// still leaves a line saying so.
+	trace *trace.Logger
 
 	// installer fetches llama-server; servers holds one supervisor per backend
 	// entry that KiChat runs itself. The two are separate because the binaries
@@ -275,6 +281,8 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.store != nil {
 		a.store.Close()
 	}
+	a.trace.Record(trace.Event{Event: trace.EvAppStop})
+	a.trace.Close()
 }
 
 // ensure performs one-time initialisation. Every bound method calls it, so the
@@ -318,6 +326,8 @@ func (a *App) init() error {
 	if err := os.MkdirAll(a.dataDir, 0o700); err != nil {
 		return fmt.Errorf("Datenverzeichnis anlegen: %w", err)
 	}
+	a.trace = trace.New(a.dataDir)
+	a.trace.Record(trace.Event{Event: trace.EvAppStart, Version: version.Version})
 
 	a.dbPath = filepath.Join(a.dataDir, "kichat.db")
 	if a.newKeys == nil {
@@ -331,8 +341,17 @@ func (a *App) init() error {
 		return err
 	}
 	if err := a.openDatabase(); err != nil {
+		a.trace.Record(trace.Event{Event: trace.EvDBOpen, Level: trace.LevelError, Kind: trace.KindOf(err)})
 		return err
 	}
+	a.dbMu.Lock()
+	dbOpen := !a.locked
+	a.dbMu.Unlock()
+	dbPhase := "open"
+	if !dbOpen {
+		dbPhase = "locked"
+	}
+	a.trace.Record(trace.Event{Event: trace.EvDBOpen, Phase: dbPhase, OK: &dbOpen})
 	if a.locked {
 		// Defaults, so the unlock screen has a language and a theme. Everything that
 		// needs the history stays unbuilt until a key is available.
@@ -394,7 +413,7 @@ func (a *App) startEnabledModels() {
 		}
 		if err := a.startManagedModel(id); err != nil {
 			// Not fatal to the app: the failure is on the entry's status, where
-			// the user can read what to fix.
+			// the user can read what to fix. startManagedModel records it itself.
 			runtime.LogErrorf(a.ctx, "Modell %s starten: %v", id, err)
 		}
 	}
@@ -415,11 +434,33 @@ func (a *App) startEnabledImages() {
 		// Not fatal to the app, like a managed chat model that will not start: the
 		// reason lands on the row the user can read and fix.
 		runtime.LogErrorf(a.ctx, "Bildserver starten: %v", err)
+		a.trace.Record(trace.Event{
+			Event: trace.EvServerStart, Level: trace.LevelError, Backend: "images", Kind: trace.KindOf(err),
+		})
+		return
 	}
+	yes := true
+	a.trace.Record(trace.Event{Event: trace.EvServerStart, Backend: "images", OK: &yes})
 }
 
 // startManagedModel starts the server of one managed backend.
-func (a *App) startManagedModel(backendID string) error {
+//
+// The trace line is written from a deferred call, so the three ways this can fail
+// before the process exists — no entry, no launcher, no projector — are recorded too.
+// The error itself is classified, never copied: it can name the model's path.
+func (a *App) startManagedModel(backendID string) (err error) {
+	started := time.Now()
+	defer func() {
+		ok := err == nil
+		ev := trace.Event{
+			Event: trace.EvServerStart, Backend: backendID, MS: time.Since(started).Milliseconds(), OK: &ok,
+		}
+		if err != nil {
+			ev.Level = trace.LevelError
+			ev.Kind = trace.KindOf(err)
+		}
+		a.trace.Record(ev)
+	}()
 	if err := a.ensure(); err != nil {
 		return err
 	}
@@ -446,7 +487,7 @@ func (a *App) startManagedModel(backendID string) error {
 	// else, but `-lv` is a flag an older binary a user points at may not know, and an
 	// unknown argument stops the server rather than a report. A downloaded build is
 	// days old and always has it; a path in BinaryPath is of unknown age.
-	trace := strings.TrimSpace(settings.Runtime.BinaryPath) == ""
+	verboseTrace := strings.TrimSpace(settings.Runtime.BinaryPath) == ""
 	err = srv.Start(rt.Options{
 		Binary:         binary,
 		Model:          mm.ModelPath,
@@ -456,7 +497,7 @@ func (a *App) startManagedModel(backendID string) error {
 		CacheTypeK:     mm.CacheTypeK,
 		CacheTypeV:     mm.CacheTypeV,
 		Offload:        mm.Offload,
-		Trace:          trace,
+		Trace:          verboseTrace,
 		Extra:          rt.SplitArgs(mm.ExtraArgs),
 	})
 	if err == nil {
@@ -849,6 +890,9 @@ func (a *App) rebuildServices(settings config.Settings) {
 	engine := chat.NewEngineWithState(a.store, registry, toolService, a.Settings, a.emit, a.turns)
 
 	a.servicesMu.Lock()
+	engine.Trace = a.trace
+	toolService.Trace = a.trace
+
 	a.registry, a.chain, a.scraper, a.toolSvc, a.engine = registry, chain, scraper, toolService, engine
 	a.imageProvider = imageProvider
 	a.servicesMu.Unlock()

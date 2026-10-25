@@ -106,6 +106,10 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetTracePath() {
+  return window['go']['main']['App']['GetTracePath']();
+}
+
 export function GetUpscalerInstall() {
   return window['go']['main']['App']['GetUpscalerInstall']();
 }
