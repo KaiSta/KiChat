@@ -673,6 +673,34 @@ FROM documents WHERE id=?`, id).
 	return d, nil
 }
 
+// DocumentBySource returns the newest document a chat holds for a source URL, with
+// its text.
+//
+// It exists because a scraped page is two things at once: a tool result the model has
+// just been handed, and a document the chat indexed. The result carries an excerpt, so
+// the part that condenses it needs the document itself to summarise all of it. The
+// newest row wins because a page scraped twice has two, and the one just written is the
+// text the model just read.
+func (s *Store) DocumentBySource(chatID, sourceURL string) (Document, bool, error) {
+	if chatID == "" || sourceURL == "" {
+		return Document{}, false, nil
+	}
+	var d Document
+	var created int64
+	err := s.db.QueryRow(`SELECT id,attachment_id,chat_id,title,text,token_count,page_count,sha256,source_url,created_at
+FROM documents WHERE chat_id=? AND source_url=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, chatID, sourceURL).
+		Scan(&d.ID, &d.AttachmentID, &d.ChatID, &d.Title, &d.Text, &d.TokenCount,
+			&d.PageCount, &d.SHA256, &d.SourceURL, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Document{}, false, nil
+	}
+	if err != nil {
+		return Document{}, false, err
+	}
+	d.CreatedAt = fromMillis(created)
+	return d, true, nil
+}
+
 // ListDocuments returns a chat's documents without their full text.
 func (s *Store) ListDocuments(chatID string) ([]Document, error) {
 	rows, err := s.db.Query(`SELECT id,attachment_id,chat_id,title,token_count,page_count,sha256,source_url,created_at

@@ -306,6 +306,45 @@ func TestChatAndMessageRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDocumentBySourceFindsTheNewestCopyWithItsText is the lookup the condensation of a
+// scraped page depends on: the result holds an excerpt, so the summary has to be written
+// from the indexed document, which the scrape stored under the URL that was asked for.
+func TestDocumentBySourceFindsTheNewestCopyWithItsText(t *testing.T) {
+	st := newStore(t)
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatalf("CreateChat: %v", err)
+	}
+	const url = "https://example.com/a.pdf"
+	for _, d := range []Document{
+		{ID: "d-old", ChatID: "c1", Title: "a.pdf", Text: "alte Fassung", SourceURL: url,
+			CreatedAt: time.Now().Add(-time.Hour)},
+		{ID: "d-new", ChatID: "c1", Title: "a.pdf", Text: "neue Fassung", SourceURL: url,
+			CreatedAt: time.Now()},
+	} {
+		if err := st.CreateDocument(d); err != nil {
+			t.Fatalf("CreateDocument(%s): %v", d.ID, err)
+		}
+	}
+
+	got, ok, err := st.DocumentBySource("c1", url)
+	if err != nil {
+		t.Fatalf("DocumentBySource: %v", err)
+	}
+	if !ok || got.ID != "d-new" {
+		t.Fatalf("found %q (ok=%v), want the newest document for the URL", got.ID, ok)
+	}
+	if got.Text != "neue Fassung" {
+		t.Errorf("text = %q; the lookup is useless without the document's text", got.Text)
+	}
+
+	if _, ok, err := st.DocumentBySource("c1", "https://example.com/other.pdf"); err != nil || ok {
+		t.Errorf("an unknown URL found a document (ok=%v, err=%v)", ok, err)
+	}
+	if _, ok, err := st.DocumentBySource("", url); err != nil || ok {
+		t.Errorf("an empty chat found a document (ok=%v, err=%v)", ok, err)
+	}
+}
+
 // TestFTSSearchRanksByRelevance is the document-search path the model relies on.
 func TestFTSSearchRanksByRelevance(t *testing.T) {
 	st := newStore(t)

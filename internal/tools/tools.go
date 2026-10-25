@@ -480,8 +480,12 @@ func (s *Service) indexScraped(chatID string, result research.ScrapeResult) (sto
 		Text:       result.Markdown,
 		TokenCount: result.Tokens,
 		PageCount:  result.Pages,
-		SourceURL:  result.FinalURL,
-		CreatedAt:  time.Now(),
+		// The URL that was asked for, not the one it redirected to: it is the identity
+		// the model will use when it reads the same source again, and the lookup that
+		// lets the condensation cover the whole document matches on it (see
+		// chat.indexedDocument). The final URL is still what the result shows.
+		SourceURL: result.URL,
+		CreatedAt: time.Now(),
 	}
 	if err := s.Store.CreateDocument(document); err != nil {
 		return store.Document{}, 0, err

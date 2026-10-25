@@ -13,6 +13,7 @@ import (
 	"kichat/internal/config"
 	"kichat/internal/events"
 	"kichat/internal/llm"
+	"kichat/internal/research"
 	"kichat/internal/store"
 	"kichat/internal/tools"
 )
@@ -54,12 +55,51 @@ const digestCacheDays = 30
 // it cannot verify is an invitation to claim completeness it cannot have. The
 // second sentence is the escape hatch — asking for the same page again hands over
 // the full text (see condensationLedger).
-func digestNotice(call llm.ToolCall) string {
+func digestNotice(call llm.ToolCall, partial bool) string {
 	url := callArgument(call.Arguments, "url")
-	if url == "" {
+	switch {
+	case partial && url != "":
+		// A document larger than the summariser's window: the tail was not read by
+		// anyone, so the notice must not let the model think it was covered.
+		return fmt.Sprintf("[Teilzusammenfassung von %s — der Rest wurde nicht zusammengefasst]", url)
+	case partial:
+		return "[Teilzusammenfassung des gelesenen Inhalts — der Rest wurde nicht zusammengefasst]"
+	case url != "":
+		return fmt.Sprintf("[Zusammenfassung der Seite %s — der vollständige Text ist länger und wird auf erneute Anfrage geliefert]", url)
+	default:
 		return "[Zusammenfassung des gelesenen Inhalts — der vollständige Text ist länger und wird auf erneute Anfrage geliefert]"
 	}
-	return fmt.Sprintf("[Zusammenfassung der Seite %s — der vollständige Text ist länger und wird auf erneute Anfrage geliefert]", url)
+}
+
+// digestPromptReserve is what the request's own text costs beside the page: the system
+// prompt, the wrapper around the text, the no-think tag and slack for the tokenizer's
+// error. It is derived rather than a number someone typed, so a longer prompt cannot
+// quietly eat into the room the page was given.
+var digestPromptReserve = llm.EstimateTokens(digestSystemPrompt) +
+	llm.EstimateTokens(digestPrompt("")) + llm.EstimateTokens(noThinkTag) + 128
+
+// The markers tools.scrapeURL wraps the page in. Everything between them is the page;
+// everything around them is the tool's own framing — title, source line, page count,
+// and, for a document too large to inline, the document id and the chunk range that
+// reads the rest of it back.
+const (
+	scrapeBodyOpen  = "<scraped_content>"
+	scrapeBodyClose = "</scraped_content>"
+)
+
+// splitScrapedBody separates the page text from the framing the tool wrote around it.
+//
+// Condensing only the page is what keeps a condensed result usable. The framing is
+// where an indexed document says which document it is and how to read the rest, so a
+// condensation that swallowed it would leave the chat holding a summary of a document
+// it could no longer reach — the very failure the index was added to prevent.
+func splitScrapedBody(output string) (framing, body, trailer string, ok bool) {
+	open := strings.Index(output, scrapeBodyOpen)
+	close := strings.LastIndex(output, scrapeBodyClose)
+	if open < 0 || close < open+len(scrapeBodyOpen) {
+		return "", "", "", false
+	}
+	return output[:open], output[open+len(scrapeBodyOpen) : close], output[close:], true
 }
 
 // callArgument reads one string argument out of a tool call. A malformed argument
@@ -138,6 +178,30 @@ func digestPrompt(text string) string {
 	sb.WriteString(text)
 	sb.WriteString("\n</page>")
 	return sb.String()
+}
+
+// indexedDocument is the document a scrape_url result was taken from, when the chat
+// holds one that is larger than the excerpt in the result.
+//
+// No document is the normal answer for a page small enough to inline. A lookup that
+// fails is reported and then treated the same way, because the excerpt is still a
+// correct input — merely a shorter one — and the condensation must never be the reason
+// a tool result goes missing.
+func (e *Engine) indexedDocument(chatID string, call llm.ToolCall, excerpt string) (store.Document, bool) {
+	source := research.NormaliseURL(callArgument(call.Arguments, "url"))
+	if source == "" || e.Store == nil {
+		return store.Document{}, false
+	}
+	document, ok, err := e.Store.DocumentBySource(chatID, source)
+	if err != nil {
+		e.condenseWarning(chatID, fmt.Sprintf("der indizierte Text zu %s konnte nicht gelesen werden (%v) — "+
+			"gekürzt wird der Auszug aus dem Ergebnis", source, err))
+		return store.Document{}, false
+	}
+	if !ok || llm.EstimateTokens(document.Text) <= llm.EstimateTokens(excerpt) {
+		return store.Document{}, false
+	}
+	return document, true
 }
 
 // condensationLedger remembers, per chat, which tool results have already been
@@ -223,14 +287,29 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// Only a page is condensed. A document is not read whole in the first place —
 	// the ingest index chunks it and read_pages fetches the range whose chunk
 	// numbers the model found — so a condensation there would throw away the
-	// precision that retrieval was built for.
+	// precision that retrieval was built for. A scraped document comes back through
+	// this path, which is why only its page text is condensed below and the tool's
+	// framing — the document id and the chunk range among it — is carried through.
 	if call.Name != tools.ToolScrapeURL {
 		return output, false
 	}
+	framing, pageBody, trailer, framed := splitScrapedBody(output)
+	content := output
+	if framed {
+		content = strings.TrimSpace(pageBody)
+	}
+	// A page too large to inline is indexed whole, and the result carries only its
+	// beginning. Summarising that beginning would answer questions about page 1 and
+	// none about page 50, so the indexed document is what gets condensed.
+	if document, ok := e.indexedDocument(chatID, call, content); ok {
+		content = document.Text
+	}
 	// DigestThreshold rather than the field: a save that arrived with the field emptied
 	// carries 0, and 0 read literally would condense every tool result — one request
-	// per tool call, including for a five-token error message.
-	if llm.EstimateTokens(output) < settings.Digest.DigestThreshold() {
+	// per tool call, including for a five-token error message. The size is measured on
+	// the page rather than on the result, so the framing (a hundred tokens of header)
+	// does not decide whether a short page is worth a second request.
+	if llm.EstimateTokens(content) < settings.Digest.DigestThreshold() {
 		return output, false
 	}
 	identity := condensedIdentity(chatID, call, output)
@@ -249,16 +328,12 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// a request, while this is how long the answer may be, and a 40k page above a 2k
 	// threshold can want more than 2k tokens out.
 	maxTokens := settings.Digest.DigestMaxTokens()
-	key := digestKey(ref, maxTokens, output)
-	if entry, ok := e.Store.GetDigestCache(key); ok {
-		e.condensations().add(identity)
-		return digestNotice(call) + "\n\n" + entry.Summary, true
-	}
-
 	// The cached resolution, not the fresh one: only the window and the capability
 	// list are needed here, and asking for them unconditionally means a listing of
 	// every configured backend inside a tool call — up to twenty seconds each for a
-	// backend that is merely slow, paid once per condensed page.
+	// backend that is merely slow. It is resolved before the cache is consulted
+	// because the window decides how much text is summarised, and that is part of
+	// what a stored condensation is a condensation of.
 	info := e.resolveModelCached(ref.Backend, ref.Model, settings)
 	limit := info.ContextLimit
 	// A ceiling the summariser is planned against is smaller than its window, and a
@@ -268,6 +343,38 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// measured for the chat's model and this is a different tokenizer.
 	if ceiling := e.ceilingFor(ref.Backend, ref.Model).Tokens; ceiling > 0 && ceiling < limit {
 		limit = ceiling
+	}
+	// An indexed document can be far larger than the summariser can read — a 56-page
+	// manual is ~98k tokens against a 32k window — and a request that large is refused
+	// before a token is generated. The text is cut to the room the window leaves beside
+	// the summary, and the notice says the result is a partial one: a summary that
+	// silently covered the first third of a manual would be worse than no summary.
+	text, partial := content, false
+	if limit > 0 {
+		if room := limit - maxTokens - digestPromptReserve; room > 0 && llm.EstimateTokens(content) > room {
+			if cut := cutToTokens(content, room); cut != "" {
+				text, partial = cut, true
+			}
+		}
+	}
+	// The key is the page, not the result: the framing carries a document id that is
+	// new on every scrape, so hashing the whole output would miss the cache every time
+	// the same document was read again — which is exactly the read that used to be
+	// free before a scraped document could be indexed. It hashes the text that was
+	// actually read, so a narrower summariser cannot serve a wider summary from cache.
+	key := digestKey(ref, maxTokens, text)
+	// assemble puts the condensation back where the page was. A result that was never
+	// framed is returned as before, one string with the notice on top.
+	assemble := func(summary string) string {
+		condensed := digestNotice(call, partial) + "\n\n" + summary
+		if !framed {
+			return condensed
+		}
+		return framing + scrapeBodyOpen + "\n" + condensed + "\n" + trailer
+	}
+	if entry, ok := e.Store.GetDigestCache(key); ok {
+		e.condensations().add(identity)
+		return assemble(entry.Summary), true
 	}
 	// A condensation is not a reasoning task, so thinking is switched off where the
 	// backend can: without it a small thinking model spends the whole cap before it
@@ -279,7 +386,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	}
 
 	summary, err := DigestToolOutput(ctx, provider, ref.Model, DigestOptions{
-		Text:            output,
+		Text:            text,
 		MaxTokens:       maxTokens,
 		DisableThinking: disableThinking,
 		ContextLimit:    limit,
@@ -304,7 +411,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 		ExpiresAt:    time.Now().Add(digestCacheDays * 24 * time.Hour),
 	}))
 	e.condensations().add(identity)
-	return digestNotice(call) + "\n\n" + summary, true
+	return assemble(summary), true
 }
 
 // condenseWarning reports a condensation that did not happen, once per chat and

@@ -1005,6 +1005,30 @@ keeps what the tool actually returned. The message that is stored — and theref
 replayed on every later turn — holds the condensation, which is the whole point: a page
 the user read once would otherwise cost every subsequent request in that chat.
 
+Inside a `scrape_url` result, only the page is condensed: the text between
+`<scraped_content>` and `</scraped_content>` is replaced by the summary, and everything
+the tool wrote around it — title, source line, page count, and, for a document too large
+to inline, the document id and the chunk range that reads the rest — travels unchanged.
+The two halves have opposite jobs: the page is what the second model may throw away, the
+framing is how the chat reaches the parts it kept.
+
+**What is condensed is the document, not the excerpt.** A result over the inline
+threshold carries only the beginning of a page that was indexed whole (RESEARCH.md §6),
+and a summary of that beginning answers questions about page 1 and none about page 50.
+So `condenseToolOutput` looks the document up by the URL the call asked for
+(`Store.DocumentBySource`, newest row, source URL normalised the way the scraper does it)
+and summarises its text; a page small enough to inline has no document at all and keeps
+the old behaviour. The summariser then reads more than it did before — a 20k-token page
+entirely — and the summary covers all of it.
+
+**A document larger than the summariser reads is said to be partial.** The text is cut to
+what the window leaves beside the summary (`limit − maxTokens − digestPromptReserve`, a
+reserve derived from the prompts rather than typed), and the notice opens with
+`Teilzusammenfassung von … — der Rest wurde nicht zusammengefasst` instead of claiming a
+full summary. The rest is still reachable through the chunk range in the framing. A
+56-page manual is ~98k tokens against a 32k window, so this is the normal case for a
+manual, not an edge case.
+
 | setting | where | default |
 | --- | --- | --- |
 | `Digest.Model` | Settings → Tool results | empty = **off** |
@@ -1039,7 +1063,11 @@ bound that remains is the tool budget: a condensation still passes through
   large window that loses only the latency.
 - **Only a page.** `scrape_url` is condensed. A document is already chunked and read by
   chunk range (`read_pages`), and a condensation there would throw away the precision
-  retrieval was built for.
+  retrieval was built for. A scraped document is both at once — `scrape_url` indexes a
+  result too large to inline (RESEARCH.md §6) — so the rule is applied to the page text
+  rather than to the result: the framing around it stays verbatim, which is what keeps an
+  indexed document reachable from a condensed read
+  (`TestACondensedDocumentKeepsThePointer`).
 - **Never the reason a result is missing.** Every failure — no provider, an unreachable
   model, an empty answer — returns the result unchanged and emits a warning. The feature
   is an optimisation of what the model reads; the behaviour without it is always the
@@ -1050,8 +1078,13 @@ bound that remains is the tool budget: a condensation still passes through
   condensation of what it had just failed to read.
 - **Cached by content.** The key is the model *reference* (backend and id, the same
   identity `llm.Ref` gives everything else), the prompt version, the cap the summary was
-  written under, and a hash of the text — not the URL, because a changed page is a
-  different page. The cap is in the key because it is a setting: a summary asked to fit
+  written under, and a hash of the *text that was read* — the document when one was found,
+  the page text otherwise, and never the whole tool result. The framing is deliberately
+  out of the key: it carries a document id that is new on every scrape, so a key over the
+  whole result would miss on every re-read of the same document
+  (`TestTheCondensationCacheIsKeyedByThePageNotItsFraming`). Hashing the text that was
+  read, rather than the document, is what stops a summariser with a narrower window from
+  serving a wider summary out of the cache. The cap is in the key because it is a setting: a summary asked to fit
   in 600 tokens is not the one the same model gives at 2000, so a changed cap must miss
   the cache instead of serving the old length for up to 30 days. A page read twice in one
   chat or across chats costs one condensation; the entry expires after 30 days and the

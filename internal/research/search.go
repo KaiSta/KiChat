@@ -171,6 +171,13 @@ var trackingParams = map[string]bool{
 	"mc_cid": true, "mc_eid": true, "ref": true, "yt0": true, "rut": true,
 }
 
+// NormaliseURL is normaliseURL for callers outside this package.
+//
+// The scrape cache is keyed by it, and so is the source URL an indexed document is
+// stored under, so anything looking one of those up has to normalise the URL it was
+// given the same way this package does.
+func NormaliseURL(raw string) string { return normaliseURL(raw) }
+
 // normaliseURL collapses the variations of one address into a single form:
 // tracking parameters removed, fragment dropped, and a trailing path slash
 // trimmed. Without this the same page can be scraped, cached and cited twice.
