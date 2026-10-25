@@ -12,7 +12,8 @@ toolkit in one window. It runs open-weight models (GGUF) on your own hardware th
 you — and it reaches the hosted providers whose free tier or subscription you already
 have: **Groq**, **NVIDIA build.nvidia.com**, **Mistral** and **DeepSeek**. Chats,
 sources, documents, generated pictures, enlarged copies and code stay in one searchable,
-fully offline history on your own disk.
+fully offline history on your own disk — encrypted, with the key in your OS keyring and,
+optionally, a passphrase-protected copy beside it.
 
 No KiChat account, no service of its own, no telemetry. Nothing leaves the machine unless
 you picked a hosted model or asked for a web search.
@@ -72,7 +73,8 @@ you picked a hosted model or asked for a web search.
   is an ordinary attachment you can save, **enlarge** to FHD or 4K in about a second, or
   redraw from its stored recipe — and an uploaded photograph can be enlarged too.
 - **Nothing is locked in.** Three local runtimes, four hosted APIs, keys in the OS
-  keychain, chats in one SQLite file you can copy.
+  keychain — and a chat history that is an encrypted SQLite database, with an encrypted
+  export when it has to move between machines.
 
 ## What it does
 
@@ -129,6 +131,11 @@ Picture generation is a first-class part of the chat, not a separate toy:
 - **Three servers, one client**: AUTOMATIC1111, Forge, and stable-diffusion.cpp's
   `sd-server` all share the `/sdapi/v1/txt2img` route KiChat speaks. A WebUI on
   `:7860` usually needs nothing but `--api` in its start command.
+- **A hosted fourth kind, with nothing to install.** *NVIDIA NIM* draws on
+  build.nvidia.com through the key the Backends tab already holds for the chat side,
+  offering FLUX.1 schnell, FLUX.1 dev (non-commercial for production) and FLUX.3 Klein.
+  Its free part is a prototyping allowance rather than a monthly quota, and it is off
+  until you pick it.
 - **A `sd-server` KiChat starts and stops itself**, finding the program in the folder
   you unpacked it into and choosing a port that avoids LM Studio's 1234. And a
   **one-shot `sd-cli`** mode that runs the binary with its own flags, once per picture.
@@ -500,25 +507,49 @@ Your chats are yours: no KiChat account, no telemetry, no analytics, no crash re
 The only outbound requests KiChat makes are to the backends you configured, the search
 provider you use, and GitHub when you ask it to check for a llama.cpp update.
 
+### The database is encrypted
+
+`kichat.db` is encrypted, not a plaintext SQLite file. The key lives in your OS keyring;
+beside the database, `kichat.key` keeps a copy protected by a passphrase you choose in
+**Settings → Data → Database**, so a new machine or a reinstalled OS can still open it. An
+older, unencrypted database is converted on the first start.
+
+What this protects is the file: copied, disk-imaged or synced into a cloud folder, it is
+useless without the key. It does not protect you from someone using the app on an unlocked
+machine, or from malware running as you — [`ENCRYPTION.md`](ENCRYPTION.md) has the full list
+of limits.
+
+If the keyring entry is missing, KiChat asks for that passphrase instead of opening your
+chats. Without either copy the database cannot be opened, so keep an encrypted export if
+you need a way back.
+
+### Where everything lives
+
 | What | Location |
 | --- | --- |
-| Chats, messages, documents, FTS index, attachments, settings | `~/.config/kichat/kichat.db` (`~/Library/Application Support/kichat/kichat.db` on macOS, `%AppData%\kichat` on Windows) |
-| API keys and the image server's credential | the OS keyring; an encrypted `secrets.enc` beside the database when no keyring is available |
+| Chats, messages, documents, attachments, settings | `~/.config/kichat/kichat.db` (`~/Library/Application Support/kichat/kichat.db` on macOS, `%AppData%\kichat` on Windows) — encrypted |
+| Your API keys | the OS keyring; an encrypted file beside the database when no keyring is available |
+| The database key | the OS keyring; a passphrase-protected copy (`kichat.key`) beside the database, if you set one |
 | Chat backups you export | one `.kichat` file wherever you save it — AES-256-GCM under a passphrase KiChat never stores |
 
-The keyring is preferred because a key in a file is a key in a backup. Nothing is ever
-read from the working tree, and nothing is written into it.
+KiChat's own files are readable only by you, and a deleted chat is scrubbed from the
+database rather than left behind for a later copy.
 
-Backups leave the machine only when you ask: the Data tab writes the chats you pick
-into that one encrypted file, and importing it on another machine offers the same list
-back, chat by chat. Neither side talks to a server, so the file can live in whatever
-cloud folder you already trust. The passphrase is not stored anywhere — not in the
-file, not in the keyring — so forgetting it means the archive stays closed.
+### Chat backups
 
-Two things leave the machine by design, and both are visible when they happen: **web
-search** (the query goes to Brave or DuckDuckGo) and **hosted models** (the same prompt
-and context a local model would receive). A local model plus no search is a fully
-offline setup.
+Backups leave the machine only when you ask: the Data tab writes the chats you pick into
+that one encrypted file, and importing it on another machine offers the same list back,
+chat by chat. Neither side talks to a server, so the file can live in whatever cloud folder
+you already trust. The passphrase is not stored anywhere — not in the file, not in the
+keyring — so forgetting it means the archive stays closed. Import applies one rule in both
+directions: the newer copy of a chat wins, so an archive can add to a machine but never
+roll it back, and it never overwrites the backend setup of the machine receiving the file.
+
+### What leaves the machine
+
+Both are visible when they happen: **web search** (the query goes to Brave or DuckDuckGo)
+and **hosted models or pictures** (the same prompt and context a local model would
+receive). A local model plus no search is a fully offline setup.
 
 Compaction never deletes messages — the originals stay in the database and remain
 viewable, and a compaction is a separate row you can inspect or delete.
@@ -612,7 +643,7 @@ that crosses the bridge, build before type-checking the frontend.
 ## Tests and checks
 
 ```sh
-make check            # gofmt, vet (linux/windows/darwin), tests, tsc — in one step
+make check            # gofmt, vet (linux/windows/darwin and both arm64 halves), tests, tsc — in one step
 make build            # and a real build, into build/bin/kichat
 go test ./... -count=1
 ```
@@ -653,6 +684,7 @@ readable from a live response.
 | First picture takes minutes | a one-shot `sd-cli` draw loads the model silently before its first step; the managed `sd-server` shows a `starting` row instead |
 | An enlarged picture is black | Real-ESRGAN ran without its `models/` folder — a build of the small archive does exactly that, exits 0 and looks fine; use the app's download button instead |
 | Real-ESRGAN is offered but fails before it starts | its build is Vulkan-only, so a missing or broken driver is the cause — resampling needs neither GPU nor program |
+| KiChat opens on a passphrase prompt instead of your chats | the OS keyring no longer holds the database key (a new machine, a reinstalled OS) — enter the passphrase that wraps `kichat.key`, or import an encrypted export if there is none |
 
 ## FAQ
 
@@ -689,7 +721,9 @@ the most of a free tier](#making-the-most-of-a-free-tier).
 **Can it generate images without AUTOMATIC1111?**
 Yes — stable-diffusion.cpp's `sd-server` speaks the same API, and KiChat can start and
 stop it from the folder you unpacked. `sd-cli` works too, one picture per process, which
-skips loading a server at all.
+skips loading a server at all. And with **NVIDIA NIM** selected, nothing local is needed:
+KiChat calls build.nvidia.com with the NVIDIA key already stored in the Backends tab. Its
+free part is a prototyping allowance rather than a monthly quota.
 
 **Can I enlarge a photo I uploaded?**
 Yes. *Enlarge…* under any image attachment resamples to FHD, 4K or a custom long side,
@@ -709,12 +743,23 @@ Yes, natively or cross-built from Linux. Windows needs the WebView2 runtime, whi
 Windows 11 and Windows 10 from 21H2 already have.
 
 **Where are my chats stored?**
-One SQLite file under your config directory — see [Privacy and where data lives](#privacy-and-where-data-lives). Copy it and you have moved your history.
+One SQLite file under your config directory, encrypted — see [Privacy and
+where data lives](#privacy-and-where-data-lives). Copying the file on its own is not enough
+to open it elsewhere: the key lives in the OS keyring, with a passphrase-protected copy
+beside the database if you set one. To move a history between machines, export it in
+**Settings → Data** as an encrypted archive.
+
+**What happens if I lose the keyring entry?**
+The unlock screen asks for the passphrase you set for `kichat.key` beside the database and
+opens the history with it. If you never set one, the database cannot be opened — import an
+encrypted export instead. Settings → Data → Database shows which copies exist, and lets you
+add or remove one.
 
 ## Roadmap
 
-Delivered: chat, research, images, picture enlarging, coding, the managed llama.cpp
-runtime with GPU offload, vision projectors and the free-tier budget machinery.
+Delivered: chat, research, images (local and hosted), picture enlarging, coding, the
+managed llama.cpp runtime with GPU offload, vision projectors, the free-tier budget
+machinery, an encrypted database and encrypted chat exports.
 
 Next, roughly in the order they matter:
 
@@ -726,7 +771,7 @@ Next, roughly in the order they matter:
   path rather than a separate app, with the same rules for parameters, progress and
   cancellation.
 - **More picture backends.** ComfyUI (a workflow graph rather than a flat prompt) and
-  hosted image APIs behind the same interface the three current servers share.
+  more hosted image APIs behind the same interface the four current kinds share.
 - **More picture operations.** `img2img`, inpainting, and more than one picture per
   request, built on the same panel that now enlarges.
 - **Faster first draws.** The one-shot draw's model load is silent today; the managed
@@ -744,8 +789,10 @@ document, and each one distinguishes what was observed from what is expected.
 | [`PLAN.md`](PLAN.md) | the architecture and the reasoning behind it |
 | [`COMPACT.md`](COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
 | [`RESEARCH.md`](RESEARCH.md) | web search and scraping: providers, refusals, SSRF and robots guards, budgets |
-| [`IMAGES.md`](IMAGES.md) | picture generation: the three server kinds, parameters, profiles, verification |
+| [`IMAGES.md`](IMAGES.md) | picture generation: the three server kinds and the hosted one, parameters, profiles, verification |
+| [`IMAGES-CLOUD.md`](IMAGES-CLOUD.md) | hosted picture backends: what each free tier really is, and why NVIDIA NIM was the one built |
 | [`UPSCALING.md`](UPSCALING.md) | enlarging a picture: the Lanczos resampler, Real-ESRGAN, targets, the Enlarge panel |
+| [`ENCRYPTION.md`](ENCRYPTION.md) | the encrypted database: page-level encryption, the key and its recovery copy, the migration, and what it cannot protect |
 | [`LLAMACPP.md`](LLAMACPP.md) | the llama.cpp provider, the managed runtime, projector pairing, ternary models |
 | [`GROQ.md`](GROQ.md) | the Groq backend, its listings, refusals, ceilings and pacing |
 | [`NVIDIA.md`](NVIDIA.md) | the build.nvidia.com backend and its availability check |
