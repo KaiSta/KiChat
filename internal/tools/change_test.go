@@ -23,9 +23,9 @@ type asked struct {
 	answer  error
 }
 
-func (a *asked) confirm(_ context.Context, req ApprovalRequest) error {
+func (a *asked) confirm(_ context.Context, req *ApprovalRequest) error {
 	a.calls++
-	a.request = req
+	a.request = *req
 	return a.answer
 }
 

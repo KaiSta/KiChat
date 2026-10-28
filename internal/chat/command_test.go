@@ -49,7 +49,7 @@ type recordingConfirm struct {
 	answer error
 }
 
-func (c *recordingConfirm) confirm(_ context.Context, req tools.ApprovalRequest) error {
+func (c *recordingConfirm) confirm(_ context.Context, req *tools.ApprovalRequest) error {
 	c.asked++
 	c.line = req.Command.Line
 	return c.answer

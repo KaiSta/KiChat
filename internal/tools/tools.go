@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +39,20 @@ type Service struct {
 	Chain   *research.Chain
 	Scraper *research.Scraper
 	Store   *store.Store
+
+	// running holds the commands in flight, so the window can stop one without stopping the
+	// turn. Guarded because the click arrives on another goroutine than the command's own.
+	runningMu sync.Mutex
+	running   map[commandKey]*commandHandle
+
+	// readsSeen remembers what this turn has already read, so the second identical read of an
+	// untouched file can be answered with a sentence instead of the file. Written by the read
+	// tools and *dropped* by every tool that changes the folder, so that a read after an edit
+	// always returns the file rather than a claim about this map
+	// (internal/tools/reads.go). Guarded because two chats' turns run at once and both may
+	// read the same folder.
+	readsMu   sync.Mutex
+	readsSeen map[readKey]readStamp
 
 	// Images is the picture backend a generate_image call draws through. It is
 	// nil when the feature is switched off or no server is configured, which is
@@ -78,7 +93,7 @@ type Service struct {
 	// and the engine does not even advertise the tools that would need it (see
 	// chat.toolDefinitions). It is not a state this app reaches: a service built
 	// without it is a service a test built, and a read-only chat never has one.
-	Confirm func(ctx context.Context, req ApprovalRequest) error
+	Confirm func(ctx context.Context, req *ApprovalRequest) error
 	// Settings reads the current configuration. It is a function rather than a
 	// copy so a settings save takes effect on the next tool call, the same way the
 	// engine's own Settings does — a Service outlives one settings blob.
@@ -274,8 +289,71 @@ func (s *Service) Definitions() []llm.ToolDefinition {
 	}, projectDefinitions()...)
 }
 
+// Summary is the part of a result written for the window rather than for the model.
+//
+// The result text itself is the model's, and it has to stay exactly what the model read: it
+// is the record of what a call returned, and a card that showed a translated paraphrase
+// instead would be the one place a person cannot check what the turn was given. But the same
+// text is also what a person sees in the transcript, and it is written in one language at a
+// time — this app has three. So a project tool reports both: the text it hands the model, and
+// a code plus its arguments that the window translates. A tool with no summary shows its text
+// alone, which is what the research tools do.
+type Summary struct {
+	// Code is a key in frontend/src/lib/i18n.ts, under `tool.sum.`.
+	Code string `json:"code"`
+	// Args fill {{1}}, {{2}}… in order, as strings because they travel through JSON to a
+	// dictionary that substitutes text.
+	Args []string `json:"args,omitempty"`
+}
+
+// Result is what one tool call produced.
+type Result struct {
+	Text    string
+	Summary *Summary
+}
+
+// textResult is a result with nothing for the window to translate.
+func textResult(text string) Result { return Result{Text: text} }
+
+// summarized is a result the window can also describe in its own language.
+func summarized(text, code string, args ...string) Result {
+	return Result{Text: text, Summary: &Summary{Code: code, Args: args}}
+}
+
 // Execute runs one tool call and returns a Markdown result for the model.
+//
+// It is ExecuteWithSummary with the window's half dropped, which is what a test or a caller
+// that only needs the text wants; the engine calls the fuller one so the card can translate.
 func (s *Service) Execute(ctx context.Context, chatID, name, argsJSON string) (string, error) {
+	result, err := s.ExecuteWithSummary(ctx, chatID, name, argsJSON)
+	return result.Text, err
+}
+
+// ExecuteWithSummary runs one tool call and reports both halves of what it produced.
+func (s *Service) ExecuteWithSummary(ctx context.Context, chatID, name, argsJSON string) (Result, error) {
+	switch name {
+	case ToolReadFile:
+		return s.readFile(ctx, chatID, argsJSON)
+	case ToolListDir:
+		return s.listDir(chatID, argsJSON)
+	case ToolSearchFiles:
+		return s.searchFiles(chatID, argsJSON)
+	case ToolFindFiles:
+		return s.findFiles(chatID, argsJSON)
+	case ToolWriteFile:
+		return s.writeFile(ctx, chatID, argsJSON)
+	case ToolEditFile:
+		return s.editFile(ctx, chatID, argsJSON)
+	case ToolRunCommand:
+		return s.runCommand(ctx, chatID, argsJSON)
+	}
+	text, err := s.executeText(ctx, chatID, name, argsJSON)
+	return textResult(text), err
+}
+
+// executeText runs the tools whose result needs no translation: their output is either the
+// model's own material (a search hit, a page) or a picture with a caption.
+func (s *Service) executeText(ctx context.Context, chatID, name, argsJSON string) (string, error) {
 	switch name {
 	case ToolSearchWeb:
 		return s.searchWeb(ctx, argsJSON)
@@ -287,18 +365,6 @@ func (s *Service) Execute(ctx context.Context, chatID, name, argsJSON string) (s
 		return s.readPages(chatID, argsJSON)
 	case ToolGenerateImage:
 		return s.generateImage(ctx, chatID, argsJSON)
-	case ToolReadFile:
-		return s.readFile(chatID, argsJSON)
-	case ToolListDir:
-		return s.listDir(chatID, argsJSON)
-	case ToolSearchFiles:
-		return s.searchFiles(chatID, argsJSON)
-	case ToolWriteFile:
-		return s.writeFile(ctx, chatID, argsJSON)
-	case ToolEditFile:
-		return s.editFile(ctx, chatID, argsJSON)
-	case ToolRunCommand:
-		return s.runCommand(ctx, chatID, argsJSON)
 	default:
 		return "", uimsg.Detailf("tools.unknownTool",
 			fmt.Sprintf("no tool named %q exists; use one of the tools this request declares", name), name)

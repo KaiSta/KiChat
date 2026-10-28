@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"kichat/internal/llm"
+	"kichat/internal/proc"
 	"kichat/internal/uimsg"
 	"kichat/internal/workspace"
 )
@@ -231,21 +232,21 @@ func commandDefinitions() []llm.ToolDefinition {
 	}
 }
 
-func (s *Service) runCommand(ctx context.Context, chatID, argsJSON string) (string, error) {
+func (s *Service) runCommand(ctx context.Context, chatID, argsJSON string) (Result, error) {
 	var args runCommandArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return "", badArguments(err)
+		return Result{}, badArguments(err)
 	}
 	line := strings.TrimSpace(args.Command)
 	if line == "" {
-		return "", uimsg.Detailf("tools.commandMissing",
+		return Result{}, uimsg.Detailf("tools.commandMissing",
 			"the command argument is empty; name one command line to run")
 	}
 	// Before the folder is even looked at: whether this machine can run the line at all does
 	// not depend on the project, and a question the app cannot act on should not be asked.
 	// The line stays on the card either way, which is where the person copies it from.
 	if program, ok := elevationRequest(line); ok {
-		return "", uimsg.Detailf("tools.needsElevation",
+		return Result{}, uimsg.Detailf("tools.needsElevation",
 			fmt.Sprintf("this command asks for administrator rights (%s), which this app cannot supply: "+
 				"it runs commands with the user's own rights and has no terminal to answer a password "+
 				"prompt. Do not retry it — tell the user the exact line so they can run it themselves, "+
@@ -253,20 +254,44 @@ func (s *Service) runCommand(ctx context.Context, chatID, argsJSON string) (stri
 	}
 	root, err := s.workspaceFor(chatID)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	timeout := commandTimeout(looseInt(args.Timeout, 0))
-	// The confirmation comes before anything is executed, and it carries what the person
-	// has to see: the line itself, the folder it runs in, and how long it may take.
-	if err := s.approveCommand(ctx, chatID, Command{
-		Line:       line,
-		Dir:        root.Path(),
-		TimeoutSec: int(timeout / time.Second),
-		Shell:      shellLabel(),
-	}); err != nil {
-		return "", err
+	// The line can come back from the card edited: a person who spots a typo in an approval
+	// should be able to fix it there instead of declining and typing it again in the composer.
+	// The edited line is a *new* line, so the elevation check runs on it too — the card is a
+	// text field, and the one thing an edit must not do is slip past the refusal below.
+	request := ApprovalRequest{
+		ChatID:     chatID,
+		MessageID:  callingMessage(ctx),
+		ToolCallID: toolCallFrom(ctx),
+		Tool:       ToolRunCommand,
+		Kind:       ApprovalKindCommand,
+		Command: Command{
+			Line:       line,
+			Dir:        root.Path(),
+			TimeoutSec: int(timeout / time.Second),
+			Shell:      shellLabel(),
+		},
 	}
-	return s.execCommand(ctx, root, line, timeout)
+	if err := s.approve(ctx, &request); err != nil {
+		return Result{}, err
+	}
+	if request.EditedLine != "" && request.EditedLine != line {
+		if program, ok := elevationRequest(request.EditedLine); ok {
+			return Result{}, uimsg.Detailf("tools.needsElevation",
+				fmt.Sprintf("the command you approved asks for administrator rights (%s), which this app "+
+					"cannot supply: it runs commands with the user's own rights and has no terminal to "+
+					"answer a password prompt. Do not retry it — tell the user the exact line so they can "+
+					"run it themselves, or suggest a way that needs no elevation", program))
+		}
+		line = request.EditedLine
+	}
+	// A command is the one tool whose effect cannot be enumerated — `gofmt -w .` rewrites
+	// every file under a folder — so the read cache is dropped for the whole chat, whatever
+	// the line turned out to do.
+	defer s.forgetAllReads(chatID)
+	return s.execCommand(ctx, chatID, root, line, timeout)
 }
 
 // commandTimeout clamps what the model asked for into the two limits, and turns "no
@@ -283,7 +308,82 @@ func commandTimeout(asked int) time.Duration {
 }
 
 // execCommand runs one line in the project folder and renders the result.
-func (s *Service) execCommand(ctx context.Context, root workspace.Root, line string, timeout time.Duration) (string, error) {
+// commandKey is one running command: the chat it belongs to and the call that started it.
+// Both halves are needed because two chats can run the same line at the same time.
+type commandKey struct {
+	chatID string
+	callID string
+}
+
+// commandHandle is a command somebody may still stop.
+//
+// byUser is the bit that makes a stop a *result* rather than a fault: the command was killed,
+// but the turn is alive and the model should be told the person cut it short rather than that
+// the app failed. Without it, cancelling the context is indistinguishable from the user
+// stopping the whole turn, which ends the answer.
+type commandHandle struct {
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	byUser bool
+}
+
+func (h *commandHandle) stop() {
+	h.mu.Lock()
+	h.byUser = true
+	h.mu.Unlock()
+	h.cancel()
+}
+
+func (h *commandHandle) stoppedByUser() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.byUser
+}
+
+// StopCommand ends one running command and reports whether there was one to end.
+//
+// It is the per-call half of stopping: the turn's own Stop cancels everything and abandons the
+// answer, while this kills one command and lets the model read the output so far and decide
+// what next. The tree is ended, not the shell alone (proc.KillTree), because that is what
+// stops the work.
+func (s *Service) StopCommand(chatID, toolCallID string) bool {
+	s.runningMu.Lock()
+	handle := s.running[commandKey{chatID: chatID, callID: toolCallID}]
+	s.runningMu.Unlock()
+	if handle == nil {
+		return false
+	}
+	handle.stop()
+	return true
+}
+
+// beginCommand registers a running command and returns the context a stop cancels.
+func (s *Service) beginCommand(ctx context.Context, key commandKey) (context.Context, *commandHandle) {
+	callCtx, cancel := context.WithCancel(ctx)
+	handle := &commandHandle{cancel: cancel}
+	s.runningMu.Lock()
+	if s.running == nil {
+		s.running = make(map[commandKey]*commandHandle)
+	}
+	s.running[key] = handle
+	s.runningMu.Unlock()
+	return callCtx, handle
+}
+
+// endCommand forgets a command that is no longer running.
+func (s *Service) endCommand(key commandKey) {
+	s.runningMu.Lock()
+	delete(s.running, key)
+	s.runningMu.Unlock()
+}
+
+func (s *Service) execCommand(ctx context.Context, chatID string, root workspace.Root, line string, timeout time.Duration) (Result, error) {
+	// A context of its own, so the window's stop can end this command without ending the turn
+	// it belongs to. The turn's cancellation is still the parent: stopping the turn stops it.
+	key := commandKey{chatID: chatID, callID: toolCallFrom(ctx)}
+	ctx, handle := s.beginCommand(ctx, key)
+	defer s.endCommand(key)
+
 	program, argv := shellCommand(line)
 	cmd := exec.Command(program, argv...)
 	cmd.Dir = root.Path()
@@ -307,16 +407,16 @@ func (s *Service) execCommand(ctx context.Context, root workspace.Root, line str
 	// them, not in two piles a model has to correlate by itself.
 	cmd.Stdout = sink
 	cmd.Stderr = sink
-	startInOwnGroup(cmd)
+	proc.StartInOwnGroup(cmd)
 	// WaitDelay bounds the wait *after* the process is gone. A grandchild that inherited
 	// these pipes keeps Wait from returning, and without this the timeout would be a
-	// request rather than a limit. It is the backstop behind killTree, not a substitute:
+	// request rather than a limit. It is the backstop behind proc.KillTree, not a substitute:
 	// the tree kill is what stops the work.
 	cmd.WaitDelay = 5 * time.Second
 
 	started := time.Now()
 	if err := cmd.Start(); err != nil {
-		return "", uimsg.Detailf("tools.commandFailed",
+		return Result{}, uimsg.Detailf("tools.commandFailed",
 			fmt.Sprintf("the command could not be started: %v", err))
 	}
 
@@ -342,7 +442,7 @@ func (s *Service) execCommand(ctx context.Context, root workspace.Root, line str
 			timedOut = true
 		}
 		mu.Unlock()
-		killTree(cmd)
+		_ = proc.KillTree(cmd)
 	}
 	timer := time.AfterFunc(timeout, func() { end(true) })
 	// The turn being stopped (the user pressed Stop) is the other end: the context is
@@ -372,15 +472,22 @@ func (s *Service) execCommand(ctx context.Context, root workspace.Root, line str
 	}
 
 	switch {
+	case ctx.Err() != nil && handle.stoppedByUser():
+		// The person stopped this command, not the turn: the output so far is the result,
+		// and the model is told what happened so it can decide rather than retry blindly.
+		return summarized(commandResult(line, out, fmt.Sprintf(
+			"Vom Nutzer nach %s gestoppt. Die Ausgabe oben ist unvollständig — frage nach, was als "+
+				"Nächstes passieren soll, statt denselben Befehl erneut zu starten.", humanDuration(elapsed))),
+			"tool.sum.commandStopped", humanDuration(elapsed)), nil
 	case ctx.Err() != nil:
 		// The turn is over, so nobody is waiting for this result; the error is what the
 		// record needs to say why there is no output above it.
-		return "", uimsg.Wrapf("tools.commandStopped",
+		return Result{}, uimsg.Wrapf("tools.commandStopped",
 			"the turn was stopped, so the command was killed", ctx.Err())
 	case wasTimedOut:
-		return commandResult(line, out, fmt.Sprintf(
+		return summarized(commandResult(line, out, fmt.Sprintf(
 			"Nach %s abgebrochen: der Befehl war noch nicht fertig. Die Ausgabe oben ist unvollständig.",
-			humanDuration(elapsed))), nil
+			humanDuration(elapsed))), "tool.sum.commandTimeout", humanDuration(elapsed)), nil
 	case waitErr != nil:
 		// A non-zero exit, which is a result: the code is what the model reasons about,
 		// and the output above it is the reason.
@@ -389,12 +496,15 @@ func (s *Service) execCommand(ctx context.Context, root workspace.Root, line str
 			code = cmd.ProcessState.ExitCode()
 		}
 		if code < 0 {
-			return commandResult(line, out, fmt.Sprintf(
-				"Der Befehl wurde beendet, ohne einen Exit-Code zu hinterlassen (%s).", humanDuration(elapsed))), nil
+			return summarized(commandResult(line, out, fmt.Sprintf(
+				"Der Befehl wurde beendet, ohne einen Exit-Code zu hinterlassen (%s).", humanDuration(elapsed))),
+				"tool.sum.commandUnknown", humanDuration(elapsed)), nil
 		}
-		return commandResult(line, out, fmt.Sprintf("Exit-Code %d (%s)", code, humanDuration(elapsed))), nil
+		return summarized(commandResult(line, out, fmt.Sprintf("Exit-Code %d (%s)", code, humanDuration(elapsed))),
+			"tool.sum.command", fmt.Sprint(code), humanDuration(elapsed)), nil
 	default:
-		return commandResult(line, out, fmt.Sprintf("Exit-Code 0 (%s)", humanDuration(elapsed))), nil
+		return summarized(commandResult(line, out, fmt.Sprintf("Exit-Code 0 (%s)", humanDuration(elapsed))),
+			"tool.sum.command", "0", humanDuration(elapsed)), nil
 	}
 }
 

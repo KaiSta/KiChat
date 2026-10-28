@@ -1,6 +1,6 @@
 //go:build linux
 
-package runtime
+package terminal
 
 import (
 	"os/exec"
@@ -40,8 +40,20 @@ func linuxTerminalPrograms() []terminalProgram {
 	}
 }
 
-// terminalCommand resolves the first terminal on this machine and builds its command.
-func terminalCommand(dir string) (*exec.Cmd, error) {
+// resolve finds the first terminal on this machine.
+func resolve() (string, string, error) {
+	for _, program := range linuxTerminalPrograms() {
+		path, err := exec.LookPath(program.name)
+		if err != nil {
+			continue
+		}
+		return program.name, path, nil
+	}
+	return "", "", ErrNoTerminal
+}
+
+// command builds the invocation for the terminal this machine has.
+func command(dir string) (*exec.Cmd, error) {
 	for _, program := range linuxTerminalPrograms() {
 		path, err := exec.LookPath(program.name)
 		if err != nil {

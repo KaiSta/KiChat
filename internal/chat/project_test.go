@@ -64,7 +64,7 @@ func projectEngine(t *testing.T) (*Engine, store.Chat, store.Chat) {
 	// mode gate, not about approvals. Without one the write tools are withheld by design
 	// and the gate below would look narrower than it is.
 	service := &tools.Service{Store: st,
-		Confirm: func(context.Context, tools.ApprovalRequest) error { return nil }}
+		Confirm: func(context.Context, *tools.ApprovalRequest) error { return nil }}
 	return NewEngine(st, llm.NewRegistry(nil), service,
 		func() config.Settings { return settings }, (&eventLog{}).emit), project, plain
 }

@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"strings"
 
 	"kichat/internal/events"
 	"kichat/internal/tools"
@@ -43,12 +44,22 @@ type pendingChange struct {
 	// decide carries the answer. It is buffered, so an answer that arrives in the moment
 	// between the question being shown and the turn being stopped is not lost in a way that
 	// hangs the sender.
-	decide chan string
+	decide chan approvalAnswer
+}
+
+// approvalAnswer is one person's answer to one question.
+//
+// It carries the decision and, for a command, the line they actually ran: the card's field is
+// editable, and an answer that discarded the edit would leave the app running something the
+// person had just corrected.
+type approvalAnswer struct {
+	decision string
+	line     string
 }
 
 // confirmChange asks the window whether a change may be made, and refuses unless the answer
 // is explicit.
-func (a *App) confirmChange(ctx context.Context, req tools.ApprovalRequest) error {
+func (a *App) confirmChange(ctx context.Context, req *tools.ApprovalRequest) error {
 	// The two ways a question is already answered. The setting is the standing one — set once
 	// for everyone who trusts the model with this kind of work — and the chat's own "always"
 	// is the narrower one given while watching a task. Both are consulted before anything is
@@ -63,7 +74,7 @@ func (a *App) confirmChange(ctx context.Context, req tools.ApprovalRequest) erro
 		return uimsg.Wrapf("tools.denied",
 			"this change cannot be confirmed, so it was not made", tools.ErrDenied)
 	}
-	waiter := &pendingChange{chatID: req.ChatID, decide: make(chan string, 1)}
+	waiter := &pendingChange{chatID: req.ChatID, decide: make(chan approvalAnswer, 1)}
 	if !a.addChangeWaiter(req.ToolCallID, waiter) {
 		// The same call asking twice: a retry of a change that is already waiting on screen,
 		// which one answer cannot resolve. Refused rather than queued.
@@ -72,11 +83,15 @@ func (a *App) confirmChange(ctx context.Context, req tools.ApprovalRequest) erro
 	}
 	defer a.removeChangeWaiter(req.ToolCallID)
 
-	a.emit(events.Approval, approvalPayload(req))
+	a.emit(events.Approval, approvalPayload(*req))
 
 	select {
-	case decision := <-waiter.decide:
-		switch decision {
+	case answer := <-waiter.decide:
+		// What the person actually ran, for the one question that has a field on its card.
+		// The tool re-checks it — approving an edited line must not bypass the refusal that
+		// produced the line in the first place.
+		req.EditedLine = answer.line
+		switch answer.decision {
 		case approvalAlways:
 			a.allowChanges(req.ChatID)
 			return nil
@@ -165,6 +180,19 @@ func commandFields(command tools.Command) map[string]any {
 // turn was stopped, is not an error worth a toast — the user did what they meant and the
 // turn had already moved on.
 func (a *App) ResolveToolApproval(approvalID, decision string) bool {
+	return a.resolveApproval(approvalID, approvalAnswer{decision: decision})
+}
+
+// ResolveToolApprovalWith answers a question and says what to run instead of the line shown.
+//
+// A separate binding rather than a third argument on the old one: the two-argument call is what
+// a change and every other caller uses, and widening its arity would have made every existing
+// call site pass a string it does not have. command is ignored for a change.
+func (a *App) ResolveToolApprovalWith(approvalID, decision, command string) bool {
+	return a.resolveApproval(approvalID, approvalAnswer{decision: decision, line: strings.TrimSpace(command)})
+}
+
+func (a *App) resolveApproval(approvalID string, answer approvalAnswer) bool {
 	a.changesMu.Lock()
 	waiter, ok := a.changes[approvalID]
 	a.changesMu.Unlock()
@@ -172,7 +200,7 @@ func (a *App) ResolveToolApproval(approvalID, decision string) bool {
 		return false
 	}
 	select {
-	case waiter.decide <- decision:
+	case waiter.decide <- answer:
 		return true
 	default:
 		// Answering the same question twice: the first answer is the one that counts.

@@ -71,8 +71,8 @@ func (r *approvalApp) waitQuestions(t *testing.T, want int) {
 	t.Fatalf("%d questions were asked, want %d", len(r.questions()), want)
 }
 
-func changeRequest(chatID, callID string, change workspace.Change) tools.ApprovalRequest {
-	return tools.ApprovalRequest{
+func changeRequest(chatID, callID string, change workspace.Change) *tools.ApprovalRequest {
+	return &tools.ApprovalRequest{
 		ChatID:     chatID,
 		MessageID:  "msg-1",
 		ToolCallID: callID,
@@ -87,7 +87,7 @@ func changeRequest(chatID, callID string, change workspace.Change) tools.Approva
 // the payload by key; a renamed field is not an error anywhere — it is a card that silently
 // renders nothing while every change still works.
 func TestTheApprovalPayloadCarriesWhatTheWindowReads(t *testing.T) {
-	payload := approvalPayload(changeRequest("chat-1", "call-1", workspace.Change{
+	payload := approvalPayload(*changeRequest("chat-1", "call-1", workspace.Change{
 		Path:      "internal/store/notes.go",
 		Operation: workspace.OperationCreate,
 		After:     "package store\n",
@@ -278,7 +278,7 @@ func TestAStandingAnswerSkipsTheFileQuestion(t *testing.T) {
 
 	// A command is the other question. Allowing the files said nothing about the machine, so
 	// it is still asked — and it is answered on its own.
-	command := tools.ApprovalRequest{
+	command := &tools.ApprovalRequest{
 		ChatID:     "chat-1",
 		MessageID:  "msg-1",
 		ToolCallID: "call-2",

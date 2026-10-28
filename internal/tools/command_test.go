@@ -589,3 +589,112 @@ func TestTheTerminalIsGatedAndOffered(t *testing.T) {
 		t.Error("command is not required by the schema")
 	}
 }
+
+// editingConfirm is a person who corrects the line in the card's field and then allows it.
+//
+// It writes through the request rather than returning an answer because that is the contract
+// the app implements: the field belongs to the answer, and the confirmer is the only one that
+// can know what it held.
+type editingConfirm struct{ line string }
+
+func (e editingConfirm) confirm(_ context.Context, req *ApprovalRequest) error {
+	if req.Kind == ApprovalKindCommand {
+		req.EditedLine = e.line
+	}
+	return nil
+}
+
+// TestTheLineTheUserEditsIsWhatRuns is the promise the editable field makes. A person who
+// spots a wrong flag in an approval should not have to decline and rebuild the whole call —
+// the folder, the timeout and the shell the tool chose all stay, and only the sentence
+// changes.
+func TestTheLineTheUserEditsIsWhatRuns(t *testing.T) {
+	service, chatID, _ := projectService(t, nil)
+	service.Confirm = editingConfirm{line: "echo edited"}.confirm
+
+	out, err := service.Execute(context.Background(), chatID, ToolRunCommand,
+		`{"command":`+jsonString("echo original")+`}`)
+	if err != nil {
+		t.Fatalf("the edited command returned an error: %v", err)
+	}
+	if !strings.Contains(out, "edited") {
+		t.Errorf("the edited line did not run:\n%s", out)
+	}
+	// The model's line must not have run: a field that only *looked* editable would leave the
+	// person believing they had corrected something.
+	if strings.Contains(out, "original") {
+		t.Errorf("the original line ran as well as the edit:\n%s", out)
+	}
+}
+
+// TestAnEditedLineCannotSlipPastTheElevationRefusal closes the hole the field would otherwise
+// open: the refusal exists because this app has no terminal to answer a password prompt, and
+// an edit is a line like any other. It is checked after the answer rather than at the field,
+// because the answer is where the line is known.
+func TestAnEditedLineCannotSlipPastTheElevationRefusal(t *testing.T) {
+	service, chatID, _ := projectService(t, nil)
+	service.Confirm = editingConfirm{line: "sudo ls"}.confirm
+
+	_, err := service.Execute(context.Background(), chatID, ToolRunCommand,
+		`{"command":`+jsonString("echo harmless")+`}`)
+	if code := refusalCode(t, err); code != "tools.needsElevation" {
+		t.Fatalf("an edited elevation line reported %q, want tools.needsElevation", code)
+	}
+}
+
+// TestARunningCommandCanBeStoppedWithoutEndingTheTurn pins the difference between the two
+// stops this app has. The turn's Stop abandons the answer; this one ends a single command and
+// reports it *as a result*, so the model can read what the command printed up to that point
+// and decide what to do instead of retrying it.
+func TestARunningCommandCanBeStoppedWithoutEndingTheTurn(t *testing.T) {
+	service, chatID, _ := commandService(t)
+	ctx := WithToolCall(context.Background(), "call-stop")
+	type outcome struct {
+		result Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := service.ExecuteWithSummary(ctx, chatID, ToolRunCommand,
+			`{"command":`+jsonString(sleepCommand(30))+`,"timeout_seconds":60}`)
+		done <- outcome{result: result, err: err}
+	}()
+
+	// The command registers itself when it starts, so a stop that lands early is a stop with
+	// nothing to end — the loop waits for the registration rather than sleeping a guess.
+	started := time.Now()
+	stopped := false
+	for time.Since(started) < 10*time.Second {
+		if service.StopCommand(chatID, "call-stop") {
+			stopped = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !stopped {
+		t.Fatal("a running command was not registered, so it could not be stopped")
+	}
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("a command stopped by the user returned an error: %v", got.err)
+		}
+		if !strings.Contains(got.result.Text, "gestoppt") {
+			t.Errorf("the result does not say the person stopped it:\n%s", got.result.Text)
+		}
+		if !strings.Contains(got.result.Text, "unvollständig") {
+			t.Errorf("the model is not told the output is incomplete:\n%s", got.result.Text)
+		}
+		if elapsed := time.Since(started); elapsed > 15*time.Second {
+			t.Errorf("the stop took %s; the sleep was 30s, so the tree was not killed", elapsed)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the stopped command never returned")
+	}
+
+	// And the registration is gone, so a second click is a no-op rather than a stale handle.
+	if service.StopCommand(chatID, "call-stop") {
+		t.Error("a finished command is still registered as running")
+	}
+}

@@ -12,7 +12,7 @@ import (
 	"kichat/internal/store"
 	"kichat/internal/uimsg"
 
-	rt "kichat/internal/runtime"
+	"kichat/internal/terminal"
 )
 
 // terminalTestApp is an App with a real store and a launcher that records its folder
@@ -133,7 +133,7 @@ func TestOpenProjectTerminalRefusesAFolderThatIsGone(t *testing.T) {
 // launcher's own error is the only thing that distinguishes them.
 func TestOpenProjectTerminalSeparatesAMissingTerminalFromAFailedOne(t *testing.T) {
 	root := t.TempDir()
-	a, st := terminalTestApp(t, func(dir string) error { return rt.ErrNoTerminal })
+	a, st := terminalTestApp(t, func(dir string) error { return terminal.ErrNoTerminal })
 	terminalTestChat(t, st, "p1", store.ModeCoding, root)
 
 	if code := codeOf(t, a.OpenProjectTerminal("p1")); code != "project.noTerminal" {

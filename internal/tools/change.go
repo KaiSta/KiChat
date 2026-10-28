@@ -106,6 +106,11 @@ type ApprovalRequest struct {
 	Change workspace.Change
 	// Command is what would run, for ApprovalKindCommand.
 	Command Command
+	// EditedLine is what the person ran instead of the line they were shown, set by the app
+	// when the card's field was changed before Allow. Empty means "exactly what was shown".
+	// It belongs to the answer rather than to the question, which is why the request is a
+	// pointer: the confirmer is the only one that can know it.
+	EditedLine string
 }
 
 // writeFileArgs is what the model may send.
@@ -222,75 +227,98 @@ func toolCallFrom(ctx context.Context) string {
 
 // --- execution --------------------------------------------------------------
 
-func (s *Service) writeFile(ctx context.Context, chatID, argsJSON string) (string, error) {
+func (s *Service) writeFile(ctx context.Context, chatID, argsJSON string) (Result, error) {
 	var args writeFileArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return "", badArguments(err)
+		return Result{}, badArguments(err)
 	}
 	args.Path = strings.TrimSpace(args.Path)
 	if args.Path == "" {
-		return "", uimsg.Detailf("tools.pathMissing", "the path argument is empty; name a file in the project folder")
+		return Result{}, uimsg.Detailf("tools.pathMissing", "the path argument is empty; name a file in the project folder")
 	}
 	root, err := s.workspaceFor(chatID)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	// The plan first: a change that cannot happen must never reach the person being asked
 	// (a folder where a file was named, a file too large to replace, a path outside the
 	// project).
 	change, err := root.DescribeWrite(args.Path, args.Content)
 	if err != nil {
-		return "", changeError(args.Path, err)
+		return Result{}, changeError(args.Path, err)
 	}
 	if err := s.approveChange(ctx, chatID, ToolWriteFile, change); err != nil {
-		return "", err
+		return Result{}, err
 	}
+	// The text an undo puts back, read before it is replaced.
+	pre := s.preImageOf(root, args.Path)
 	result, err := root.Write(args.Path, args.Content)
 	if err != nil {
-		return "", changeError(args.Path, err)
+		return Result{}, changeError(args.Path, err)
 	}
+	// The read cache is told rather than left to notice: a model that re-reads this file to
+	// check what it wrote must get the file, not a sentence about what the app remembers.
+	s.forgetReads(chatID, root.Absolute(result.Path))
+	note := s.remember(chatID, pre, workspace.Digest(args.Content))
 	if result.Created {
-		return fmt.Sprintf("%s neu geschrieben (%s).", result.Path, lines(result.Lines)), nil
+		return summarized(fmt.Sprintf("%s neu geschrieben (%s).%s",
+			result.Path, lines(result.Lines), note),
+			"tool.sum.writeNew", result.Path, fmt.Sprint(result.Lines)), nil
 	}
-	return fmt.Sprintf("%s geschrieben (%s; vorher %s).",
-		result.Path, lines(result.Lines), lines(result.PreviousLines)), nil
+	return summarized(fmt.Sprintf("%s geschrieben (%s; vorher %s).%s",
+		result.Path, lines(result.Lines), lines(result.PreviousLines), note),
+		"tool.sum.write", result.Path, fmt.Sprint(result.Lines), fmt.Sprint(result.PreviousLines)), nil
 }
 
-func (s *Service) editFile(ctx context.Context, chatID, argsJSON string) (string, error) {
+func (s *Service) editFile(ctx context.Context, chatID, argsJSON string) (Result, error) {
 	var args editFileArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return "", badArguments(err)
+		return Result{}, badArguments(err)
 	}
 	args.Path = strings.TrimSpace(args.Path)
 	if args.Path == "" {
-		return "", uimsg.Detailf("tools.pathMissing", "the path argument is empty; name a file in the project folder")
+		return Result{}, uimsg.Detailf("tools.pathMissing", "the path argument is empty; name a file in the project folder")
 	}
 	root, err := s.workspaceFor(chatID)
 	if err != nil {
-		return "", err
+		return Result{}, err
 	}
 	replaceAll := looseBool(args.ReplaceAll, false)
 	change, err := root.DescribeEdit(args.Path, args.OldString, args.NewString, replaceAll)
 	if err != nil {
-		return "", changeError(args.Path, err)
+		return Result{}, changeError(args.Path, err)
 	}
 	if err := s.approveChange(ctx, chatID, ToolEditFile, change); err != nil {
-		return "", err
+		return Result{}, err
 	}
+	// Read before the edit for the same reason a write does it: afterwards the file already
+	// holds the new text, and that is not what an undo restores.
+	pre := s.preImageOf(root, args.Path)
 	result, err := root.Edit(args.Path, args.OldString, args.NewString, replaceAll)
 	if err != nil {
-		return "", changeError(args.Path, err)
+		return Result{}, changeError(args.Path, err)
+	}
+	// Same as a write: the next read of this file is a question about the disk.
+	s.forgetReads(chatID, root.Absolute(result.Path))
+	// Said to the model, not only to the person: a model whose whitespace was forgiven needs
+	// to know it was, or it learns that guessing indentation works.
+	note := s.remember(chatID, pre, result.Digest)
+	if result.Approximate {
+		note += " Der Einzug wich ab: ersetzt wurde die Zeile so, wie sie in der Datei steht."
 	}
 	if result.Occurrences == 1 {
-		return fmt.Sprintf("%s bearbeitet: 1 Vorkommen ersetzt (Zeile %d).", result.Path, result.Line), nil
+		return summarized(fmt.Sprintf("%s bearbeitet: 1 Vorkommen ersetzt (Zeile %d).%s",
+			result.Path, result.Line, note),
+			"tool.sum.edit", result.Path, "1", fmt.Sprint(result.Line)), nil
 	}
-	return fmt.Sprintf("%s bearbeitet: %d Vorkommen ersetzt (erstes in Zeile %d).",
-		result.Path, result.Occurrences, result.Line), nil
+	return summarized(fmt.Sprintf("%s bearbeitet: %d Vorkommen ersetzt (erstes in Zeile %d).%s",
+		result.Path, result.Occurrences, result.Line, note),
+		"tool.sum.edit", result.Path, fmt.Sprint(result.Occurrences), fmt.Sprint(result.Line)), nil
 }
 
 // approveChange asks the user whether a change to a file may be made.
 func (s *Service) approveChange(ctx context.Context, chatID, tool string, change workspace.Change) error {
-	return s.approve(ctx, ApprovalRequest{
+	return s.approve(ctx, &ApprovalRequest{
 		ChatID:     chatID,
 		MessageID:  callingMessage(ctx),
 		ToolCallID: toolCallFrom(ctx),
@@ -306,23 +334,7 @@ func (s *Service) approveChange(ctx context.Context, chatID, tool string, change
 // the person reads is a line, and what they are allowing is everything that line does —
 // this app does not sandbox it, does not inspect it, and could not promise to understand it.
 // That is why it is asked per call, and why the line travels unedited.
-func (s *Service) approveCommand(ctx context.Context, chatID string, command Command) error {
-	return s.approve(ctx, ApprovalRequest{
-		ChatID:     chatID,
-		MessageID:  callingMessage(ctx),
-		ToolCallID: toolCallFrom(ctx),
-		Tool:       ToolRunCommand,
-		Kind:       ApprovalKindCommand,
-		Command:    command,
-	})
-}
-
-// approve asks the user one question. Every path out of it that is not an explicit yes is a
-// refusal, including the two that are not the user's fault: a build with nobody to ask, and a
-// turn stopped while the question was on screen. The alternative — treating "no answer" as
-// consent — is how an agent talks itself into a file or a command it was never given
-// permission to touch.
-func (s *Service) approve(ctx context.Context, req ApprovalRequest) error {
+func (s *Service) approve(ctx context.Context, req *ApprovalRequest) error {
 	if s.Confirm == nil {
 		return uimsg.Wrapf("tools.denied",
 			"no confirmation is available in this build, so nothing was changed", ErrDenied)

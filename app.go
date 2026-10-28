@@ -25,6 +25,7 @@ import (
 	rt "kichat/internal/runtime"
 	"kichat/internal/secret"
 	"kichat/internal/store"
+	"kichat/internal/terminal"
 	"kichat/internal/tools"
 	"kichat/internal/trace"
 	"kichat/internal/uimsg"
@@ -1513,6 +1514,55 @@ func (a *App) PickProjectFolder(title string) (string, error) {
 	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
 }
 
+// TerminalStatus is the terminal the hand-off would open.
+//
+// Two fields rather than one because they answer two questions: the program's name is what a
+// person recognises in the About row, and the resolved path is what a bug report needs when
+// the name resolves to a wrapper script that turns out to be broken.
+type TerminalStatus struct {
+	Program string `json:"program"`
+	Path    string `json:"path"`
+}
+
+// StopToolCommand ends one running command without ending the turn.
+//
+// A command has its own stop for a reason the turn's stop cannot serve: killing a `go test`
+// that was started with the wrong flags should not also throw away the answer being written.
+// The tool reports the stop to the model as a result, so the turn carries on and the model can
+// ask what to do next.
+//
+// It reports whether there was a command to stop: a click that arrives a moment after the
+// command finished is not an error, and a toast about it would be noise.
+func (a *App) StopToolCommand(chatID, toolCallID string) bool {
+	if err := a.ensure(); err != nil || a.toolSvc == nil {
+		return false
+	}
+	return a.toolSvc.StopCommand(chatID, toolCallID)
+}
+
+// DetectTerminal reports which terminal this machine has, without opening one.
+//
+// It exists because the launcher's platform lists are the part of coding mode nobody can
+// test for on another operating system: the suite runs on one machine, and CI compiles the
+// others. A row in About that names the resolved program turns "it should work on Windows"
+// into something the person on Windows can check in one glance — and it lets the hand-off's
+// button be honest before the click rather than after it.
+func (a *App) DetectTerminal() (TerminalStatus, error) {
+	if err := a.ensure(); err != nil {
+		return TerminalStatus{}, err
+	}
+	program, err := terminal.Detect()
+	if err != nil {
+		if errors.Is(err, terminal.ErrNoTerminal) {
+			// No terminal is a state, not a failure: the About row says so in the user's
+			// language, and the hand-off's own sentence covers the click.
+			return TerminalStatus{}, nil
+		}
+		return TerminalStatus{}, uimsg.Errorf("project.terminalFailed", err)
+	}
+	return TerminalStatus{Program: program.Name, Path: program.Path}, nil
+}
+
 // OpenProjectTerminal opens the user's own terminal in a project's folder.
 //
 // The app runs no terminal and is not getting one; what needs a terminal is something the
@@ -1543,10 +1593,10 @@ func (a *App) OpenProjectTerminal(chatID string) error {
 	// appearing on somebody's desktop.
 	start := a.openTerminal
 	if start == nil {
-		start = rt.OpenTerminal
+		start = terminal.Open
 	}
 	if err := start(root.Path()); err != nil {
-		if errors.Is(err, rt.ErrNoTerminal) {
+		if errors.Is(err, terminal.ErrNoTerminal) {
 			return uimsg.Errorf("project.noTerminal")
 		}
 		return uimsg.Errorf("project.terminalFailed", err)
