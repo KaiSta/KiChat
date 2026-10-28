@@ -744,6 +744,27 @@ Verfügbare Tools: {{tool_list}}`,
 当前日期 / 时间：{{datetime}}
 可用工具：{{tool_list}}`,
     },
+    /*
+     * The project prompt. Only the English body is kept verbatim here: it is what the
+     * harness shows when a project is created (CreateProject below), and the other two
+     * languages exist in Go. A drifted copy would have the harness rendering a prompt
+     * nobody who clicks "new project" in this app ever gets, which is the one thing
+     * this fixture must not do — so the opening lines are copied from
+     * codingAgentPromptEN rather than paraphrased.
+     */
+    'coding-agent': {
+      en: `You are an experienced software engineer working inside the user's project folder. Your job is not to talk about code but to understand the code in that folder and deliver concrete changes.
+
+### HOW TO WORK
+- **Read before you claim.** Use the tools to look up files, call sites and identifiers in the project instead of guessing their contents from a name or from memory.
+
+### PROJECT INSTRUCTIONS
+If your context contains a <project_agents_md> block, that is this project's own guidance (usually AGENTS.md in the root folder).
+
+Current date / time: {{datetime}}
+Location: {{location}}
+Available tools: {{tool_list}}`,
+    },
     'blank': {
       en: ``,
       de: ``,
@@ -1228,7 +1249,7 @@ Verfügbare Tools: {{tool_list}}`,
     // reads it so a new chat in the harness opens on the model the panel names.
     defaultModel: { backend: 'lmstudio', model: 'ornith-1.5-9b' },
     defaultSystemPrompt: PROMPT_BODIES.research.en,
-    // Same five built-ins, in the same order, as config.DefaultPresets(). The
+    // Same six built-ins, in the same order, as config.DefaultPresets(). The
     // names are only the fallback: the settings view translates a built-in by
     // looking up `preset.<id>`, so these strings must match the Go ones for the
     // untranslated case to read the same in both.
@@ -1237,12 +1258,27 @@ Verfügbare Tools: {{tool_list}}`,
       { id: 'small-local', name: 'Small local models', prompt: PROMPT_BODIES['small-local'].en, builtIn: true },
       { id: 'assistant', name: 'Neutral assistant', prompt: PROMPT_BODIES.assistant.en, builtIn: true },
       { id: 'coding', name: 'Code & engineering', prompt: PROMPT_BODIES.coding.en, builtIn: true },
+      { id: 'coding-agent', name: 'Coding agent (project)', prompt: PROMPT_BODIES['coding-agent'].en, builtIn: true },
       { id: 'blank', name: 'Empty', prompt: PROMPT_BODIES.blank.en, builtIn: true },
     ],
     autoTitle: true,
     toolIterations: 6,
     toolTokenBudget: 25000,
     nativeTools: true,
+    // Both off, like the shipped default: a fixture that granted a permission would hide
+    // the very state the coding tab's switches are about.
+    autoApprove: { files: false, commands: false },
+  }
+
+  // ?autoapprove=files|commands|both is the state a user reaches by trusting the model, and
+  // it takes two screens to see: the switches live in Settings, what they change is the
+  // project header's permission note and the absence of the card.
+  const autoApprove = new URLSearchParams(location.search).get('autoapprove')
+  if (autoApprove) {
+    settings.autoApprove = {
+      files: autoApprove === 'files' || autoApprove === 'both',
+      commands: autoApprove === 'commands' || autoApprove === 'both',
+    }
   }
 
   // ?missing=1 stores a model no backend lists any more — the state a switched-off
@@ -1425,6 +1461,32 @@ Verfügbare Tools: {{tool_list}}`,
       keepRecentTurns: 6,
       searchFirst: false,
     },
+    // A project, last in the array but its own list in the sidebar: the two kinds of
+    // conversation have to be told apart in the default fixture, not only under a flag.
+    // Last rather than first on purpose — the opened chat is the first row of the array, and
+    // that has to stay the markdown chat, which is the fixture every markdown feature is
+    // checked against. The groups are built from the whole list, so a project at the end of
+    // it still heads the project group.
+    {
+      id: 'chat-project',
+      title: 'kichat',
+      createdAt: now(),
+      updatedAt: now(),
+      backend: 'lmstudio',
+      model: models[0].id,
+      systemPrompt: settings.promptPresets?.find((p) => p.id === 'coding-agent')?.prompt || '',
+      systemPromptPreset: 'coding-agent',
+      temperature: 0.7,
+      topP: 0.9,
+      numCtx: 0,
+      archived: false,
+      autoCompact: true,
+      compactThreshold: 0.8,
+      keepRecentTurns: 6,
+      searchFirst: false,
+      mode: 'coding',
+      workspace: '/home/you/projects/kichat',
+    },
   ]
 
   /*
@@ -1546,6 +1608,20 @@ Verfügbare Tools: {{tool_list}}`,
   // the only place a Stop can live is the call's own row — and it is a flag rather than the
   // default because the default chat has to stay the ordinary one, a picture that arrived.
   const drawTool = query.get('drawtool') === '1'
+  /*
+   * ?approval=<kind> is a project chat whose next turn stops at a change *before* it is
+   * made: the write_file call goes up pending, the question follows on chat:approval, and
+   * the turn stays open until ResolveToolApproval answers it. The blocking is the point —
+   * the card means nothing if the turn it belongs to is not actually waiting — so the
+   * fixture holds the turn and finishes it only when a button was pressed.
+   *
+   * `kind` picks what the question shows, because the shapes render differently: `create`
+   * (a new file, no before side), `edit` (a snippet replaced), `overwrite` (a whole file
+   * rewritten), `dirs` (folders created to hold the path), `truncated` (a preview shorter
+   * than the change it describes) and `command` (the terminal's question, which has no diff
+   * at all).
+   */
+  const approvalKind = query.get('approval')
   // ?throttle=1 pauses a streamed reply the way a backend's rate limit does: the app emits
   // the phase and the wait while the retry sleeps, and nothing arrives on the wire until it
   // is over. It is a flag because the ordinary fixture has to keep streaming without a pause.
@@ -1896,6 +1972,102 @@ Verfügbare Tools: {{tool_list}}`,
       statsSource: 'estimated',
     }),
   ])
+  if (approvalKind) {
+    // The flag needs the project open, because a write tool is offered to a project and to
+    // nothing else — and because the question is about that folder. The fixture's own
+    // project is moved to the front of the list, which is what the store opens on boot;
+    // declared here rather than with the other flags because moving a chat around needs
+    // the chat fixtures, and those are built below this point.
+    const project = chats.find((c) => c.mode === 'coding')
+    if (project) {
+      chats.splice(chats.indexOf(project), 1)
+      chats.unshift(project)
+      // Its seeded conversation stays: the question is asked on the next turn, and a
+      // project with history is what the card is normally seen against.
+    }
+    console.warn(
+      `[harness] approval=${approvalKind} active: a project chat whose turn stops on an unanswered change or command`,
+    )
+  }
+
+  // The project chat answers about the folder it is pointed at, and its tool call is a
+  // project read — so the coding tools' labels and the line about what a result cost are
+  // both renderable in the default state rather than only under a flag.
+  messages.set('chat-project', [
+    message('chat-project', 'user', 'Wo wird entschieden, ob ein Chat ein Projekt ist?'),
+    message('chat-project', 'assistant',
+      'In `store.Chat.IsProject` — beide Hälften müssen stimmen: der Modus *und* ein Ordner.', {
+      id: 'msg-project-1',
+      seq: 1,
+      toolCalls: [
+        {
+          id: 'call-project-1',
+          messageId: 'msg-project-1',
+          chatId: 'chat-project',
+          name: 'read_file',
+          argsJson: JSON.stringify({ path: 'internal/store/models.go', offset: 63, limit: 40 }),
+          resultJson: JSON.stringify({
+            content:
+              'internal/store/models.go — Zeilen 63–102 von 534\n\n' +
+              'func (c Chat) IsProject() bool {\n\treturn c.Mode == ModeCoding && c.Workspace != ""\n}',
+          }),
+          status: 'ok',
+          durationMs: 3,
+          error: '',
+          sourceTokens: 640,
+          contextTokens: 640,
+          condensed: false,
+          createdAt: now(),
+        },
+      ],
+      promptTokens: 1860,
+      completionTokens: 74,
+      tokensPerSecond: 31.2,
+      ttftMs: 940,
+      generationMs: 2380,
+      stopReason: 'stop',
+      statsSource: 'estimated',
+    }),
+  ])
+
+  /*
+   * ?refusal=elevation is the terminal's one refusal that never reaches a question: a command
+   * that asks for administrator rights. The app cannot answer a password prompt, so it declines
+   * before asking — and the card then has to carry both halves: the sentence saying what to do,
+   * and the line itself, ready to copy and run in the user's own terminal. Nothing about this
+   * can be exercised from the backend here, which is exactly why the rendering needs a fixture.
+   */
+  let refusedCall = null
+  let refusedEmitted = false
+  if (new URLSearchParams(location.search).get('refusal') === 'elevation') {
+    const project = chats.find((c) => c.mode === 'coding')
+    if (project) {
+      chats.splice(chats.indexOf(project), 1)
+      chats.unshift(project)
+    }
+    const refused = 'sudo apt-get install -y libwebkit2gtk-4.1-dev'
+    const list = messages.get('chat-project') || []
+    list.push(message('chat-project', 'user', 'Installier bitte die fehlenden Pakete.'))
+    const reply = message('chat-project', 'assistant',
+      'Dafür brauche ich Administratorrechte, die ich nicht habe. Führe den Befehl bitte selbst aus — er steht in der Karte und lässt sich dort kopieren.',
+      { status: 'complete' })
+    refusedCall = {
+      id: 'call-elevation-1',
+      messageId: reply.id,
+      chatId: 'chat-project',
+      name: 'run_command',
+      argsJson: JSON.stringify({ command: refused, timeout_seconds: 120 }),
+      resultJson: '',
+      status: 'error',
+      durationMs: 0,
+      error: 'i18n:' + JSON.stringify({ code: 'tools.needsElevation' }),
+      createdAt: now(),
+    }
+    reply.toolCalls = [refusedCall]
+    list.push(reply)
+    console.warn('[harness] refusal=elevation active: a command refused before the question')
+  }
+
   // The two tool calls a research answer carries, because the token line on the card is
   // only reachable from a record: one result the summary model cut, and one that came
   // back whole. The sizes are what the backend measured, not something the browser may
@@ -2121,6 +2293,153 @@ Verfügbare Tools: {{tool_list}}`,
 
   const timers = new Map()
 
+  /*
+   * The change waiting for an answer, or null. One at a time: the real app keeps a map
+   * keyed by tool call id, but a fixture that could hold two questions at once would
+   * only make the flag harder to read.
+   */
+  let pendingApproval = null
+
+  /**
+   * The question the ?approval= fixture asks, in the shape api_changes.go emits.
+   *
+   * The fields are the ones the card reads, and the ones a real change carries: both
+   * sides of the text, the line counts of the *change* (not of a truncated preview), the
+   * folders that would be created, and whether the preview is shorter than the change.
+   */
+  function approvalFixture(kind, chatId, messageId, toolCallId) {
+    const common = { approvalId: toolCallId, chatId, messageId, toolCallId }
+    // The second kind of question. It renders nothing like a diff — a command cannot be
+    // previewed, which is why the card shows the line, the folder, the shell and the
+    // limit instead — so it is built here rather than through changeBody below.
+    if (kind === 'command') {
+      return {
+        ...common,
+        tool: 'run_command',
+        kind: 'command',
+        change: null,
+        command: {
+          line: 'go test ./... -run TestRegistry',
+          dir: '/home/you/projects/kichat',
+          timeoutSec: 120,
+          shell: '/bin/sh -c',
+        },
+      }
+    }
+    const { tool, ...change } = changeBody(kind)
+    return { ...common, tool, kind: 'change', change, command: null }
+  }
+
+  /**
+   * The file-change half: what the diff shows, in the shape workspace.Change describes.
+   *
+   * The counts are the change's, not the preview's — a truncated preview is a shorter thing
+   * to read, and a fixture that counted what it printed would make the card's own warning
+   * line look like a mistake.
+   */
+  function changeBody(kind) {
+    const text = (lines) => lines.join('\n')
+    const base = {
+      createsDirs: [],
+      truncated: false,
+    }
+    switch (kind) {
+      case 'edit':
+        return {
+          ...base,
+          tool: 'edit_file',
+          path: 'internal/tools/project.go',
+          operation: 'edit',
+          before: text([
+            '\tif !chat.IsProject() {',
+            '\t\treturn nil, uimsg.Detailf("tools.noWorkspace", "no folder")',
+            '\t}',
+          ]),
+          added: 4,
+          removed: 3,
+          after: text([
+            '\tif !chat.IsProject() {',
+            '\t\treturn workspace.Root{}, uimsg.Detailf("tools.noWorkspace",',
+            '\t\t\t"this chat has no project folder, so there are no files to read")',
+            '\t}',
+          ]),
+        }
+      case 'overwrite':
+        return {
+          ...base,
+          tool: 'write_file',
+          path: 'internal/workspace/edit.go',
+          operation: 'overwrite',
+          before: text(['package workspace', '', '// Ein Kommentar, der ersetzt wird.']),
+          added: 41,
+          removed: 3,
+          after: text([
+            'package workspace',
+            '',
+            '// The write side of a project folder: two operations, each described before it',
+            '// is made. A person cannot consent to "write_file pkg/a.go" — that is a tool name,',
+            '// not a change.',
+          ]),
+        }
+      case 'dirs':
+        return {
+          ...base,
+          tool: 'write_file',
+          path: 'internal/store/migrations/0002_notes.sql',
+          operation: 'create',
+          before: '',
+          added: 6,
+          removed: 0,
+          createsDirs: ['internal/store/migrations'],
+          after: text([
+            '-- Notizen zu einer Antwort.',
+            'CREATE TABLE IF NOT EXISTS answer_notes (',
+            '  id TEXT PRIMARY KEY,',
+            '  message_id TEXT NOT NULL,',
+            '  body TEXT NOT NULL',
+            ');',
+          ]),
+        }
+      case 'truncated':
+        return {
+          ...base,
+          tool: 'write_file',
+          path: 'frontend/src/lib/i18n.ts',
+          operation: 'overwrite',
+          before: text(['const de = {', "  'app.title': 'KiChat',"]),
+          added: 1420,
+          removed: 1180,
+          truncated: true,
+          after: text([
+            'const de = {',
+            "  'app.title': 'KiChat',",
+            "  'change.title': 'Änderung am Projektordner',",
+            '  // … und die Vorschau bricht hier ab, während die Änderung weitergeht.',
+          ]),
+        }
+      default:
+        return {
+          ...base,
+          tool: 'write_file',
+          path: 'internal/store/notes.go',
+          operation: 'create',
+          before: '',
+          added: 12,
+          removed: 0,
+          after: text([
+            'package store',
+            '',
+            '// Note is one remark filed against a message.',
+            'type Note struct {',
+            '\tID        string',
+            '\tMessageID string',
+            '\tBody      string',
+            '}',
+          ]),
+        }
+    }
+  }
+
   function startTurn(chatId, text, regenerate) {
     const chat = chats.find((c) => c.id === chatId)
     if (!chat) return
@@ -2141,6 +2460,45 @@ Verfügbare Tools: {{tool_list}}`,
     const messageId = reply.id
     emit('chat:start', { chatId, messageId, backend: chat.backend, model: chat.model })
     emit('chat:budget', { chatId, budget: budget(1713) })
+
+    if (approvalKind && chat.mode === 'coding') {
+      // The change, asked before it is made. Nothing streams and no `done` follows: the
+      // turn is waiting on the answer, exactly as the real one blocks in Go, and the tool
+      // call sits on the reply in its `pending` state — which is the row the card's answer
+      // will rewrite.
+      const call = {
+        id: 'call-change-1',
+        messageId,
+        chatId,
+        name:
+          approvalKind === 'command'
+            ? 'run_command'
+            : approvalKind === 'edit'
+              ? 'edit_file'
+              : 'write_file',
+        argsJson: JSON.stringify(
+          approvalKind === 'command'
+            ? { command: 'go test ./... -run TestRegistry', timeout_seconds: 120 }
+            : approvalKind === 'edit'
+              ? { path: 'internal/tools/project.go', old_string: '\tif !chat.IsProject() {', new_string: '\tif !chat.IsProject() {' }
+              : { path: 'internal/store/notes.go', content: 'package store\n' },
+        ),
+        resultJson: '',
+        status: 'pending',
+        durationMs: 0,
+        error: '',
+        createdAt: now(),
+      }
+      reply.toolCalls = [call]
+      pendingApproval = {
+        approvalId: call.id,
+        chatId,
+        finish: (decision) => finishApproval(chatId, messageId, call, decision),
+      }
+      emit('chat:tool', { chatId, toolCall: call })
+      emit('chat:approval', approvalFixture(approvalKind, chatId, messageId, call.id))
+      return
+    }
 
     const words = MARKDOWN_REPLY.split(/(\s+)/)
     let i = 0
@@ -2208,6 +2566,69 @@ Verfügbare Tools: {{tool_list}}`,
     timers.set(chatId, setTimeout(step, 60))
   }
 
+  let approvalStarted = false
+
+  /*
+   * What the turn does once the question was answered: the tool call leaves `pending`,
+   * and the reply that was waiting behind it finishes. A declined change is a decision
+   * rather than a fault — the call is recorded as `denied` and the model is told not to
+   * ask again — and that difference is the one the tool card has to show.
+   */
+  function finishApproval(chatId, messageId, call, decision) {
+    const allowed = decision === 'once' || decision === 'always'
+    // What the card's answer produces differs by kind, and that difference is the point of
+    // the two fixtures: a file change ends with a file, a command with output and an exit
+    // code — and a skipped test run reads `ok` while nothing was written anywhere.
+    const isCommand = call.name === 'run_command'
+    if (isCommand && allowed) {
+      // An allowed command runs, so its output arrives *while* it runs: `chat:tool-output`
+      // carries the output so far, which is what the card shows in place of a result that
+      // does not exist yet. The real one is throttled in Go; this is two reports so the
+      // filling card can be seen at all.
+      const lines = ['=== RUN   TestRegistry\n', '--- PASS: TestRegistry (0.02s)\nPASS\n']
+      let shown = ''
+      lines.forEach((line, i) => {
+        setTimeout(() => {
+          shown += line
+          emit('chat:tool-output', { chatId, toolCallId: call.id, text: shown })
+        }, 200 * (i + 1))
+      })
+      setTimeout(() => settleApproval(chatId, messageId, call, decision), 200 * (lines.length + 1))
+      return
+    }
+    settleApproval(chatId, messageId, call, decision)
+  }
+
+  /* The answer once whatever the tool does while it runs is over: the record, the reply the
+   * person was waiting for, and the end of the turn. */
+  function settleApproval(chatId, messageId, call, decision) {
+    const allowed = decision === 'once' || decision === 'always'
+    const isCommand = call.name === 'run_command'
+    call.status = allowed ? 'ok' : 'denied'
+    call.durationMs = allowed ? (isCommand ? 2380 : 12) : 0
+    call.resultJson = JSON.stringify({
+      content: allowed
+        ? isCommand
+          ? '$ go test ./... -run TestRegistry\nok  \tkichat/internal/tools\t1.184s\nExit-Code 0 (2.4 s)\n'
+          : 'internal/store/notes.go neu geschrieben (12 Zeilen).'
+        : 'Nicht ausgeführt: Die Änderung wurde nicht vorgenommen; frage nicht erneut danach.',
+    })
+    emit('chat:tool', { chatId, toolCall: call })
+    const list = messages.get(chatId) || []
+    const last = list[list.length - 1]
+    if (last && last.role === 'assistant') {
+      last.status = 'complete'
+      last.content = allowed
+        ? isCommand
+          ? 'Die Tests laufen durch. Als Nächstes sehe ich mir den Rest des Pakets an.'
+          : 'Die Datei ist geschrieben. Als Nächstes prüfe ich, ob das Projekt noch baut.'
+        : 'Ich habe die Änderung nicht vorgenommen. Sag mir, wie du sie stattdessen haben willst.'
+      last.promptTokens = 2400
+      last.completionTokens = 32
+    }
+    emit('chat:done', { chatId, messageId, lastMessageId: messageId, status: 'complete' })
+  }
+
   function chatState(chatId) {
     const chat = chats.find((c) => c.id === chatId)
     if (!chat) return Promise.reject(new Error('chat not found: ' + chatId))
@@ -2218,6 +2639,24 @@ Verfügbare Tools: {{tool_list}}`,
       drawToolStarted = true
       beginDraw({ id: 'msg-image-1', chatId, steps: 40, toolCall: drawToolCall })
     }
+    // The turn that stops at a change starts when its chat is first opened, for the same
+    // reason the draw does: an event emitted before anything subscribed goes nowhere, and
+    // the reply it hangs on is not mounted yet. Once is enough.
+    if (approvalKind && chat.mode === 'coding' && !pendingApproval && !approvalStarted) {
+      approvalStarted = true
+      startTurn(
+        chatId,
+        approvalKind === 'command' ? 'Prüf, ob die Registry-Tests noch durchlaufen.' : 'Leg die Notizen-Tabelle an.',
+        false,
+      )
+    }
+    // The refused command is emitted as the event a turn produces, not only seeded into the
+    // history: the composer's hand-off is derived from that event, so a fixture that painted
+    // only the card would leave the half this flag exists for untested.
+    if (refusedCall && !refusedEmitted && chatId === refusedCall.chatId) {
+      refusedEmitted = true
+      emit('chat:tool', { chatId, toolCall: refusedCall })
+    }
     return Promise.resolve({
       chat,
       messages: messages.get(chatId) || [],
@@ -2225,7 +2664,10 @@ Verfügbare Tools: {{tool_list}}`,
       attachments: [],
       documents: [],
       budget: budget(1713),
-      running: timers.has(chatId),
+      // A turn waiting on a confirmation is still a running turn: the engine has not
+      // finished it, and reporting `false` here would drop the Stop button the moment the
+      // question appeared — the one control a user needs while a change is on screen.
+      running: timers.has(chatId) || pendingApproval?.chatId === chatId,
     })
   }
 
@@ -2950,6 +3392,40 @@ Verfügbare Tools: {{tool_list}}`,
         compactThreshold: 0.8,
         keepRecentTurns: 6,
         searchFirst: false,
+        mode: 'chat',
+        workspace: '',
+      }
+      chats.unshift(chat)
+      messages.set(chat.id, [])
+      emit('chats:changed', {})
+      return Promise.resolve(chat)
+    },
+    // The folder chooser. A native directory dialog cannot be scripted from here, so the
+    // harness answers with a fixed path instead of opening one: the state this mock
+    // exists to render is "a project was just created", not "a dialog is on screen".
+    PickProjectFolder: () => Promise.resolve('/home/you/projects/kichat'),
+    CreateProject: (workspace) => {
+      const chat = {
+        id: nextId('project'),
+        // The real one titles a project after its folder, because the folder is the
+        // project's identity and an empty title would leave the sidebar blank.
+        title: String(workspace).replace(/[/\\]+$/, '').split(/[/\\]/).pop() || '',
+        createdAt: now(),
+        updatedAt: now(),
+        backend: settings.defaultModel?.backend || 'lmstudio',
+        model: settings.defaultModel?.model || models[0].id,
+        systemPrompt: settings.promptPresets.find((p) => p.id === 'coding-agent')?.prompt || '',
+        systemPromptPreset: 'coding-agent',
+        temperature: 0.7,
+        topP: 0.9,
+        numCtx: 0,
+        archived: false,
+        autoCompact: true,
+        compactThreshold: 0.8,
+        keepRecentTurns: 6,
+        searchFirst: false,
+        mode: 'coding',
+        workspace,
       }
       chats.unshift(chat)
       messages.set(chat.id, [])
@@ -2977,9 +3453,39 @@ Verfügbare Tools: {{tool_list}}`,
       emit('chats:changed', {})
       return Promise.resolve(null)
     },
+    /*
+     * `/clear`: the conversation goes, the chat stays. The real binding also refuses while a
+     * turn is running — a turn appends its reply as it goes, so clearing underneath it would
+     * watch new messages arrive — and that refusal is Go's to make. Here the transcript, the
+     * compactions and any tool calls behind them are dropped, which is what the window then
+     * has to render as an empty chat with the folder and the settings still in place.
+     */
+    ClearChat: (id) => {
+      if (!chats.some((c) => c.id === id)) {
+        return Promise.reject('i18n:{"code":"chat.gone"}')
+      }
+      messages.set(id, [])
+      compactions.set(id, [])
+      emit('chats:changed', {})
+      return Promise.resolve(null)
+    },
     SendMessage: (req) => {
       startTurn(req.chatId, req.text, req.regenerate)
       return Promise.resolve(null)
+    },
+    /*
+     * The answer to a waiting change. The real one sends on a channel the blocked turn is
+     * reading; here it finishes that turn, because the visible half of the answer is what
+     * the turn does next — the tool call's status and the reply that follows it. A false
+     * answer for an id nobody is waiting on is the ordinary case of a second click, and it
+     * is reported rather than thrown for the same reason the real binding returns a bool.
+     */
+    ResolveToolApproval: (approvalId, decision) => {
+      const waiting = pendingApproval
+      if (!waiting || waiting.approvalId !== approvalId) return Promise.resolve(false)
+      pendingApproval = null
+      waiting.finish(decision)
+      return Promise.resolve(true)
     },
     Regenerate: (chatId) => {
       startTurn(chatId, '', true)
