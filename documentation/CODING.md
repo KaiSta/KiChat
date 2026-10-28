@@ -147,6 +147,25 @@ a rendering of it, so pasting it into a terminal runs what the model asked for. 
 that is the whole recovery path: the sentence says to run it yourself, and the line is right
 there.
 
+**The question's line is editable, and the edit is what runs.** A typo in a path, a flag the
+model guessed, `-run TestRegistry` where the whole suite was meant: the person reading the card
+is the one who knows, and declining to retype the line in the composer costs the turn a round
+and loses the folder, the timeout and the shell the tool chose. So the field on the card is the
+answer, not a quotation of it, and the edit travels back with the answer
+(`ResolveToolApprovalWith`, `ApprovalRequest.EditedLine`) rather than being spliced into the
+tool's arguments somewhere. Two consequences are load-bearing:
+
+- **The refusal runs again on the edited line.** `elevationRequest` is checked after the answer,
+  on what was actually approved, because the field is a text box and the one thing an edit must
+  not do is slip past the check that runs before the question. Pinned by
+  `TestAnEditedLineCannotSlipPastTheElevationRefusal`.
+- **An emptied field is not an answer.** *Allow* is disabled while the line is blank, so there
+  is no path that runs `""` and reports the shell's complaint as the tool's failure.
+
+The card says which text ran: while the field differs from the model's line, a sentence above
+the folder note says the person's version is what runs, offers *reset the line*, and repeats
+that the administrator check applies to it too.
+
 **And the line is handed back where the person types.** A refusal also raises a card above the
 composer — *run it yourself*, the line, a copy button, an open-terminal button, a close button —
 because the transcript's card sits several screens above the composer and the next move after a
@@ -244,7 +263,80 @@ cannot inherit each other's text, and the window drops the entry when the call's
 arrives — the record carries the whole output, and a second copy beside it would be shown
 twice. Nothing is reported when nobody is watching, which is what a test-built service is.
 
-## 5. Starting over: `/clear`
+**One command can be stopped without stopping the answer.** The turn's Stop cancels everything
+and abandons the reply, which is the wrong price for a `go test` started with the wrong flags.
+So a command registers itself on the way in (`Service.beginCommand`, keyed by chat and tool
+call, because two chats can run the same line) and the card offers *stop the command* while the
+call is still `pending`. The stop cancels that call's own context — a child of the turn's, so
+Stop still reaches it — and the tool answers with the output so far plus "you stopped this,
+the output is incomplete", as a *result*: the model reads it and decides, the turn carries on,
+and nothing is marked as a fault. `proc.KillTree` ends the tree, not the shell alone.
+
+## 5. Reading the folder, and the shortcut that must not lie
+
+`read_file`, `list_dir`, `search_files` and `find_files` are the read side; `find_files` exists
+so a model can ask "which tests exist" in one call instead of walking a tree a level at a time,
+and `search_files`/`find_files` both skip what `.gitignore` excludes (counted in the result, so
+an empty answer does not read as an empty folder).
+
+**A repeat read of an unchanged range is answered with a sentence** rather than the file
+(`internal/tools/reads.go`): a model checking whether it still remembers a file it read four
+rounds ago does not need it again. The memory is per turn and per chat, bounded, and dropped
+when the turn ends.
+
+**What it must never answer is "did my write land".** The cache is therefore *told* about
+changes rather than left to notice them from size and modification time: `write_file` and
+`edit_file` forget the path they touched, and `run_command` forgets the whole chat's memory,
+because a command can rewrite anything (`gofmt -w .`) and the app cannot enumerate that. Size
+and mtime remain the optimistic half — they catch a file changed outside the app — but they are
+deliberately not the guarantee, because a filesystem with coarse timestamps or a same-length
+replacement defeats both. `TestAReadAfterAWriteReturnsTheFile` gives the write the same byte
+length and puts the modification time back, so only the invalidation can make it pass.
+
+**A subdirectory's `AGENTS.md` arrives with the file that needs it.** `read_file` appends the
+nearest `AGENTS.md` above the file it just read (`workspace.AgentsFileNear`, root excluded —
+that one is already in the system prompt), in the same `<project_agents_md>` markup, with one
+sentence saying it is project knowledge and not an extension of what may be read. The nearest
+file wins rather than a stack of them: a rule written in `api/` already knows about the root's,
+and three documents that disagree are worse than the one the person meant.
+
+## 6. Undoing a change
+
+A model's change is only safe to accept if it can be taken back, so every `write_file` and
+`edit_file` records what it replaced. Three decisions:
+
+| | Choose | Why |
+| --- | --- | --- |
+| Where | the database (`file_snapshots`, migration 12) | The database is encrypted at rest; a copy of somebody's source in a plain folder beside it would be the one thing the encryption did not cover. It also travels with the chat, and is deleted with it. |
+| What | the text *before the chat's first change*, and the digest of what was last written | The question people ask is "put this file back the way you found it", not "undo round seven but keep round eight" — the model usually takes several rounds to get a file right. One row per (chat, file), so ten edits store one copy. |
+| When | read before the change, written after it | Read before, because reading afterwards records the new text as the old one. Written after, because a change that was refused or failed must not leave a row claiming something happened. |
+
+The digest is what makes the undo safe rather than eager: `RevertFileChange` compares it with
+the file on disk and **refuses when they differ** (`project.revertConflict`), because a revert
+is a write and overwriting an edit somebody made in their own editor is exactly the accident a
+one-click undo would cause. A file the chat *created* is removed rather than emptied — an empty
+file is not the state the folder was in — and folders a write created are left, because by now
+they may hold work the chat did not put there. A running turn is refused too: the model might
+be writing that file at this instant. A file that is binary or larger than a change may touch
+has no undo at all, and the panel says so instead of offering a button that could only fail.
+
+The record goes when it is no longer true: a successful revert deletes the row, and `/clear`
+and deleting the chat delete all of them — an undo offered for a change the history no longer
+describes is a button nobody can check.
+
+**The panel** (`ProjectChanges.tsx`, beside the folder badge in a project's header) answers
+"what has this chat done to my folder" — the question the transcript answers only as a hundred
+tool cards, in which a file rewritten four times appears four times with nothing saying the
+fourth replaced the first three. It lists one row per file with a diff against the file as it is
+now, how many times the chat wrote it, and either *put back* or the reason it cannot be. It is
+loaded with the chat and refreshed when a write lands, so the header's count is the folder's
+state rather than a hint that something happened once.
+
+The list and the diff are built in Go (`ProjectFileChanges`), not in the window: the two texts
+are clamped previews, exactly as an approval's are, so a chat with fifty changed files does not
+send fifty files through the bridge.
+
+## 7. Starting over: `/clear`
 
 A chat can be answered by creating another one. A project cannot: **a project is its
 conversation**, so a second one on the same folder would be a second copy of the settings
@@ -278,7 +370,7 @@ For a project this is also the answer to "the context is full": the context is t
 conversation plus the folder's `AGENTS.md`, so clearing it starts with an empty history that
 still carries the project's own guidance.
 
-## 6. What a project's prompt carries
+## 8. What a project's prompt carries
 
 `internal/chat/project.go` injects the folder's `AGENTS.md` as its own budget segment
 (`SegmentProject`, labelled with the file name), read from the project folder on each turn and
@@ -292,7 +384,7 @@ the Context Inspector shows the real count for the folder actually opened. The c
 of the model's window, because a flat byte count cannot express the rule that matters: this
 file must never dominate a small model's context.
 
-## 7. Watching it without the app
+## 9. Watching it without the app
 
 `make frontend && go run ./tools/uiharness` renders the whole mode against a mocked bridge: the
 sidebar's two groups, a project's folder and permission note, and a confirmation card in its
@@ -310,6 +402,18 @@ show the absence of the card — the harness emits the question itself, so `?app
 renders one — because *whether the app asks* is the Go side, pinned by
 `TestAStandingAnswerSkipsTheFileQuestion`. The flag table is in the
 [`verify-ui`](../.claude/skills/verify-ui/SKILL.md) skill.
+
+The project fixture also carries what the changes panel reads (`ProjectFileChanges`,
+`RevertFileChange`): three rows — a changed file with a diff, a created one, and a binary that
+cannot be undone — so all three states are on screen, and pressing *put back* removes the row
+and drops the header's count. The card's line is a real field under `?approval=command`: typing
+into it and pressing *Allow* answers through `ResolveToolApprovalWith`, which the harness logs,
+so a caller that quietly used the plain binding would show up as a missing line in the console.
+
+What the harness cannot show is the *stopping* of a running command: the fixture's commands
+finish immediately, so there is never a `pending` call to press, and `StopToolCommand` answers
+`false`. That path is `TestARunningCommandCanBeStoppedWithoutEndingTheTurn`, which starts a real
+sleep and asserts the stop is a result rather than a fault.
 
 The harness proves rendering, state flow and event wiring. It proves nothing about the backend:
 neither the shell, nor the timeout, nor the tree kill is exercised there. Those are covered by

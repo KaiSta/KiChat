@@ -36,7 +36,8 @@ Two rules keep this useful:
 | `api_runtime.go` | llama.cpp as the app installs and supervises it: builds, GPU families, model folders, start/stop, the image server's process |
 | `api_models.go` | Listing models and probing them, overrides, prompt variables, the model-file pickers |
 | `api_chat.go` | Compaction, attachments, chats' documents and chunk search, web search and scrape |
-| `api_changes.go` | The app's half of a project tool's question: `confirmChange`, the `chat:approval` payload, `ResolveToolApproval`, the standing auto-approval check and the per-chat "always" |
+| `api_changes.go` | The app's half of a project tool's question: `confirmChange`, the `chat:approval` payload, `ResolveToolApproval` / `ResolveToolApprovalWith` (a command's line can be edited before it runs), the standing auto-approval check and the per-chat "always" |
+| `api_project_files.go` | What a project chat changed: `ProjectFileChanges` (one row per file, with a clamped diff and whether undo is safe) and `RevertFileChange` (the undo, refused for a file edited since or a running turn) |
 | `api_images.go` | Picture generation: status, redraw, progress, the one-draw slot, cache, saving and reading an attachment's image |
 | `api_upscale.go` | The enlarging bridge: `UpscaleAttachment`, the upscaler status/test/dialog/install (`InstallUpscaler`, `GetUpscalerInstall`), the upscale bound |
 | `internal/` | All logic, one package per subsystem (below) |
@@ -60,8 +61,10 @@ Two rules keep this useful:
 | `internal/runtime` | llama.cpp as a thing KiChat installs and supervises: releases, GPU families, model folders, projector pairing, offload reading — plus the user's terminal, started in a folder for the hand-off (`terminal.go` and one `terminal_<os>.go` per platform) | `install.go`, `builds.go`/`distribution.go`, `supervise.go`, `discover.go`, `libs.go`, `offload.go`, `terminal*.go` | `*_test.go` + `live_prism_test.go` |
 | `internal/research` | Brave and DuckDuckGo, the search-first context route, the scraper and its guards | `search.go`, `chain.go`, `brave.go`, `brave_context.go`, `duckduckgo.go`, `scrape.go` | `*_test.go` + `live_test.go` |
 | `internal/ingest` | Attachments to text: PDF, office, chunking | `ingest.go` (dispatch), `pdf.go`, `office.go`, `chunk.go` | `ingest_test.go` |
-| `internal/tools` | What the model can call, native schema *and* text protocol, plus `generate_image`, the project reads (`read_file`, `list_dir`, `search_files`), the changes (`write_file`, `edit_file`) and the terminal (`run_command`) — the last three stop for the user's confirmation | `tools.go`, `image.go`, `project.go` (reads), `change.go` (writes, the guarded list and the question), `command.go` (the terminal: caps, timeout, result) with `command_unix.go`/`command_windows.go` (the shell and the tree kill) | `tools_test.go`, `image_test.go`, `project_test.go`, `change_test.go`, `command_test.go` |
-| `internal/workspace` | The folder a coding project works in: resolving it, keeping every path inside it, the read/list/search it allows, the project's own AGENTS.md, and the two write operations — each computed twice, once to be shown and once to be performed | `workspace.go` (`Open`, `Root.Resolve`, `Read`, `List`, `Search`, `AgentsFile`), `edit.go` (`DescribeWrite`/`Write`, `DescribeEdit`/`Edit`, `Change`) | `workspace_test.go`, `edit_test.go` |
+| `internal/tools` | What the model can call, native schema *and* text protocol, plus `generate_image`, the project reads (`read_file`, `list_dir`, `search_files`, `find_files`), the changes (`write_file`, `edit_file`) and the terminal (`run_command`, which can be stopped without ending the turn) — the last three stop for the user's confirmation | `tools.go` (`Result`/`Summary`), `image.go`, `project.go` (reads), `find.go` (the glob), `reads.go` (the per-turn read shortcut and its invalidation), `change.go` (writes, the guarded list and the question), `snapshot.go` (the undo record), `command.go` (the terminal: caps, timeout, result, `StopCommand`) with `command_unix.go`/`command_windows.go` (the shell) | `tools_test.go`, `image_test.go`, `project_test.go`, `find_test.go`, `reads_test.go`, `change_test.go`, `snapshot_test.go`, `command_test.go` |
+| `internal/workspace` | The folder a coding project works in: resolving it, keeping every path inside it, the read/list/search it allows (including what `.gitignore` excludes), the project's own AGENTS.md at the root and near a nested file, and the two write operations — each computed twice, once to be shown and once to be performed | `workspace.go` (`Open`, `Root.Resolve`, `Read`, `Text`, `List`, `Search`, `AgentsFile`/`AgentsFileNear`, `Remove`, `CompareDiff`, `Digest`), `edit.go` (`DescribeWrite`/`Write`, `DescribeEdit`/`Edit`, `Change`), `find.go` (the glob), `ignore.go` (`.gitignore`) | `workspace_test.go`, `edit_test.go`, `find_test.go`, `ignore_test.go` |
+| `internal/proc` | Starting a process in its own group and ending its tree, shared by the terminal tool, the supervised servers and the image CLI instead of three copies | `proc.go`, `proc_unix.go`, `proc_windows.go` | — |
+| `internal/terminal` | The user's own terminal, started in a folder (the hand-off's *open terminal*) | `terminal.go` (`Detect`, `Open`), one `terminal_<os>.go` per platform | — |
 | `internal/secret` | API keys: OS keyring, encrypted-file fallback | `secret.go` (`New`, `NewIsolated`) | `secret_test.go` |
 | `internal/backup` | The portable archive: a selection of chats as one passphrase-encrypted file (AES-256-GCM, Argon2id) | `backup.go` (`Encode`, `Decode`, `Manifest`) | `backup_test.go` |
 | `internal/trace` | The content-free diagnostic log: a fixed event schema, error kinds instead of error text, rotation beside the encrypted database | `trace.go` (`Logger`, `Event`, `KindOf`) | `trace_test.go` (+ `internal/chat/trace_test.go` for a whole turn) |
@@ -76,7 +79,8 @@ Two rules keep this useful:
 | --- | --- |
 | `frontend/src/App.tsx` | Shell: sidebar, chat list, settings modal, global key handling (Escape) |
 | `frontend/src/components/ChatView.tsx` | The conversation: message list, composer (which answers `/clear` itself), attachments, context meter, stop, and a project's folder and permission note |
-| `frontend/src/components/Confirmation.tsx` | The question a project tool asks, in its two shapes — a change's two sides with line counts, a command's line with its folder, shell and limit — and the three answers. It is rendered at the composer because the turn behind it is blocked |
+| `frontend/src/components/Confirmation.tsx` | The question a project tool asks, in its two shapes — a change's two sides with line counts, a command's line *as an editable field* with its folder, shell and limit — and the three answers. It is rendered at the composer because the turn behind it is blocked |
+| `frontend/src/components/ProjectChanges.tsx` | A project's changed files: the header's count, the panel, each file's diff and its undo (or the reason undo is not offered) |
 | `frontend/src/components/MessageParts.tsx` | How one message renders — the split between settled and streaming pieces |
 | `frontend/src/components/Markdown.tsx` | The markdown pipeline: remark/rehype, KaTeX, highlight.js |
 | `frontend/src/components/settings/` | The settings screen: `Settings.tsx` is the shell and tab strip, `shared.tsx` the `Section`/`Field` helpers, and one file per tab (`GeneralTab`, `BackendsTab`, `ImagesTab`, `PromptTab`, `CodingTab` for what a project's tools may do unasked, `ResearchTab`, `ContextTab`, `PayloadTab`, `DataTab` for database encryption, backup and import) |
@@ -95,9 +99,10 @@ in `internal/store/store.go`; adding a table is a new migration, never an edit o
 one. The key is in the OS keyring by default; `kichat.key` beside the database is the
 passphrase-wrapped recovery copy, and `internal/dbkey` owns both.
 
-`chats`, `messages`, `compactions`, `tool_calls`, `attachments`, `documents`,
-`chunks` (+ `chunks_fts`, FTS5/BM25), `search_cache`, `scrape_cache`, `settings`
-(one JSON row — see `internal/config`), `model_overrides`, `counters`.
+`chats`, `messages`, `compactions`, `tool_calls`, `file_snapshots` (what a project's
+files looked like before this chat changed them, for the undo), `attachments`,
+`documents`, `chunks` (+ `chunks_fts`, FTS5/BM25), `search_cache`, `scrape_cache`,
+`settings` (one JSON row — see `internal/config`), `model_overrides`, `counters`.
 
 Export and import of a chat is `internal/store/bundle.go` (`LoadChatBundle`,
 `SaveChatBundle`, one transaction per chat), wrapped in the archive format by
@@ -129,7 +134,7 @@ progress uses a name from `internal/events`.
 | An enlarging method | `internal/images/upscale.go` (`Method*`, the switch in `Upscale`), the Enlarge panel, i18n | [`UPSCALING.md`](UPSCALING.md) |
 | A tool the model can call | `internal/tools/tools.go` (`Definitions` + execution), `internal/chat` if it needs a round | — |
 | A tool that reads the project folder | `internal/workspace` for the path boundary, `internal/tools/project.go` for the schema and result, `chat.toolDefinitions`/`projectTool` for the mode gate | — |
-| A tool that changes the project folder | `internal/workspace/edit.go` (the `Describe*`/apply split), `internal/tools/change.go` (schema, `approveChange`, `WriteToolNames`), `tools.NeedsApproval` in the engine's gate, `api_changes.go` (the event and the bound answer), `Confirmation.tsx` | — |
+| A tool that changes the project folder | `internal/workspace/edit.go` (the `Describe*`/apply split), `internal/tools/change.go` (schema, `approveChange`, `WriteToolNames`), `internal/tools/snapshot.go` (the undo record), `tools.NeedsApproval` in the engine's gate, `api_changes.go` (the event and the bound answer), `Confirmation.tsx`, `ProjectChanges.tsx` | [`CODING.md`](CODING.md) |
 | A tool that runs something on this machine | `internal/tools/command.go` (schema, caps, timeout, result) plus `command_unix.go`/`command_windows.go` (the shell, the process group, the tree kill), `approveCommand`, the command half of `approvalPayload`, `Confirmation.tsx` | [`CODING.md`](CODING.md) |
 | A new chat mode (a different tool set or prompt per conversation) | `store.Chat.Mode` + a migration, `internal/chat/engine.go`'s tool gate, the branch that creates the chat in `app.go`, the sidebar's `newChat`/`newProject` controls | — |
 | A tool result condensed before the model reads it | `internal/chat/digest.go` (the gate, cache and escape hatch), `toolOutputBudget.take` in `generate.go`, `config.DigestSettings` | [`COMPACT.md`](COMPACT.md) §17 |
