@@ -94,6 +94,8 @@ export function OpenBackup(arg1:string,arg2:string):Promise<main.BackupPreview>;
 
 export function OpenExternal(arg1:string):Promise<void>;
 
+export function OpenProjectTerminal(arg1:string):Promise<void>;
+
 export function PickFiles():Promise<Array<string>>;
 
 export function PickImageFile(arg1:string,arg2:Array<string>):Promise<string>;

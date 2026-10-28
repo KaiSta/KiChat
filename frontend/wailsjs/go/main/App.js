@@ -170,6 +170,10 @@ export function OpenExternal(arg1) {
   return window['go']['main']['App']['OpenExternal'](arg1);
 }
 
+export function OpenProjectTerminal(arg1) {
+  return window['go']['main']['App']['OpenProjectTerminal'](arg1);
+}
+
 export function PickFiles() {
   return window['go']['main']['App']['PickFiles']();
 }

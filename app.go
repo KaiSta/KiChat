@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,6 +105,11 @@ type App struct {
 	changesMu      sync.Mutex
 	changes        map[string]*pendingChange
 	allowedChanges map[string]bool
+
+	// openTerminal starts a terminal in a folder. Nil means runtime.OpenTerminal, which
+	// is what the window gets; a test sets it to record the folder without opening
+	// anything on the machine running the suite.
+	openTerminal func(dir string) error
 
 	dataDir string
 	// trace is the content-free diagnostic log beside the encrypted database. It is
@@ -1505,6 +1511,47 @@ func (a *App) PickProjectFolder(title string) (string, error) {
 		return "", err
 	}
 	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+}
+
+// OpenProjectTerminal opens the user's own terminal in a project's folder.
+//
+// The app runs no terminal and is not getting one; what needs a terminal is something the
+// app *cannot* do — a command that asks for administrator rights, where a password prompt
+// has nowhere to go. The honest hand-off for that is the program the user already has,
+// opened at the folder they are working in. Nothing is executed by this call: the window
+// opens, the prompt waits, and whatever gets typed there is theirs.
+//
+// The folder is checked before a terminal is started in it. A terminal opened "somewhere
+// nearby" because the directory is gone would be a window in a folder the person never
+// asked for, which is worse than the sentence saying the folder cannot be used.
+func (a *App) OpenProjectTerminal(chatID string) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	chat, err := a.store.GetChat(chatID)
+	if err != nil {
+		return uimsg.Errorf("chat.gone")
+	}
+	if !chat.IsProject() {
+		return uimsg.Errorf("tools.noWorkspace")
+	}
+	root, err := workspace.Open(chat.Workspace)
+	if err != nil {
+		return uimsg.Errorf("project.badFolder", chat.Workspace)
+	}
+	// The launcher is a field so a test can watch what it is handed without a terminal
+	// appearing on somebody's desktop.
+	start := a.openTerminal
+	if start == nil {
+		start = rt.OpenTerminal
+	}
+	if err := start(root.Path()); err != nil {
+		if errors.Is(err, rt.ErrNoTerminal) {
+			return uimsg.Errorf("project.noTerminal")
+		}
+		return uimsg.Errorf("project.terminalFailed", err)
+	}
+	return nil
 }
 
 // defaultChatModel picks the model a new chat opens on: the one the settings name
