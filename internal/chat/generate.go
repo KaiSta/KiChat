@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"kichat/internal/config"
@@ -354,17 +355,13 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		}
 
 		e.emitStatus(in.Chat.ID, "tool")
-		for i, call := range calls {
-			if ctx.Err() != nil {
-				e.cancelRemainingCalls(in.Chat.ID, row, calls, i)
-				return result, ctx.Err()
-			}
-			e.runTool(ctx, in.Chat.ID, row, call, toolBudget, tools.TurnRef{
-				BackendID: in.BackendID,
-				ModelID:   in.ModelID,
-				Turn:      in.Turn,
-				Sources:   in.Sources,
-			})
+		if err := e.runRound(ctx, in.Chat.ID, row, calls, toolBudget, tools.TurnRef{
+			BackendID: in.BackendID,
+			ModelID:   in.ModelID,
+			Turn:      in.Turn,
+			Sources:   in.Sources,
+		}); err != nil {
+			return result, err
 		}
 		e.emitStatus(in.Chat.ID, "idle")
 	}
@@ -414,7 +411,33 @@ func (e *Engine) traceReply(in generateInput, messageID string, ms int64, usage 
 // budget is written into the tool message the model reads. The stored message is
 // what is replayed on every later turn, so bounding it here is what actually
 // keeps a large scrape out of the window.
-func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, budget *toolOutputBudget, turn tools.TurnRef) {
+// toolOutcome is one call's execution, before anything has been written about it.
+//
+// The split exists for concurrency: a round of six reads should cost one wait rather than six,
+// and that means the executions can overlap while the records — and the cards — are still
+// written in the order the model asked for them. Everything the window sees therefore happens
+// in startTool and finishTool, on the round's own goroutine; executeCall touches nothing but
+// the tool service.
+type toolOutcome struct {
+	result tools.Result
+	err    error
+	ms     int64
+	// ran is "the call was executed". Cancellation can leave a call unstarted, and such a
+	// call is recorded as cancelled rather than as a result nobody can explain.
+	ran bool
+}
+
+// readParallelism bounds how many read-only calls run at once. It is a small number on
+// purpose: these are file reads on one disk, and the win comes from overlapping the latency,
+// not from a hundred goroutines contending for the same directory.
+const readParallelism = 4
+
+// startTool writes the call's pending record and tells the window the call exists. The record
+// it returns is what finishTool updates, so the row keeps the time it was created at.
+//
+// A card that appears only when the result does is a card that arrives without warning in the
+// middle of a long tool round; the pending row is what puts it on screen with "running" on it.
+func (e *Engine) startTool(chatID string, row store.Message, call llm.ToolCall) store.ToolCallRecord {
 	record := store.ToolCallRecord{
 		ID:        call.ID,
 		MessageID: row.ID,
@@ -426,10 +449,22 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 	}
 	e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
 	e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
+	return record
+}
 
+// executeCall runs one call and times it, and writes nothing.
+func (e *Engine) executeCall(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, turn tools.TurnRef) toolOutcome {
 	start := time.Now()
-	output, execErr := e.executeTool(ctx, chatID, row.ID, call, turn)
-	record.DurationMs = time.Since(start).Milliseconds()
+	result, err := e.executeTool(ctx, chatID, row.ID, call, turn)
+	return toolOutcome{result: result, err: err, ms: time.Since(start).Milliseconds(), ran: true}
+}
+
+// finishTool records what a call produced: the status, the two sizes, the text the model
+// reads, and the trace line. It is the half that must stay in call order.
+func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, record store.ToolCallRecord, out toolOutcome, budget *toolOutputBudget, turn tools.TurnRef) {
+	execErr := out.err
+	output := out.result.Text
+	record.DurationMs = out.ms
 
 	// The tool's name, how long it took and how much it returned — the three things
 	// that explain a slow or empty round. The result itself stays out of the trace.
@@ -453,6 +488,7 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 		e.emit(events.Attachments, map[string]any{"chatId": chatID})
 	}
 
+	summary := out.result.Summary
 	switch {
 	case execErr == nil:
 		record.Status = store.ToolOK
@@ -462,6 +498,7 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 		// change that is retried every round is a loop the user has to escape by
 		// stopping the turn, which is a worse outcome than the change not being made.
 		record.Status = store.ToolDenied
+		summary = nil
 		output = fmt.Sprintf("Nicht ausgeführt: %s Die Änderung wurde nicht vorgenommen; frage nicht "+
 			"erneut danach. Wenn sie nötig ist, beschreibe, was du ändern wolltest und warum, und "+
 			"überlasse dem Nutzer die Entscheidung.", uimsg.Sentence(execErr))
@@ -471,9 +508,10 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 		// it, because a payload is not something it can correct a call from. This is the
 		// one place a message has two audiences, and uimsg carries both.
 		record.Error = execErr.Error()
+		summary = nil
 		output = fmt.Sprintf("Tool error: %s", uimsg.Sentence(execErr))
 	}
-	record.ResultJSON = resultJSON(output)
+	record.ResultJSON = resultJSON(output, summary)
 	e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
 	e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 
@@ -514,6 +552,71 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 		e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 	}
 	e.appendToolResult(chatID, call, delivered, record.Status)
+}
+
+// runRound executes every call the model asked for in one round.
+//
+// The pending cards are written first, in the model's order, and then the calls run: the
+// read-only ones together, because they touch nothing and each costs a disk wait, and the ones
+// that need an answer one after another, because each of those is a person reading a diff and
+// two questions at once is a race for the same attention. Finishing is back in call order, so
+// the transcript reads the way the model wrote it however the work overlapped.
+func (e *Engine) runRound(ctx context.Context, chatID string, row store.Message, calls []llm.ToolCall, budget *toolOutputBudget, turn tools.TurnRef) error {
+	records := make([]store.ToolCallRecord, len(calls))
+	for i, call := range calls {
+		records[i] = e.startTool(chatID, row, call)
+	}
+
+	outcomes := make([]toolOutcome, len(calls))
+	var readers sync.WaitGroup
+	slots := make(chan struct{}, readParallelism)
+	for i, call := range calls {
+		if tools.NeedsApproval(call.Name) {
+			continue
+		}
+		readers.Add(1)
+		slots <- struct{}{}
+		go func(index int, c llm.ToolCall) {
+			defer readers.Done()
+			defer func() { <-slots }()
+			outcomes[index] = e.executeCall(ctx, chatID, row, c, turn)
+		}(i, call)
+	}
+	// The gated calls run here, in order, so their questions are asked one at a time.
+	cancelled := false
+	for i, call := range calls {
+		if !tools.NeedsApproval(call.Name) {
+			continue
+		}
+		if ctx.Err() != nil {
+			cancelled = true
+			break
+		}
+		outcomes[i] = e.executeCall(ctx, chatID, row, call, turn)
+	}
+	readers.Wait()
+
+	// Finishing happens in call order whatever finished first, and a call that never ran is
+	// written as cancelled: the assistant message already claims it, and a backend rejects a
+	// history with a tool call that has no result at all.
+	for i := range calls {
+		if outcomes[i].ran {
+			e.finishTool(ctx, chatID, row, calls[i], records[i], outcomes[i], budget, turn)
+			continue
+		}
+		e.cancelRemainingCalls(chatID, row, calls[i:i+1], 0)
+	}
+	if cancelled {
+		return ctx.Err()
+	}
+	return nil
+}
+
+// runTool runs one call end to end. It is runRound for a single call, and it stays because a
+// caller with one call in hand should not have to build a slice to say so.
+func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, budget *toolOutputBudget, turn tools.TurnRef) {
+	record := e.startTool(chatID, row, call)
+	e.finishTool(ctx, chatID, row, call, record, e.executeCall(ctx, chatID, row, call, turn), budget, turn)
 }
 
 // toolOutputBudget bounds how many tokens of tool results one answer carries into
@@ -626,9 +729,9 @@ func (b *toolOutputBudget) take(output string) (string, bool) {
 // attachment — generate_image is the only one — link it to the turn that asked
 // for it. A field on the shared Service would be wrong: two chats can run turns
 // at once, and the tool service is one value for the whole app.
-func (e *Engine) executeTool(ctx context.Context, chatID, messageID string, call llm.ToolCall, turn tools.TurnRef) (string, error) {
+func (e *Engine) executeTool(ctx context.Context, chatID, messageID string, call llm.ToolCall, turn tools.TurnRef) (tools.Result, error) {
 	if e.Tools == nil {
-		return "", uimsg.Detailf("chat.noTools", "no tools are available")
+		return tools.Result{}, uimsg.Detailf("chat.noTools", "no tools are available")
 	}
 	// The turn's backend and model travel with the call beside the message id, and so does
 	// the call's own id: a tool that needs them must not read them from a field two
@@ -652,7 +755,7 @@ func (e *Engine) executeTool(ctx context.Context, chatID, messageID string, call
 			})
 		})
 	}
-	return e.Tools.Execute(ctx, chatID, call.Name, call.Arguments)
+	return e.Tools.ExecuteWithSummary(ctx, chatID, call.Name, call.Arguments)
 }
 
 // cancelRemainingCalls writes a cancelled tool result for every call from index
@@ -668,7 +771,7 @@ func (e *Engine) cancelRemainingCalls(chatID string, row store.Message, calls []
 			ChatID:     chatID,
 			Name:       call.Name,
 			ArgsJSON:   call.Arguments,
-			ResultJSON: resultJSON(cancelledToolOutput),
+			ResultJSON: resultJSON(cancelledToolOutput, nil),
 			Status:     store.ToolCancelled,
 			CreatedAt:  time.Now(),
 		}
@@ -703,8 +806,15 @@ func (e *Engine) appendToolResult(chatID string, call llm.ToolCall, output, stat
 	e.emit(events.Message, map[string]any{"chatId": chatID, "message": msg})
 }
 
-func resultJSON(output string) string {
-	raw, err := json.Marshal(map[string]any{"content": output})
+func resultJSON(output string, summary *tools.Summary) string {
+	payload := map[string]any{"content": output}
+	// The window's half travels beside the model's rather than replacing it: the card shows a
+	// translated sentence and keeps the exact text, so a person can read the summary at a
+	// glance and still check what the turn was handed.
+	if summary != nil && summary.Code != "" {
+		payload["summary"] = summary
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "{}"
 	}
