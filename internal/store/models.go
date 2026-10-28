@@ -25,14 +25,52 @@ type Chat struct {
 	Model              string    `json:"model"`
 	SystemPrompt       string    `json:"systemPrompt"`
 	SystemPromptPreset string    `json:"systemPromptPreset"`
-	Temperature        float64   `json:"temperature"`
-	TopP               float64   `json:"topP"`
-	NumCtx             int       `json:"numCtx"`
-	Archived           bool      `json:"archived"`
-	AutoCompact        bool      `json:"autoCompact"`
-	CompactThreshold   float64   `json:"compactThreshold"`
-	KeepRecentTurns    int       `json:"keepRecentTurns"`
-	SearchFirst        bool      `json:"searchFirst"`
+	// Mode is what kind of conversation this is: ModeChat, or ModeCoding for a
+	// project that works in a folder (Workspace). It decides which tools exist, so
+	// it is a stored field rather than a derivation from the prompt preset — a
+	// preset is text the user can edit, copy or delete, and the tool set must not
+	// change when somebody retypes a textarea.
+	Mode string `json:"mode"`
+	// Workspace is the folder a coding chat works in, absolute and symlink-resolved
+	// as it was when the project was created. Every path a file tool resolves goes
+	// through it (internal/workspace), and an empty one means the chat has no files
+	// to read, which is every chat in chat mode and every row written before this
+	// column existed.
+	Workspace        string  `json:"workspace"`
+	Temperature      float64 `json:"temperature"`
+	TopP             float64 `json:"topP"`
+	NumCtx           int     `json:"numCtx"`
+	Archived         bool    `json:"archived"`
+	AutoCompact      bool    `json:"autoCompact"`
+	CompactThreshold float64 `json:"compactThreshold"`
+	KeepRecentTurns  int     `json:"keepRecentTurns"`
+	SearchFirst      bool    `json:"searchFirst"`
+}
+
+// The modes a chat can be in.
+const (
+	// ModeChat is the research assistant: search, documents, pictures.
+	ModeChat = "chat"
+	// ModeCoding is a project: a folder, the file tools, and a prompt written for
+	// working in a codebase.
+	ModeCoding = "coding"
+)
+
+// IsProject reports whether this chat works in a folder, which is the one question the
+// tool set, the prompt and the window all ask. Both halves are needed: a coding chat
+// whose folder was never set has nothing to read, and a folder without the coding mode
+// is a chat mode that must not see the file tools.
+func (c Chat) IsProject() bool {
+	return c.Mode == ModeCoding && c.Workspace != ""
+}
+
+// NormaliseMode reports the mode a stored value means, so a row written by a newer
+// build — or edited by hand — cannot put a chat in a mode no code knows about.
+func NormaliseMode(mode string) string {
+	if mode == ModeCoding {
+		return ModeCoding
+	}
+	return ModeChat
 }
 
 // Message is one turn in a chat.
@@ -257,6 +295,11 @@ const (
 	ToolOK        = "ok"
 	ToolError     = "error"
 	ToolCancelled = "cancelled"
+	// ToolDenied is the user refusing a change a tool asked to make. It is its own status
+	// rather than an error because it is not one: nothing failed, the app worked, and the
+	// person decided. A card that showed "Error" for a decision the user just made would
+	// read as the app breaking at the moment they took control of it.
+	ToolDenied = "denied"
 )
 
 // ToolCallRecord is the persisted outcome of one tool invocation.

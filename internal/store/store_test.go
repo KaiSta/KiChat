@@ -513,6 +513,128 @@ func TestDeleteChatCascadesAndRemovesIndexEntries(t *testing.T) {
 	}
 }
 
+// TestClearChatKeepsTheChatAndDropsTheConversation pins what separates clearing a
+// conversation from deleting one. The project survives — its folder, prompt, model and
+// title — and everything the conversation accumulated goes, including the parts no read
+// would show again: a tool call left in its own table, and the document and chunk rows an
+// attachment's text was extracted into.
+//
+// That last pair is the reason this is not a loop over the messages. An attachment is how
+// a file enters a context, and its chunks are what `search_documents` searches, so a chat
+// that had "cleared" its context while keeping them could still answer a question out of
+// the very file it was cleared of — the failure would be silent and the answer would look
+// correct.
+func TestClearChatKeepsTheChatAndDropsTheConversation(t *testing.T) {
+	st := newStore(t)
+	project := chatFixture("p1")
+	project.Mode = ModeCoding
+	project.Workspace = filepath.Join(t.TempDir(), "proj")
+	project.SystemPrompt = "Du bist ein Coding-Agent."
+	if err := st.CreateChat(project); err != nil {
+		t.Fatal(err)
+	}
+	// A second conversation, cleared by nothing here, to show the operation is one chat's
+	// business.
+	if err := st.CreateChat(chatFixture("c2")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.AppendMessage(Message{ID: "m1", ChatID: "p1", Role: "user",
+		Content: "hallo", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendMessage(Message{ID: "m2", ChatID: "p1", Role: "assistant",
+		Content: "hi", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertToolCall(ToolCallRecord{ID: "t1", MessageID: "m2", ChatID: "p1",
+		Name: "read_file", Status: "ok", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateCompaction(Compaction{ID: "k1", ChatID: "p1", Trigger: "auto",
+		FromSeq: 1, ToSeq: 2, Summary: "Zusammenfassung", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateDocument(Document{ID: "d1", AttachmentID: "a1", ChatID: "p1",
+		Title: "notes.txt", Text: "Ein Vertrag über den Zaun.", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateAttachment(Attachment{ID: "a1", ChatID: "p1", Kind: "file",
+		Filename: "notes.txt", Placement: PlacementIndexed, DocumentID: "d1",
+		CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if st.FTS {
+		if err := st.InsertChunks([]Chunk{{DocumentID: "d1", ChatID: "p1", Ordinal: 0,
+			Text: "Ein Vertrag über den Zaun."}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.AppendMessage(Message{ID: "o1", ChatID: "c2", Role: "user",
+		Content: "bleibt", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.ClearChat("p1"); err != nil {
+		t.Fatalf("ClearChat: %v", err)
+	}
+
+	// The chat itself, and everything that makes it the project it was.
+	got, err := st.GetChat("p1")
+	if err != nil {
+		t.Fatalf("the chat did not survive the clear: %v", err)
+	}
+	if !got.IsProject() || got.Workspace != project.Workspace {
+		t.Errorf("after a clear the project reads as %+v, want its mode and folder", got)
+	}
+	if got.SystemPrompt != project.SystemPrompt || got.Title != project.Title {
+		t.Errorf("the clear took the chat's own settings with it: %+v", got)
+	}
+
+	messages, err := st.ListMessages("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Errorf("%d messages survived the clear: %+v", len(messages), messages)
+	}
+	for _, table := range []string{"tool_calls", "compactions", "attachments", "documents", "chunks"} {
+		if n := rowCount(t, st, table, "chat_id=?", "p1"); n != 0 {
+			t.Errorf("%d %s rows survived the clear", n, table)
+		}
+	}
+	if st.FTS {
+		hits, err := st.SearchChunks("p1", "Vertrag", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(hits) != 0 {
+			t.Errorf("the cleared chat can still answer from its index: %+v", hits)
+		}
+	}
+
+	// The next turn starts the conversation over, numbering included: a chat whose first
+	// new message carried seq 3 would look to the transcript and to compaction like a
+	// continuation of something that is no longer there.
+	first, err := st.AppendMessage(Message{ID: "m3", ChatID: "p1", Role: "user",
+		Content: "neuer Anfang", CreatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Seq != 1 {
+		t.Errorf("the first message after a clear has seq %d, want 1", first.Seq)
+	}
+
+	// And the other chat kept its conversation.
+	others, err := st.ListMessages("c2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(others) != 1 {
+		t.Errorf("clearing one chat touched another: %d messages in c2", len(others))
+	}
+}
+
 // TestDeleteAttachmentRemovesItsDocument pins the order the rows go in: the
 // document carries the chunks, so it must not outlive the attachment pointing at
 // it, and deleting something that is already gone must stay quiet.
@@ -1063,6 +1185,8 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 		{"tool_calls", "condensed"},
 		{"tool_calls", "withheld"},
 		{"messages", "sources_json"},
+		{"chats", "mode"},
+		{"chats", "workspace"},
 	} {
 		if _, err := st.DB().Exec(`ALTER TABLE ` + column.table + ` DROP COLUMN ` + column.name); err != nil {
 			t.Fatalf("drop %s.%s to build the older schema: %v", column.table, column.name, err)
@@ -1071,9 +1195,16 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 	if _, err := st.DB().Exec(`PRAGMA user_version = 3`); err != nil {
 		t.Fatalf("roll the version back: %v", err)
 	}
-	// A row written before the column existed has to survive the upgrade too.
-	if err := st.CreateChat(chatFixture("c1")); err != nil {
-		t.Fatal(err)
+	// A row written before the column existed has to survive the upgrade too. The chat
+	// is inserted with the *older* schema's column list, because that is what a
+	// database from version 3 could have written: CreateChat now names the two columns
+	// this migration adds, and would fail here on the very case the test builds.
+	if _, err := st.DB().Exec(`INSERT INTO chats
+  (id,title,created_at,updated_at,backend,model,system_prompt,system_prompt_preset,
+   temperature,top_p,num_ctx,archived,auto_compact,compact_threshold,keep_recent_turns,
+   search_first)
+  VALUES ('c1','Old','0','0','lmstudio','m','sys','',0.7,0.9,0,0,1,0.8,6,0)`); err != nil {
+		t.Fatalf("insert a pre-upgrade chat: %v", err)
 	}
 	if _, err := st.DB().Exec(`INSERT INTO attachments
   (id,chat_id,message_id,kind,filename,mime,size_bytes,sha256,pages,token_estimate,
@@ -1110,6 +1241,16 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 	// is the honest reading — nothing recorded a copy, so the app cannot claim there is one.
 	if old.SavedPath != "" {
 		t.Errorf("a file attached before the export column existed reports an export: %q", old.SavedPath)
+	}
+	// And the chat that predates the mode column reads as a research conversation with
+	// no folder, which is what it is: a chat whose mode came back empty would reach the
+	// tool gate as a value nothing matches.
+	chat, err := reopened.GetChat("c1")
+	if err != nil {
+		t.Fatalf("the pre-upgrade chat is unreadable after the upgrade: %v", err)
+	}
+	if chat.Mode != ModeChat || chat.Workspace != "" {
+		t.Errorf("a chat written before the mode column reads as %+v, want the chat mode and no folder", chat)
 	}
 }
 
@@ -1274,5 +1415,93 @@ func TestTheExportPathRoundTrips(t *testing.T) {
 	}
 	if empty == nil {
 		t.Error("AllAttachments returned nil for an empty store; the caller iterates it")
+	}
+}
+
+// TestAChatsModeAndFolderSurviveARoundTrip pins the two columns phase one of coding
+// mode added. The default matters as much as the values: every row written before the
+// migration is a research conversation, and a chat whose mode came back empty would
+// reach the tool gate as a mode no code knows.
+func TestAChatsModeAndFolderSurviveARoundTrip(t *testing.T) {
+	st := newStore(t)
+
+	plain := chatFixture("c1")
+	if err := st.CreateChat(plain); err != nil {
+		t.Fatalf("CreateChat: %v", err)
+	}
+	got, err := st.GetChat("c1")
+	if err != nil {
+		t.Fatalf("GetChat: %v", err)
+	}
+	if got.Mode != ModeChat || got.Workspace != "" || got.IsProject() {
+		t.Errorf("a chat created without a mode reads as %+v, want the chat mode and no folder", got)
+	}
+
+	project := chatFixture("c2")
+	project.Mode = ModeCoding
+	project.Workspace = filepath.Join(t.TempDir(), "proj")
+	if err := st.CreateChat(project); err != nil {
+		t.Fatalf("CreateChat: %v", err)
+	}
+	got, err = st.GetChat("c2")
+	if err != nil {
+		t.Fatalf("GetChat: %v", err)
+	}
+	if got.Mode != ModeCoding || got.Workspace != project.Workspace || !got.IsProject() {
+		t.Errorf("a project reads back as %+v, want the coding mode and %q", got, project.Workspace)
+	}
+
+	// The list the sidebar reads goes through the same scanner, so a mode that only
+	// survived GetChat would still be a blank row.
+	chats, err := st.ListChats(false)
+	if err != nil {
+		t.Fatalf("ListChats: %v", err)
+	}
+	var found bool
+	for _, c := range chats {
+		if c.ID == "c2" {
+			found = true
+			if c.Mode != ModeCoding {
+				t.Errorf("ListChats reports mode %q for the project, want %q", c.Mode, ModeCoding)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the project is missing from ListChats")
+	}
+
+	// And an update keeps it: the folder is what the file tools read through, so losing
+	// it on an unrelated save would turn a project into a chat mid-conversation.
+	got.Title = "renamed"
+	got.Mode = ModeCoding
+	if err := st.UpdateChat(got); err != nil {
+		t.Fatalf("UpdateChat: %v", err)
+	}
+	again, err := st.GetChat("c2")
+	if err != nil {
+		t.Fatalf("GetChat after update: %v", err)
+	}
+	if again.Title != "renamed" || again.Workspace != project.Workspace || !again.IsProject() {
+		t.Errorf("after an update the project reads as %+v", again)
+	}
+}
+
+// TestAnUnknownModeReadsAsAChat is the defensive half: a row edited by hand, or written
+// by a build with a mode this one does not have, must not reach the tool gate as a value
+// no case handles.
+func TestAnUnknownModeReadsAsAChat(t *testing.T) {
+	st := newStore(t)
+	if err := st.CreateChat(chatFixture("c1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(`UPDATE chats SET mode='quantum' WHERE id='c1'`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetChat("c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode != ModeChat {
+		t.Errorf("mode = %q for an unknown one, want %q", got.Mode, ModeChat)
 	}
 }

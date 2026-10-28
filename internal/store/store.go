@@ -477,6 +477,21 @@ ALTER TABLE tool_calls ADD COLUMN condensed INTEGER NOT NULL DEFAULT 0;
 	// text this app no longer keeps in that shape. An empty string is every row
 	// written before citations existed, and renders no list.
 	`ALTER TABLE messages ADD COLUMN sources_json TEXT NOT NULL DEFAULT ''`,
+	// 11: a chat's mode, and the folder a coding project works in.
+	//
+	// Two columns rather than one, because they answer different questions: `mode`
+	// decides which tools exist and is a property of the conversation, while
+	// `workspace` is a path that may be deleted, moved or renamed underneath the
+	// row. A coding chat whose folder is gone is still a coding chat — the file
+	// tools then report that the folder is unusable (internal/tools), which is a
+	// better answer than a chat that silently became a research assistant.
+	//
+	// 'chat' rather than an empty default, because that is what every row written
+	// before this migration is: a research conversation, with no folder to read.
+	`
+ALTER TABLE chats ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat';
+ALTER TABLE chats ADD COLUMN workspace TEXT NOT NULL DEFAULT '';
+`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

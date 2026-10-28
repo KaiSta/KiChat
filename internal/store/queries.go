@@ -23,12 +23,12 @@ func (s *Store) CreateChat(c Chat) error {
 	_, err := s.db.Exec(`
 INSERT INTO chats (id,title,created_at,updated_at,backend,model,system_prompt,
   system_prompt_preset,temperature,top_p,num_ctx,archived,auto_compact,
-  compact_threshold,keep_recent_turns,search_first)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  compact_threshold,keep_recent_turns,search_first,mode,workspace)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		c.ID, c.Title, millis(c.CreatedAt), millis(c.UpdatedAt), c.Backend, c.Model,
 		c.SystemPrompt, c.SystemPromptPreset, c.Temperature, c.TopP, c.NumCtx,
 		boolToInt(c.Archived), boolToInt(c.AutoCompact), c.CompactThreshold,
-		c.KeepRecentTurns, boolToInt(c.SearchFirst))
+		c.KeepRecentTurns, boolToInt(c.SearchFirst), NormaliseMode(c.Mode), c.Workspace)
 	return err
 }
 
@@ -38,11 +38,11 @@ func (s *Store) UpdateChat(c Chat) error {
 	res, err := s.db.Exec(`
 UPDATE chats SET title=?,updated_at=?,backend=?,model=?,system_prompt=?,
   system_prompt_preset=?,temperature=?,top_p=?,num_ctx=?,archived=?,auto_compact=?,
-  compact_threshold=?,keep_recent_turns=?,search_first=? WHERE id=?`,
+  compact_threshold=?,keep_recent_turns=?,search_first=?,mode=?,workspace=? WHERE id=?`,
 		c.Title, millis(c.UpdatedAt), c.Backend, c.Model, c.SystemPrompt,
 		c.SystemPromptPreset, c.Temperature, c.TopP, c.NumCtx, boolToInt(c.Archived),
 		boolToInt(c.AutoCompact), c.CompactThreshold, c.KeepRecentTurns,
-		boolToInt(c.SearchFirst), c.ID)
+		boolToInt(c.SearchFirst), NormaliseMode(c.Mode), c.Workspace, c.ID)
 	if err != nil {
 		return err
 	}
@@ -91,9 +91,67 @@ func (s *Store) DeleteChat(id string) error {
 	return s.commitAndCheckpoint(tx)
 }
 
+// ClearChat empties a chat's conversation and keeps the chat: the folder, the prompt, the
+// model, the sampler values and the title all stay, and the next turn begins the way the
+// first one did.
+//
+// It exists because a **project is one conversation**. A chat can be answered by creating
+// another one, but a second project on the same folder would be a second copy of the same
+// settings that then drifts from the first, so starting over has to happen *here*.
+//
+// Everything the conversation accumulated goes, in one transaction, and each table is
+// named for a reason:
+//
+//   - `messages` and their `tool_calls`. The call table holds no foreign key to messages
+//     (a call outlives the message row while a turn is in flight), so a row left behind
+//     would be an orphan nothing in the window could show.
+//   - `compactions`. They are summaries *of* the messages being deleted; kept, they would
+//     be sent as the conversation's memory on the next turn, describing a history that no
+//     longer exists — the same double-rendering DeleteCompactionsFrom exists to prevent.
+//   - `attachments`, with their `documents` and `chunks`. This is the one that would
+//     otherwise be forgotten, and the symptom would be quiet rather than visible: an
+//     attachment's extracted text is retrievable through `search_documents`, so a chat
+//     that had "cleared" its context could still answer a question from the file it was
+//     cleared of. The document and chunk tables hold no foreign key to chats and are
+//     deleted by hand here, for the reason DeleteChat does it.
+//
+// The chat's `updated_at` is touched because the conversation is what the list orders on,
+// and a chat that was just emptied is the one the user last worked in.
+func (s *Store) ClearChat(chatID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// The index first, and by hand: chunks_fts is a virtual table, so the cascade from
+	// documents does not reach its rows.
+	if s.FTS {
+		if _, err := tx.Exec(`DELETE FROM chunks_fts WHERE chat_id = ?`, chatID); err != nil {
+			return err
+		}
+	}
+	for _, statement := range []string{
+		`DELETE FROM chunks WHERE chat_id = ?`,
+		`DELETE FROM documents WHERE chat_id = ?`,
+		`DELETE FROM attachments WHERE chat_id = ?`,
+		`DELETE FROM tool_calls WHERE chat_id = ?`,
+		`DELETE FROM compactions WHERE chat_id = ?`,
+		`DELETE FROM messages WHERE chat_id = ?`,
+	} {
+		if _, err := tx.Exec(statement, chatID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE chats SET updated_at=? WHERE id=?`, millis(time.Now()), chatID); err != nil {
+		return err
+	}
+	return s.commitAndCheckpoint(tx)
+}
+
 const chatColumns = `id,title,created_at,updated_at,backend,model,system_prompt,
   system_prompt_preset,temperature,top_p,num_ctx,archived,auto_compact,
-  compact_threshold,keep_recent_turns,search_first`
+  compact_threshold,keep_recent_turns,search_first,mode,workspace`
 
 func scanChat(row interface{ Scan(...any) error }) (Chat, error) {
 	var c Chat
@@ -101,7 +159,8 @@ func scanChat(row interface{ Scan(...any) error }) (Chat, error) {
 	var archived, autoCompact, searchFirst int
 	err := row.Scan(&c.ID, &c.Title, &created, &updated, &c.Backend, &c.Model,
 		&c.SystemPrompt, &c.SystemPromptPreset, &c.Temperature, &c.TopP, &c.NumCtx,
-		&archived, &autoCompact, &c.CompactThreshold, &c.KeepRecentTurns, &searchFirst)
+		&archived, &autoCompact, &c.CompactThreshold, &c.KeepRecentTurns, &searchFirst,
+		&c.Mode, &c.Workspace)
 	if err != nil {
 		return Chat{}, err
 	}
@@ -110,6 +169,9 @@ func scanChat(row interface{ Scan(...any) error }) (Chat, error) {
 	c.Archived = archived != 0
 	c.AutoCompact = autoCompact != 0
 	c.SearchFirst = searchFirst != 0
+	// A row from a newer build, or one edited by hand, is read as the mode this build
+	// knows rather than left as a value that would reach a switch with no case for it.
+	c.Mode = NormaliseMode(c.Mode)
 	return c, nil
 }
 
