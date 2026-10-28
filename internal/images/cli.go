@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"kichat/internal/proc"
 )
 
 // This file is the second kind of image backend: a local binary run once per picture,
@@ -697,8 +699,8 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	// Stop is a kill on this backend, so the child is given a group of its own and the kill
 	// is aimed at the group: a configured "binary" may be a wrapper script, and a script
 	// that started sd-cli without `exec` would otherwise survive the stop and keep drawing.
-	isolateProcess(cmd)
-	cmd.Cancel = func() error { return killProcess(cmd) }
+	proc.StartInOwnGroup(cmd)
+	cmd.Cancel = func() error { return proc.KillTree(cmd) }
 	// A bound on the wait itself, whatever the child did with its pipes. `Wait` returns only
 	// once the output pipes are closed as well as the process reaped, and a grandchild holding
 	// the write end open — what a killed wrapper script leaves behind — would hold the caller

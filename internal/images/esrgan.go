@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"kichat/internal/proc"
 )
 
 // The weights the portable release ships. x4plus is trained on photographs and the
@@ -120,8 +122,8 @@ func (e ESRGAN) Enlarge(ctx context.Context, src image.Image, target Target) (*i
 	// The program is a single native binary, but the same reason sd-cli gets a group
 	// applies: a user may configure a wrapper script, and Stop must reach the process
 	// that is actually holding the GPU.
-	isolateProcess(cmd)
-	cmd.Cancel = func() error { return killProcess(cmd) }
+	proc.StartInOwnGroup(cmd)
+	cmd.Cancel = func() error { return proc.KillTree(cmd) }
 	cmd.WaitDelay = 5 * time.Second
 	var log bytes.Buffer
 	cmd.Stdout = &log

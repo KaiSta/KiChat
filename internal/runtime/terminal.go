@@ -17,6 +17,8 @@ package runtime
 import (
 	"errors"
 	"time"
+
+	"kichat/internal/proc"
 )
 
 // ErrNoTerminal is returned when this machine has no terminal emulator the app knows how
@@ -62,7 +64,7 @@ func OpenTerminal(dir string) error {
 	if err != nil {
 		return err
 	}
-	startInOwnGroup(cmd)
+	proc.StartInOwnGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
