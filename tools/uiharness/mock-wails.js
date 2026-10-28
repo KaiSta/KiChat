@@ -3404,6 +3404,16 @@ Available tools: {{tool_list}}`,
     // harness answers with a fixed path instead of opening one: the state this mock
     // exists to render is "a project was just created", not "a dialog is on screen".
     PickProjectFolder: () => Promise.resolve('/home/you/projects/kichat'),
+    // Opening the user's terminal. The harness cannot start one, and the state worth
+    // rendering is the button and the sentence after it, so this reports the folder it
+    // would have opened instead of failing — the failure case is the Go test's.
+    OpenProjectTerminal: (chatId) => {
+      const chat = chats.find((c) => c.id === chatId)
+      // The payload, not a sentence: the window translates the code, and a fixture that
+      // rejected plain text would render the refusal in the harness but not in the app.
+      if (!chat || !chat.workspace) return Promise.reject('i18n:{"code":"tools.noWorkspace"}')
+      return Promise.resolve()
+    },
     CreateProject: (workspace) => {
       const chat = {
         id: nextId('project'),

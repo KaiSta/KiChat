@@ -992,7 +992,9 @@ const de = {
   // nennt den zweiten Schritt, weil der erste allein die Antwort nicht weiterbringt.
   'handoff.title': 'Selbst ausführen',
   'handoff.hint':
-    'Dieser Befehl braucht Administratorrechte. Kopiere ihn in dein Terminal und füge die Ausgabe danach hier ein — das Modell liest sie als Nächstes.',
+    'Dieser Befehl braucht Administratorrechte. Öffne ein Terminal im Projektordner, führe ihn dort aus und füge die Ausgabe danach hier ein — das Modell liest sie als Nächstes.',
+  'handoff.openTerminal': 'Terminal öffnen',
+  'handoff.terminalOpened': 'Terminal im Projektordner geöffnet.',
 
   // Die zwei Schalter, die genau die Fragen darüber abschalten. Deshalb stehen sie hier und
   // nicht bei den Sampler-Werten: sie gehören zu den Karten, die sie ersetzen.
@@ -1193,6 +1195,9 @@ const de = {
   'err.tools.fileUnreadable': '{{1}} ist nicht lesbar',
   'err.project.badFolder':
     '{{1}} ist kein Ordner, den ein Projekt verwenden kann.',
+  'err.project.noTerminal':
+    'Auf diesem Rechner wurde kein Terminal gefunden, das KiChat öffnen könnte. Öffne eines selbst und wechsle in den Projektordner.',
+  'err.project.terminalFailed': 'Das Terminal ließ sich nicht starten: {{1}}',
   'err.tools.editNoMatch':
     '{{1}} enthält diesen Text nicht — lies die Datei erneut und übernimm die Zeile genau.',
   'err.tools.editAmbiguous':
@@ -2173,7 +2178,9 @@ const en: Record<keyof typeof de, string> = {
   // first one alone does not get the answer anywhere.
   'handoff.title': 'Run it yourself',
   'handoff.hint':
-    'This command needs administrator rights. Copy it into your terminal, then paste the output back here — the model reads it next.',
+    'This command needs administrator rights. Open a terminal in the project folder, run it there, then paste the output back here — the model reads it next.',
+  'handoff.openTerminal': 'Open terminal',
+  'handoff.terminalOpened': 'Terminal opened in the project folder.',
 
   // The two switches that turn off exactly the questions above. They live here rather than
   // among the sampler values because they belong to the cards they replace.
@@ -2369,6 +2376,9 @@ const en: Record<keyof typeof de, string> = {
     '{{1}} is outside the project folder. Paths have to be inside the project.',
   'err.tools.fileUnreadable': '{{1}} cannot be read',
   'err.project.badFolder': '{{1}} is not a folder a project can use.',
+  'err.project.noTerminal':
+    'no terminal was found that KiChat could open. Open one yourself and change into the project folder.',
+  'err.project.terminalFailed': 'the terminal could not be started: {{1}}',
   'err.tools.editNoMatch':
     '{{1}} does not contain that text — read the file again and copy the line exactly.',
   'err.tools.editAmbiguous':
@@ -3263,7 +3273,9 @@ const zh: Record<keyof typeof de, string> = {
   // 被拒绝的管理员命令的交接：命令进入用户的剪贴板与终端，而不是对话。
   // 提示语说明第二步，因为只做第一步无法让回答继续。
   'handoff.title': '请自行运行',
-  'handoff.hint': '该命令需要管理员权限。请把它复制到你的终端，之后把输出粘贴回这里 —— 模型会接着读取它。',
+  'handoff.hint': '该命令需要管理员权限。请在项目文件夹中打开终端运行它，之后把输出粘贴回这里 —— 模型会接着读取它。',
+  'handoff.openTerminal': '打开终端',
+  'handoff.terminalOpened': '已在项目文件夹中打开终端。',
 
   // 这两个开关关闭的正是上面的询问，因此放在这里，而不是采样器设置旁。
   'settings.autoApprove': '无需询问即执行',
@@ -3447,6 +3459,8 @@ const zh: Record<keyof typeof de, string> = {
   'err.tools.outsideWorkspace': '{{1}} 位于项目文件夹之外。路径必须位于项目内部。',
   'err.tools.fileUnreadable': '无法读取 {{1}}',
   'err.project.badFolder': '{{1}} 不是项目可以使用的文件夹。',
+  'err.project.noTerminal': '找不到 KiChat 可以打开的终端。请自行打开一个并进入项目文件夹。',
+  'err.project.terminalFailed': '无法启动终端：{{1}}',
   'err.tools.editNoMatch': '{{1}} 中没有这段文本 —— 请重新读取文件并原样复制该行。',
   'err.tools.editAmbiguous': '这段文本在 {{1}} 中出现 {{2}} 次（第一次在第 {{3}} 行）。请包含周围的几行。',
   'err.tools.changeFailed': '无法修改 {{1}}：{{2}}',

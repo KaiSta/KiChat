@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { useStore } from '../store'
+import { App as Api } from '../lib/api'
+import { errText, useStore } from '../store'
 
 /**
  * A command the app handed back to the person, with the line to run.
@@ -11,9 +12,16 @@ import { useStore } from '../store'
  * the next thing a person does is type in the composer, several screens below a card they may
  * have scrolled past. So the line is repeated here, where the typing happens.
  *
- * Two steps, one card: copy the line, run it in a terminal, paste the output back. The hint
- * names the second one because copying alone leaves the answer exactly where it was — the model
- * has no way to know the command ran.
+ * Three steps, one card: open a terminal in the project folder, run the line there, paste the
+ * output back. The hint names the last one because copying alone leaves the answer exactly
+ * where it was — the model has no way to know the command ran.
+ *
+ * "Open terminal" hands the folder to the *user's* terminal emulator (see
+ * internal/runtime/terminal.go) rather than growing one here. Two reasons: a terminal embedded
+ * in this window would have to answer a password prompt, which is exactly the thing that got
+ * refused; and a terminal started by the app is one the app would then be responsible for
+ * keeping, which is a window somebody may keep open all afternoon. So the button opens the
+ * program they already trust and stops there — the line still gets typed or pasted by them.
  *
  * It is dismissed rather than timed out. A banner that vanishes while somebody is in another
  * window switching to their terminal is a banner that has to be found again; the transcript's
@@ -25,6 +33,9 @@ export function Handoff() {
   const handoff = useStore((s) => (s.activeChatId ? s.handoffs[s.activeChatId] : undefined))
   const dismiss = useStore((s) => s.dismissHandoff)
   const [copied, setCopied] = useState(false)
+  // Held for the length of the call, because the call starts a program: a second click on a
+  // button that shows nothing for a moment is a second terminal in the same folder.
+  const [opening, setOpening] = useState(false)
 
   if (!handoff || !chatId) return null
 
@@ -56,6 +67,27 @@ export function Handoff() {
           }}
         >
           {copied ? t('chat.copied') : `⧉ ${t('tool.copyCommand')}`}
+        </button>
+        {/* Beside the copy button rather than a second row: the two together are the whole
+            hand-off, and a person who has just read the line wants both within reach. */}
+        <button
+          type="button"
+          className="btn btn-sm"
+          disabled={opening}
+          onClick={() => {
+            setOpening(true)
+            // The sentence follows the call rather than preceding it: a failure is the
+            // interesting half, and a window that takes a second to appear should not be
+            // announced before it exists.
+            void Api.OpenProjectTerminal(chatId)
+              .then(
+                () => useStore.getState().toast('info', t('handoff.terminalOpened')),
+                (err: unknown) => useStore.getState().toast('error', errText(err)),
+              )
+              .finally(() => setOpening(false))
+          }}
+        >
+          {t('handoff.openTerminal')}
         </button>
         <button
           type="button"
