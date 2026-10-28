@@ -46,6 +46,10 @@ export function DeleteCompaction(arg1, arg2) {
   return window['go']['main']['App']['DeleteCompaction'](arg1, arg2);
 }
 
+export function DetectTerminal() {
+  return window['go']['main']['App']['DetectTerminal']();
+}
+
 export function ExportBackup(arg1) {
   return window['go']['main']['App']['ExportBackup'](arg1);
 }
@@ -210,6 +214,10 @@ export function PreviewSystemPrompt(arg1) {
   return window['go']['main']['App']['PreviewSystemPrompt'](arg1);
 }
 
+export function ProjectFileChanges(arg1) {
+  return window['go']['main']['App']['ProjectFileChanges'](arg1);
+}
+
 export function RedactSecrets(arg1) {
   return window['go']['main']['App']['RedactSecrets'](arg1);
 }
@@ -248,6 +256,14 @@ export function RenameChat(arg1, arg2) {
 
 export function ResolveToolApproval(arg1, arg2) {
   return window['go']['main']['App']['ResolveToolApproval'](arg1, arg2);
+}
+
+export function ResolveToolApprovalWith(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ResolveToolApprovalWith'](arg1, arg2, arg3);
+}
+
+export function RevertFileChange(arg1, arg2) {
+  return window['go']['main']['App']['RevertFileChange'](arg1, arg2);
 }
 
 export function SaveAttachmentAs(arg1) {
@@ -340,6 +356,10 @@ export function StopImageServer() {
 
 export function StopManagedModel(arg1) {
   return window['go']['main']['App']['StopManagedModel'](arg1);
+}
+
+export function StopToolCommand(arg1, arg2) {
+  return window['go']['main']['App']['StopToolCommand'](arg1, arg2);
 }
 
 export function TestBraveKey(arg1) {

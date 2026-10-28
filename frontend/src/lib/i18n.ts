@@ -378,6 +378,8 @@ const de = {
   'settings.platform': 'Plattform',
   'settings.runtime': 'Laufzeit',
   'settings.copyVersion': 'Versionsinfo kopieren',
+  'settings.terminal': 'Terminal',
+  'settings.terminalNone': 'keins gefunden',
   'settings.trace': 'Diagnose-Protokoll',
   'settings.traceNote': 'Abläufe, Zeiten und Fehlerarten – keine Inhalte.',
   'settings.copyTrace': 'Protokollpfad kopieren',
@@ -935,7 +937,34 @@ const de = {
   'tool.liveOutput': 'Ausgabe',
   // Der Befehl als Zeile, die man in ein eigenes Terminal einfügen kann — der Ausweg bei
   // einem abgelehnten Befehl, deshalb auf jedem Terminal-Aufruf und nicht nur im Fehlerfall.
+  // Die Zusammenfassung über einem Tool-Ergebnis. Der Text darunter bleibt der, den das
+  // Modell gelesen hat; diese Sätze sind die Fassung für das Fenster, in seiner Sprache.
+  'tool.sum.read': '{{1}}: Zeilen {{2}}–{{3}} von {{4}}',
+  'tool.sum.readEnd': '{{1}}: {{2}} Zeilen, ab Zeile {{3}} nichts mehr',
+  'tool.sum.readEmpty': '{{1}} ist leer',
+  'tool.sum.readBinary': '{{1}} ist keine Textdatei',
+  'tool.sum.list': '{{1}}: {{2}} Einträge',
+  'tool.sum.listSome': '{{1}}: {{2}} Einträge, {{3}} nicht gezeigt',
+  'tool.sum.listEmpty': '{{1}}: leer',
+  'tool.sum.search': '{{2}} Treffer für „{{1}}“ in {{3}} Dateien',
+  'tool.sum.searchNone': 'Kein Treffer für „{{1}}“ in {{2}} Dateien',
+  'tool.sum.searchStopped': '{{2}} Treffer für „{{1}}“, Suche nach {{3}} Dateien abgebrochen',
+  'tool.sum.find': '{{1}} Dateien für „{{2}}“',
+  'tool.sum.write': '{{1}} geschrieben: {{2}} Zeilen (vorher {{3}})',
+  'tool.sum.writeNew': '{{1}} angelegt: {{2}} Zeilen',
+  'tool.sum.edit': '{{1}}: {{2}} Vorkommen ersetzt (Zeile {{3}})',
+  'tool.sum.readSame': '{{1}}: unverändert seit dem Lesen in diesem Turn',
+  'tool.sum.command': 'Exit-Code {{1}} · {{2}}',
+  'tool.sum.commandStopped': 'von dir nach {{1}} abgebrochen',
+  'tool.sum.commandTimeout': 'nach {{1}} abgebrochen',
+  'tool.sum.commandUnknown': 'ohne Exit-Code beendet · {{1}}',
+  'tool.find_files': 'Dateien finden',
   'tool.copyCommand': 'Befehl kopieren',
+  // Der zweite Stopp neben dem des Turns: dieser beendet nur den Befehl, damit die Antwort
+  // weiterläuft — deshalb sagt der Tooltip, was danach passiert.
+  'tool.stopCommand': 'Befehl abbrechen',
+  'tool.stopCommandHint':
+    'Beendet nur diesen Befehl, nicht die Antwort. Das Modell liest die bisherige Ausgabe und macht weiter.',
   'tool.tokensOne': '{{tokens}} Tokens',
   'tool.tokensCut': '{{source}} → {{context}} Tokens',
   'tool.tokensBudgetTag': 'Budget',
@@ -981,11 +1010,36 @@ const de = {
   'confirm.stoppedAskingCommands':
     'Befehle laufen ab jetzt ohne Nachfrage. Einstellungen → Coding-Agent.',
 
+  // Die Änderungsliste neben dem Chat: was dieser Chat im Ordner verändert hat, und der eine
+  // Knopf, der es zurücknimmt. Sie beantwortet die Frage, die der Verlauf nur in Form von
+  // hundert Tool-Karten beantwortet — und ohne zu sagen, welche Datei wie oft geschrieben wurde.
+  'changes.button': 'Änderungen',
+  'changes.hint': 'Zeigt, welche Dateien dieser Chat geändert hat — mit Diff und Rückgängig.',
+  'changes.title': 'Änderungen in diesem Projekt',
+  'changes.empty': 'Dieser Chat hat noch keine Datei geändert.',
+  'changes.created': 'angelegt',
+  'changes.changed': 'geändert',
+  'changes.revisions': '{{count}}× geschrieben',
+  'changes.revert': 'Zurücksetzen',
+  'changes.revertHint':
+    'Schreibt die Datei so zurück, wie dieser Chat sie vorgefunden hat. Eine Datei, die seitdem selbst bearbeitet wurde, bleibt unangetastet.',
+  'changes.blockedOutside': 'Seit der Änderung selbst bearbeitet — bleibt unangetastet.',
+  'changes.blockedBinary': 'Keine Textdatei — nicht sicherbar, deshalb kein Zurücksetzen.',
+  'changes.truncated': 'Diff gekürzt.',
+  'changes.close': 'Schließen',
+
   // Der Terminal-Aufruf. Ein Befehl lässt sich nicht vorher zeigen — die Zeile *ist* die
   // Beschreibung —, deshalb steht hier alles, was man zum Beurteilen braucht.
   'command.title': 'Befehl ausführen',
   'command.dir': 'Läuft im Projektordner {{folder}}',
   'command.timeout': 'wird nach {{seconds}} s abgebrochen',
+  // Die Zeile ist ein Feld, kein Zitat: ein Tippfehler ist im Augenblick der Frage am
+  // billigsten zu beheben, und Ablehnen-und-neu-tippen kostet den ganzen Satz. Der Hinweis
+  // darunter sagt, dass die Prüfung auf Administratorrechte auch für die eigene Fassung gilt.
+  'command.editLabel': 'Zeile — vor dem Ausführen änderbar',
+  'command.edited':
+    'Ausgeführt wird deine Fassung — die Prüfung auf Administratorrechte gilt auch für sie.',
+  'command.reset': 'Zeile zurücksetzen',
 
   // Die Übergabe nach einer abgelehnten Administrator-Zeile: der Befehl landet nicht in der
   // Unterhaltung, sondern in der Zwischenablage und im eigenen Terminal des Nutzers. Der Satz
@@ -1198,6 +1252,16 @@ const de = {
   'err.project.noTerminal':
     'Auf diesem Rechner wurde kein Terminal gefunden, das KiChat öffnen könnte. Öffne eines selbst und wechsle in den Projektordner.',
   'err.project.terminalFailed': 'Das Terminal ließ sich nicht starten: {{1}}',
+  // Die Änderungsliste und ihr Rückgängig. Der Konflikt ist der wichtigste Satz hier: er sagt,
+  // dass jemand die Datei danach selbst bearbeitet hat, und deshalb nicht überschrieben wird.
+  'err.project.changesFailed': 'Die Änderungen ließen sich nicht lesen: {{1}}',
+  'err.project.folderGone': 'Der Projektordner {{1}} lässt sich nicht öffnen — existiert er noch?',
+  'err.project.pathMissing': 'Kein Pfad angegeben — wähle eine Datei aus der Liste.',
+  'err.project.revertWhileRunning':
+    'Die Antwort läuft noch. Warte, bis sie fertig ist, und mach die Änderung dann rückgängig.',
+  'err.project.revertConflict':
+    '{{1}} wurde nach der Änderung von KiChat selbst bearbeitet — die Datei bleibt, wie sie ist.',
+  'err.project.revertFailed': '{{1}} ließ sich nicht zurücksetzen: {{2}}',
   'err.tools.editNoMatch':
     '{{1}} enthält diesen Text nicht — lies die Datei erneut und übernimm die Zeile genau.',
   'err.tools.editAmbiguous':
@@ -1206,6 +1270,8 @@ const de = {
   'err.tools.denied':
     'Die Änderung wurde nicht bestätigt und deshalb nicht vorgenommen. Wiederhole sie nicht von selbst.',
   'err.tools.commandMissing': 'command fehlt — nenne eine Kommandozeile.',
+  'err.tools.patternMissing': 'pattern fehlt — nenne ein Muster wie **/*.go.',
+  'err.tools.badPattern': 'Das Muster {{1}} ließ sich nicht verwenden — prüfe die Klammern.',
   'err.tools.commandFailed': 'Der Befehl konnte nicht gestartet werden: {{1}}',
   'err.tools.commandStopped': 'Der Turn wurde gestoppt, deshalb wurde der Befehl beendet.',
   // Vor der Bestätigung abgelehnt, nicht danach: KiChat hat kein Terminal, in dem ein
@@ -1585,6 +1651,8 @@ const en: Record<keyof typeof de, string> = {
   'settings.platform': 'Platform',
   'settings.runtime': 'Runtime',
   'settings.copyVersion': 'Copy version info',
+  'settings.terminal': 'Terminal',
+  'settings.terminalNone': 'none found',
   'settings.trace': 'Diagnostic trace',
   'settings.traceNote': 'Flow, timings and failure kinds – never content.',
   'settings.copyTrace': 'Copy trace path',
@@ -2122,7 +2190,34 @@ const en: Record<keyof typeof de, string> = {
   'tool.arguments': 'Arguments',
   'tool.result': 'Result',
   'tool.liveOutput': 'Output',
+  // The summary above a tool result. The text below it stays whatever the model read; these
+  // sentences are the window's own rendering, in its language.
+  'tool.sum.read': '{{1}}: lines {{2}}–{{3}} of {{4}}',
+  'tool.sum.readEnd': '{{1}}: {{2}} lines, nothing after line {{3}}',
+  'tool.sum.readEmpty': '{{1}} is empty',
+  'tool.sum.readBinary': '{{1}} is not a text file',
+  'tool.sum.list': '{{1}}: {{2}} entries',
+  'tool.sum.listSome': '{{1}}: {{2}} entries, {{3}} not shown',
+  'tool.sum.listEmpty': '{{1}}: empty',
+  'tool.sum.search': '{{2}} hits for “{{1}}” in {{3}} files',
+  'tool.sum.searchNone': 'no hits for “{{1}}” in {{2}} files',
+  'tool.sum.searchStopped': '{{2}} hits for “{{1}}”, search stopped after {{3}} files',
+  'tool.sum.find': '{{1}} files for “{{2}}”',
+  'tool.sum.write': '{{1}} written: {{2}} lines (was {{3}})',
+  'tool.sum.writeNew': '{{1}} created: {{2}} lines',
+  'tool.sum.edit': '{{1}}: {{2}} occurrences replaced (line {{3}})',
+  'tool.sum.readSame': '{{1}}: unchanged since you read it in this turn',
+  'tool.sum.command': 'exit code {{1}} · {{2}}',
+  'tool.sum.commandStopped': 'stopped by you after {{1}}',
+  'tool.sum.commandTimeout': 'stopped after {{1}}',
+  'tool.sum.commandUnknown': 'ended without an exit code · {{1}}',
+  'tool.find_files': 'Find files',
   'tool.copyCommand': 'Copy command',
+  // The second stop beside the turn's: this one ends only the command, so the answer keeps
+  // going — which is why the tooltip says what happens next.
+  'tool.stopCommand': 'Stop the command',
+  'tool.stopCommandHint':
+    'Ends this command only, not the answer. The model reads the output so far and carries on.',
   'tool.tokensOne': '{{tokens}} tokens',
   'tool.tokensCut': '{{source}} → {{context}} tokens',
   'tool.tokensBudgetTag': 'budget',
@@ -2167,11 +2262,36 @@ const en: Record<keyof typeof de, string> = {
     'File changes are written without asking from now on. Settings → Coding agent.',
   'confirm.stoppedAskingCommands': 'Commands run without asking from now on. Settings → Coding agent.',
 
+  // The changed-file list beside the chat: what this chat did to the folder, and the one button
+  // that undoes it. It answers the question the transcript answers only in the form of a
+  // hundred tool cards — and never says which file was written, or how often.
+  'changes.button': 'Changes',
+  'changes.hint': 'Shows which files this chat changed — with a diff and an undo.',
+  'changes.title': 'Changes in this project',
+  'changes.empty': 'This chat has not changed a file yet.',
+  'changes.created': 'created',
+  'changes.changed': 'changed',
+  'changes.revisions': 'written {{count}}×',
+  'changes.revert': 'Put back',
+  'changes.revertHint':
+    'Writes the file back the way this chat found it. A file edited since then is left alone.',
+  'changes.blockedOutside': 'Edited since the change — left alone.',
+  'changes.blockedBinary': 'Not a text file — it cannot be saved, so there is no undo.',
+  'changes.truncated': 'Diff shortened.',
+  'changes.close': 'Close',
+
   // The terminal. A command cannot be previewed — the line *is* the description — so
   // everything needed to judge it is on the card.
   'command.title': 'Run command',
   'command.dir': 'Runs in the project folder {{folder}}',
   'command.timeout': 'stopped after {{seconds}} s',
+  // The line is a field rather than a quotation: a typo is cheapest to fix at the moment of
+  // the question, and declining-and-retyping costs the whole sentence. The hint below says
+  // the elevation check applies to the edited line too.
+  'command.editLabel': 'The line — editable before it runs',
+  'command.edited':
+    'Your version is what runs — the check for administrator rights applies to it as well.',
+  'command.reset': 'Reset the line',
 
   // The hand-off after a refused administrator line: the command goes to the user's clipboard
   // and terminal, not into the conversation. The sentence names the second step, because the
@@ -2379,6 +2499,16 @@ const en: Record<keyof typeof de, string> = {
   'err.project.noTerminal':
     'no terminal was found that KiChat could open. Open one yourself and change into the project folder.',
   'err.project.terminalFailed': 'the terminal could not be started: {{1}}',
+  // The changed-file list and its undo. The conflict is the sentence that matters most: it
+  // says somebody edited the file afterwards, and that is why it is not overwritten.
+  'err.project.changesFailed': 'the changes could not be read: {{1}}',
+  'err.project.folderGone': 'the project folder {{1}} cannot be opened — is it still there?',
+  'err.project.pathMissing': 'no path was given — pick a file from the list.',
+  'err.project.revertWhileRunning':
+    'The answer is still running. Wait for it to finish, then undo the change.',
+  'err.project.revertConflict':
+    '{{1}} was edited after KiChat changed it — the file is left as it is.',
+  'err.project.revertFailed': '{{1}} could not be restored: {{2}}',
   'err.tools.editNoMatch':
     '{{1}} does not contain that text — read the file again and copy the line exactly.',
   'err.tools.editAmbiguous':
@@ -2387,6 +2517,8 @@ const en: Record<keyof typeof de, string> = {
   'err.tools.denied':
     'The change was not confirmed, so it was not made. Do not repeat it on your own.',
   'err.tools.commandMissing': 'command is missing — name one command line.',
+  'err.tools.patternMissing': 'pattern is missing — name a pattern such as **/*.go.',
+  'err.tools.badPattern': 'the pattern {{1}} could not be used — check the brackets.',
   'err.tools.commandFailed': 'The command could not be started: {{1}}',
   'err.tools.commandStopped': 'The turn was stopped, so the command was killed.',
   // Refused before the confirmation, not after: KiChat has no terminal to type a password
@@ -2732,6 +2864,8 @@ const zh: Record<keyof typeof de, string> = {
   'settings.platform': '平台',
   'settings.runtime': '运行时',
   'settings.copyVersion': '复制版本信息',
+  'settings.terminal': '终端',
+  'settings.terminalNone': '未找到',
   'settings.trace': '诊断日志',
   'settings.traceNote': '记录流程、耗时和故障类型，不记录内容。',
   'settings.copyTrace': '复制日志路径',
@@ -3226,7 +3360,31 @@ const zh: Record<keyof typeof de, string> = {
   'tool.arguments': '参数',
   'tool.result': '结果',
   'tool.liveOutput': '输出',
+  // 工具结果上方的摘要。下方文本仍是模型读到的原文；这些句子是窗口用自身语言给出的说法。
+  'tool.sum.read': '{{1}}：第 {{2}}–{{3}} 行，共 {{4}} 行',
+  'tool.sum.readEnd': '{{1}} 共 {{2}} 行，第 {{3}} 行之后没有内容',
+  'tool.sum.readEmpty': '{{1}} 为空',
+  'tool.sum.readBinary': '{{1}} 不是文本文件',
+  'tool.sum.list': '{{1}}：{{2}} 个条目',
+  'tool.sum.listSome': '{{1}}：{{2}} 个条目，{{3}} 个未显示',
+  'tool.sum.listEmpty': '{{1}}：空',
+  'tool.sum.search': '在 {{3}} 个文件中找到 {{2}} 处“{{1}}”',
+  'tool.sum.searchNone': '在 {{2}} 个文件中未找到“{{1}}”',
+  'tool.sum.searchStopped': '找到 {{2}} 处“{{1}}”，搜索在 {{3}} 个文件后中止',
+  'tool.sum.find': '{{1}} 个文件匹配“{{2}}”',
+  'tool.sum.write': '已写入 {{1}}：{{2}} 行（原 {{3}} 行）',
+  'tool.sum.writeNew': '已创建 {{1}}：{{2}} 行',
+  'tool.sum.edit': '{{1}}：替换 {{2}} 处（第 {{3}} 行）',
+  'tool.sum.readSame': '{{1}}：本轮读取后未发生变化',
+  'tool.sum.command': '退出码 {{1}} · {{2}}',
+  'tool.sum.commandStopped': '你在 {{1}} 后中止了它',
+  'tool.sum.commandTimeout': '{{1}} 后中止',
+  'tool.sum.commandUnknown': '结束但无退出码 · {{1}}',
+  'tool.find_files': '查找文件',
   'tool.copyCommand': '复制命令',
+  // 与整轮停止并列的第二个停止：只结束这条命令，回答继续运行 —— 因此提示说明之后会怎样。
+  'tool.stopCommand': '中止命令',
+  'tool.stopCommandHint': '只结束这条命令，不停止回答。模型会读取已产生的输出并继续。',
   'tool.tokensOne': '{{tokens}} 个令牌',
   'tool.tokensCut': '{{source}} → {{context}} 个令牌',
   'tool.tokensBudgetTag': '预算',
@@ -3265,10 +3423,31 @@ const zh: Record<keyof typeof de, string> = {
   'confirm.stoppedAskingFiles': '从现在起写入文件不再询问。设置 → 编码代理。',
   'confirm.stoppedAskingCommands': '从现在起运行命令不再询问。设置 → 编码代理。',
 
+  // 对话旁的更改列表：这个对话对文件夹做了什么，以及唯一的撤销按钮。
+  // 它回答了对话记录只能以上百张工具卡片来回答的问题 —— 而且从不说清哪个文件被写过、写了几次。
+  'changes.button': '更改',
+  'changes.hint': '显示这个对话更改了哪些文件 —— 含差异与撤销。',
+  'changes.title': '此项目中的更改',
+  'changes.empty': '这个对话还没有更改任何文件。',
+  'changes.created': '新建',
+  'changes.changed': '更改',
+  'changes.revisions': '已写入 {{count}} 次',
+  'changes.revert': '还原',
+  'changes.revertHint': '把这个对话找到它时的内容写回文件。此后被编辑过的文件保持原样。',
+  'changes.blockedOutside': '更改后被编辑过 —— 保持原样。',
+  'changes.blockedBinary': '不是文本文件 —— 无法保存，因此不能还原。',
+  'changes.truncated': '差异已截短。',
+  'changes.close': '关闭',
+
   // 终端调用。命令无法预览 —— 命令本身就是描述 —— 因此卡片上给出了判断所需的全部信息。
   'command.title': '运行命令',
   'command.dir': '在项目文件夹 {{folder}} 中运行',
   'command.timeout': '{{seconds}} 秒后中止',
+  // 这行是输入框而不是引用：提问时改错字最省事，先拒绝再重打要付出整句的代价。
+  // 下方的提示说明管理员权限检查同样适用于修改后的命令。
+  'command.editLabel': '命令行 —— 运行前可修改',
+  'command.edited': '将运行你修改后的命令行 —— 管理员权限检查同样适用。',
+  'command.reset': '还原命令行',
 
   // 被拒绝的管理员命令的交接：命令进入用户的剪贴板与终端，而不是对话。
   // 提示语说明第二步，因为只做第一步无法让回答继续。
@@ -3461,11 +3640,20 @@ const zh: Record<keyof typeof de, string> = {
   'err.project.badFolder': '{{1}} 不是项目可以使用的文件夹。',
   'err.project.noTerminal': '找不到 KiChat 可以打开的终端。请自行打开一个并进入项目文件夹。',
   'err.project.terminalFailed': '无法启动终端：{{1}}',
+  // 更改列表与撤销。冲突这句最重要：它说明有人在之后编辑了该文件，因此不会覆盖它。
+  'err.project.changesFailed': '无法读取更改：{{1}}',
+  'err.project.folderGone': '无法打开项目文件夹 {{1}} —— 它还存在吗？',
+  'err.project.pathMissing': '未给出路径 —— 请从列表中选择一个文件。',
+  'err.project.revertWhileRunning': '回答仍在运行。请等它结束后再撤销该更改。',
+  'err.project.revertConflict': '{{1}} 在 KiChat 修改后被编辑过 —— 文件保持原样。',
+  'err.project.revertFailed': '无法还原 {{1}}：{{2}}',
   'err.tools.editNoMatch': '{{1}} 中没有这段文本 —— 请重新读取文件并原样复制该行。',
   'err.tools.editAmbiguous': '这段文本在 {{1}} 中出现 {{2}} 次（第一次在第 {{3}} 行）。请包含周围的几行。',
   'err.tools.changeFailed': '无法修改 {{1}}：{{2}}',
   'err.tools.denied': '该更改未获确认，因此没有执行。请不要自行重试。',
   'err.tools.commandMissing': '缺少 command —— 请给出一条命令行。',
+  'err.tools.patternMissing': '缺少 pattern —— 请给出形如 **/*.go 的模式。',
+  'err.tools.badPattern': '无法使用模式 {{1}} —— 请检查括号。',
   'err.tools.commandFailed': '无法启动该命令：{{1}}',
   'err.tools.commandStopped': '该轮回答已停止，因此命令已被终止。',
   // 在确认之前就拒绝，而不是之后：KiChat 没有可以输入密码的终端。命令仍保留在卡片上，

@@ -23,6 +23,7 @@ import {
 import { Markdown } from './Markdown'
 import { Confirmation } from './Confirmation'
 import { Handoff } from './Handoff'
+import { ProjectChanges } from './ProjectChanges'
 
 type Item =
   | { kind: 'message'; key: string; message: storeTypes.Message }
@@ -332,6 +333,10 @@ export function ChatView() {
             </span>
           </div>
         )}
+        {/* A project's changes are part of what the chat *is*, not a tool: the transcript says
+            what happened one card at a time, and nothing there answers "which files are
+            different now". Beside the folder and the permission, where the folder is. */}
+        {chatState?.chat.workspace && <ProjectChanges chatId={activeChatId} />}
         <SearchFirstToggle />
       </div>
 

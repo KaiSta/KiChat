@@ -83,6 +83,17 @@ export namespace runtime {
 
 export namespace main {
   export type AppInfo = Plain<Gen.main.AppInfo>
+  /** The terminal the coding hand-off would open, or empty when there is none. */
+  export type TerminalStatus = Plain<Gen.main.TerminalStatus>
+  /**
+   * One file a project chat changed, as the changes panel lists it.
+   *
+   * The two texts are clamped previews, not whole files, and `canRevert` is the app's own
+   * answer to "would undo be safe": false comes with `blocked`, a code the panel translates
+   * ("outside" for a file edited after the app wrote it, "not-text" for one it will not
+   * rewrite).
+   */
+  export type FileChange = Plain<Gen.main.FileChange>
   export type ChatState = Plain<Gen.main.ChatState>
   export type SearchStatus = Plain<Gen.main.SearchStatus>
   export type SecretStatus = Plain<Gen.main.SecretStatus>

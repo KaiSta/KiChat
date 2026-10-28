@@ -41,13 +41,32 @@ export function Confirmation() {
   const stopAsking = useStore((s) => s.stopAsking)
   const [busy, setBusy] = useState<ApprovalDecision | null>(null)
   const [granting, setGranting] = useState(false)
+  // The command as it stands in the card's field. Keyed by the question rather than kept as a
+  // bare string, so the card that replaces this one shows *its* line rather than the tail of
+  // an edit somebody made to the previous command.
+  const [draft, setDraft] = useState<{ id: string; line: string } | null>(null)
 
   if (!approval) return null
+
+  // What the field holds: the model's line until somebody types, then their version. A field
+  // emptied altogether is not an answer — there is nothing to run — so Allow stays disabled
+  // rather than sending a blank line the backend would refuse after the click.
+  const line =
+    approval.kind === 'command'
+      ? draft && draft.id === approval.approvalId
+        ? draft.line
+        : approval.command.line
+      : ''
+  const edited =
+    approval.kind === 'command' && line.trim() !== '' && line.trim() !== approval.command.line.trim()
 
   const answer = async (decision: ApprovalDecision) => {
     setBusy(decision)
     try {
-      await resolve(approval.chatId, approval.approvalId, decision)
+      // The line travels only when it was changed: the plain answer is the plain binding, and
+      // an unchanged field has nothing to add to it.
+      const sent = approval.kind === 'command' && edited ? line.trim() : undefined
+      await resolve(approval.chatId, approval.approvalId, decision, sent)
     } finally {
       setBusy(null)
     }
@@ -66,6 +85,8 @@ export function Confirmation() {
   }
 
   const disabled = busy !== null || granting
+  // Allow is the one button an empty field blocks: there is nothing to run. Declining a
+  // question whose line somebody cleared still makes sense, and so does the setting.
 
   return (
     <div
@@ -75,7 +96,14 @@ export function Confirmation() {
       style={{ borderColor: 'var(--accent)' }}
     >
       {approval.kind === 'command' ? (
-        <CommandQuestion command={approval.command} />
+        <CommandQuestion
+          command={approval.command}
+          line={line}
+          edited={edited}
+          disabled={disabled}
+          onChange={(next) => setDraft({ id: approval.approvalId, line: next })}
+          onReset={() => setDraft({ id: approval.approvalId, line: approval.command.line })}
+        />
       ) : (
         <ChangeQuestion change={approval.change} />
       )}
@@ -84,7 +112,7 @@ export function Confirmation() {
         <button
           type="button"
           className="btn btn-sm btn-primary"
-          disabled={disabled}
+          disabled={disabled || (approval.kind === 'command' && line.trim() === '')}
           onClick={() => void answer('once')}
         >
           {t('change.once')}
@@ -189,8 +217,32 @@ function ChangeQuestion({ change }: { change: ApprovalChange }) {
   )
 }
 
-/** One command: the line, the folder, the shell and the limit. */
-function CommandQuestion({ command }: { command: ApprovalCommand }) {
+/** One command: the line, the folder, the shell and the limit.
+ *
+ * The line is an editable field rather than a quotation. What is being approved is a sentence
+ * somebody wrote — a typo in a path, a flag the model guessed — and the person reading it is
+ * the one who knows. Declining and typing it again in the composer would cost the turn a round
+ * and lose the folder, the timeout and the shell that the tool chose, so the fix belongs here.
+ *
+ * The app still runs the line through its own refusals after the answer (internal/tools), so
+ * the field cannot be used to slip past the one check that runs before the question: an edited
+ * line asking for administrator rights is refused exactly like the model's own.
+ */
+function CommandQuestion({
+  command,
+  line,
+  edited,
+  disabled,
+  onChange,
+  onReset,
+}: {
+  command: ApprovalCommand
+  line: string
+  edited: boolean
+  disabled: boolean
+  onChange: (line: string) => void
+  onReset: () => void
+}) {
   const t = useStore((s) => s.t)
   return (
     <>
@@ -203,12 +255,33 @@ function CommandQuestion({ command }: { command: ApprovalCommand }) {
         <span className="faint ml-auto">{t('change.waiting')}</span>
       </div>
 
-      <div
-        className="mono mt-2 max-h-40 overflow-auto rounded p-2 text-[12px] whitespace-pre-wrap"
+      <textarea
+        className="mono mt-2 max-h-40 w-full resize-y rounded p-2 text-[12px]"
         style={{ background: 'var(--code-bg)', border: '1px solid var(--border)' }}
-      >
-        {command.line}
-      </div>
+        rows={Math.min(4, Math.max(1, line.split('\n').length))}
+        spellCheck={false}
+        autoComplete="off"
+        aria-label={t('command.editLabel')}
+        disabled={disabled}
+        value={line}
+        onChange={(event) => onChange(event.target.value)}
+      />
+
+      {edited && (
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: 'var(--warn)' }}>
+          {/* Said out loud, because the card has stopped being a preview: the person has to
+              know that what runs is their line and that the app checked it as such. */}
+          <span>{t('command.edited')}</span>
+          <button
+            type="button"
+            className="underline decoration-dotted"
+            disabled={disabled}
+            onClick={onReset}
+          >
+            {t('command.reset')}
+          </button>
+        </div>
+      )}
 
       <div className="faint mt-1 flex flex-wrap items-center gap-2 text-[11px]">
         <span title={command.dir}>{t('command.dir', { folder: folderName(command.dir) })}</span>

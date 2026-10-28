@@ -1490,6 +1490,61 @@ Available tools: {{tool_list}}`,
   ]
 
   /*
+   * What the project fixture has changed, for the changes panel.
+   *
+   * Three rows rather than one, because the panel's states have to be on screen somewhere: a
+   * file the chat changed (put back is offered), a file it created, and one it cannot restore
+   * (a binary). Held as a mutable list so the revert binding edits it — pressing undo in the
+   * harness has to make the row disappear the way the real one does.
+   */
+  const projectChanges = new Map([
+    [
+      'chat-project',
+      [
+        {
+          path: 'internal/tools/command.go',
+          operation: 'changed',
+          revisions: 2,
+          before: 'func (s *Service) execCommand(ctx context.Context, root workspace.Root, line string) (string, error) {\n\tcmd := exec.Command(line)\n\treturn out, nil\n}',
+          after: 'func (s *Service) execCommand(ctx context.Context, chatID string, root workspace.Root, line string, timeout time.Duration) (Result, error) {\n\tcmd := exec.Command(program, argv...)\n\treturn summarized(out, "tool.sum.command"), nil\n}',
+          added: 3,
+          removed: 2,
+          truncated: false,
+          canRevert: true,
+          blocked: '',
+          changedAt: now(),
+        },
+        {
+          path: 'internal/tools/find.go',
+          operation: 'created',
+          revisions: 1,
+          before: '',
+          after: 'package tools\n\nfunc findFilesDefinition() llm.ToolDefinition {}\n',
+          added: 3,
+          removed: 0,
+          truncated: false,
+          canRevert: true,
+          blocked: '',
+          changedAt: now(),
+        },
+        {
+          path: 'assets/logo.bin',
+          operation: 'changed',
+          revisions: 1,
+          before: '',
+          after: '',
+          added: 0,
+          removed: 0,
+          truncated: false,
+          canRevert: false,
+          blocked: 'not-text',
+          changedAt: now(),
+        },
+      ],
+    ],
+  ])
+
+  /*
    * A picture the model generated, as a fixture.
    *
    * The real binding returns the stored PNG re-encoded as a data: URL. An SVG is
@@ -2299,6 +2354,21 @@ Available tools: {{tool_list}}`,
    * only make the flag harder to read.
    */
   let pendingApproval = null
+
+  /*
+   * The answer to the waiting question, from either binding.
+   *
+   * Shared by ResolveToolApproval and ResolveToolApprovalWith, because the difference between
+   * them is the line the card held and not what the turn does with the answer: a harness where
+   * the edited half took a different path would be testing the mock.
+   */
+  const answerApproval = (approvalId, decision) => {
+    const waiting = pendingApproval
+    if (!waiting || waiting.approvalId !== approvalId) return Promise.resolve(false)
+    pendingApproval = null
+    waiting.finish(decision)
+    return Promise.resolve(true)
+  }
 
   /**
    * The question the ?approval= fixture asks, in the shape api_changes.go emits.
@@ -3490,12 +3560,38 @@ Available tools: {{tool_list}}`,
      * answer for an id nobody is waiting on is the ordinary case of a second click, and it
      * is reported rather than thrown for the same reason the real binding returns a bool.
      */
-    ResolveToolApproval: (approvalId, decision) => {
-      const waiting = pendingApproval
-      if (!waiting || waiting.approvalId !== approvalId) return Promise.resolve(false)
-      pendingApproval = null
-      waiting.finish(decision)
-      return Promise.resolve(true)
+    ResolveToolApproval: (approvalId, decision) => answerApproval(approvalId, decision),
+    // The answer to a command whose line was edited in the card's field. Logged, because the
+    // edited line is the whole point of the separate binding and a harness that swallowed it
+    // would let a broken caller pass.
+    ResolveToolApprovalWith: (approvalId, decision, command) => {
+      console.log('[harness] answered with an edited line:', command)
+      return answerApproval(approvalId, decision)
+    },
+    // Ending one running command. The fixture's commands finish immediately, so there is
+    // never one to stop; false is the real answer for a click that arrives a moment late.
+    StopToolCommand: (chatId, toolCallId) => {
+      console.log('[harness] StopToolCommand', chatId, toolCallId, '(nothing was running)')
+      return Promise.resolve(false)
+    },
+    // What this project has changed, and the one action over it. The revert edits the fixture
+    // so the row disappears — the panel reloads the list after every press.
+    ProjectFileChanges: (chatId) => Promise.resolve(copy(projectChanges.get(chatId) || [])),
+    RevertFileChange: (chatId, path) => {
+      const list = projectChanges.get(chatId) || []
+      const row = list.find((change) => change.path === path)
+      if (!row) return Promise.resolve()
+      if (!row.canRevert) {
+        return Promise.reject(
+          `i18n:{"code":"project.revertConflict","args":${JSON.stringify([path])}}`,
+        )
+      }
+      projectChanges.set(
+        chatId,
+        list.filter((change) => change.path !== path),
+      )
+      console.log('[harness] RevertFileChange', path, '(restored)')
+      return Promise.resolve()
     },
     Regenerate: (chatId) => {
       startTurn(chatId, '', true)
@@ -3717,6 +3813,10 @@ Available tools: {{tool_list}}`,
         goVersion: 'go mock',
         platform: 'mock/harness',
       }),
+    // The terminal the coding hand-off would open, as the About row shows it. A fake program
+    // name on purpose: the row exists so a person can check their own platform's launcher, and
+    // a fixture that named one of them would look like a claim about this machine.
+    DetectTerminal: () => Promise.resolve({ program: 'x-terminal-emulator', path: '/usr/bin/x-terminal-emulator' }),
     // The diagnostic trace's location, as Settings -> About shows it. A mock path,
     // because the harness never writes one.
     GetTracePath: () => Promise.resolve('/home/mock/.config/kichat/kichat-trace.jsonl'),

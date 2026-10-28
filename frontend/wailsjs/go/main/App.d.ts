@@ -32,6 +32,8 @@ export function DeleteChat(arg1:string):Promise<void>;
 
 export function DeleteCompaction(arg1:string,arg2:string):Promise<void>;
 
+export function DetectTerminal():Promise<main.TerminalStatus>;
+
 export function ExportBackup(arg1:main.BackupExportRequest):Promise<main.BackupExportResult>;
 
 export function GetAppInfo():Promise<main.AppInfo>;
@@ -114,6 +116,8 @@ export function PickUpscalerBinary(arg1:string):Promise<string>;
 
 export function PreviewSystemPrompt(arg1:string):Promise<string>;
 
+export function ProjectFileChanges(arg1:string):Promise<Array<main.FileChange>>;
+
 export function RedactSecrets(arg1:string):Promise<string>;
 
 export function Regenerate(arg1:string,arg2:string,arg3:string):Promise<void>;
@@ -133,6 +137,10 @@ export function RemoveOldLlamaBuilds():Promise<number>;
 export function RenameChat(arg1:string,arg2:string):Promise<void>;
 
 export function ResolveToolApproval(arg1:string,arg2:string):Promise<boolean>;
+
+export function ResolveToolApprovalWith(arg1:string,arg2:string,arg3:string):Promise<boolean>;
+
+export function RevertFileChange(arg1:string,arg2:string):Promise<void>;
 
 export function SaveAttachmentAs(arg1:string):Promise<string>;
 
@@ -179,6 +187,8 @@ export function StopImageDraw(arg1:string):Promise<main.StopDrawResult>;
 export function StopImageServer():Promise<void>;
 
 export function StopManagedModel(arg1:string):Promise<void>;
+
+export function StopToolCommand(arg1:string,arg2:string):Promise<boolean>;
 
 export function TestBraveKey(arg1:string):Promise<research.SearchOutcome>;
 

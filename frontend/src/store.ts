@@ -168,6 +168,12 @@ interface State {
    * answer names.
    */
   approvals: Record<string, ApprovalPayload>
+  /**
+   * chatId -> what that chat has changed in its folder, most recent first, with the diff and
+   * whether undo would be safe. Loaded when a project chat is opened and refreshed when a
+   * change lands, so the header's count and the panel agree with the folder.
+   */
+  fileChanges: Record<string, main.FileChange[]>
   running: Record<string, boolean>
   /** chatId -> phase such as "tool" or "compacting". */
   phase: Record<string, string>
@@ -185,6 +191,17 @@ interface State {
   nextModel: { backend: string; model: string } | null
   setNextModel: (value: { backend: string; model: string } | null) => void
 
+  /** Re-read a chat's changed files after a change, a revert, or a switch to it. */
+  loadFileChanges: (chatId: string) => Promise<void>
+  /**
+   * Put one file back the way the chat found it, then reload the list.
+   *
+   * The backend refuses in the two cases a revert would be wrong — the file was edited
+   * afterwards, or a turn is still running — and its sentence is what the toast shows. A
+   * successful revert emits nothing, so the list is re-read here rather than waited for.
+   */
+  revertFile: (chatId: string, path: string) => Promise<void>
+
   /* actions */
   t: (key: MessageKey, vars?: Record<string, string | number>) => string
   /** For keys built at runtime: see `translateDynamic`. */
@@ -196,7 +213,20 @@ interface State {
    * allows every later one in the same chat for as long as it is open, anything else
    * declines.
    */
-  resolveApproval: (chatId: string, approvalId: string, decision: ApprovalDecision) => Promise<void>
+  /**
+   * Answer the waiting question.
+   *
+   * `editedLine` is the command as it stood in the card's field when the answer was given,
+   * and only a command answer carries one. It travels as an argument rather than as a second
+   * binding for the callers that have no line to give: a change has none, and an unchanged
+   * command is the plain answer the backend already reads.
+   */
+  resolveApproval: (
+    chatId: string,
+    approvalId: string,
+    decision: ApprovalDecision,
+    editedLine?: string,
+  ) => Promise<void>
   /** Put a hand-off away: the line is still in the transcript's card, so nothing is lost. */
   dismissHandoff: (chatId: string) => void
   /**
@@ -308,6 +338,7 @@ export const useStore = create<State>((set, get) => {
     toolOutput: {},
     handoffs: {},
     approvals: {},
+    fileChanges: {},
     running: {},
     phase: {},
     phaseWaitMs: {},
@@ -462,10 +493,39 @@ export const useStore = create<State>((set, get) => {
         set({ chatState: state })
         const running = { ...get().running, [id]: state.running }
         set({ running })
+        // A project's changed files come with it: the header's count is part of what the
+        // chat *is*, and loading it on demand would let a count appear only after a click.
+        if (state.chat.workspace) void get().loadFileChanges(id)
       } catch (err) {
         get().toast('error', errText(err))
       } finally {
         set({ chatLoading: false })
+      }
+    },
+
+    loadFileChanges: async (chatId) => {
+      try {
+        const changes = await App.ProjectFileChanges(chatId)
+        // Keyed by chat, so a reply for a chat the user has since left is still wanted: the
+        // count belongs to that chat and will be read when it is opened again.
+        set((s) => ({ fileChanges: { ...s.fileChanges, [chatId]: changes } }))
+      } catch {
+        // A chat with no folder, or one whose folder moved, has nothing to list. The panel
+        // then shows what it had, and the file tools report the folder where the model asks.
+        set((s) => ({ fileChanges: { ...s.fileChanges, [chatId]: [] } }))
+      }
+    },
+
+    revertFile: async (chatId, path) => {
+      try {
+        await App.RevertFileChange(chatId, path)
+      } catch (err) {
+        get().toast('error', errText(err))
+      } finally {
+        // Reloaded either way: a refused revert has still told the user *why*, and the row's
+        // state may have moved on since the list was read.
+        await get().loadFileChanges(chatId)
+        if (get().activeChatId === chatId) await get().refreshChatState()
       }
     },
 
@@ -595,7 +655,7 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
-    resolveApproval: async (chatId, approvalId, decision) => {
+    resolveApproval: async (chatId, approvalId, decision, editedLine) => {
       // Taken off screen before the call, not after it: the backend resumes the turn the
       // moment it hears the answer, and a card still sitting there invites a second click
       // on a question that has already been decided. The turn's own end (done, error, or
@@ -606,7 +666,13 @@ export const useStore = create<State>((set, get) => {
         return { approvals }
       })
       try {
-        await App.ResolveToolApproval(approvalId, decision)
+        // The edited form answers through its own binding: an empty third argument would be
+        // indistinguishable from "the field was cleared", which is not an answer at all.
+        if (editedLine !== undefined) {
+          await App.ResolveToolApprovalWith(approvalId, decision, editedLine)
+        } else {
+          await App.ResolveToolApproval(approvalId, decision)
+        }
       } catch (err) {
         get().toast('error', errText(err))
       }
@@ -796,6 +862,15 @@ function wireEvents(
     const toolOutput = { ...get().toolOutput }
     if (p.toolCall.status !== 'pending') delete toolOutput[p.toolCall.id]
     set({ chatState: { ...state.chatState, messages }, toolOutput })
+    // A change that landed is a change the panel has to show, and the list is one query. Read
+    // only for the two tools that write a file: a read or a search leaves the folder as it was
+    // and the count would not move.
+    if (
+      (p.toolCall.status === 'ok' || p.toolCall.status === 'error') &&
+      (p.toolCall.name === 'write_file' || p.toolCall.name === 'edit_file')
+    ) {
+      void get().loadFileChanges(p.chatId)
+    }
   })
 
   on<{ chatId: string; phase: string; waitMs?: number }>(EV.status, (p) => {

@@ -127,6 +127,10 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
 
   const parsedArgs = prettyJSON(call.argsJson)
   const result = parseResult(call.resultJson)
+  // The window's own sentence about the result, when the tool reported one. The text under
+  // the expand toggle stays exactly what the model was given — that is the record — while
+  // this line is the same fact in the reader's language.
+  const summary = parseSummary(call.resultJson)
   // The line a command ran — or, when the app refused it, the line the user has to run
   // themselves. Offered on every terminal call rather than only on a refusal: a command worth
   // refusing is a command worth copying, and a button that appears only once something broke
@@ -185,6 +189,16 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
           ))}
         <span className="ml-auto faint">{formatDuration(call.durationMs)}</span>
       </button>
+
+      {/* What the call produced, in the window's language. It sits outside the toggle
+          because it is the part worth reading without opening anything, and it is a project
+          tool's own summary rather than a translation of the model's text — the two halves
+          are written separately so neither can drift into describing the other. */}
+      {summary && (
+        <div className="faint mt-1 truncate text-[11px]" title={result}>
+          {tDynamic(summary.code, summaryVars(summary.args))}
+        </div>
+      )}
 
       {/* Why a call failed, and the line to take away, without opening anything: an error is
           the one part of a tool's detail a person has to read to act on it. A refusal that sat
@@ -248,6 +262,35 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
             }}
           >
             ⏹ {t('images.stop')}
+          </button>
+        </div>
+      )}
+
+      {/* The turn's Stop and this button are different promises: Stop abandons the answer, so
+          a command started with the wrong flags would cost the whole turn. This ends the
+          command alone, and the tool reports it to the model as a result — the output so far
+          and "the person stopped this" — so the turn carries on with something to work from.
+          Offered only while the call is still pending, because that is the only time there is
+          something to end. */}
+      {call.name === 'run_command' && call.status === 'pending' && (
+        <div className="mt-1 flex items-center gap-2">
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={stopping}
+            title={t('tool.stopCommandHint')}
+            onClick={async () => {
+              setStopping(true)
+              try {
+                await App.StopToolCommand(call.chatId, call.id)
+              } catch (err) {
+                useStore.getState().toast('error', errText(err))
+              } finally {
+                setStopping(false)
+              }
+            }}
+          >
+            ⏹ {t('tool.stopCommand')}
           </button>
         </div>
       )}
@@ -443,6 +486,36 @@ function parseResult(raw: string): string {
   } catch {
     return raw
   }
+}
+
+/**
+ * The window's half of a tool result: a code into the dictionaries and its arguments.
+ *
+ * A result carries it beside the model's text (`{"content": …, "summary": {"code": …}}`),
+ * which is what lets the card say "3 hits in 12 files" in the reader's language while the
+ * expand toggle still shows the exact text the turn was handed. A result without one — every
+ * research tool — renders its text alone, which is what it did before.
+ */
+function parseSummary(raw: string): { code: string; args: string[] } | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as { summary?: { code?: unknown; args?: unknown } }
+    const summary = parsed?.summary
+    if (!summary || typeof summary.code !== 'string' || summary.code === '') return null
+    const args = Array.isArray(summary.args) ? summary.args.map((arg) => String(arg)) : []
+    return { code: summary.code, args }
+  } catch {
+    return null
+  }
+}
+
+/** `{{1}}`, `{{2}}`… in order, as the dictionary substitutes them. */
+function summaryVars(args: string[]): Record<string, string> {
+  const vars: Record<string, string> = {}
+  args.forEach((arg, index) => {
+    vars[String(index + 1)] = arg
+  })
+  return vars
 }
 
 /** One-line hint of what a tool was called with, for the collapsed state. */
