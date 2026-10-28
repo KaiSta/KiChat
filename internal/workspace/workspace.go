@@ -20,6 +20,8 @@ package workspace
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -226,6 +228,129 @@ func (r Root) Relative(abs string) string {
 		return abs
 	}
 	return filepath.ToSlash(rel)
+}
+
+// Text is one file as it is on disk, for the two callers that need the file rather than a
+// window into it: the pre-image kept before a change, and the diff a revert shows.
+type Text struct {
+	// Path is workspace-relative.
+	Path string
+	// Content is the whole file.
+	Content string
+	// Existed is false for a path that is not there yet — the ordinary case for a create, and
+	// the one a revert answers by removing the file rather than by writing an empty one.
+	Existed bool
+	// Writable is false for a file this app will not rewrite: a binary, or one larger than a
+	// change may touch. A pre-image of such a file would be a promise the undo could not keep,
+	// so it is not offered rather than offered and broken.
+	Writable bool
+}
+
+// Text reads a whole file the way a change or a revert needs it.
+//
+// A missing file is not an error here — it is the state a create starts from — and neither is a
+// folder's absence: both answer Existed=false. Everything else that can go wrong (a folder
+// where a file was named, a permission) is returned, because the caller is about to write.
+func (r Root) Text(rel string) (Text, error) {
+	abs, err := r.Resolve(rel)
+	if err != nil {
+		return Text{}, err
+	}
+	out := Text{Path: r.Relative(abs)}
+	info, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return out, nil
+		}
+		return Text{}, err
+	}
+	if info.IsDir() {
+		return Text{}, fmt.Errorf("%s is a folder, not a file", out.Path)
+	}
+	out.Existed = true
+	if info.Size() > MaxWriteBytes {
+		return out, nil
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return Text{}, err
+	}
+	// The same sniff the reader uses, and for the same reason: what a revert restores has to be
+	// bytes the app itself read, not a page of replacement characters.
+	if isBinary(data[:min(len(data), maxSniffBytes)]) {
+		return out, nil
+	}
+	out.Content, out.Writable = string(data), true
+	return out, nil
+}
+
+// Remove deletes one file from the folder.
+//
+// It is the undo of a create, and it is deliberately a file: a folder is left alone, because
+// the folders a write made may now hold work this chat did not put there.
+func (r Root) Remove(rel string) error {
+	abs, err := r.Resolve(rel)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a folder", r.Relative(abs))
+	}
+	return os.Remove(abs)
+}
+
+// Diff is the pair of texts a diff pane shows, with the counts its heading needs.
+type Diff struct {
+	Before string
+	After  string
+	// Added and Removed count the lines of each side, not a line-by-line comparison: the pane
+	// shows the two texts, and the numbers say whether what follows is the change the reader
+	// meant to look at.
+	Added   int
+	Removed int
+	// Truncated is "a preview here is shorter than the file", so the pane can say the diff it
+	// shows is not all of it.
+	Truncated bool
+}
+
+// CompareDiff renders the difference between what a file was and what it is.
+func CompareDiff(before, after string) Diff {
+	shownBefore, shownAfter, truncated := preview(before, after)
+	return Diff{
+		Before:    shownBefore,
+		After:     shownAfter,
+		Added:     countLines(after),
+		Removed:   countLines(before),
+		Truncated: truncated,
+	}
+}
+
+// Digest is the fingerprint of a text, used to notice that a file changed after this app wrote
+// it: a revert compares it against what the tool recorded, so an edit made in the user's own
+// editor in the meantime is a refusal rather than something to overwrite.
+func Digest(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+// Absolute is the inverse of Relative: the path on disk a workspace-relative path names.
+//
+// It is not Resolve, and the difference is what it is for. Resolve validates a path a model
+// wrote — `..`, an absolute path pointing elsewhere, a symlink that leaves the tree — and the
+// callers here already hold a path this app produced itself, from a write it just made. Doing
+// that validation again would be a second opinion about a path that came out of the folder.
+func (r Root) Absolute(rel string) string {
+	if r.path == "" {
+		return rel
+	}
+	return filepath.Join(r.path, filepath.FromSlash(rel))
 }
 
 // --- reading ---------------------------------------------------------------
@@ -437,6 +562,9 @@ type Matches struct {
 	Hits  []Hit
 	// Scanned is how many files were read looking for the query.
 	Scanned int
+	// Ignored counts the files and folders a .gitignore excluded, so the model can see
+	// that the answer was shaped by one rather than concluding a folder is empty.
+	Ignored int
 	// Stopped is "the walk ended at one of its own budgets rather than at the end of
 	// the tree". It is the difference between "the string is not in the project" and
 	// "it was not in the part that was read", which is a difference the model has to
@@ -481,6 +609,7 @@ func (r Root) Search(query string, maxHits int) (Matches, error) {
 	}
 	out := Matches{Query: query}
 	needle := strings.ToLower(query)
+	ignores := newIgnoreTree(r.path)
 
 	walkErr := filepath.WalkDir(r.path, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -492,9 +621,14 @@ func (r Root) Search(query string, maxHits int) (Matches, error) {
 			return nil
 		}
 		if entry.IsDir() {
-			if path != r.path && skipDirs[entry.Name()] {
+			if path != r.path && (skipDirs[entry.Name()] || ignores.ignored(path, true)) {
+				out.Ignored++
 				return fs.SkipDir
 			}
+			return nil
+		}
+		if ignores.ignored(path, false) {
+			out.Ignored++
 			return nil
 		}
 		if !entry.Type().IsRegular() {
@@ -579,7 +713,40 @@ func (r Root) AgentsFile(maxBytes int) (Doc, bool, error) {
 	if r.path == "" {
 		return Doc{}, false, ErrNoRoot
 	}
-	path := filepath.Join(r.path, AgentsFileName)
+	return r.agentsAt(r.path, "", maxBytes)
+}
+
+// AgentsFileNear reads the nearest AGENTS.md above a file, excluding the root one.
+//
+// The convention every coding agent follows is that a subdirectory may carry its own
+// instructions, and that they apply to everything under it: a monorepo's `api/AGENTS.md`
+// says how that service is built, and a model reading a file there needs it. The root file
+// already travels in the system prompt, so this starts at the file's own folder and stops
+// before the root — returning the root document a second time would spend context on
+// guidance the model already has.
+//
+// The nearest one wins rather than every one on the way up: a rule written in `api/` knows
+// about the rules in the root, and a stack of three documents that disagree is worse than
+// the one the person meant.
+func (r Root) AgentsFileNear(rel string, maxBytes int) (Doc, bool, error) {
+	if r.path == "" {
+		return Doc{}, false, ErrNoRoot
+	}
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	dir := filepath.Dir(clean)
+	for dir != "." && dir != string(filepath.Separator) && dir != "" {
+		if doc, ok, err := r.agentsAt(filepath.Join(r.path, dir), filepath.ToSlash(dir), maxBytes); ok || err != nil {
+			return doc, ok, err
+		}
+		dir = filepath.Dir(dir)
+	}
+	return Doc{}, false, nil
+}
+
+// agentsAt reads the AGENTS.md in one folder. rel is where the model should think it lives,
+// which for a nested file is its folder's path rather than the root.
+func (r Root) agentsAt(dir, rel string, maxBytes int) (Doc, bool, error) {
+	path := filepath.Join(dir, AgentsFileName)
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -597,21 +764,30 @@ func (r Root) AgentsFile(maxBytes int) (Doc, bool, error) {
 	// per turn: the size and the modification time together are the file's identity,
 	// so an edit is picked up on the next turn and an untouched file is not re-read.
 	if doc, ok := agentsCache.get(path, info); ok {
-		return trimDoc(doc, path, maxBytes), true, nil
+		return trimDocAt(doc, path, rel, maxBytes), true, nil
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Doc{}, false, err
 	}
 	agentsCache.put(path, info, string(raw))
-	return trimDoc(string(raw), path, maxBytes), true, nil
+	return trimDocAt(string(raw), path, rel, maxBytes), true, nil
 }
 
 // AgentsFileName is the conventional name of the file above.
 const AgentsFileName = "AGENTS.md"
 
-func trimDoc(text, path string, maxBytes int) Doc {
-	doc := Doc{Path: filepath.ToSlash(AgentsFileName)}
+// trimDoc is trimDocAt for the root file, whose path is its name.
+func trimDoc(text, path string, maxBytes int) Doc { return trimDocAt(text, path, "", maxBytes) }
+
+// trimDocAt renders a document with the path the model should reason about: the root file is
+// "AGENTS.md", a nested one is "api/AGENTS.md".
+func trimDocAt(text, path, rel string, maxBytes int) Doc {
+	shown := AgentsFileName
+	if rel != "" {
+		shown = filepath.ToSlash(filepath.Join(rel, AgentsFileName))
+	}
+	doc := Doc{Path: shown}
 	if len(text) > maxBytes {
 		// Cut on a line boundary so the last thing the model reads is a whole
 		// sentence rather than half of one.

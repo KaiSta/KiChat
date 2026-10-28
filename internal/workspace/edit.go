@@ -90,6 +90,15 @@ type EditResult struct {
 	// Added and Removed are the line counts of the two snippets.
 	Added   int
 	Removed int
+	// Approximate is "the text matched once its indentation was ignored". The edit still
+	// replaced the file's real text, but the caller says so: a model that learns this
+	// succeeded with different whitespace will keep guessing, and the person reading the
+	// card deserves to know the line they picture is not byte-for-byte the one it found.
+	Approximate bool
+	// Digest is the fingerprint of the text the edit left behind. It is computed here because
+	// this is the one place the new text exists before it reaches the disk, and the undo record
+	// needs it to notice a file that changed afterwards (see internal/tools/snapshot.go).
+	Digest string
 }
 
 // DescribeWrite reports what writing content to rel would do.
@@ -211,7 +220,7 @@ func (r Root) missingDirs(abs string) []string {
 // exactly the edits that Edit would refuse — so a person is never asked to approve
 // something that cannot be applied.
 func (r Root) DescribeEdit(rel, old, new string, replaceAll bool) (Change, error) {
-	abs, _, _, _, err := r.inspectEdit(rel, old, replaceAll)
+	abs, _, _, _, matched, _, err := r.inspectEdit(rel, old, replaceAll)
 	if err != nil {
 		return Change{}, err
 	}
@@ -219,9 +228,11 @@ func (r Root) DescribeEdit(rel, old, new string, replaceAll bool) (Change, error
 		Path:      r.Relative(abs),
 		Operation: OperationEdit,
 		Added:     countLines(new),
-		Removed:   countLines(old),
+		Removed:   countLines(matched),
 	}
-	change.Before, change.After, change.Truncated = preview(old, new)
+	// The preview shows what would actually be replaced, which for an approximate match is
+	// the file's own lines rather than the ones the model typed.
+	change.Before, change.After, change.Truncated = preview(matched, new)
 	return change, nil
 }
 
@@ -237,15 +248,15 @@ func (r Root) DescribeEdit(rel, old, new string, replaceAll bool) (Change, error
 // newline all survive an edit they are not part of: this is a string replacement inside
 // text, not a re-rendering of it.
 func (r Root) Edit(rel, old, new string, replaceAll bool) (EditResult, error) {
-	abs, text, mode, occurrences, err := r.inspectEdit(rel, old, replaceAll)
+	abs, text, mode, occurrences, matched, approx, err := r.inspectEdit(rel, old, replaceAll)
 	if err != nil {
 		return EditResult{}, err
 	}
 	// One occurrence, because inspectEdit has already refused an ambiguous match: an edit
 	// whose text appears twice is an error, never the first of the two.
-	updated := strings.Replace(text, old, new, 1)
+	updated := strings.Replace(text, matched, new, 1)
 	if replaceAll {
-		updated = strings.ReplaceAll(text, old, new)
+		updated = strings.ReplaceAll(text, matched, new)
 	}
 	if err := os.WriteFile(abs, []byte(updated), mode); err != nil {
 		return EditResult{}, err
@@ -257,48 +268,121 @@ func (r Root) Edit(rel, old, new string, replaceAll bool) (EditResult, error) {
 	return EditResult{
 		Path:        r.Relative(abs),
 		Occurrences: replaced,
-		Line:        lineOf(text, old),
+		Line:        lineOf(text, matched),
 		Added:       countLines(new),
-		Removed:     countLines(old),
+		Removed:     countLines(matched),
+		Approximate: approx,
+		Digest:      Digest(updated),
 	}, nil
 }
 
 // inspectEdit reads the file to be edited and refuses the edit if it cannot be made.
-func (r Root) inspectEdit(rel, old string, replaceAll bool) (abs, text string, mode fs.FileMode, occurrences int, err error) {
+// inspectEdit reads the file to be edited and refuses the edit if it cannot be made.
+//
+// It returns the text it actually matched, which is `old` itself when the match was exact and
+// the file's own lines when the match was approximate: what gets replaced has to be the bytes
+// that are in the file, whatever the model typed.
+func (r Root) inspectEdit(rel, old string, replaceAll bool) (abs, text string, mode fs.FileMode, occurrences int, matched string, approx bool, err error) {
 	abs, err = r.Resolve(rel)
 	if err != nil {
-		return "", "", 0, 0, err
+		return "", "", 0, 0, "", false, err
 	}
 	if strings.TrimSpace(old) == "" {
-		return "", "", 0, 0, fmt.Errorf("the text to replace is empty")
+		return "", "", 0, 0, "", false, fmt.Errorf("the text to replace is empty")
 	}
 	info, statErr := os.Stat(abs)
 	if statErr != nil {
-		return "", "", 0, 0, statErr
+		return "", "", 0, 0, "", false, statErr
 	}
 	if info.IsDir() {
-		return "", "", 0, 0, fmt.Errorf("%s is a folder", r.Relative(abs))
+		return "", "", 0, 0, "", false, fmt.Errorf("%s is a folder", r.Relative(abs))
 	}
 	if info.Size() > MaxWriteBytes {
-		return "", "", 0, 0, fmt.Errorf("%s is %s, larger than the %s an edit may touch",
+		return "", "", 0, 0, "", false, fmt.Errorf("%s is %s, larger than the %s an edit may touch",
 			r.Relative(abs), humanBytes(info.Size()), humanBytes(MaxWriteBytes))
 	}
 	data, readErr := os.ReadFile(abs)
 	if readErr != nil {
-		return "", "", 0, 0, readErr
+		return "", "", 0, 0, "", false, readErr
 	}
 	text = string(data)
 	if isBinary(data[:min(len(data), maxSniffBytes)]) {
-		return "", "", 0, 0, fmt.Errorf("%s is not a text file", r.Relative(abs))
+		return "", "", 0, 0, "", false, fmt.Errorf("%s is not a text file", r.Relative(abs))
 	}
 	occurrences = strings.Count(text, old)
+	matched, approx = old, false
 	switch {
 	case occurrences == 0:
-		return "", "", 0, 0, ErrNoMatch
+		// A second attempt that ignores indentation, because the usual reason a model's
+		// text is not found is that it reproduced the line with different leading
+		// whitespace — a tab where the file has four spaces — and the alternative is a
+		// round spent re-reading a file it already read.
+		//
+		// What it deliberately does not do: match a *different* line. The comparison is
+		// per line after trimming, so a word changed, a line added or a line reordered all
+		// fail here exactly as they did before, and an ambiguous approximate match is
+		// refused like an ambiguous exact one.
+		approxMatches, found := approximateMatches(text, old)
+		switch {
+		case found == 0:
+			return "", "", 0, 0, "", false, ErrNoMatch
+		case found > 1 && !replaceAll:
+			return "", "", 0, 0, "", false, &AmbiguousMatch{
+				Path: r.Relative(abs), Count: found, FirstLine: lineOf(text, approxMatches[0])}
+		}
+		matched, approx = approxMatches[0], true
+		occurrences = found
 	case occurrences > 1 && !replaceAll:
-		return "", "", 0, 0, &AmbiguousMatch{Path: r.Relative(abs), Count: occurrences, FirstLine: lineOf(text, old)}
+		return "", "", 0, 0, "", false, &AmbiguousMatch{Path: r.Relative(abs), Count: occurrences, FirstLine: lineOf(text, old)}
 	}
-	return abs, text, info.Mode().Perm(), occurrences, nil
+	return abs, text, info.Mode().Perm(), occurrences, matched, approx, nil
+}
+
+// approximateMatches finds the spans of text that equal old once each line's leading and
+// trailing whitespace is ignored.
+//
+// It returns the file's own text for each span, in order, so the caller replaces bytes that
+// exist rather than bytes the model imagined. Line endings are normalised first: a model on
+// one platform writing CRLF into a file that uses LF is the same mistake as indentation, and
+// the span it returns keeps whatever the file actually has.
+func approximateMatches(text, old string) ([]string, int) {
+	textLines := strings.Split(text, "\n")
+	oldLines := strings.Split(strings.ReplaceAll(old, "\r\n", "\n"), "\n")
+	// A trailing newline in the searched text is a separator, not an empty last line.
+	if n := len(oldLines); n > 0 && oldLines[n-1] == "" {
+		oldLines = oldLines[:n-1]
+	}
+	if len(oldLines) == 0 {
+		return nil, 0
+	}
+	trim := func(line string) string {
+		return strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+	}
+	var spans []string
+	// Offsets of each line's start, so a span can be cut out of the original text with the
+	// bytes the file has rather than a re-join that would flatten a lone \r.
+	start := 0
+	offsets := make([]int, len(textLines))
+	for i, line := range textLines {
+		offsets[i] = start
+		start += len(line) + 1
+	}
+	for i := 0; i+len(oldLines) <= len(textLines); i++ {
+		matches := true
+		for j := range oldLines {
+			if trim(textLines[i+j]) != trim(oldLines[j]) {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		begin := offsets[i]
+		end := offsets[i+len(oldLines)-1] + len(textLines[i+len(oldLines)-1])
+		spans = append(spans, text[begin:end])
+	}
+	return spans, len(spans)
 }
 
 // ErrNoMatch is an edit whose text is not in the file — usually whitespace the model

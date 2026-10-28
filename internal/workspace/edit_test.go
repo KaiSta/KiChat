@@ -292,3 +292,61 @@ func TestALongPreviewIsCutAndSaysSo(t *testing.T) {
 		t.Errorf("Added = %d, want the whole file's 4000 lines", change.Added)
 	}
 }
+
+// The failure this exists for: a model re-writes a line it read, but with spaces where the
+// file has a tab. The exact match used to refuse, and the refusal cost a round — the model
+// read the file again, copied the line, and tried once more.
+func TestAnEditForgivesDifferentIndentation(t *testing.T) {
+	root, _ := project(t, map[string]string{
+		"main.go": "func main() {\n\tprintln(\"hi\")\n}\n",
+	})
+
+	// Four spaces where the file has a tab.
+	result, err := root.Edit("main.go", "    println(\"hi\")", "\tprintln(\"bye\")", false)
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if !result.Approximate {
+		t.Error("the result does not report the approximate match")
+	}
+	text, err := os.ReadFile(filepath.Join(root.Path(), "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(text), "func main() {\n\tprintln(\"bye\")\n}\n"; got != want {
+		t.Errorf("file = %q, want %q", got, want)
+	}
+}
+
+// What the forgiveness must not do: replace a line that says something else. A changed word is
+// a different line, however close the whitespace is.
+func TestAnEditDoesNotForgetWords(t *testing.T) {
+	root, _ := project(t, map[string]string{"main.go": "keep = 1\n"})
+
+	if _, err := root.Edit("main.go", "   keep = 2   ", "keep = 3", false); err == nil {
+		t.Fatal("an edit of a line that is not there reported success")
+	}
+	text, err := os.ReadFile(filepath.Join(root.Path(), "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(text) != "keep = 1\n" {
+		t.Errorf("the file changed: %q", text)
+	}
+}
+
+// Two candidate lines are still ambiguous: the whitespace is forgiven, guessing is not.
+func TestAnApproximateEditRefusesTwoCandidates(t *testing.T) {
+	root, _ := project(t, map[string]string{
+		"main.go": "if a {\n\tx = 1\n}\nif b {\n\tx = 1\n}\n",
+	})
+
+	_, err := root.Edit("main.go", "    x = 1", "x = 2", false)
+	var ambiguous *AmbiguousMatch
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("error = %v, want an AmbiguousMatch", err)
+	}
+	if ambiguous.Count != 2 {
+		t.Errorf("count = %d, want 2", ambiguous.Count)
+	}
+}
