@@ -148,16 +148,52 @@ that is the whole recovery path: the sentence says to run it yourself, and the l
 there.
 
 **And the line is handed back where the person types.** A refusal also raises a card above the
-composer — *run it yourself*, the line, a copy button, a close button — because the transcript's
-card sits several screens above the composer and the next move after a refusal is to type. It is
-recognised by the message's **code** (`tools.needsElevation`), never by its sentence: the
-sentence is translated, and which refusal this is has to survive a language switch. It is keyed
-by chat and set from the event rather than derived from the history, so a project opened
-tomorrow does not offer a hand-off for a refusal it answered yesterday, while one that is still
-waiting is found again after switching away. Two steps on one card — copy the line, run it,
-paste the output back — because copying alone leaves the answer exactly where it was: the model
-has no way to know the command ran. Dismissing it loses nothing, since the transcript's card
-keeps the line.
+composer — *run it yourself*, the line, a copy button, an open-terminal button, a close button —
+because the transcript's card sits several screens above the composer and the next move after a
+refusal is to type. It is recognised by the message's **code** (`tools.needsElevation`), never
+by its sentence: the sentence is translated, and which refusal this is has to survive a language
+switch. It is keyed by chat and set from the event rather than derived from the history, so a
+project opened tomorrow does not offer a hand-off for a refusal it answered yesterday, while one
+that is still waiting is found again after switching away. Three steps on one card — open a
+terminal, run the line, paste the output back — because copying alone leaves the answer exactly
+where it was: the model has no way to know the command ran. Dismissing it loses nothing, since
+the transcript's card keeps the line.
+
+**The terminal is the user's, and the app only points it at the folder.** *Open terminal* calls
+`OpenProjectTerminal`, which resolves the chat's folder, checks it still exists, and starts the
+program the person already uses through `internal/runtime`'s launcher — `gnome-terminal`,
+`konsole`, `xfce4-terminal`, `kitty`, `alacritty`, `foot`, `terminator`, `xterm`, `urxvt` on
+Linux in that order; `open -a Terminal` on macOS, which takes the folder as a document and so
+needs no AppleScript permission; Windows Terminal, else the shell `ComSpec` names, with
+`CREATE_NEW_CONSOLE`, whose working directory is set on the process rather than through a
+command line. Four things follow, and each was the reason for a decision:
+
+- **No embedded terminal.** A terminal inside this window would have to answer a password
+  prompt, which is the exact thing the refusal above exists because the app cannot do.
+- **A program, not a generic launcher.** `x-terminal-emulator` is a symlink to whatever the
+  distribution chose, and the flags it accepts follow that choice: `--working-directory` on a
+  build that is xterm opens in the user's home and reports success, and even `-e` is not
+  interchangeable (the rxvt family takes the rest of the line as argv, the gnome-terminal
+  family one string). So it is not in the list at all. Naming the programs costs a list and
+  buys an answer that is either right or absent; a terminal nobody named falls through to
+  "no terminal was found" instead of a window that flashes an error.
+- **The folder is one argument, never part of a script.** The two rxvt-family terminals are
+  given `cd "$1" && exec "${SHELL:-/bin/sh}"` with the folder as `$1`, so a directory named
+  `a; rm -rf ~` is still a directory. A missing folder is refused before anything starts,
+  because a terminal opened somewhere else looks like it worked.
+- **A start that fails immediately is reported as a failure.** A terminal given a flag it does
+  not know prints its usage and exits non-zero, and `Start` reports success for that — the
+  process started, it just did not open a window. So `OpenTerminal` watches the first 500 ms
+  and returns the exit error when there is one; a terminal still running after that (or one
+  that handed off to an instance already running and exited 0) is the outcome asked for.
+
+The window keeps it open afterwards: it is started in its own process group and not waited for,
+so a shell somebody types in all afternoon is not owned by a turn. `ErrNoTerminal` has its own
+sentence ("no terminal was found") because it asks for something different than a start that
+failed — a program to install rather than a retry. `open_terminal_test.go` pins all four cases
+with a recorded launcher, so the suite never opens a window; the launcher's own startup watch
+has no automated test, because making one reach the real `Start` path would mean putting a fake
+terminal on `PATH`.
 
 **A failed call says why without being opened.** The tool card shows its error under the header
 instead of only behind the expand toggle. That block used to be inside it, which meant the one
