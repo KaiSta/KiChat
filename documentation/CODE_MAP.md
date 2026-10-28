@@ -30,12 +30,13 @@ Two rules keep this useful:
 | Path | What it is |
 | --- | --- |
 | `main.go` | Wails bootstrap, window/menu options, `go:embed all:frontend/dist`, `--version` |
-| `app.go` | The `App` struct and the chat lifecycle: send, regenerate, stop, chats CRUD, `GetBudget` |
+| `app.go` | The `App` struct and the chat lifecycle: send, regenerate, stop, `ClearChat` (the `/clear` command), chats CRUD, `GetBudget` |
 | `api.go` | The bridge's own vocabulary: settings, backends and keys, app info, search status, `OpenExternal` — and the struct types the other bridge files return |
 | `api_database.go` | The encrypted database: `GetDatabaseStatus`, the lock state and key resolution at launch, `UnlockDatabase`, `StartFreshDatabase`, and the passphrase/keyring actions Settings → Data offers |
 | `api_runtime.go` | llama.cpp as the app installs and supervises it: builds, GPU families, model folders, start/stop, the image server's process |
 | `api_models.go` | Listing models and probing them, overrides, prompt variables, the model-file pickers |
 | `api_chat.go` | Compaction, attachments, chats' documents and chunk search, web search and scrape |
+| `api_changes.go` | The app's half of a project tool's question: `confirmChange`, the `chat:approval` payload, `ResolveToolApproval`, the standing auto-approval check and the per-chat "always" |
 | `api_images.go` | Picture generation: status, redraw, progress, the one-draw slot, cache, saving and reading an attachment's image |
 | `api_upscale.go` | The enlarging bridge: `UpscaleAttachment`, the upscaler status/test/dialog/install (`InstallUpscaler`, `GetUpscalerInstall`), the upscale bound |
 | `internal/` | All logic, one package per subsystem (below) |
@@ -59,7 +60,8 @@ Two rules keep this useful:
 | `internal/runtime` | llama.cpp as a thing KiChat installs and supervises: releases, GPU families, model folders, projector pairing, offload reading | `install.go`, `builds.go`/`distribution.go`, `supervise.go`, `discover.go`, `libs.go`, `offload.go` | `*_test.go` + `live_prism_test.go` |
 | `internal/research` | Brave and DuckDuckGo, the search-first context route, the scraper and its guards | `search.go`, `chain.go`, `brave.go`, `brave_context.go`, `duckduckgo.go`, `scrape.go` | `*_test.go` + `live_test.go` |
 | `internal/ingest` | Attachments to text: PDF, office, chunking | `ingest.go` (dispatch), `pdf.go`, `office.go`, `chunk.go` | `ingest_test.go` |
-| `internal/tools` | What the model can call, native schema *and* text protocol, plus `generate_image` | `tools.go`, `image.go` | `tools_test.go`, `image_test.go` |
+| `internal/tools` | What the model can call, native schema *and* text protocol, plus `generate_image`, the project reads (`read_file`, `list_dir`, `search_files`), the changes (`write_file`, `edit_file`) and the terminal (`run_command`) — the last three stop for the user's confirmation | `tools.go`, `image.go`, `project.go` (reads), `change.go` (writes, the guarded list and the question), `command.go` (the terminal: caps, timeout, result) with `command_unix.go`/`command_windows.go` (the shell and the tree kill) | `tools_test.go`, `image_test.go`, `project_test.go`, `change_test.go`, `command_test.go` |
+| `internal/workspace` | The folder a coding project works in: resolving it, keeping every path inside it, the read/list/search it allows, the project's own AGENTS.md, and the two write operations — each computed twice, once to be shown and once to be performed | `workspace.go` (`Open`, `Root.Resolve`, `Read`, `List`, `Search`, `AgentsFile`), `edit.go` (`DescribeWrite`/`Write`, `DescribeEdit`/`Edit`, `Change`) | `workspace_test.go`, `edit_test.go` |
 | `internal/secret` | API keys: OS keyring, encrypted-file fallback | `secret.go` (`New`, `NewIsolated`) | `secret_test.go` |
 | `internal/backup` | The portable archive: a selection of chats as one passphrase-encrypted file (AES-256-GCM, Argon2id) | `backup.go` (`Encode`, `Decode`, `Manifest`) | `backup_test.go` |
 | `internal/trace` | The content-free diagnostic log: a fixed event schema, error kinds instead of error text, rotation beside the encrypted database | `trace.go` (`Logger`, `Event`, `KindOf`) | `trace_test.go` (+ `internal/chat/trace_test.go` for a whole turn) |
@@ -73,10 +75,11 @@ Two rules keep this useful:
 | Path | Owns |
 | --- | --- |
 | `frontend/src/App.tsx` | Shell: sidebar, chat list, settings modal, global key handling (Escape) |
-| `frontend/src/components/ChatView.tsx` | The conversation: message list, composer, attachments, context meter, stop |
+| `frontend/src/components/ChatView.tsx` | The conversation: message list, composer (which answers `/clear` itself), attachments, context meter, stop, and a project's folder and permission note |
+| `frontend/src/components/Confirmation.tsx` | The question a project tool asks, in its two shapes — a change's two sides with line counts, a command's line with its folder, shell and limit — and the three answers. It is rendered at the composer because the turn behind it is blocked |
 | `frontend/src/components/MessageParts.tsx` | How one message renders — the split between settled and streaming pieces |
 | `frontend/src/components/Markdown.tsx` | The markdown pipeline: remark/rehype, KaTeX, highlight.js |
-| `frontend/src/components/settings/` | The settings screen: `Settings.tsx` is the shell and tab strip, `shared.tsx` the `Section`/`Field` helpers, and one file per tab (`GeneralTab`, `BackendsTab`, `ImagesTab`, `PromptTab`, `ResearchTab`, `ContextTab`, `PayloadTab`, `DataTab` for database encryption, backup and import) |
+| `frontend/src/components/settings/` | The settings screen: `Settings.tsx` is the shell and tab strip, `shared.tsx` the `Section`/`Field` helpers, and one file per tab (`GeneralTab`, `BackendsTab`, `ImagesTab`, `PromptTab`, `CodingTab` for what a project's tools may do unasked, `ResearchTab`, `ContextTab`, `PayloadTab`, `DataTab` for database encryption, backup and import) |
 | `frontend/src/components/UnlockScreen.tsx` | The window while the database is locked: enter the passphrase, or set one when no keyring exists |
 | `frontend/src/components/ModelSwitcher.tsx` | Model picker with capability badges and window size |
 | `frontend/src/lib/api.ts` | The typed wrapper over the generated `window.go` bindings |
@@ -125,7 +128,12 @@ progress uses a name from `internal/events`.
 | A setting | `internal/config/config.go` (+ `clone_test.go`), the settings UI, i18n | [`change-settings`](../.claude/skills/change-settings/SKILL.md) |
 | An enlarging method | `internal/images/upscale.go` (`Method*`, the switch in `Upscale`), the Enlarge panel, i18n | [`UPSCALING.md`](UPSCALING.md) |
 | A tool the model can call | `internal/tools/tools.go` (`Definitions` + execution), `internal/chat` if it needs a round | — |
+| A tool that reads the project folder | `internal/workspace` for the path boundary, `internal/tools/project.go` for the schema and result, `chat.toolDefinitions`/`projectTool` for the mode gate | — |
+| A tool that changes the project folder | `internal/workspace/edit.go` (the `Describe*`/apply split), `internal/tools/change.go` (schema, `approveChange`, `WriteToolNames`), `tools.NeedsApproval` in the engine's gate, `api_changes.go` (the event and the bound answer), `Confirmation.tsx` | — |
+| A tool that runs something on this machine | `internal/tools/command.go` (schema, caps, timeout, result) plus `command_unix.go`/`command_windows.go` (the shell, the process group, the tree kill), `approveCommand`, the command half of `approvalPayload`, `Confirmation.tsx` | [`CODING.md`](CODING.md) |
+| A new chat mode (a different tool set or prompt per conversation) | `store.Chat.Mode` + a migration, `internal/chat/engine.go`'s tool gate, the branch that creates the chat in `app.go`, the sidebar's `newChat`/`newProject` controls | — |
 | A tool result condensed before the model reads it | `internal/chat/digest.go` (the gate, cache and escape hatch), `toolOutputBudget.take` in `generate.go`, `config.DigestSettings` | [`COMPACT.md`](COMPACT.md) §17 |
+| A slash command the window answers instead of sending | `ChatView.tsx` (`submit`, where the command is matched) and the bridge method behind it | — |
 | A Wails event | `internal/events/events.go`, the emitter, the frontend listener | — |
 | A user-visible string | `frontend/src/lib/i18n.ts`, all three languages | — |
 

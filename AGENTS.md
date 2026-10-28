@@ -239,6 +239,7 @@ instead of the result.
 | --- | --- |
 | [`PLAN.md`](documentation/PLAN.md) | the architecture, and the reasoning behind it |
 | [`COMPACT.md`](documentation/COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
+| [`CODING.md`](documentation/CODING.md) | coding mode: what makes a conversation a project, the folder boundary, the confirmation gate, and the terminal's shell, caps and timeout |
 | [`RESEARCH.md`](documentation/RESEARCH.md) | search and scraping: providers, refusals, guards, budgets |
 | [`IMAGES.md`](documentation/IMAGES.md) | picture generation: three server kinds, parameters, profiles, verification |
 | [`IMAGES-CLOUD.md`](documentation/IMAGES-CLOUD.md) | hosted picture backends: which free tiers exist, what each would cost, and the one that was built (NVIDIA NIM) |
