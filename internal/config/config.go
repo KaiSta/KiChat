@@ -92,6 +92,35 @@ type Settings struct {
 	// list is the same idea the system-prompt presets follow — a named set of saved
 	// configurations, stored whole, so a field added later needs no migration.
 	ImageProfiles []ImageProfile `json:"imageProfiles,omitempty"`
+	// AutoApprove is which project tools run without asking. It is the standing answer to
+	// the confirmation a project's tools otherwise need every time, and it exists because
+	// the person answering has context the app does not: somebody working in their own
+	// repository with a model they have learned to trust is not served by clicking a diff
+	// forty times a day, and pretending otherwise only teaches them to click without
+	// reading — which is worse than a switch they set deliberately.
+	//
+	// It ships off, both halves, for the reason the hosted backends do: an install that
+	// starts out silent about what it changes is an install whose first surprise is a file
+	// it did not expect.
+	AutoApprove AutoApproveSettings `json:"autoApprove"`
+}
+
+// AutoApproveSettings is which of a project's guarded tools skip the question.
+//
+// It is split by what a tool can do rather than by tool name, because that is the
+// distinction a person is actually making: a file change is readable in a diff and
+// recoverable from version control, and a command is neither — it runs with their rights,
+// can leave the folder, and leaves nothing behind to review. Somebody who trusts the model
+// with their files has not thereby said anything about their machine.
+//
+// The split is by *kind*, not by name, so a fourth file-writing tool inherits the file
+// setting and a second command tool would inherit the command one. A tool that fits
+// neither keeps asking (see App.autoApproved).
+type AutoApproveSettings struct {
+	// Files approves write_file and edit_file without showing the change.
+	Files bool `json:"files"`
+	// Commands approves run_command without showing the line.
+	Commands bool `json:"commands"`
 }
 
 // ImageProfile is a named, saved picture configuration: what the Images tab
@@ -1193,6 +1222,12 @@ func Default() Settings {
 			MaxTokens:   0,
 			NumCtx:      0,
 		},
+		AutoApprove: AutoApproveSettings{
+			// Both off. See the field comment: an install that changes files silently
+			// before anybody asked for that is the wrong first impression.
+			Files:    false,
+			Commands: false,
+		},
 		DefaultSystemPrompt: PromptBody(PresetResearch, LangEnglish),
 		PromptPresets:       DefaultPresets(LangEnglish),
 		AutoTitle:           true,
@@ -1232,7 +1267,12 @@ const (
 	PresetSmallLocal = "small-local"
 	PresetAssistant  = "assistant"
 	PresetCoding     = "coding"
-	PresetBlank      = "blank"
+	// PresetCodingAgent is the prompt a *project* is created with: the same
+	// engineering discipline, plus the tool discipline and the project-guidance rule a
+	// chat that can read the user's folder needs. It is a separate id from PresetCoding
+	// so an installation that edits one does not silently retype the other.
+	PresetCodingAgent = "coding-agent"
+	PresetBlank       = "blank"
 )
 
 // DefaultPresets are the system prompts available out of the box, written in
@@ -1246,6 +1286,10 @@ func DefaultPresets(lang string) []PromptPreset {
 		{ID: PresetSmallLocal, Name: "Small local models", Prompt: PromptBody(PresetSmallLocal, lang), Built: true},
 		{ID: PresetAssistant, Name: "Neutral assistant", Prompt: PromptBody(PresetAssistant, lang), Built: true},
 		{ID: PresetCoding, Name: "Code & engineering", Prompt: PromptBody(PresetCoding, lang), Built: true},
+		// The project prompt sits beside the conversational coding one rather than
+		// replacing it: one is for asking about code, the other for working in a folder,
+		// and a user who edits one should not have to retype it in the other.
+		{ID: PresetCodingAgent, Name: "Coding agent (project)", Prompt: PromptBody(PresetCodingAgent, lang), Built: true},
 		{ID: PresetBlank, Name: "Empty", Prompt: PromptBody(PresetBlank, lang), Built: true},
 	}
 }

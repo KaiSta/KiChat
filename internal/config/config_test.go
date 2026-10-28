@@ -371,7 +371,7 @@ var shippedLanguages = []string{LangEnglish, LangGerman, LangChinese}
 // fell back to English would look like a pass to every other test here, so the
 // bodies are compared against each other rather than merely checked for content.
 func TestEveryPresetExistsInEveryLanguage(t *testing.T) {
-	for _, id := range []string{PresetResearch, PresetSmallLocal, PresetAssistant, PresetCoding} {
+	for _, id := range []string{PresetResearch, PresetSmallLocal, PresetAssistant, PresetCoding, PresetCodingAgent} {
 		bodies := map[string]string{}
 		for _, lang := range shippedLanguages {
 			body := PromptBody(id, lang)
@@ -1081,6 +1081,42 @@ func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 // install of its own, so probing an address for a feature nobody has asked for
 // would report a failure before the user has done anything — the same reason the
 // metered chat backends ship disabled.
+// TestAutoApproveShipsOffAndStaysOffWhenAbsent pins the two switches that turn the
+// confirmation gate off. Both are off in Default() for the reason the hosted backends are:
+// an installation whose first surprise is a file it did not expect is the wrong first
+// impression. And a blob written before the group existed has to arrive at exactly that —
+// an absent boolean read as "yes" would be a permission nobody granted.
+func TestAutoApproveShipsOffAndStaysOffWhenAbsent(t *testing.T) {
+	if s := Default(); s.AutoApprove.Files || s.AutoApprove.Commands {
+		t.Fatalf("auto-approval is on in Default(): %+v", s.AutoApprove)
+	}
+
+	// The decode is where an absent field could have arrived as something else.
+	older := Default()
+	if err := json.Unmarshal([]byte(`{"language":"en","toolIterations":6}`), &older); err != nil {
+		t.Fatalf("unmarshal an older blob: %v", err)
+	}
+	if older.AutoApprove.Files || older.AutoApprove.Commands {
+		t.Errorf("an older blob arrived with a permission nobody gave: %+v", older.AutoApprove)
+	}
+
+	// And a yes the user gave once has to survive a save and a restart, because that is what
+	// a standing answer means. The other half stays off: the two are separate questions.
+	stored := Default()
+	stored.AutoApprove = AutoApproveSettings{Files: true}
+	blob, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	again := Default()
+	if err := json.Unmarshal(blob, &again); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !again.AutoApprove.Files || again.AutoApprove.Commands {
+		t.Errorf("the stored answer came back as %+v, want files allowed only", again.AutoApprove)
+	}
+}
+
 func TestDefaultLeavesImageGenerationOff(t *testing.T) {
 	s := Default()
 	if s.Images.Enabled {
