@@ -5,12 +5,22 @@ import { GeneralTab } from './GeneralTab'
 import { BackendsTab } from './BackendsTab'
 import { ImagesTab } from './ImagesTab'
 import { PromptTab } from './PromptTab'
+import { CodingTab } from './CodingTab'
 import { ResearchTab } from './ResearchTab'
 import { PayloadTab } from './PayloadTab'
 import { ContextTab } from './ContextTab'
 import { DataTab } from './DataTab'
 
-type Tab = 'general' | 'backends' | 'images' | 'prompt' | 'research' | 'context' | 'payload' | 'data'
+type Tab =
+  | 'general'
+  | 'backends'
+  | 'images'
+  | 'prompt'
+  | 'coding'
+  | 'research'
+  | 'context'
+  | 'payload'
+  | 'data'
 
 export function Settings() {
   const t = useStore((s) => s.t)
@@ -76,6 +86,9 @@ export function Settings() {
     // themselves — but a tab of its own, because the setup does not fit beside one.
     { id: 'images', label: t('settings.images') },
     { id: 'prompt', label: t('settings.prompt') },
+    // Beside the prompts rather than with the general settings: this is what the coding
+    // mode's tools may do unasked, which is the other half of how a project chat behaves.
+    { id: 'coding', label: t('settings.coding') },
     { id: 'research', label: t('settings.research') },
     { id: 'context', label: t('settings.compaction') },
     // Its own tab rather than a section of Compaction: a fold rewrites a history the
@@ -128,6 +141,7 @@ export function Settings() {
           {tab === 'backends' && <BackendsTab draft={draft} patch={patch} onApply={save} />}
           {tab === 'images' && <ImagesTab draft={draft} patch={patch} onApply={save} />}
           {tab === 'prompt' && <PromptTab draft={draft} patch={patch} />}
+          {tab === 'coding' && <CodingTab draft={draft} patch={patch} />}
           {tab === 'research' && <ResearchTab draft={draft} patch={patch} />}
           {tab === 'context' && <ContextTab draft={draft} patch={patch} />}
           {tab === 'payload' && <PayloadTab draft={draft} patch={patch} />}

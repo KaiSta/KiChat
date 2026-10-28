@@ -1,0 +1,264 @@
+import { useState } from 'react'
+import { folderName } from '../lib/api'
+import { useStore } from '../store'
+import type { ApprovalChange, ApprovalCommand, ApprovalDecision } from '../lib/api'
+
+/**
+ * The question a project tool asks, and the buttons that answer it.
+ *
+ * It is a blocking question, not a notification: the turn that asked is suspended in Go until
+ * `ResolveToolApproval` answers, so nothing the model does can pass this card. That is why it
+ * renders at the composer rather than inside the transcript — the answer is the next thing
+ * this chat needs, and the transcript is where it will end up recorded anyway (the tool call
+ * it belongs to is already there, in the `pending` state).
+ *
+ * There are two kinds of question here, and they are answered differently because they *are*
+ * different. A change to a file is shown as its two sides, which is the only form in which
+ * "replace the string in `internal/store/store.go`" can be agreed to. A command cannot be
+ * previewed at all — `rm -rf build` is its own description — so what is shown is everything a
+ * person needs to judge it: the exact line, the folder it runs in, which shell interprets it,
+ * and how long it may take.
+ *
+ * The blanket answer ("always in this chat") is offered beside the single one because a
+ * coding turn is usually a dozen of these, and a dialog nobody reads is not a confirmation
+ * either. It is scoped and worded so that what it grants — every later change *and command*
+ * in this folder, until the chat is closed — is visible at the moment it is granted.
+ *
+ * The third choice is the one that outlives the chat: *stop asking about file changes* (or
+ * about commands) allows this change and turns the matching switch in Settings on. It is a
+ * link rather than a fourth button because it is a different kind of answer — a setting — and
+ * because a permission given by pressing a friendly-looking button is exactly the permission
+ * nobody remembers granting. It names the switch it turns on, says it survives a restart, and
+ * says where to undo it.
+ */
+export function Confirmation() {
+  const t = useStore((s) => s.t)
+  const resolve = useStore((s) => s.resolveApproval)
+  // One card per chat, read by the chat that is open: a question asked in a chat the user
+  // clicked away from is still waiting when they come back, because the entry is keyed by
+  // chat and only its *rendering* follows the view.
+  const approval = useStore((s) => (s.activeChatId ? s.approvals[s.activeChatId] : undefined))
+  const stopAsking = useStore((s) => s.stopAsking)
+  const [busy, setBusy] = useState<ApprovalDecision | null>(null)
+  const [granting, setGranting] = useState(false)
+
+  if (!approval) return null
+
+  const answer = async (decision: ApprovalDecision) => {
+    setBusy(decision)
+    try {
+      await resolve(approval.chatId, approval.approvalId, decision)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // The setting is saved first and the question answered second, inside the store: a failed
+  // save therefore leaves this card where it is, rather than closing a question nobody has
+  // actually decided.
+  const never = async () => {
+    setGranting(true)
+    try {
+      await stopAsking(approval.chatId, approval.approvalId, approval.kind)
+    } finally {
+      setGranting(false)
+    }
+  }
+
+  const disabled = busy !== null || granting
+
+  return (
+    <div
+      className="card mb-2 px-3 py-2"
+      role="group"
+      aria-label={t('confirm.title')}
+      style={{ borderColor: 'var(--accent)' }}
+    >
+      {approval.kind === 'command' ? (
+        <CommandQuestion command={approval.command} />
+      ) : (
+        <ChangeQuestion change={approval.change} />
+      )}
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          disabled={disabled}
+          onClick={() => void answer('once')}
+        >
+          {t('change.once')}
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm"
+          title={t('change.alwaysHint')}
+          disabled={disabled}
+          onClick={() => void answer('always')}
+        >
+          {t('change.always')}
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm btn-danger"
+          disabled={disabled}
+          onClick={() => void answer('deny')}
+        >
+          {t('change.decline')}
+        </button>
+        <span className="faint text-[11px]">{t('change.declineHint')}</span>
+      </div>
+
+      {/* The setting, offered where the question is. A link rather than a button: it is not
+          another answer to *this* question, it is the switch that makes there not be a next
+          one — and it says so in the tooltip rather than in a quieter colour alone. */}
+      <div className="mt-1">
+        <button
+          type="button"
+          className="text-[11px] underline decoration-dotted"
+          style={{ color: 'var(--text-dim)' }}
+          title={t('confirm.stopAskingHint')}
+          disabled={disabled}
+          onClick={() => void never()}
+        >
+          {approval.kind === 'command'
+            ? t('confirm.stopAskingCommands')
+            : t('confirm.stopAskingFiles')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** One file's change: what is there now, and what would be there instead. */
+function ChangeQuestion({ change }: { change: ApprovalChange }) {
+  const t = useStore((s) => s.t)
+  // The counts come from the change, not from the preview: a truncated preview is a shorter
+  // thing to read, and counting its rows would understate a change by exactly the amount the
+  // reader is being told to be careful about.
+  const before = lines(change.before)
+  const after = lines(change.after)
+
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2 text-[12px]">
+        <span className="badge badge-accent">
+          {change.operation === 'create'
+            ? t('change.create')
+            : change.operation === 'overwrite'
+              ? t('change.overwrite')
+              : t('change.edit')}
+        </span>
+        <span className="mono truncate" style={{ color: 'var(--text)' }} title={change.path}>
+          {change.path}
+        </span>
+        {/* Line counts, not a diff stat: for an edit they are the two snippets, for a rewrite
+            of a whole file they are the file before and after, and either way the number is
+            what tells a reader whether what follows is the change they meant. */}
+        <span className="faint mono">
+          {change.removed > 0 && `−${change.removed}`}
+          {change.removed > 0 && change.added > 0 && ' '}
+          {change.added > 0 && `+${change.added}`}
+        </span>
+        <span className="faint ml-auto">{t('change.waiting')}</span>
+      </div>
+
+      {change.createsDirs.length > 0 && (
+        <div className="mt-1 text-[11px]" style={{ color: 'var(--warn)' }}>
+          {t('change.createsDirs', { folders: change.createsDirs.join(', ') })}
+        </div>
+      )}
+
+      <div
+        className="mt-2 max-h-64 overflow-auto rounded p-2"
+        style={{ background: 'var(--code-bg)', border: '1px solid var(--border)' }}
+      >
+        {before.length > 0 && (
+          <Side label={t('change.before')} sign="−" tone="var(--danger)" lines={before} />
+        )}
+        {after.length > 0 && (
+          <Side label={t('change.after')} sign="+" tone="var(--ok)" lines={after} />
+        )}
+        {before.length === 0 && after.length === 0 && (
+          <div className="faint text-[11px]">{t('change.empty')}</div>
+        )}
+      </div>
+
+      {change.truncated && <div className="faint mt-1 text-[11px]">{t('change.truncated')}</div>}
+    </>
+  )
+}
+
+/** One command: the line, the folder, the shell and the limit. */
+function CommandQuestion({ command }: { command: ApprovalCommand }) {
+  const t = useStore((s) => s.t)
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2 text-[12px]">
+        <span className="badge badge-accent">{t('command.title')}</span>
+        {/* The shell is on the card because it is part of what is being approved: the same
+            line means different things to cmd, PowerShell and sh, and a person who cannot
+            see which one interprets it cannot judge the line. */}
+        <span className="mono faint">{command.shell}</span>
+        <span className="faint ml-auto">{t('change.waiting')}</span>
+      </div>
+
+      <div
+        className="mono mt-2 max-h-40 overflow-auto rounded p-2 text-[12px] whitespace-pre-wrap"
+        style={{ background: 'var(--code-bg)', border: '1px solid var(--border)' }}
+      >
+        {command.line}
+      </div>
+
+      <div className="faint mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+        <span title={command.dir}>{t('command.dir', { folder: folderName(command.dir) })}</span>
+        <span>·</span>
+        <span>{t('command.timeout', { seconds: command.timeoutSec })}</span>
+      </div>
+    </>
+  )
+}
+
+/** One side of the change: every line of it, with a gutter that says which side. */
+function Side({
+  label,
+  sign,
+  tone,
+  lines,
+}: {
+  label: string
+  sign: string
+  tone: string
+  lines: string[]
+}) {
+  return (
+    <>
+      <div className="faint mb-1 text-[10px] uppercase tracking-wide">{label}</div>
+      <div className="mono text-[11px] leading-[1.45]">
+        {lines.map((line, index) => (
+          <div key={index} className="flex whitespace-pre" style={{ color: tone }}>
+            <span className="w-4 shrink-0 select-none" style={{ opacity: 0.7 }}>
+              {sign}
+            </span>
+            {/* The line itself, never re-coloured: a red line is text that goes, and the
+                text still has to read as the code it is. */}
+            <span style={{ color: 'var(--text)' }}>{line}</span>
+          </div>
+        ))}
+      </div>
+    </>
+  )
+}
+
+/**
+ * The lines of one side, with the trailing newline of a file ignored.
+ *
+ * `"a\nb\n"` is two lines, not three: a whole-file write loses its final newline in most
+ * editors' heads, and a trailing empty row would read as a blank line being added to a file
+ * that ends exactly the way it did before.
+ */
+function lines(text: string): string[] {
+  if (text === '') return []
+  const body = text.endsWith('\n') ? text.slice(0, -1) : text
+  return body.split('\n')
+}

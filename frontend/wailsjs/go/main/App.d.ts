@@ -16,6 +16,8 @@ export function AddAttachment(arg1:main.AttachmentInput):Promise<store.Attachmen
 
 export function CheckLlamaRuntimeUpdate():Promise<main.RuntimeUpdate>;
 
+export function ClearChat(arg1:string):Promise<void>;
+
 export function ClearHiddenModels(arg1:string):Promise<main.ModelCheckStatus>;
 
 export function ClearImageCache():Promise<main.ImageCacheClear>;
@@ -23,6 +25,8 @@ export function ClearImageCache():Promise<main.ImageCacheClear>;
 export function CompactNow(arg1:main.CompactRequest):Promise<chat.CompactResult>;
 
 export function CreateChat(arg1:string,arg2:string):Promise<store.Chat>;
+
+export function CreateProject(arg1:string):Promise<store.Chat>;
 
 export function DeleteChat(arg1:string):Promise<void>;
 
@@ -100,6 +104,8 @@ export function PickManagedModelFile(arg1:string):Promise<string>;
 
 export function PickModelFolder(arg1:string):Promise<string>;
 
+export function PickProjectFolder(arg1:string):Promise<string>;
+
 export function PickSaveFolder():Promise<string>;
 
 export function PickUpscalerBinary(arg1:string):Promise<string>;
@@ -123,6 +129,8 @@ export function RemoveLlamaBuild(arg1:string):Promise<void>;
 export function RemoveOldLlamaBuilds():Promise<number>;
 
 export function RenameChat(arg1:string,arg2:string):Promise<void>;
+
+export function ResolveToolApproval(arg1:string,arg2:string):Promise<boolean>;
 
 export function SaveAttachmentAs(arg1:string):Promise<string>;
 

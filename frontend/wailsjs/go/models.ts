@@ -127,6 +127,20 @@ export namespace chat {
 
 export namespace config {
 	
+	export class AutoApproveSettings {
+	    files: boolean;
+	    commands: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new AutoApproveSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.files = source["files"];
+	        this.commands = source["commands"];
+	    }
+	}
 	export class CompactSettings {
 	    enabled: boolean;
 	    midTurnCheck: boolean;
@@ -493,6 +507,7 @@ export namespace config {
 	    hiddenModels?: string[];
 	    images: ImageSettings;
 	    imageProfiles?: ImageProfile[];
+	    autoApprove: AutoApproveSettings;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -520,6 +535,7 @@ export namespace config {
 	        this.hiddenModels = source["hiddenModels"];
 	        this.images = this.convertValues(source["images"], ImageSettings);
 	        this.imageProfiles = this.convertValues(source["imageProfiles"], ImageProfile);
+	        this.autoApprove = this.convertValues(source["autoApprove"], AutoApproveSettings);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1738,6 +1754,8 @@ export namespace store {
 	    model: string;
 	    systemPrompt: string;
 	    systemPromptPreset: string;
+	    mode: string;
+	    workspace: string;
 	    temperature: number;
 	    topP: number;
 	    numCtx: number;
@@ -1761,6 +1779,8 @@ export namespace store {
 	        this.model = source["model"];
 	        this.systemPrompt = source["systemPrompt"];
 	        this.systemPromptPreset = source["systemPromptPreset"];
+	        this.mode = source["mode"];
+	        this.workspace = source["workspace"];
 	        this.temperature = source["temperature"];
 	        this.topP = source["topP"];
 	        this.numCtx = source["numCtx"];

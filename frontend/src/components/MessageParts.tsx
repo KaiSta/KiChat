@@ -106,19 +106,32 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
   // what turns a tool call that means "minutes of GPU" into something the user can watch and
   // stop — the two things a tool card could not do for a picture until now.
   const draw = useStore((s) => s.draws[call.messageId])
+  // A command's output while it runs. The store drops it when the call's record arrives, so
+  // its presence means "this is happening now" — a build that prints nothing for two minutes
+  // is otherwise indistinguishable from a card that stopped working.
+  const liveOutput = useStore((s) => s.toolOutput[call.id])
   const [stopping, setStopping] = useState(false)
 
+  // A declined change is not a fault, so it is not shown as one: the app worked, the
+  // person decided, and a red "Error" at the moment they took control would read as the
+  // app breaking. It is toned like a cancellation because it is the same kind of fact —
+  // the call was not executed.
   const tone =
     call.status === 'ok'
       ? 'badge-ok'
       : call.status === 'error'
         ? 'badge-danger'
-        : call.status === 'cancelled'
+        : call.status === 'cancelled' || call.status === 'denied'
           ? 'badge-warn'
           : 'badge-accent'
 
   const parsedArgs = prettyJSON(call.argsJson)
   const result = parseResult(call.resultJson)
+  // The line a command ran — or, when the app refused it, the line the user has to run
+  // themselves. Offered on every terminal call rather than only on a refusal: a command worth
+  // refusing is a command worth copying, and a button that appears only once something broke
+  // is one nobody knows is there.
+  const command = call.name === 'run_command' ? commandArgument(call.argsJson) : ''
 
   return (
     <div
@@ -137,7 +150,9 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
               ? t('tool.error')
               : call.status === 'cancelled'
                 ? t('tool.cancelled')
-                : t('tool.running')}
+                : call.status === 'denied'
+                  ? t('tool.denied')
+                  : t('tool.running')}
         </span>
         <strong style={{ color: 'var(--text)' }}>
           {tDynamic(`tool.${call.name}`) !== `tool.${call.name}`
@@ -171,6 +186,38 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
         <span className="ml-auto faint">{formatDuration(call.durationMs)}</span>
       </button>
 
+      {/* Why a call failed, and the line to take away, without opening anything: an error is
+          the one part of a tool's detail a person has to read to act on it. A refusal that sat
+          behind the expand toggle — as every tool error did — is a sentence nobody reads, and
+          this one is the app telling them which command to run themselves. */}
+      {(call.error || command) && (
+        <div className="mt-1 flex items-start gap-2 text-[11px]">
+          {call.error && (
+            <div className="min-w-0 flex-1" style={{ color: 'var(--danger)' }}>
+              {errText(call.error)}
+            </div>
+          )}
+          {command && <CopyLine text={command} label={t('tool.copyCommand')} />}
+        </div>
+      )}
+
+      {liveOutput && (
+        <div className="mt-2">
+          <div className="faint mb-1">{t('tool.liveOutput')}</div>
+          {/* Fixed height, scrolled to the newest line: the text is a bounded tail of the
+              output, and a card that grew with it would push the reply off the screen for
+              the whole length of a build. */}
+          <pre
+            className="mono max-h-40 overflow-auto whitespace-pre-wrap rounded p-2 text-[11px]"
+            style={{ background: 'var(--code-bg)', border: '1px solid var(--border)' }}
+            ref={(el) => {
+              if (el) el.scrollTop = el.scrollHeight
+            }}
+          >
+            {liveOutput}
+          </pre>
+        </div>
+      )}
       {draw && (
         <LiveDraw
           preview={draw.preview}
@@ -216,12 +263,6 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
               {parsedArgs}
             </pre>
           </div>
-          {call.error && (
-            <div>
-              <div className="faint mb-1">{t('tool.error')}</div>
-              <div style={{ color: 'var(--danger)' }}>{errText(call.error)}</div>
-            </div>
-          )}
           <div>
             <div className="faint mb-1">{t('tool.result')}</div>
             <pre
@@ -234,6 +275,48 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
         </div>
       )}
     </div>
+  )
+}
+
+/** The command a `run_command` call carries, empty when its arguments are not readable.
+ *
+ * A model can send arguments that are not JSON — that is what `decodeLoose` on the Go side
+ * exists for — so this is a copy convenience and never a reason to render nothing else.
+ */
+function commandArgument(argsJSON: string): string {
+  try {
+    const parsed = JSON.parse(argsJSON) as { command?: unknown }
+    return typeof parsed.command === 'string' ? parsed.command.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+/** One line, with a button that puts it on the clipboard.
+ *
+ * `text` is the line itself, not a rendering of it: what lands in the clipboard has to be
+ * runnable when it is pasted, so it is the unedited string the tool was given.
+ */
+function CopyLine({ text, label }: { text: string; label: string }) {
+  const t = useStore((s) => s.t)
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      type="button"
+      className="btn btn-sm shrink-0"
+      title={text}
+      onClick={() => {
+        navigator.clipboard.writeText(text).then(
+          () => {
+            setCopied(true)
+            window.setTimeout(() => setCopied(false), 1500)
+          },
+          () => undefined,
+        )
+      }}
+    >
+      {copied ? t('chat.copied') : `⧉ ${label}`}
+    </button>
   )
 }
 
