@@ -537,7 +537,8 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 		// demoted rather than replayed (see toolhistory.go). Deliberately not the
 		// offered list: a tool that is momentarily unavailable — search with both
 		// providers down, the index disabled — is still a tool the app can answer.
-		KnownTools: engineKnownTools(e),
+		// The project tools are the exception: engineKnownTools explains why.
+		KnownTools: engineKnownTools(e, chat),
 
 		Limit:         limit,
 		LimitSource:   limitSource,
@@ -608,14 +609,46 @@ func (e *Engine) warn(chatID, warning string) {
 	e.emit(events.Warning, map[string]any{"chatId": chatID, "warning": warning})
 }
 
-// engineKnownTools is every tool name this engine can execute, or nil when it has no
-// tool service at all — which is what leaves a history untouched in the preview
+// engineKnownTools is every tool name this engine can execute for this chat, or nil when
+// it has no tool service at all — which is what leaves a history untouched in the preview
 // engines a test builds (see AssemblyInput.KnownTools).
-func engineKnownTools(e *Engine) []string {
+//
+// It stays deliberately wider than the offered set for the reason buildAssembly gives:
+// a tool that is momentarily unavailable is still a tool the app can answer, so search
+// with both providers down is not demoted from a history. The project tools are the one
+// exception, and they are a different kind of exclusion: a chat with no folder cannot be
+// answered at all, whatever the moment, because there is no root to read. Leaving them in
+// would mean a research chat that happened to hallucinate `read_file` had it *executed*
+// and answered with a real file, which is the one failure this filter exists to prevent.
+//
+// Known and offered are therefore filtered by the same predicate (projectTool), so the
+// two can never drift apart.
+func engineKnownTools(e *Engine, chat *store.Chat) []string {
 	if e == nil || e.Tools == nil {
 		return nil
 	}
-	return definitionNames(e.Tools.Definitions())
+	names := definitionNames(e.Tools.Definitions())
+	if chat != nil && chat.IsProject() {
+		return names
+	}
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if !projectTool(name) {
+			kept = append(kept, name)
+		}
+	}
+	return kept
+}
+
+// projectTool reports whether a tool reads the project folder. It is the predicate both
+// the advertised set and the known-name set are filtered by.
+func projectTool(name string) bool {
+	for _, project := range tools.ProjectToolNames() {
+		if name == project {
+			return true
+		}
+	}
+	return false
 }
 
 // toolDefinitions decides which tools to advertise for this model and chat.
@@ -645,6 +678,28 @@ func (e *Engine) toolDefinitions(ctx context.Context, chat *store.Chat, model ll
 			// which is what keeps a model from spending a tool round discovering
 			// that image generation is switched off.
 			if e.Tools.Images == nil {
+				continue
+			}
+		default:
+			// The project tools are advertised to a project and to nothing else. A chat
+			// with no folder has no files to name, and the file tools are the one group
+			// whose absence is a boundary rather than a configuration: there is no path
+			// they could resolve against. `IsProject` asks both halves, so a chat whose
+			// folder was deleted keeps the mode and loses the tools rather than reading
+			// from somewhere else (see workspaceFor).
+			if !projectTool(t.Name) {
+				break
+			}
+			if chat == nil || !chat.IsProject() {
+				continue
+			}
+			// A write tool needs one more thing than a folder: somebody to ask. A build
+			// whose service has no confirmation gate cannot let a change through — the
+			// execution refuses it either way (fail closed, see tools.approve) — so the
+			// tool is withheld rather than offered as a call that can only be declined.
+			// The difference is a round the model spends discovering an answer the app
+			// already knew.
+			if tools.NeedsApproval(t.Name) && e.Tools.Confirm == nil {
 				continue
 			}
 		}

@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -259,7 +260,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// model wrote in prose and the model can correct itself on the next round. The
 		// reasoning is in toolhistory.go. A nil name list means there is no tool service
 		// at all: no declared set to check against, so the executor's own error stands.
-		if known := engineKnownTools(e); len(calls) > 0 && known != nil {
+		if known := engineKnownTools(e, &in.Chat); len(calls) > 0 && known != nil {
 			var notes, dropped []string
 			calls, notes, dropped = resolveToolCalls(calls, known, in.UseNative)
 			for _, note := range notes {
@@ -452,15 +453,25 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 		e.emit(events.Attachments, map[string]any{"chatId": chatID})
 	}
 
-	if execErr != nil {
+	switch {
+	case execErr == nil:
+		record.Status = store.ToolOK
+	case errors.Is(execErr, tools.ErrDenied):
+		// The user said no. The call is recorded as a decision rather than a fault, and
+		// the sentence the model reads is written to stop it asking again — a declined
+		// change that is retried every round is a loop the user has to escape by
+		// stopping the turn, which is a worse outcome than the change not being made.
+		record.Status = store.ToolDenied
+		output = fmt.Sprintf("Nicht ausgeführt: %s Die Änderung wurde nicht vorgenommen; frage nicht "+
+			"erneut danach. Wenn sie nötig ist, beschreibe, was du ändern wolltest und warum, und "+
+			"überlasse dem Nutzer die Entscheidung.", uimsg.Sentence(execErr))
+	default:
 		record.Status = store.ToolError
 		// The card translates the code; the model gets the sentence the tool wrote for
 		// it, because a payload is not something it can correct a call from. This is the
 		// one place a message has two audiences, and uimsg carries both.
 		record.Error = execErr.Error()
 		output = fmt.Sprintf("Tool error: %s", uimsg.Sentence(execErr))
-	} else {
-		record.Status = store.ToolOK
 	}
 	record.ResultJSON = resultJSON(output)
 	e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
@@ -619,10 +630,28 @@ func (e *Engine) executeTool(ctx context.Context, chatID, messageID string, call
 	if e.Tools == nil {
 		return "", uimsg.Detailf("chat.noTools", "no tools are available")
 	}
-	// The turn's backend and model travel with the call beside the message id: a tool that
-	// needs the model that asked for it — the captioner is the first — must not read them
-	// from a field that two concurrent chats would share.
-	ctx = tools.WithTurn(tools.WithCallingMessage(ctx, messageID), turn)
+	// The turn's backend and model travel with the call beside the message id, and so does
+	// the call's own id: a tool that needs them must not read them from a field two
+	// concurrent chats would share. The confirmation is the second reader — its answer comes
+	// back naming the call whose buttons were pressed, which is how several waiting calls
+	// stay told apart.
+	ctx = tools.WithToolCall(tools.WithTurn(tools.WithCallingMessage(ctx, messageID), turn), call.ID)
+	// A running command is the one tool whose result is minutes away and whose progress is
+	// worth watching, so its output is reported as it arrives rather than only when it is
+	// done. Told here, per call, rather than set on the service: it names the call the
+	// window should draw the text on, and two chats can run commands at once.
+	//
+	// Only the terminal streams. A read answers once, and a reporter on every call would be
+	// a channel nothing writes to.
+	if call.Name == tools.ToolRunCommand {
+		ctx = tools.WithCommandOutput(ctx, func(text string) {
+			e.emit(events.ToolOutput, map[string]any{
+				"chatId":     chatID,
+				"toolCallId": call.ID,
+				"text":       text,
+			})
+		})
+	}
 	return e.Tools.Execute(ctx, chatID, call.Name, call.Arguments)
 }
 

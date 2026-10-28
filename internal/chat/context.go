@@ -9,11 +9,17 @@ import (
 
 	"kichat/internal/llm"
 	"kichat/internal/store"
+	"kichat/internal/workspace"
 )
 
 // Segment kinds, used by the Context Inspector to label each slice.
 const (
-	SegmentSystem      = "system"
+	SegmentSystem = "system"
+	// SegmentProject is a project's own guidance file. It is its own kind rather than
+	// part of the system prompt because it is not something the app says — it is text
+	// out of the user's working tree, it changes between turns, and the meter should let
+	// somebody see what it is costing them.
+	SegmentProject     = "project"
 	SegmentMemory      = "memory"
 	SegmentAttachments = "attachments"
 	SegmentHistory     = "history"
@@ -232,6 +238,23 @@ func Assemble(in AssemblyInput) Assembly {
 		Tokens: budget.System,
 		Detail: fmt.Sprintf("%d Zeichen, Variablen aufgelöst", len(renderedSystem)),
 	})
+
+	// A project's own instructions, read from its folder on every turn. They travel as
+	// markup rather than as prose because the rule for using them lives in the system
+	// prompt, which exists once per interface language, while this payload is the same
+	// in all of them. The read is a stat in the common case: internal/workspace memoises
+	// on the file's size and modification time.
+	if guidance, detail, ok := projectGuidance(in.Chat); ok {
+		systemParts = append(systemParts, guidance)
+		tokens := llm.EstimateTokens(guidance)
+		budget.Memory += tokens
+		budget.Segments = append(budget.Segments, ContextSegment{
+			Kind:   SegmentProject,
+			Label:  workspace.AgentsFileName,
+			Tokens: tokens,
+			Detail: detail,
+		})
+	}
 
 	// A notice about indexed documents keeps retrieval discoverable without
 	// paying for their full text up front.

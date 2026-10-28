@@ -69,6 +69,16 @@ type Service struct {
 	// the slot and the service asks for it. Nil means nothing is coordinating, which is what
 	// a service built without an app (the tests) gets. The release is called once.
 	TryDraw func() (release func(), ok bool)
+	// Confirm asks the user before a tool changes the project folder, and returns nil
+	// when the change may be made. It is a callback for the same reason Draws is one:
+	// this package must not know what Wails is, and the app is what owns the person
+	// being asked.
+	//
+	// Nil means nobody can be asked, and that fails closed — the change is refused,
+	// and the engine does not even advertise the tools that would need it (see
+	// chat.toolDefinitions). It is not a state this app reaches: a service built
+	// without it is a service a test built, and a read-only chat never has one.
+	Confirm func(ctx context.Context, req ApprovalRequest) error
 	// Settings reads the current configuration. It is a function rather than a
 	// copy so a settings save takes effect on the next tool call, the same way the
 	// engine's own Settings does — a Service outlives one settings blob.
@@ -99,8 +109,13 @@ func New(st *store.Store, chain *research.Chain, scraper *research.Scraper) *Ser
 func newID() string { return uuid.NewString() }
 
 // Definitions returns the tool schemas advertised to the model.
+//
+// This is every tool the service can execute, not every tool a given request offers:
+// the engine filters this list per chat (see chat.toolDefinitions), which is what keeps
+// a research chat from being shown the project tools and a coding chat from spending a
+// round on a web search it has no provider for.
 func (s *Service) Definitions() []llm.ToolDefinition {
-	return []llm.ToolDefinition{
+	return append([]llm.ToolDefinition{
 		{
 			Name: ToolSearchWeb,
 			Description: "Durchsucht das Web über die konfigurierte Suchmaschine und liefert Titel, " +
@@ -256,7 +271,7 @@ func (s *Service) Definitions() []llm.ToolDefinition {
 				"required": []string{"prompt"},
 			},
 		},
-	}
+	}, projectDefinitions()...)
 }
 
 // Execute runs one tool call and returns a Markdown result for the model.
@@ -272,6 +287,18 @@ func (s *Service) Execute(ctx context.Context, chatID, name, argsJSON string) (s
 		return s.readPages(chatID, argsJSON)
 	case ToolGenerateImage:
 		return s.generateImage(ctx, chatID, argsJSON)
+	case ToolReadFile:
+		return s.readFile(chatID, argsJSON)
+	case ToolListDir:
+		return s.listDir(chatID, argsJSON)
+	case ToolSearchFiles:
+		return s.searchFiles(chatID, argsJSON)
+	case ToolWriteFile:
+		return s.writeFile(ctx, chatID, argsJSON)
+	case ToolEditFile:
+		return s.editFile(ctx, chatID, argsJSON)
+	case ToolRunCommand:
+		return s.runCommand(ctx, chatID, argsJSON)
 	default:
 		return "", uimsg.Detailf("tools.unknownTool",
 			fmt.Sprintf("no tool named %q exists; use one of the tools this request declares", name), name)
