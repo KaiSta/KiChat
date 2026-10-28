@@ -492,6 +492,39 @@ ALTER TABLE tool_calls ADD COLUMN condensed INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE chats ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat';
 ALTER TABLE chats ADD COLUMN workspace TEXT NOT NULL DEFAULT '';
 `,
+	// 12: what a file looked like before this chat changed it.
+	//
+	// It exists for one button: put this file back the way it was before the model touched it.
+	// A change a model made is only safe to accept if it can be taken back — the folder is the
+	// user's, the model is guessing, and "I would rather have the old version" is a thing people
+	// say about their own code — and nothing in the tool call record can answer it: the args
+	// hold what was written, never what was there against it.
+	//
+	// One row per (chat, file) rather than one per change. The question a person asks is "undo
+	// what this chat did to this file", not "undo round seven but keep round eight", and the
+	// before_text is therefore the state before the chat first touched the file. after_sha is
+	// the latest content the app wrote, which is how a revert notices that somebody edited the
+	// file in between and refuses instead of overwriting that edit.
+	//
+	// Both texts are in the database rather than in a folder beside it, because this database is
+	// encrypted at rest (ENCRYPTION.md) and a copy of somebody's source in a plain directory
+	// next to it would be the one thing the encryption did not cover. Appended here for the
+	// reason migrations 4–11 are: the runner resumes at the version a database is already at, so
+	// an existing installation runs this entry and nothing earlier.
+	`
+CREATE TABLE IF NOT EXISTS file_snapshots (
+  chat_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  before_text TEXT NOT NULL DEFAULT '',
+  existed INTEGER NOT NULL DEFAULT 0,
+  after_sha TEXT NOT NULL DEFAULT '',
+  revisions INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_file_snapshots_chat ON file_snapshots(chat_id, updated_at);
+`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

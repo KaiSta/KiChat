@@ -334,6 +334,31 @@ type ToolCallRecord struct {
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
+// FileSnapshot is what one file looked like before this chat first changed it, and what the
+// app last wrote to it.
+//
+// It is the undo record for a coding project. The tool call's arguments say what was written;
+// only this says what was there instead, which is the half a revert needs.
+//
+// BeforeText is the file's whole contents as they stood, and Existed says whether the file was
+// there at all — a created file is restored by removing it, which BeforeText alone cannot
+// express (an empty file and no file look the same in a string). AfterSHA is the digest of the
+// last text the app wrote: a revert compares it with the file on disk so that an edit made in
+// the user's own editor in the meantime is a refusal rather than a casualty.
+//
+// The text is not marshalled to the window: the panel shows a diff of it, built in Go, and a
+// chat with fifty changed files would otherwise carry every one of them through the bridge.
+type FileSnapshot struct {
+	ChatID     string    `json:"chatId"`
+	Path       string    `json:"path"`
+	BeforeText string    `json:"-"`
+	Existed    bool      `json:"existed"`
+	AfterSHA   string    `json:"afterSha"`
+	Revisions  int       `json:"revisions"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
 // SearchCacheEntry caches a search provider response.
 type SearchCacheEntry struct {
 	QueryHash    string    `json:"queryHash"`

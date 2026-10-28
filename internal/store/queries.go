@@ -85,6 +85,11 @@ func (s *Store) DeleteChat(id string) error {
 	if _, err := tx.Exec(`DELETE FROM documents WHERE chat_id = ?`, id); err != nil {
 		return err
 	}
+	// file_snapshots holds no foreign key to chats either, so the undo records of a deleted
+	// chat are deleted by hand here for the same reason documents are.
+	if _, err := tx.Exec(`DELETE FROM file_snapshots WHERE chat_id = ?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM chats WHERE id=?`, id); err != nil {
 		return err
 	}
@@ -136,6 +141,10 @@ func (s *Store) ClearChat(chatID string) error {
 		`DELETE FROM documents WHERE chat_id = ?`,
 		`DELETE FROM attachments WHERE chat_id = ?`,
 		`DELETE FROM tool_calls WHERE chat_id = ?`,
+		// The undo records go with the history they describe: a chat that was emptied can no
+		// longer say which change the record belongs to, and a revert offered from it would be
+		// a button whose label nobody could check.
+		`DELETE FROM file_snapshots WHERE chat_id = ?`,
 		`DELETE FROM compactions WHERE chat_id = ?`,
 		`DELETE FROM messages WHERE chat_id = ?`,
 	} {
@@ -1060,6 +1069,90 @@ FROM tool_calls WHERE chat_id=? ORDER BY created_at`, chatID)
 		out = append(out, tc)
 	}
 	return out, rows.Err()
+}
+
+// --- file snapshots --------------------------------------------------------
+
+// PutFileSnapshot records one change to one file, keeping the first pre-image.
+//
+// The insert carries the file as this chat found it, and a later change to the same file only
+// replaces what the app last wrote and counts itself. That is what makes "put this file back"
+// one button however many rounds the model took, and it keeps the row small: a turn that edits
+// the same file ten times stores one copy of the text it replaced, not ten.
+func (s *Store) PutFileSnapshot(snap FileSnapshot) error {
+	if snap.CreatedAt.IsZero() {
+		snap.CreatedAt = time.Now()
+	}
+	if snap.UpdatedAt.IsZero() {
+		snap.UpdatedAt = snap.CreatedAt
+	}
+	if snap.Revisions < 1 {
+		snap.Revisions = 1
+	}
+	_, err := s.db.Exec(`
+INSERT INTO file_snapshots (chat_id,path,before_text,existed,after_sha,revisions,created_at,updated_at)
+VALUES (?,?,?,?,?,?,?,?)
+ON CONFLICT(chat_id,path) DO UPDATE SET after_sha=excluded.after_sha,
+  revisions=file_snapshots.revisions+1, updated_at=excluded.updated_at`,
+		snap.ChatID, snap.Path, snap.BeforeText, boolToInt(snap.Existed), snap.AfterSHA,
+		snap.Revisions, millis(snap.CreatedAt), millis(snap.UpdatedAt))
+	return err
+}
+
+// GetFileSnapshot loads one file's undo record.
+func (s *Store) GetFileSnapshot(chatID, path string) (FileSnapshot, bool, error) {
+	row := s.db.QueryRow(`SELECT chat_id,path,before_text,existed,after_sha,revisions,
+  created_at,updated_at FROM file_snapshots WHERE chat_id=? AND path=?`, chatID, path)
+	snap, err := scanFileSnapshot(row)
+	if err == sql.ErrNoRows {
+		return FileSnapshot{}, false, nil
+	}
+	if err != nil {
+		return FileSnapshot{}, false, err
+	}
+	return snap, true, nil
+}
+
+// ListFileSnapshots returns a chat's changed files, most recently changed first — the order a
+// panel wants, because the file a turn just wrote is the one the person is looking at.
+func (s *Store) ListFileSnapshots(chatID string) ([]FileSnapshot, error) {
+	rows, err := s.db.Query(`SELECT chat_id,path,before_text,existed,after_sha,revisions,
+  created_at,updated_at FROM file_snapshots WHERE chat_id=? ORDER BY updated_at DESC, path`,
+		chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []FileSnapshot{}
+	for rows.Next() {
+		snap, scanErr := scanFileSnapshot(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, snap)
+	}
+	return out, rows.Err()
+}
+
+// DeleteFileSnapshot forgets one file's undo record, which is what a successful revert does:
+// the file is back to the state the record described, so there is nothing left to restore.
+func (s *Store) DeleteFileSnapshot(chatID, path string) error {
+	_, err := s.db.Exec(`DELETE FROM file_snapshots WHERE chat_id=? AND path=?`, chatID, path)
+	return err
+}
+
+func scanFileSnapshot(row interface{ Scan(...any) error }) (FileSnapshot, error) {
+	var snap FileSnapshot
+	var existed int
+	var created, updated int64
+	if err := row.Scan(&snap.ChatID, &snap.Path, &snap.BeforeText, &existed, &snap.AfterSHA,
+		&snap.Revisions, &created, &updated); err != nil {
+		return FileSnapshot{}, err
+	}
+	snap.Existed = existed != 0
+	snap.CreatedAt = fromMillis(created)
+	snap.UpdatedAt = fromMillis(updated)
+	return snap, nil
 }
 
 // --- caches ----------------------------------------------------------------
