@@ -615,10 +615,11 @@ func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Messag
 // runRound executes every call the model asked for in one round.
 //
 // The pending cards are written first, in the model's order, and then the calls run: the
-// read-only ones together, because they touch nothing and each costs a disk wait, and the ones
-// that need an answer one after another, because each of those is a person reading a diff and
-// two questions at once is a race for the same attention. Finishing is back in call order, so
-// the transcript reads the way the model wrote it however the work overlapped.
+// read-only ones together, because they touch nothing and each costs a disk wait, and then —
+// after the last of them — the ones that need an answer, one after another, because each of
+// those is a person reading a diff and two questions at once is a race for the same attention.
+// Finishing is back in call order, so the transcript reads the way the model wrote it however
+// the work overlapped.
 func (e *Engine) runRound(ctx context.Context, chatID string, row store.Message, calls []llm.ToolCall, budget *toolOutputBudget, turn tools.TurnRef) error {
 	records := make([]store.ToolCallRecord, len(calls))
 	for i, call := range calls {
@@ -640,7 +641,13 @@ func (e *Engine) runRound(ctx context.Context, chatID string, row store.Message,
 			outcomes[index] = e.executeCall(ctx, chatID, row, c, turn)
 		}(i, call)
 	}
-	// The gated calls run here, in order, so their questions are asked one at a time.
+	// The reads are finished before the gated calls start, and that is a correctness rule rather
+	// than a tidiness one: every guarded tool invalidates what the chat remembers about files —
+	// a command forgets all of it, `gofmt -w .` being why — so a read still running beside one
+	// could remember a stamp for a file the command had just rewritten, and the next read of it
+	// in this turn would answer "unchanged". It is also what the model meant: a round that runs
+	// `gofmt -w .` and then reads a file expects the formatted text, not a race.
+	readers.Wait()
 	cancelled := false
 	for i, call := range calls {
 		if !tools.NeedsApproval(call.Name) {
@@ -652,7 +659,6 @@ func (e *Engine) runRound(ctx context.Context, chatID string, row store.Message,
 		}
 		outcomes[i] = e.executeCall(ctx, chatID, row, call, turn)
 	}
-	readers.Wait()
 
 	// Finishing happens in call order whatever finished first, and a call that never ran is
 	// written as cancelled: the assistant message already claims it, and a backend rejects a
