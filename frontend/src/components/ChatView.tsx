@@ -293,7 +293,9 @@ export function ChatView() {
 
   if (chatLoading && !chatState) {
     return <div className="flex flex-1 items-center justify-center faint">{t('common.loading')}</div>
-  }    const permission = permissionBadge(t, autoApprove)
+  }
+
+  const permission = permissionBadge(t, autoApprove)
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

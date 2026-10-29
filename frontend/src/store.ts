@@ -241,6 +241,12 @@ interface State {
     chatId: string,
     approvalId: string,
     kind: 'change' | 'command',
+    /**
+     * The line the card held, when it was edited. The same click has to run what is on screen:
+     * a person who fixed a typo and then switched the question off meant their line, not the
+     * model's.
+     */
+    editedLine?: string,
   ) => Promise<void>
 
   bootstrap: () => Promise<void>
@@ -286,6 +292,9 @@ interface State {
 }
 
 let toastSeq = 0
+
+/** The newest request per chat for a project's changed files; see loadFileChanges. */
+const fileChangeSeq: Record<string, number> = {}
 
 export const useStore = create<State>((set, get) => {
   /** Insert or replace a message, keeping the list ordered by seq. */
@@ -504,14 +513,22 @@ export const useStore = create<State>((set, get) => {
     },
 
     loadFileChanges: async (chatId) => {
+      // Answers can arrive out of order: two tool calls in one round each ask for the list, and
+      // the first query is the slower one when it was the read that found more files. The
+      // counter makes the newest *request* win rather than the last reply, so a list can never
+      // go backwards — which would show a row missing while the file sits changed on disk.
+      const seq = (fileChangeSeq[chatId] = (fileChangeSeq[chatId] ?? 0) + 1)
       try {
         const changes = await App.ProjectFileChanges(chatId)
+        if (fileChangeSeq[chatId] !== seq) return
         // Keyed by chat, so a reply for a chat the user has since left is still wanted: the
         // count belongs to that chat and will be read when it is opened again.
         set((s) => ({ fileChanges: { ...s.fileChanges, [chatId]: changes } }))
       } catch {
-        // A chat with no folder, or one whose folder moved, has nothing to list. The panel
-        // then shows what it had, and the file tools report the folder where the model asks.
+        if (fileChangeSeq[chatId] !== seq) return
+        // A chat with no folder, or one whose folder moved, has nothing to list. An empty list
+        // rather than the previous one: a row that cannot be read is not a row that is still
+        // true, and the file tools report the folder where the model asks.
         set((s) => ({ fileChanges: { ...s.fileChanges, [chatId]: [] } }))
       }
     },
@@ -610,6 +627,10 @@ export const useStore = create<State>((set, get) => {
         // dropped, so its text goes with it — and so does a hand-off, which is about a turn
         // that no longer exists.
         set({ toolOutput: {}, handoffs: {} })
+        // The undo records go with the conversation too (`Store.ClearChat`), so the changes
+        // panel's list is re-read rather than left as it was: a stale row would keep the
+        // header's count and offer a revert that silently does nothing.
+        await get().loadFileChanges(id)
         get().toast('info', get().t('chat.cleared'))
       } catch (err) {
         get().toast('error', errText(err))
@@ -660,6 +681,7 @@ export const useStore = create<State>((set, get) => {
       // moment it hears the answer, and a card still sitting there invites a second click
       // on a question that has already been decided. The turn's own end (done, error, or
       // stop) drops the entry for the case where nothing was ever clicked.
+      const asked = get().approvals[chatId]
       set((s) => {
         const approvals = { ...s.approvals }
         delete approvals[chatId]
@@ -674,6 +696,13 @@ export const useStore = create<State>((set, get) => {
           await App.ResolveToolApproval(approvalId, decision)
         }
       } catch (err) {
+        // The answer never reached Go, so the turn is still blocked on this question — and the
+        // card is the only way to answer it. A failed call therefore puts it back rather than
+        // leaving a chat waiting on buttons that are no longer on screen. Only if it is still
+        // *this* question: a newer one that arrived meanwhile belongs where it is.
+        if (asked && asked.approvalId === approvalId && !get().approvals[chatId]) {
+          set((s) => ({ approvals: { ...s.approvals, [chatId]: asked } }))
+        }
         get().toast('error', errText(err))
       }
     },
@@ -686,7 +715,7 @@ export const useStore = create<State>((set, get) => {
       })
     },
 
-    stopAsking: async (chatId, approvalId, kind) => {
+    stopAsking: async (chatId, approvalId, kind, editedLine) => {
       const state = get()
       if (!state.settings) return
       // Set, not toggle: the other kind keeps whatever it was, because a save that turned a
@@ -704,8 +733,9 @@ export const useStore = create<State>((set, get) => {
         get().toast('error', errText(err))
         return
       }
-      // This change was asked about before the switch existed, so it still needs its answer.
-      await get().resolveApproval(chatId, approvalId, 'once')
+      // This change was asked about before the switch existed, so it still needs its answer —
+      // and with the line the card was showing, not the model's original.
+      await get().resolveApproval(chatId, approvalId, 'once', editedLine)
       get().toast(
         'info',
         get().t(kind === 'command' ? 'confirm.stoppedAskingCommands' : 'confirm.stoppedAskingFiles'),
@@ -862,12 +892,16 @@ function wireEvents(
     const toolOutput = { ...get().toolOutput }
     if (p.toolCall.status !== 'pending') delete toolOutput[p.toolCall.id]
     set({ chatState: { ...state.chatState, messages }, toolOutput })
-    // A change that landed is a change the panel has to show, and the list is one query. Read
-    // only for the two tools that write a file: a read or a search leaves the folder as it was
-    // and the count would not move.
+    // A change that landed is a change the panel has to show, and the list is one query. The
+    // terminal belongs here as much as the two writers: a command is the tool that can rewrite
+    // every file in the folder (`gofmt -w .`), and the panel promises a diff against the file as
+    // it is now — leaving it stale after one would make that promise false until the chat is
+    // reopened. A read or a search does not move the folder, and neither does a declined call.
     if (
       (p.toolCall.status === 'ok' || p.toolCall.status === 'error') &&
-      (p.toolCall.name === 'write_file' || p.toolCall.name === 'edit_file')
+      (p.toolCall.name === 'write_file' ||
+        p.toolCall.name === 'edit_file' ||
+        p.toolCall.name === 'run_command')
     ) {
       void get().loadFileChanges(p.chatId)
     }
