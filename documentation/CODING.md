@@ -53,6 +53,37 @@ Every tool that changes something goes through `Service.Confirm`, which the app 
   running, because the block is one turn's goroutine.
 - The answer comes back through the bound `ResolveToolApproval`, naming the tool call's id.
 
+**The card shows a diff, not the two files.** `workspace.CompareDiff` compares the texts line by
+line and sends *hunks*: the changed lines with three unchanged ones either side, numbered on
+both sides, and the unchanged span between two hunks left out entirely. So a one-line change
+inside a 400-line file is eight rows — the old line, the new one, and the three around them —
+where it used to be the first 16 kB of two pages that differ by one character somewhere in the
+middle. The comparison trims the equal head and tail before it builds a table, which is what
+keeps that ordinary case cheap; past `maxDiffCells` the middle is reported as one replacement
+rather than compared. It is computed in Go because the changes panel draws the same thing, and
+because a byte budget at the transport is not a shape hunks can be cut from.
+
+**The one change with no rows says so.** A line diff splits on newlines and compares the text
+between them, so adding or dropping the *final* newline of a file produces no rows at all — and
+the card would then read "no line differs" about a file whose last byte is about to change. The
+diff carries `NewlineOnly` for exactly that case and the card says which of the two empty diffs
+it is showing. Every other difference in the bytes produces a row; a carriage return does, and
+its rows are shown with the `\r` hidden rather than rendered.
+
+**A diff that is longer than the card says so.** `maxDiffRows` and `maxDiffBytes` bound what one
+change sends — a full rewrite is one enormous hunk, and the card is a preview in a fixed-height
+box — and the totals beside the path count the *diff's* lines, not either file's, so they match
+the rows below them. An edit's hunks carry the one span the tool call names, so a `replace_all`
+that matched twelve places still reports `Occurrences` above a diff that shows one: the totals
+are over every replacement, the rows are not, and the card says which is which.
+
+**A change that cannot be applied is never put on the card.** Both writers refuse during
+`Describe*`, not only during the write: a file that is not text (its preview would be a page of
+replacement characters, and it has no undo to put back), a path whose parent is a file
+(`MkdirAll` would fail with ENOTDIR), a replacement large enough to push the file past
+`MaxWriteBytes`, and a text too large to write at all. Finding out after the click is the one
+outcome the describe-then-apply split exists to prevent.
+
 **It fails closed.** A cancelled turn, a request with no tool call id to name, a double answer,
 and a build with no confirmer at all every end in "not allowed". A confirmer's error is
 classified as a refusal whatever it says (`Service.approve`), because a call recorded as a
@@ -374,9 +405,9 @@ now, how many times the chat wrote it, and either *put back* or the reason it ca
 loaded with the chat and refreshed when a write lands, so the header's count is the folder's
 state rather than a hint that something happened once.
 
-The list and the diff are built in Go (`ProjectFileChanges`), not in the window: the two texts
-are clamped previews, exactly as an approval's are, so a chat with fifty changed files does not
-send fifty files through the bridge.
+The list and the diff are built in Go (`ProjectFileChanges`), not in the window: a row carries
+the same bounded hunk diff an approval does, computed against the file as it is now, so a chat
+with fifty changed files sends fifty small diffs rather than fifty files through the bridge.
 
 ## 7. Starting over: `/clear`
 

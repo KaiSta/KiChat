@@ -22,8 +22,13 @@ func TestWriteCreatesAFileAndItsFolders(t *testing.T) {
 	if change.Operation != OperationCreate {
 		t.Errorf("operation = %q for a file that does not exist, want %q", change.Operation, OperationCreate)
 	}
-	if change.Before != "" {
-		t.Errorf("a create shows a before of %q, want nothing", change.Before)
+	// A create has nothing to compare against, so every line of it is an addition and no row
+	// has an old line number.
+	if added := addedText(change); added != "package deep" {
+		t.Errorf("a create shows %q as added, want the line being written", added)
+	}
+	if removed := removedText(change); removed != "" {
+		t.Errorf("a create shows %q as removed, want nothing", removed)
 	}
 	if want := []string{"internal", "internal/deep"}; strings.Join(change.CreatesDirs, ",") != strings.Join(want, ",") {
 		t.Errorf("CreatesDirs = %v, want %v in that order", change.CreatesDirs, want)
@@ -65,8 +70,11 @@ func TestWriteReplacesAFileWithoutLosingItsMode(t *testing.T) {
 	if change.Operation != OperationOverwrite {
 		t.Errorf("operation = %q for an existing file, want %q", change.Operation, OperationOverwrite)
 	}
-	if !strings.Contains(change.Before, "echo old") {
-		t.Errorf("the before side does not show what is being replaced: %q", change.Before)
+	if !strings.Contains(removedText(change), "echo old") {
+		t.Errorf("the diff does not show the line being replaced: %q", removedText(change))
+	}
+	if !strings.Contains(addedText(change), "echo new") {
+		t.Errorf("the diff does not show the line taking its place: %q", addedText(change))
 	}
 
 	result, err := root.Write("run.sh", "#!/bin/sh\necho new\n")
@@ -159,11 +167,16 @@ func TestEditReplacesOneOccurrence(t *testing.T) {
 	if change.Operation != OperationEdit {
 		t.Errorf("operation = %q, want %q", change.Operation, OperationEdit)
 	}
-	if !strings.Contains(change.Before, "println(\"old\")") || !strings.Contains(change.After, "println(\"new\")") {
-		t.Errorf("the preview does not show the two sides: before %q, after %q", change.Before, change.After)
+	if !strings.Contains(removedText(change), "println(\"old\")") || !strings.Contains(addedText(change), "println(\"new\")") {
+		t.Errorf("the diff does not show the two sides: removed %q, added %q", removedText(change), addedText(change))
 	}
 	if change.Added != 1 || change.Removed != 1 {
 		t.Errorf("Added/Removed = %d/%d, want 1/1 for a one-line replacement", change.Added, change.Removed)
+	}
+	// Numbered from the file, not from the snippet: the card says line 4 because that is where
+	// the line is, and a person can go and look at it.
+	if rows := rowsOf(change); len(rows) != 2 || rows[0].Old != 4 || rows[1].New != 4 {
+		t.Errorf("the diff is numbered %+v, want the match's line 4 on both sides", rows)
 	}
 
 	result, err := root.Edit("main.go", "\tprintln(\"old\")", "\tprintln(\"new\")", false)
@@ -269,9 +282,10 @@ func TestEditRefusesABinaryFile(t *testing.T) {
 	}
 }
 
-// TestALongPreviewIsCutAndSaysSo keeps a four-megabyte rewrite from being rendered in a
-// window: the change is shown in part, and the card can say it is a part.
-func TestALongPreviewIsCutAndSaysSo(t *testing.T) {
+// TestALongChangeIsCutAndSaysSo keeps a four-thousand-line rewrite from being rendered in a
+// window: the hunks are cut, the card can say they are cut, and the counts still describe the
+// whole change rather than the part that fitted.
+func TestALongChangeIsCutAndSaysSo(t *testing.T) {
 	root, _ := project(t, nil)
 	long := strings.Repeat("a line of the new file\n", 4_000)
 	change, err := root.DescribeWrite("long.txt", long)
@@ -279,13 +293,14 @@ func TestALongPreviewIsCutAndSaysSo(t *testing.T) {
 		t.Fatalf("DescribeWrite: %v", err)
 	}
 	if !change.Truncated {
-		t.Error("a preview longer than the budget was not reported as truncated")
+		t.Error("a diff longer than the row budget was not reported as truncated")
 	}
-	if len(change.After) > MaxChangePreviewBytes {
-		t.Errorf("the preview is %d bytes, more than the %d budget", len(change.After), MaxChangePreviewBytes)
+	if got := rowsOf(change); len(got) != maxDiffRows {
+		t.Errorf("the diff carries %d rows, want the %d-row budget", len(got), maxDiffRows)
 	}
-	if !strings.HasSuffix(change.After, "a line of the new file") {
-		t.Errorf("the preview was cut mid-line: %q", change.After[len(change.After)-40:])
+	// The cut is at a row boundary: every row is a whole line of the file.
+	if got := rowsOf(change); got[len(got)-1].Text != "a line of the new file" {
+		t.Errorf("the diff was cut mid-line: %q", got[len(got)-1].Text)
 	}
 	// The counts are of the whole change, not of the preview.
 	if change.Added != 4_000 {
@@ -315,6 +330,153 @@ func TestAnEditForgivesDifferentIndentation(t *testing.T) {
 	}
 	if got, want := string(text), "func main() {\n\tprintln(\"bye\")\n}\n"; got != want {
 		t.Errorf("file = %q, want %q", got, want)
+	}
+}
+
+// TestAWhitespaceTolerantReplaceAllReplacesEveryOccurrence is the combination the two
+// behaviours make dangerous together. The spans a tolerant match finds are not the same text —
+// each carries the file's own indentation — so replacing the first span everywhere touched only
+// the occurrences that happened to look exactly like it, while the result and the tool card said
+// every one had been replaced.
+func TestAWhitespaceTolerantReplaceAllReplacesEveryOccurrence(t *testing.T) {
+	root, dir := project(t, map[string]string{
+		"main.go": "if a {\n\tx = 1\n}\nif b {\n    x = 1\n}\n",
+	})
+	// Six spaces are an exact substring of neither line, which is what makes the match
+	// approximate — and leaves the two spans spelled differently from each other.
+	result, err := root.Edit("main.go", "      x = 1", "x = 2", true)
+	if err != nil {
+		t.Fatalf("replace_all with an approximate match: %v", err)
+	}
+	if result.Occurrences != 2 {
+		t.Errorf("the result says %d occurrences replaced, want 2", result.Occurrences)
+	}
+	text, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "if a {\nx = 2\n}\nif b {\nx = 2\n}\n"
+	if string(text) != want {
+		t.Errorf("file = %q, want %q — the second occurrence was left alone", text, want)
+	}
+}
+
+// TestAReplaceAllPreviewSaysHowManyPlacesItTouches is the card's half of a replace_all: the
+// preview can only hold the one span the tool call carries, so an edit that touches twelve
+// places used to look exactly like an edit that touched one — a person approved the other
+// eleven blind.
+func TestAReplaceAllPreviewSaysHowManyPlacesItTouches(t *testing.T) {
+	root, _ := project(t, map[string]string{"a.go": "x := 1\ny := 1\nz := 1\n"})
+
+	change, err := root.DescribeEdit("a.go", ":= 1", ":= 2", true)
+	if err != nil {
+		t.Fatalf("DescribeEdit: %v", err)
+	}
+	if change.Occurrences != 3 {
+		t.Errorf("the change says %d occurrences, want 3", change.Occurrences)
+	}
+	// The counts are totals over every replacement rather than one snippet's lines, or the
+	// card would show "−1 +1" for a change to three lines of the file.
+	if change.Added != 3 || change.Removed != 3 {
+		t.Errorf("Added/Removed = %d/%d, want 3/3 for three one-line replacements", change.Added, change.Removed)
+	}
+
+	// An ordinary edit is still one place, and says so.
+	single, err := root.DescribeEdit("a.go", "x := 1", "x := 9", false)
+	if err != nil {
+		t.Fatalf("DescribeEdit: %v", err)
+	}
+	if single.Occurrences != 1 || single.Removed != 1 {
+		t.Errorf("a single edit = %+v, want one occurrence of one line", single)
+	}
+}
+
+// TestAWriteUnderAFileIsRefusedBeforeTheCard pins the promise of the describe-then-apply
+// split: a change that cannot happen must never reach the person being asked. `main.go/x.go`
+// used to be described as "creates the file" and then fail with ENOTDIR after the click.
+func TestAWriteUnderAFileIsRefusedBeforeTheCard(t *testing.T) {
+	root, _ := project(t, map[string]string{"main.go": "package main\n"})
+
+	if _, err := root.DescribeWrite("main.go/x.go", "package x\n"); err == nil {
+		t.Error("a write inside a file was described for approval")
+	}
+	if _, err := root.Write("main.go/x.go", "package x\n"); err == nil {
+		t.Error("a write inside a file was allowed")
+	}
+}
+
+// TestAWriteRefusesToReplaceSomethingThatIsNotText is the write side of the refusal
+// edit_file already made, and it protects two things at once: the card's preview of a binary
+// file is a page of replacement characters, and there is no pre-image for one — so a text write
+// over a picture is a change somebody approved without seeing and could not put back.
+func TestAWriteRefusesToReplaceSomethingThatIsNotText(t *testing.T) {
+	root, dir := project(t, nil)
+	blob := []byte{0x7f, 'E', 0, 'F', 0, 0}
+	if err := os.WriteFile(filepath.Join(dir, "blob.bin"), blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := root.DescribeWrite("blob.bin", "text"); err == nil {
+		t.Error("a write over a binary file was described for approval")
+	}
+	if _, err := root.Write("blob.bin", "text"); err == nil {
+		t.Error("a write over a binary file was allowed")
+	}
+	kept, err := os.ReadFile(filepath.Join(dir, "blob.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(kept) != string(blob) {
+		t.Errorf("the refused write still changed the file: %q", kept)
+	}
+
+	// A new file is not that case: there is no binary to destroy.
+	if _, err := root.Write("notes.txt", "text\n"); err != nil {
+		t.Errorf("a write to a new path was refused: %v", err)
+	}
+}
+
+// TestAnEditCannotGrowAFilePastTheWriteBound keeps the edit from being the way around the bound
+// a write enforces: the preview is cut to 16 kB, so a replacement a person approves is not the
+// replacement they saw, and a file past the bound can no longer be edited or undone.
+func TestAnEditCannotGrowAFilePastTheWriteBound(t *testing.T) {
+	root, dir := project(t, map[string]string{"a.go": "package a\n"})
+	huge := strings.Repeat("a", MaxWriteBytes+1)
+	if _, err := root.DescribeEdit("a.go", "package a", huge, false); err == nil {
+		t.Error("a replacement larger than a write may hold was described for approval")
+	}
+	if _, err := root.Edit("a.go", "package a", huge, false); err == nil {
+		t.Error("a replacement larger than a write may hold was written")
+	}
+	text, err := os.ReadFile(filepath.Join(dir, "a.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(text) != "package a\n" {
+		t.Errorf("the refused edit still changed the file: %d bytes", len(text))
+	}
+}
+
+// TestATolerantMatchCountsOverlappingLinesOnce pins the count against the exact one. `a\na`
+// occurs once in `a\na\na`, and strings.Count says so; a tolerant scan that advanced one line at
+// a time found two overlapping spans, so the same file was one match or two depending on which
+// matcher saw it — and replace_all would then claim a replacement it could not make.
+func TestATolerantMatchCountsOverlappingLinesOnce(t *testing.T) {
+	root, dir := project(t, map[string]string{"a.txt": "a\na\na\n"})
+
+	result, err := root.Edit("a.txt", "  a\n  a", "b", true)
+	if err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	if result.Occurrences != 1 {
+		t.Errorf("the overlapping pair was counted %d times, want once", result.Occurrences)
+	}
+	text, err := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(text) != "b\na\n" {
+		t.Errorf("file = %q, want %q", text, "b\na\n")
 	}
 }
 

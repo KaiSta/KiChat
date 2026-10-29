@@ -52,6 +52,19 @@ func readDisk(t *testing.T, folder, name string) string {
 
 // recordChange writes the snapshot a tool would have written: the old text, and the digest of
 // what the app left on disk.
+// changeText is every row of a listed change's hunks: the panel draws them one per line, and a
+// test that asks what a person would see should say that rather than walk the structure.
+func changeText(change FileChange) string {
+	var b strings.Builder
+	for _, hunk := range change.Hunks {
+		for _, line := range hunk.Lines {
+			b.WriteString(line.Text)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 func recordChange(t *testing.T, st *store.Store, path, before, after string, existed bool) {
 	t.Helper()
 	if err := st.PutFileSnapshot(store.FileSnapshot{
@@ -207,11 +220,13 @@ func TestTheListShowsADiffAndSaysWhetherItCanBeUndone(t *testing.T) {
 	if changed.Operation != "changed" || !changed.CanRevert || changed.Blocked != "" {
 		t.Errorf("changed.go = %+v, want a revertable change", changed)
 	}
-	if !strings.Contains(changed.Before, "one") || !strings.Contains(changed.After, "two") {
-		t.Errorf("the diff does not carry both sides: %+v", changed)
+	if shown := changeText(changed); !strings.Contains(shown, "one") || !strings.Contains(shown, "two") {
+		t.Errorf("the diff does not carry both sides: %q", shown)
 	}
-	if changed.Added != 2 || changed.Removed != 1 {
-		t.Errorf("line counts = +%d −%d, want +2 −1", changed.Added, changed.Removed)
+	// One line added to a file that already had "one": the numbers are the diff's, so they
+	// match the one row below them rather than the size of the file.
+	if changed.Added != 1 || changed.Removed != 0 {
+		t.Errorf("line counts = +%d −%d, want +1 −0", changed.Added, changed.Removed)
 	}
 
 	if gone := byPath["gone.go"]; !gone.CanRevert {

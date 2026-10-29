@@ -64,7 +64,7 @@ func (a *App) confirmChange(ctx context.Context, req *tools.ApprovalRequest) err
 	// for everyone who trusts the model with this kind of work — and the chat's own "always"
 	// is the narrower one given while watching a task. Both are consulted before anything is
 	// emitted, so an auto-approved call behaves exactly like a read tool: no card, no block.
-	if a.autoApproved(req.Tool) || a.changesAllowed(req.ChatID) {
+	if a.standingConsent(req.ChatID, req.Tool) {
 		return nil
 	}
 	if req.ToolCallID == "" {
@@ -150,14 +150,25 @@ func changeFields(change workspace.Change) map[string]any {
 		// render error.
 		dirs = []string{}
 	}
+	hunks := change.Hunks
+	if hunks == nil {
+		// Same reason as the folders below: the window maps over this list, and null is not a
+		// list. A change with nothing to show is an empty one.
+		hunks = []workspace.Hunk{}
+	}
 	return map[string]any{
-		"path":        change.Path,
-		"operation":   change.Operation,
-		"before":      change.Before,
-		"after":       change.After,
-		"added":       change.Added,
-		"removed":     change.Removed,
-		"truncated":   change.Truncated,
+		"path":      change.Path,
+		"operation": change.Operation,
+		"hunks":     hunks,
+		"added":     change.Added,
+		"removed":   change.Removed,
+		"truncated": change.Truncated,
+		// The one difference that has no rows: the card says which it is rather than showing
+		// an empty diff beside a file whose bytes changed.
+		"newlineOnly": change.NewlineOnly,
+		// Zero for a write. The card shows it when an edit replaces more than the one place
+		// its preview can display.
+		"occurrences": change.Occurrences,
 		"createsDirs": dirs,
 	}
 }
@@ -208,21 +219,59 @@ func (a *App) resolveApproval(approvalID string, answer approvalAnswer) bool {
 	}
 }
 
-// autoApproved reports whether the user has switched this tool's confirmation off.
-//
-// It matches by *tool name* and answers for the two kinds the setting distinguishes: the
-// tools that write a file, and the tool that runs a command. A guarded tool that is neither
-// keeps asking, which is the direction that has to be safe — a tool added later must not
-// inherit a permission somebody granted for the tools that existed when they granted it.
-func (a *App) autoApproved(tool string) bool {
-	auto := a.Settings().AutoApprove
+// The kinds a confirmation setting distinguishes: the tools that write a file, and the tool
+// that runs a command. One name each, because the settings switch and the card's "always"
+// both have to answer the same question about the same tool.
+const (
+	consentKindFiles    = "files"
+	consentKindCommands = "commands"
+)
+
+// consentKind is the kind of question a tool asks, or "" for a guarded tool that has no kind
+// yet — a tool added after these two, whose confirmation nobody has been asked about.
+func consentKind(tool string) string {
 	switch tool {
 	case tools.ToolWriteFile, tools.ToolEditFile:
-		return auto.Files
+		return consentKindFiles
 	case tools.ToolRunCommand:
+		return consentKindCommands
+	}
+	return ""
+}
+
+// autoApproved reports whether the user has switched this tool's confirmation off.
+//
+// It matches by *tool name* and answers for the two kinds the setting distinguishes. A guarded
+// tool that is neither keeps asking, which is the direction that has to be safe — a tool added
+// later must not inherit a permission somebody granted for the tools that existed when they
+// granted it.
+func (a *App) autoApproved(tool string) bool {
+	auto := a.Settings().AutoApprove
+	switch consentKind(tool) {
+	case consentKindFiles:
+		return auto.Files
+	case consentKindCommands:
 		return auto.Commands
 	}
 	return false
+}
+
+// standingConsent reports whether a permission the person already gave answers this call: the
+// settings switch for its kind, or the "always in this chat" they clicked while watching a
+// task. Both are consulted before a card is emitted.
+//
+// The per-chat answer covers the two kinds its own button names — changes *and* commands — and
+// nothing else. A guarded tool with no kind keeps asking even in a chat that was told "always":
+// the same rule autoApproved states for the setting, which the per-chat permission would
+// otherwise quietly break the day a third guarded tool is added.
+func (a *App) standingConsent(chatID, tool string) bool {
+	if a.autoApproved(tool) {
+		return true
+	}
+	if consentKind(tool) == "" {
+		return false
+	}
+	return a.changesAllowed(chatID)
 }
 
 // --- the waiting changes ----------------------------------------------------

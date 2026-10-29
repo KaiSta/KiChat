@@ -1490,6 +1490,26 @@ Available tools: {{tool_list}}`,
   ]
 
   /*
+   * One hunk of a diff, with its line numbers filled in from the first line it shows.
+   *
+   * Rows are written the way a diff reads — a kind and the line — and the numbers come out of
+   * them, because a fixture that typed every number by hand would stop agreeing with its own
+   * rows the first time somebody added one. Same shape workspace.Hunk marshals to.
+   */
+  function hunkOf(oldStart, newStart, rows) {
+    let old = oldStart
+    let next = newStart
+    return {
+      lines: rows.map(([kind, text]) => {
+        const row = { kind, text, old: 0, new: 0 }
+        if (kind !== 'added') row.old = old++
+        if (kind !== 'removed') row.new = next++
+        return row
+      }),
+    }
+  }
+
+  /*
    * What the project fixture has changed, for the changes panel.
    *
    * Three rows rather than one, because the panel's states have to be on screen somewhere: a
@@ -1505,10 +1525,25 @@ Available tools: {{tool_list}}`,
           path: 'internal/tools/command.go',
           operation: 'changed',
           revisions: 2,
-          before: 'func (s *Service) execCommand(ctx context.Context, root workspace.Root, line string) (string, error) {\n\tcmd := exec.Command(line)\n\treturn out, nil\n}',
-          after: 'func (s *Service) execCommand(ctx context.Context, chatID string, root workspace.Root, line string, timeout time.Duration) (Result, error) {\n\tcmd := exec.Command(program, argv...)\n\treturn summarized(out, "tool.sum.command"), nil\n}',
           added: 3,
-          removed: 2,
+          removed: 3,
+          hunks: [
+            hunkOf(118, 118, [
+              [
+                'removed',
+                'func (s *Service) execCommand(ctx context.Context, root workspace.Root, line string) (string, error) {',
+              ],
+              [
+                'added',
+                'func (s *Service) execCommand(ctx context.Context, chatID string, root workspace.Root, line string, timeout time.Duration) (Result, error) {',
+              ],
+              ['removed', '\tcmd := exec.Command(line)'],
+              ['added', '\tcmd := exec.Command(program, argv...)'],
+              ['removed', '\treturn out, nil'],
+              ['added', '\treturn summarized(out, "tool.sum.command"), nil'],
+              ['context', '}'],
+            ]),
+          ],
           truncated: false,
           canRevert: true,
           blocked: '',
@@ -1518,10 +1553,15 @@ Available tools: {{tool_list}}`,
           path: 'internal/tools/find.go',
           operation: 'created',
           revisions: 1,
-          before: '',
-          after: 'package tools\n\nfunc findFilesDefinition() llm.ToolDefinition {}\n',
           added: 3,
           removed: 0,
+          hunks: [
+            hunkOf(1, 1, [
+              ['added', 'package tools'],
+              ['added', ''],
+              ['added', 'func findFilesDefinition() llm.ToolDefinition {}'],
+            ]),
+          ],
           truncated: false,
           canRevert: true,
           blocked: '',
@@ -1531,8 +1571,7 @@ Available tools: {{tool_list}}`,
           path: 'assets/logo.bin',
           operation: 'changed',
           revisions: 1,
-          before: '',
-          after: '',
+          hunks: [],
           added: 0,
           removed: 0,
           truncated: false,
@@ -2401,17 +2440,22 @@ Available tools: {{tool_list}}`,
   }
 
   /**
-   * The file-change half: what the diff shows, in the shape workspace.Change describes.
+   * The file-change half: the hunks the card draws, in the shape workspace.Change describes.
    *
-   * The counts are the change's, not the preview's — a truncated preview is a shorter thing
-   * to read, and a fixture that counted what it printed would make the card's own warning
-   * line look like a mistake.
+   * The counts are the diff's and the change's — never the rows that happen to be in the
+   * fixture — so the `truncated` fixture can show four rows and still say 1420 lines arrived:
+   * a fixture that counted what it printed would make the card's own warning look wrong.
    */
   function changeBody(kind) {
-    const text = (lines) => lines.join('\n')
     const base = {
       createsDirs: [],
       truncated: false,
+      // The one difference a line diff cannot draw: the card says so instead of claiming no
+      // line differs.
+      newlineOnly: false,
+      // How many places an edit replaces; a write has none to count, and the card shows the
+      // line only above one.
+      occurrences: 0,
     }
     switch (kind) {
       case 'edit':
@@ -2420,19 +2464,17 @@ Available tools: {{tool_list}}`,
           tool: 'edit_file',
           path: 'internal/tools/project.go',
           operation: 'edit',
-          before: text([
-            '\tif !chat.IsProject() {',
-            '\t\treturn nil, uimsg.Detailf("tools.noWorkspace", "no folder")',
-            '\t}',
-          ]),
-          added: 4,
-          removed: 3,
-          after: text([
-            '\tif !chat.IsProject() {',
-            '\t\treturn workspace.Root{}, uimsg.Detailf("tools.noWorkspace",',
-            '\t\t\t"this chat has no project folder, so there are no files to read")',
-            '\t}',
-          ]),
+          added: 2,
+          removed: 1,
+          hunks: [
+            hunkOf(38, 38, [
+              ['context', '\tif !chat.IsProject() {'],
+              ['removed', '\t\treturn nil, uimsg.Detailf("tools.noWorkspace", "no folder")'],
+              ['added', '\t\treturn workspace.Root{}, uimsg.Detailf("tools.noWorkspace",'],
+              ['added', '\t\t\t"this chat has no project folder, so there are no files to read")'],
+              ['context', '\t}'],
+            ]),
+          ],
         }
       case 'overwrite':
         return {
@@ -2440,16 +2482,77 @@ Available tools: {{tool_list}}`,
           tool: 'write_file',
           path: 'internal/workspace/edit.go',
           operation: 'overwrite',
-          before: text(['package workspace', '', '// Ein Kommentar, der ersetzt wird.']),
-          added: 41,
-          removed: 3,
-          after: text([
-            'package workspace',
-            '',
-            '// The write side of a project folder: two operations, each described before it',
-            '// is made. A person cannot consent to "write_file pkg/a.go" — that is a tool name,',
-            '// not a change.',
-          ]),
+          added: 3,
+          removed: 1,
+          hunks: [
+            hunkOf(12, 12, [
+              ['context', 'package workspace'],
+              ['context', ''],
+              ['removed', '// Ein Kommentar, der ersetzt wird.'],
+              ['added', '// The write side of a project folder: two operations, each described before it'],
+              ['added', '// is made. A person cannot consent to "write_file pkg/a.go" — that is a tool name,'],
+              ['added', '// not a change.'],
+            ]),
+          ],
+        }
+      case 'occurrences':
+        // A replace_all: the card can show one span, and has to say that eleven more exist.
+        return {
+          ...base,
+          tool: 'edit_file',
+          path: 'internal/tools/project.go',
+          operation: 'edit',
+          occurrences: 12,
+          added: 12,
+          removed: 12,
+          // One place out of twelve: the card says so above the diff, and the numbers are the
+          // totals over every replacement rather than this hunk's two rows.
+          hunks: [
+            hunkOf(97, 97, [
+              ['removed', '\tif !chat.IsProject() {'],
+              ['added', '\tif chat == nil || !chat.IsProject() {'],
+            ]),
+          ],
+        }
+      case 'two':
+        // Two changes far apart in one file: two hunks, with the row of dots between them
+        // standing for the unchanged stretch the card deliberately does not send.
+        return {
+          ...base,
+          tool: 'write_file',
+          path: 'internal/chat/prompt.go',
+          operation: 'overwrite',
+          added: 2,
+          removed: 2,
+          hunks: [
+            hunkOf(22, 22, [
+              ['context', 'func builtins() []llm.ToolDefinition {'],
+              ['context', '\ttools := []llm.ToolDefinition{}'],
+              ['removed', '\tmaxTools := 6'],
+              ['added', '\tmaxTools := 8'],
+              ['context', '\tfor _, tool := range catalogue {'],
+            ]),
+            hunkOf(115, 115, [
+              ['context', '\tif len(tools) == 0 {'],
+              ['context', '\t\treturn nil, nil'],
+              ['removed', '\treturn tools, nil'],
+              ['added', '\treturn append(tools, extra...), nil'],
+              ['context', '}'],
+            ]),
+          ],
+        }
+      case 'newline':
+        // A file re-emitted from memory with the same lines and the newline dropped: no rows,
+        // and the one sentence that keeps the card from saying nothing changed.
+        return {
+          ...base,
+          tool: 'write_file',
+          path: 'internal/store/models.go',
+          operation: 'overwrite',
+          hunks: [],
+          newlineOnly: true,
+          added: 0,
+          removed: 0,
         }
       case 'dirs':
         return {
@@ -2457,18 +2560,19 @@ Available tools: {{tool_list}}`,
           tool: 'write_file',
           path: 'internal/store/migrations/0002_notes.sql',
           operation: 'create',
-          before: '',
           added: 6,
           removed: 0,
           createsDirs: ['internal/store/migrations'],
-          after: text([
-            '-- Notizen zu einer Antwort.',
-            'CREATE TABLE IF NOT EXISTS answer_notes (',
-            '  id TEXT PRIMARY KEY,',
-            '  message_id TEXT NOT NULL,',
-            '  body TEXT NOT NULL',
-            ');',
-          ]),
+          hunks: [
+            hunkOf(1, 1, [
+              ['added', '-- Notizen zu einer Antwort.'],
+              ['added', 'CREATE TABLE IF NOT EXISTS answer_notes ('],
+              ['added', '  id TEXT PRIMARY KEY,'],
+              ['added', '  message_id TEXT NOT NULL,'],
+              ['added', '  body TEXT NOT NULL'],
+              ['added', ');'],
+            ]),
+          ],
         }
       case 'truncated':
         return {
@@ -2476,16 +2580,18 @@ Available tools: {{tool_list}}`,
           tool: 'write_file',
           path: 'frontend/src/lib/i18n.ts',
           operation: 'overwrite',
-          before: text(['const de = {', "  'app.title': 'KiChat',"]),
           added: 1420,
           removed: 1180,
           truncated: true,
-          after: text([
-            'const de = {',
-            "  'app.title': 'KiChat',",
-            "  'change.title': 'Änderung am Projektordner',",
-            '  // … und die Vorschau bricht hier ab, während die Änderung weitergeht.',
-          ]),
+          hunks: [
+            hunkOf(1, 1, [
+              ['context', 'const de = {'],
+              ['context', "  'app.title': 'KiChat',"],
+              ['removed', "  'change.title': 'Änderung am Projektordner',"],
+              ['added', "  'change.title': 'Change to the project folder',"],
+              ['added', "  'change.noLines': 'No line differs — there is nothing to compare.',"],
+            ]),
+          ],
         }
       default:
         return {
@@ -2493,19 +2599,20 @@ Available tools: {{tool_list}}`,
           tool: 'write_file',
           path: 'internal/store/notes.go',
           operation: 'create',
-          before: '',
-          added: 12,
+          added: 8,
           removed: 0,
-          after: text([
-            'package store',
-            '',
-            '// Note is one remark filed against a message.',
-            'type Note struct {',
-            '\tID        string',
-            '\tMessageID string',
-            '\tBody      string',
-            '}',
-          ]),
+          hunks: [
+            hunkOf(1, 1, [
+              ['added', 'package store'],
+              ['added', ''],
+              ['added', '// Note is one remark filed against a message.'],
+              ['added', 'type Note struct {'],
+              ['added', '\tID        string'],
+              ['added', '\tMessageID string'],
+              ['added', '\tBody      string'],
+              ['added', '}'],
+            ]),
+          ],
         }
     }
   }

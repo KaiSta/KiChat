@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { folderName } from '../lib/api'
 import { useStore } from '../store'
 import type { ApprovalChange, ApprovalCommand, ApprovalDecision } from '../lib/api'
+import { HunkDiff } from './HunkDiff'
 
 /**
  * The question a project tool asks, and the buttons that answer it.
@@ -13,11 +14,11 @@ import type { ApprovalChange, ApprovalCommand, ApprovalDecision } from '../lib/a
  * it belongs to is already there, in the `pending` state).
  *
  * There are two kinds of question here, and they are answered differently because they *are*
- * different. A change to a file is shown as its two sides, which is the only form in which
- * "replace the string in `internal/store/store.go`" can be agreed to. A command cannot be
- * previewed at all — `rm -rf build` is its own description — so what is shown is everything a
- * person needs to judge it: the exact line, the folder it runs in, which shell interprets it,
- * and how long it may take.
+ * different. A change to a file is shown as the hunks that differ, which is the only form in
+ * which "replace the string in `internal/store/store.go`" can be agreed to. A command cannot
+ * be previewed at all — `rm -rf build` is its own description — so what is shown is
+ * everything a person needs to judge it: the exact line, the folder it runs in, which shell
+ * interprets it, and how long it may take.
  *
  * The blanket answer ("always in this chat") is offered beside the single one because a
  * coding turn is usually a dozen of these, and a dialog nobody reads is not a confirmation
@@ -74,11 +75,18 @@ export function Confirmation() {
 
   // The setting is saved first and the question answered second, inside the store: a failed
   // save therefore leaves this card where it is, rather than closing a question nobody has
-  // actually decided.
+  // actually decided. The line travels with it when it was edited, because the answer this
+  // click gives is still an answer to the command on screen — a person who fixed a typo and
+  // then switched the question off meant their line, not the model's.
   const never = async () => {
     setGranting(true)
     try {
-      await stopAsking(approval.chatId, approval.approvalId, approval.kind)
+      await stopAsking(
+        approval.chatId,
+        approval.approvalId,
+        approval.kind,
+        approval.kind === 'command' && edited ? line.trim() : undefined,
+      )
     } finally {
       setGranting(false)
     }
@@ -158,14 +166,9 @@ export function Confirmation() {
   )
 }
 
-/** One file's change: what is there now, and what would be there instead. */
+/** One file's change: the lines that differ, with enough around them to be read. */
 function ChangeQuestion({ change }: { change: ApprovalChange }) {
   const t = useStore((s) => s.t)
-  // The counts come from the change, not from the preview: a truncated preview is a shorter
-  // thing to read, and counting its rows would understate a change by exactly the amount the
-  // reader is being told to be careful about.
-  const before = lines(change.before)
-  const after = lines(change.after)
 
   return (
     <>
@@ -180,9 +183,9 @@ function ChangeQuestion({ change }: { change: ApprovalChange }) {
         <span className="mono truncate" style={{ color: 'var(--text)' }} title={change.path}>
           {change.path}
         </span>
-        {/* Line counts, not a diff stat: for an edit they are the two snippets, for a rewrite
-            of a whole file they are the file before and after, and either way the number is
-            what tells a reader whether what follows is the change they meant. */}
+        {/* The diff's own counts, so they match the rows below rather than the size of the
+            file: a one-line change in a long file reads −1 +1, which is what the card is
+            showing. */}
         <span className="faint mono">
           {change.removed > 0 && `−${change.removed}`}
           {change.removed > 0 && change.added > 0 && ' '}
@@ -197,19 +200,21 @@ function ChangeQuestion({ change }: { change: ApprovalChange }) {
         </div>
       )}
 
+      {/* A replace_all that matched more than once, said out loud. The diff below can only show
+          one place — the model's tool call carries one span — so approving it is approving the
+          other occurrences blind, and that has to be visible rather than inferred from a total
+          that looks like a single line. */}
+      {change.occurrences > 1 && (
+        <div className="mt-1 text-[11px]" style={{ color: 'var(--warn)' }}>
+          {t('change.occurrences', { count: change.occurrences })}
+        </div>
+      )}
+
       <div
         className="mt-2 max-h-64 overflow-auto rounded p-2"
         style={{ background: 'var(--code-bg)', border: '1px solid var(--border)' }}
       >
-        {before.length > 0 && (
-          <Side label={t('change.before')} sign="−" tone="var(--danger)" lines={before} />
-        )}
-        {after.length > 0 && (
-          <Side label={t('change.after')} sign="+" tone="var(--ok)" lines={after} />
-        )}
-        {before.length === 0 && after.length === 0 && (
-          <div className="faint text-[11px]">{t('change.empty')}</div>
-        )}
+        <HunkDiff hunks={change.hunks} newlineOnly={change.newlineOnly} />
       </div>
 
       {change.truncated && <div className="faint mt-1 text-[11px]">{t('change.truncated')}</div>}
@@ -292,46 +297,3 @@ function CommandQuestion({
   )
 }
 
-/** One side of the change: every line of it, with a gutter that says which side. */
-function Side({
-  label,
-  sign,
-  tone,
-  lines,
-}: {
-  label: string
-  sign: string
-  tone: string
-  lines: string[]
-}) {
-  return (
-    <>
-      <div className="faint mb-1 text-[10px] uppercase tracking-wide">{label}</div>
-      <div className="mono text-[11px] leading-[1.45]">
-        {lines.map((line, index) => (
-          <div key={index} className="flex whitespace-pre" style={{ color: tone }}>
-            <span className="w-4 shrink-0 select-none" style={{ opacity: 0.7 }}>
-              {sign}
-            </span>
-            {/* The line itself, never re-coloured: a red line is text that goes, and the
-                text still has to read as the code it is. */}
-            <span style={{ color: 'var(--text)' }}>{line}</span>
-          </div>
-        ))}
-      </div>
-    </>
-  )
-}
-
-/**
- * The lines of one side, with the trailing newline of a file ignored.
- *
- * `"a\nb\n"` is two lines, not three: a whole-file write loses its final newline in most
- * editors' heads, and a trailing empty row would read as a blank line being added to a file
- * that ends exactly the way it did before.
- */
-function lines(text: string): string[] {
-  if (text === '') return []
-  const body = text.endsWith('\n') ? text.slice(0, -1) : text
-  return body.split('\n')
-}

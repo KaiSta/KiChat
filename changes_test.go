@@ -71,6 +71,28 @@ func (r *approvalApp) waitQuestions(t *testing.T, want int) {
 	t.Fatalf("%d questions were asked, want %d", len(r.questions()), want)
 }
 
+// TestAChatsAlwaysCoversTheKindsItsButtonNames keeps the per-chat "always" from becoming a
+// blanket over tools nobody was shown. The button says "changes and commands", so those two
+// are answered without a card — and a guarded tool added after them must ask, exactly as the
+// settings switch refuses to grant a tool it does not know.
+func TestAChatsAlwaysCoversTheKindsItsButtonNames(t *testing.T) {
+	recorder := newApprovalApp(t)
+	recorder.app.allowChanges("chat-1")
+
+	for _, tool := range []string{tools.ToolWriteFile, tools.ToolEditFile, tools.ToolRunCommand} {
+		if !recorder.app.standingConsent("chat-1", tool) {
+			t.Errorf("%s still asks after the chat was told always", tool)
+		}
+	}
+	if recorder.app.standingConsent("chat-1", "delete_file") {
+		t.Error("a guarded tool the card never named was covered by the chat's always")
+	}
+	// And the blanket is per chat: another chat's permission is not this one's.
+	if recorder.app.standingConsent("chat-2", tools.ToolWriteFile) {
+		t.Error("a permission given in one chat answered a question in another")
+	}
+}
+
 func changeRequest(chatID, callID string, change workspace.Change) *tools.ApprovalRequest {
 	return &tools.ApprovalRequest{
 		ChatID:     chatID,
@@ -90,8 +112,10 @@ func TestTheApprovalPayloadCarriesWhatTheWindowReads(t *testing.T) {
 	payload := approvalPayload(*changeRequest("chat-1", "call-1", workspace.Change{
 		Path:      "internal/store/notes.go",
 		Operation: workspace.OperationCreate,
-		After:     "package store\n",
-		Added:     1,
+		Hunks: []workspace.Hunk{{Lines: []workspace.DiffLine{
+			{Kind: workspace.DiffAdded, Text: "package store", New: 1},
+		}}},
+		Added: 1,
 	}))
 
 	for _, key := range []string{
@@ -115,14 +139,25 @@ func TestTheApprovalPayloadCarriesWhatTheWindowReads(t *testing.T) {
 		t.Fatalf("a file change carries no change object: %+v", payload["change"])
 	}
 	for _, key := range []string{
-		"path", "operation", "before", "after", "added", "removed", "truncated", "createsDirs",
+		"path", "operation", "hunks", "added", "removed", "truncated", "newlineOnly",
+		"occurrences", "createsDirs",
 	} {
 		if _, ok := change[key]; !ok {
 			t.Errorf("the change has no %q; the window reads it by that name", key)
 		}
 	}
+	// A write has no occurrences to count, and the card shows the line only above one — so the
+	// field has to be a number rather than omitted, or the card would read `undefined`.
+	if change["occurrences"] != 0 {
+		t.Errorf("a write reports %v occurrences, want 0", change["occurrences"])
+	}
 	if change["operation"] != workspace.OperationCreate {
 		t.Errorf("operation = %v, want %q", change["operation"], workspace.OperationCreate)
+	}
+	// False rather than absent: the card reads it as a boolean, and `undefined` there is a
+	// card that renders neither of its two empty-diff sentences.
+	if change["newlineOnly"] != false {
+		t.Errorf("newlineOnly = %v for a create, want false", change["newlineOnly"])
 	}
 
 	// The folders list is walked by the window, so it has to be a list even when there are
@@ -134,6 +169,13 @@ func TestTheApprovalPayloadCarriesWhatTheWindowReads(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"createsDirs":[]`) {
 		t.Errorf("a change that creates no folders marshals as %s, want an empty list", encoded)
+	}
+	// The hunks are drawn row by row, so their field names are part of the interface too:
+	// `kind`, `text` and the two line numbers.
+	for _, field := range []string{`"hunks"`, `"kind":"added"`, `"text":"package store"`, `"new":1`} {
+		if !strings.Contains(string(encoded), field) {
+			t.Errorf("the change marshals as %s, want it to carry %s", encoded, field)
+		}
 	}
 	if strings.Contains(string(encoded), "null") {
 		t.Errorf("the change carries a null the window would have to guard: %s", encoded)

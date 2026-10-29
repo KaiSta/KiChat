@@ -334,22 +334,55 @@ export interface ImageProgressPayload {
  *
  * The change is sent as fields rather than as a rendered diff, because the window is what
  * decides how to show it — and because a second rendering in Go would be a second opinion
- * about what is being approved. `before` and `after` are the text on either side of the
- * change (a create has no `before`), `added` and `removed` are the line counts, and
- * `truncated` says the preview is shorter than the change it describes.
+ * about what is being approved. `hunks` is the comparison itself (see `DiffHunk`), `added`
+ * and `removed` count its lines, and `truncated` says more change exists than those hunks
+ * show. The comparison is computed in Go: it is the same one the changes panel draws, and a
+ * byte budget at the transport is not a shape hunks can be cut from.
  */
 export interface ApprovalChange {
   /** Workspace-relative, the form the model wrote. */
   path: string
   /** `create`, `overwrite` or `edit`. */
   operation: string
-  before: string
-  after: string
+  /** Never null: a change with nothing to show is an empty list. */
+  hunks: DiffHunk[]
   added: number
   removed: number
   truncated: boolean
+  /**
+   * The only difference is the newline at the end of the file: there are no hunks, and the card
+   * says which it is instead of claiming no line differs.
+   */
+  newlineOnly: boolean
+  /**
+   * How many places an edit replaces; 0 for a write. The preview can only show one of them, so
+   * the card says how many there are when it is more than one.
+   */
+  occurrences: number
   /** Folders that will be created to hold the file, outermost first. Never null. */
   createsDirs: string[]
+}
+
+/** One row of a diff: an unchanged line, one that goes, or one that arrives. */
+export interface DiffLine {
+  /** `context`, `removed` or `added`. */
+  kind: string
+  text: string
+  /** The line's number before the change, or 0 for a line the old text did not have. */
+  old: number
+  /** The line's number after it, or 0 for a line that is no longer there. */
+  new: number
+}
+
+/**
+ * A run of changed lines with the unchanged lines around them, as the card draws it.
+ *
+ * Hunks rather than whole files is the point: a one-line change in a four-hundred-line file
+ * arrives as that line and three either side, numbered on both sides. The unchanged span
+ * between two hunks is not sent at all.
+ */
+export interface DiffHunk {
+  lines: DiffLine[]
 }
 
 /** One command line waiting for an answer: what runs, where, for how long. */

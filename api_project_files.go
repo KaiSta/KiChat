@@ -37,23 +37,26 @@ const (
 
 // FileChange is one file this chat changed, as the panel lists it.
 //
-// The two texts travel clamped, exactly as an approval's preview does, because a panel that
-// sent whole files over the bridge would spend the window's memory to show forty lines. Added
-// and Removed are the line counts of the two sides: not a line-by-line diff, but the number a
-// reader needs to know whether the change is the one they meant to look at.
+// It carries the same hunk diff an approval does, for the same reason: the panel promises a
+// diff against the file *as it is now*, and a file that differs by one line used to arrive as
+// two whole texts. Added and Removed are the diff's line counts, so the row's `−3 +1` matches
+// the rows below it rather than the size of the file.
 type FileChange struct {
 	// Path is workspace-relative, the form the model wrote and the person reads.
 	Path string `json:"path"`
 	// Operation is "created" or "changed", as the chat first found the file.
 	Operation string `json:"operation"`
 	// Revisions is how many times this chat wrote the file.
-	Revisions int    `json:"revisions"`
-	Before    string `json:"before"`
-	After     string `json:"after"`
-	Added     int    `json:"added"`
-	Removed   int    `json:"removed"`
-	// Truncated says the preview is shorter than the file.
+	Revisions int `json:"revisions"`
+	// Hunks is never nil: the window maps over it.
+	Hunks   []workspace.Hunk `json:"hunks"`
+	Added   int              `json:"added"`
+	Removed int              `json:"removed"`
+	// Truncated says the diff is shorter than the change.
 	Truncated bool `json:"truncated"`
+	// NewlineOnly says the only difference is the newline at the end of the file, which has no
+	// rows in a diff: the panel would otherwise claim no line differs.
+	NewlineOnly bool `json:"newlineOnly"`
 	// CanRevert is "pressing undo would restore this file". False comes with a Blocked code.
 	CanRevert bool `json:"canRevert"`
 	// Blocked is why not: revertBlockedOutside, revertBlockedBinary, or empty.
@@ -113,18 +116,12 @@ func describeChange(root workspace.Root, snap store.FileSnapshot) FileChange {
 		// The file cannot be read (a permission, a folder where a file was): the diff falls
 		// back to what was written, and undo is off rather than attempted blind.
 		change.Blocked = revertBlockedBinary
-		diff := workspace.CompareDiff(snap.BeforeText, "")
-		change.Before, change.After = diff.Before, diff.After
-		change.Added, change.Removed, change.Truncated = diff.Added, diff.Removed, diff.Truncated
-		return change
+		return withDiff(change, workspace.CompareDiff(snap.BeforeText, ""))
 	case !current.Existed:
 		// Gone from the disk. Undo puts it back, and the diff says so by showing every line as
 		// removed — which is what the file's absence means.
 		change.CanRevert = true
-		diff := workspace.CompareDiff(snap.BeforeText, "")
-		change.Before, change.After = diff.Before, diff.After
-		change.Added, change.Removed, change.Truncated = diff.Added, diff.Removed, diff.Truncated
-		return change
+		return withDiff(change, workspace.CompareDiff(snap.BeforeText, ""))
 	case !current.Writable:
 		change.Blocked = revertBlockedBinary
 	default:
@@ -135,9 +132,17 @@ func describeChange(root workspace.Root, snap store.FileSnapshot) FileChange {
 			change.Blocked = revertBlockedOutside
 		}
 	}
-	diff := workspace.CompareDiff(snap.BeforeText, current.Content)
-	change.Before, change.After = diff.Before, diff.After
-	change.Added, change.Removed, change.Truncated = diff.Added, diff.Removed, diff.Truncated
+	return withDiff(change, workspace.CompareDiff(snap.BeforeText, current.Content))
+}
+
+// withDiff fills a row's diff in, in one place so the three ways a row is built cannot
+// disagree about which numbers belong to which field.
+func withDiff(change FileChange, diff workspace.Diff) FileChange {
+	change.Hunks = diff.Hunks
+	change.Added = diff.Added
+	change.Removed = diff.Removed
+	change.Truncated = diff.Truncated
+	change.NewlineOnly = diff.NewlineOnly
 	return change
 }
 

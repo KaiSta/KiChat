@@ -306,32 +306,6 @@ func (r Root) Remove(rel string) error {
 	return os.Remove(abs)
 }
 
-// Diff is the pair of texts a diff pane shows, with the counts its heading needs.
-type Diff struct {
-	Before string
-	After  string
-	// Added and Removed count the lines of each side, not a line-by-line comparison: the pane
-	// shows the two texts, and the numbers say whether what follows is the change the reader
-	// meant to look at.
-	Added   int
-	Removed int
-	// Truncated is "a preview here is shorter than the file", so the pane can say the diff it
-	// shows is not all of it.
-	Truncated bool
-}
-
-// CompareDiff renders the difference between what a file was and what it is.
-func CompareDiff(before, after string) Diff {
-	shownBefore, shownAfter, truncated := preview(before, after)
-	return Diff{
-		Before:    shownBefore,
-		After:     shownAfter,
-		Added:     countLines(after),
-		Removed:   countLines(before),
-		Truncated: truncated,
-	}
-}
-
 // Digest is the fingerprint of a text, used to notice that a file changed after this app wrote
 // it: a revert compares it against what the tool recorded, so an edit made in the user's own
 // editor in the meantime is a refusal rather than something to overwrite.

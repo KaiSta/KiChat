@@ -40,10 +40,6 @@ const (
 	// refusal it can read is better than an out-of-memory kill halfway through a write
 	// that has already truncated the file.
 	MaxWriteBytes = 4 << 20
-	// MaxChangePreviewBytes caps one side of a preview. The change itself is not capped by
-	// this: it exists so that a 4 MB rewrite is shown as the first 16 kB and a line saying
-	// so, rather than freezing the window while it renders.
-	MaxChangePreviewBytes = 16 << 10
 )
 
 // Change is a modification to one file, described before it is made.
@@ -52,19 +48,27 @@ type Change struct {
 	Path string
 	// Operation is one of OperationCreate, OperationOverwrite, OperationEdit.
 	Operation string
-	// Before is the text being replaced — the file's contents, or the matched string for
-	// an edit. Empty for a create.
-	Before string
-	// After is the text that will be there instead.
-	After string
-	// Added and Removed are line counts, not a diff: for an edit they are the two
-	// snippets, and for a write they are the file before and after. They are what lets the
-	// window say "14 lines become 210" without showing either.
+	// Hunks is the change as a line diff: what differs, with the unchanged lines around it
+	// that make it readable. Never nil, because the window maps over it. For a replace_all it
+	// shows the first place only — Occurrences says how many others there are.
+	Hunks []Hunk
+	// Added and Removed count the diff's lines rather than either text's: a one-line edit in a
+	// long file is 1 and 1, which is the number a reader needs next to a diff of one line. For
+	// a replace_all they are totals over every replacement, not one snippet's.
 	Added   int
 	Removed int
-	// Truncated is "a preview here is shorter than the change", so the window can say the
+	// Occurrences is how many places an edit replaces — 1 for a single match, the number of
+	// matches for replace_all — and 0 for a write, which has no occurrences to count. The card
+	// needs it because the preview can only show one of them: an edit that replaces twelve
+	// places is one pane of text here, and a person approving it has to be told the other eleven
+	// exist rather than reading a diff that looks like a single line.
+	Occurrences int
+	// Truncated is "there is more change than these hunks show", so the window can say the
 	// diff it shows is not the whole of it.
 	Truncated bool
+	// NewlineOnly is "the only difference is the newline at the end of the file": there are no
+	// hunks to draw, and the card has to say that rather than "no line differs".
+	NewlineOnly bool
 	// CreatesDirs lists folders that will be created to hold the file, outermost first.
 	// They are part of what is being approved: a typo in a path makes folders, and a
 	// listing that says so is how the person notices before rather than after.
@@ -111,10 +115,14 @@ func (r Root) DescribeWrite(rel, content string) (Change, error) {
 	if err != nil {
 		return Change{}, err
 	}
+	diff := CompareDiff(before, content)
 	change := Change{
-		Path:    r.Relative(abs),
-		Added:   countLines(content),
-		Removed: countLines(before),
+		Path:        r.Relative(abs),
+		Hunks:       diff.Hunks,
+		Added:       diff.Added,
+		Removed:     diff.Removed,
+		Truncated:   diff.Truncated,
+		NewlineOnly: diff.NewlineOnly,
 	}
 	if mode == 0 {
 		change.Operation = OperationCreate
@@ -122,7 +130,6 @@ func (r Root) DescribeWrite(rel, content string) (Change, error) {
 		change.Operation = OperationOverwrite
 	}
 	change.CreatesDirs = r.missingDirs(abs)
-	change.Before, change.After, change.Truncated = preview(before, content)
 	return change, nil
 }
 
@@ -183,6 +190,22 @@ func (r Root) inspectWrite(rel, content string) (abs, before string, mode fs.Fil
 	if abs == r.path {
 		return "", "", 0, fmt.Errorf("the project folder itself cannot be written as a file")
 	}
+	// Every ancestor that exists has to be a folder. A path whose parent is a file cannot be
+	// written — MkdirAll fails with ENOTDIR — and that failure would arrive *after* somebody had
+	// approved a card saying the file would be created, which is the one thing the
+	// describe-then-apply split exists to prevent.
+	for dir := filepath.Dir(abs); dir != r.path && inside(r.path, dir); dir = filepath.Dir(dir) {
+		dirInfo, dirErr := os.Stat(dir)
+		if dirErr != nil {
+			// Missing, so the write creates it. The walk is about the one that exists.
+			continue
+		}
+		if !dirInfo.IsDir() {
+			return "", "", 0, fmt.Errorf("%s is not a folder, so %s cannot be written in it",
+				r.Relative(dir), r.Relative(abs))
+		}
+		break
+	}
 	info, statErr := os.Stat(abs)
 	if statErr != nil {
 		if os.IsNotExist(statErr) {
@@ -200,6 +223,14 @@ func (r Root) inspectWrite(rel, content string) (abs, before string, mode fs.Fil
 	data, readErr := os.ReadFile(abs)
 	if readErr != nil {
 		return "", "", 0, readErr
+	}
+	// The refusal edit_file makes, for two reasons rather than one: the card's preview of this
+	// file would be a page of replacement characters, and there is no pre-image to put back (a
+	// change to a binary has no undo, see internal/tools/snapshot.go) — so a text write over a
+	// picture would be a change somebody approved without seeing and could not take back.
+	if isBinary(data[:min(len(data), maxSniffBytes)]) {
+		return "", "", 0, fmt.Errorf("%s is not a text file (it contains NUL bytes); overwriting it "+
+			"would destroy bytes this app cannot restore", r.Relative(abs))
 	}
 	return abs, string(data), info.Mode().Perm(), nil
 }
@@ -220,19 +251,26 @@ func (r Root) missingDirs(abs string) []string {
 // exactly the edits that Edit would refuse — so a person is never asked to approve
 // something that cannot be applied.
 func (r Root) DescribeEdit(rel, old, new string, replaceAll bool) (Change, error) {
-	abs, _, _, _, matched, _, err := r.inspectEdit(rel, old, replaceAll)
+	abs, text, _, occurrences, matched, _, err := r.inspectEdit(rel, old, new, replaceAll)
 	if err != nil {
 		return Change{}, err
 	}
+	// The diff shows what would actually be replaced, which for an approximate match is the
+	// file's own lines rather than the ones the model typed — and it is compared once, with
+	// the totals multiplied, because the other occurrences are the same replacement in a
+	// context the card cannot show (Occurrences is what says they exist). Its rows are numbered
+	// from the line the match really starts on, so the card points into the file.
+	diff := compareDiffAt(matched, new, lineOf(text, matched))
 	change := Change{
-		Path:      r.Relative(abs),
-		Operation: OperationEdit,
-		Added:     countLines(new),
-		Removed:   countLines(matched),
+		Path:        r.Relative(abs),
+		Operation:   OperationEdit,
+		Hunks:       diff.Hunks,
+		Added:       diff.Added * occurrences,
+		Removed:     diff.Removed * occurrences,
+		Truncated:   diff.Truncated,
+		NewlineOnly: diff.NewlineOnly,
+		Occurrences: occurrences,
 	}
-	// The preview shows what would actually be replaced, which for an approximate match is
-	// the file's own lines rather than the ones the model typed.
-	change.Before, change.After, change.Truncated = preview(matched, new)
 	return change, nil
 }
 
@@ -248,15 +286,29 @@ func (r Root) DescribeEdit(rel, old, new string, replaceAll bool) (Change, error
 // newline all survive an edit they are not part of: this is a string replacement inside
 // text, not a re-rendering of it.
 func (r Root) Edit(rel, old, new string, replaceAll bool) (EditResult, error) {
-	abs, text, mode, occurrences, matched, approx, err := r.inspectEdit(rel, old, replaceAll)
+	abs, text, mode, occurrences, matched, approx, err := r.inspectEdit(rel, old, new, replaceAll)
 	if err != nil {
 		return EditResult{}, err
 	}
 	// One occurrence, because inspectEdit has already refused an ambiguous match: an edit
 	// whose text appears twice is an error, never the first of the two.
-	updated := strings.Replace(text, matched, new, 1)
-	if replaceAll {
+	var updated string
+	switch {
+	case !replaceAll:
+		updated = strings.Replace(text, matched, new, 1)
+	case approx:
+		// Every span carries the file's own indentation, so replacing `matched` everywhere would
+		// only touch the occurrences that happen to be byte-identical to the first one — and
+		// report all of them as replaced.
+		updated = replaceWhitespaceMatches(text, old, new)
+	default:
 		updated = strings.ReplaceAll(text, matched, new)
+	}
+	// The authoritative form of the bound inspectEdit checked: that estimate is based on the
+	// first matched span, and whitespace-tolerant spans can be longer than it.
+	if len(updated) > MaxWriteBytes {
+		return EditResult{}, fmt.Errorf("%s would grow to %s, larger than the %s one change may "+
+			"produce", r.Relative(abs), humanBytes(int64(len(updated))), humanBytes(MaxWriteBytes))
 	}
 	if err := os.WriteFile(abs, []byte(updated), mode); err != nil {
 		return EditResult{}, err
@@ -277,18 +329,24 @@ func (r Root) Edit(rel, old, new string, replaceAll bool) (EditResult, error) {
 }
 
 // inspectEdit reads the file to be edited and refuses the edit if it cannot be made.
-// inspectEdit reads the file to be edited and refuses the edit if it cannot be made.
 //
 // It returns the text it actually matched, which is `old` itself when the match was exact and
 // the file's own lines when the match was approximate: what gets replaced has to be the bytes
 // that are in the file, whatever the model typed.
-func (r Root) inspectEdit(rel, old string, replaceAll bool) (abs, text string, mode fs.FileMode, occurrences int, matched string, approx bool, err error) {
+func (r Root) inspectEdit(rel, old, new string, replaceAll bool) (abs, text string, mode fs.FileMode, occurrences int, matched string, approx bool, err error) {
 	abs, err = r.Resolve(rel)
 	if err != nil {
 		return "", "", 0, 0, "", false, err
 	}
 	if strings.TrimSpace(old) == "" {
 		return "", "", 0, 0, "", false, fmt.Errorf("the text to replace is empty")
+	}
+	// Bounded for the same reason a write is: an edit is the other way to put text in a file,
+	// and a bound that only one of them enforces is not a bound. The preview is cut to 16 kB, so
+	// a 200 MB replacement would be something a person approves without seeing.
+	if len(new) > MaxWriteBytes {
+		return "", "", 0, 0, "", false, fmt.Errorf("the replacement text is %s, larger than the %s a "+
+			"single change may hold", humanBytes(int64(len(new))), humanBytes(MaxWriteBytes))
 	}
 	info, statErr := os.Stat(abs)
 	if statErr != nil {
@@ -335,7 +393,42 @@ func (r Root) inspectEdit(rel, old string, replaceAll bool) (abs, text string, m
 	case occurrences > 1 && !replaceAll:
 		return "", "", 0, 0, "", false, &AmbiguousMatch{Path: r.Relative(abs), Count: occurrences, FirstLine: lineOf(text, old)}
 	}
+	// A file may only grow to what a change may hold, or an edit becomes the way around the
+	// bound a write enforces (and a file too large to be edited could no longer be undone).
+	// Exact for an exact match; the whitespace-tolerant case is checked again on the finished
+	// text in Edit, because those spans carry their own indentation.
+	grown := len(text) - occurrences*len(matched) + occurrences*len(new)
+	if grown > MaxWriteBytes {
+		return "", "", 0, 0, "", false, fmt.Errorf("%s would grow to %s, larger than the %s one "+
+			"change may produce", r.Relative(abs), humanBytes(int64(grown)), humanBytes(MaxWriteBytes))
+	}
 	return abs, text, info.Mode().Perm(), occurrences, matched, approx, nil
+}
+
+// replaceWhitespaceMatches replaces every span that matches old once each line's whitespace is
+// ignored, keeping the rest of the file byte for byte.
+//
+// Separate from strings.ReplaceAll because the spans are not all the same text: the match is the
+// same lines, and each one has its own indentation in the file. The spans are found again here
+// rather than carried out of inspectEdit, so the function that decides what a match *is* stays
+// the one that enumerates them — a second matcher is how an edit ends up replacing a line the
+// description never showed.
+func replaceWhitespaceMatches(text, old, new string) string {
+	spans, _ := approximateMatches(text, old)
+	var sb strings.Builder
+	last := 0
+	for _, span := range spans {
+		at := strings.Index(text[last:], span)
+		if at < 0 {
+			continue
+		}
+		at += last
+		sb.WriteString(text[last:at])
+		sb.WriteString(new)
+		last = at + len(span)
+	}
+	sb.WriteString(text[last:])
+	return sb.String()
 }
 
 // approximateMatches finds the spans of text that equal old once each line's leading and
@@ -381,6 +474,11 @@ func approximateMatches(text, old string) ([]string, int) {
 		begin := offsets[i]
 		end := offsets[i+len(oldLines)-1] + len(textLines[i+len(oldLines)-1])
 		spans = append(spans, text[begin:end])
+		// Past the span, not one line on: a search for `a\na` in `a\na\na` must find one
+		// occurrence, the way strings.Count does, rather than two that overlap. An exact match
+		// and a whitespace-tolerant one have to count the same file the same way — the count is
+		// what the refusal and the replace_all both act on.
+		i += len(oldLines) - 1
 	}
 	return spans, len(spans)
 }
@@ -402,27 +500,6 @@ type AmbiguousMatch struct {
 func (e *AmbiguousMatch) Error() string {
 	return fmt.Sprintf("the text to replace appears %d times in %s, first at line %d",
 		e.Count, e.Path, e.FirstLine)
-}
-
-// preview renders the two sides of a change for display, cutting each to
-// MaxChangePreviewBytes on a line boundary and reporting whether either was cut.
-func preview(before, after string) (shownBefore, shownAfter string, truncated bool) {
-	shownBefore, cutBefore := clampPreview(before)
-	shownAfter, cutAfter := clampPreview(after)
-	return shownBefore, shownAfter, cutBefore || cutAfter
-}
-
-// clampPreview cuts text to the preview budget at the last whole line inside it, so the
-// page ends on a sentence rather than mid-token.
-func clampPreview(text string) (string, bool) {
-	if len(text) <= MaxChangePreviewBytes {
-		return text, false
-	}
-	cut := text[:MaxChangePreviewBytes]
-	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
-		cut = cut[:i]
-	}
-	return cut, true
 }
 
 // countLines is what the change totals show: the number of lines a reader would count,

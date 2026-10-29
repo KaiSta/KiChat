@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { type main } from '../lib/api'
 import { useStore } from '../store'
+import { HunkDiff } from './HunkDiff'
 
 /**
  * What this chat has done to the project folder, and the one action over it.
@@ -104,8 +105,6 @@ function Row({
   onUndo: () => void
 }) {
   const t = useStore((s) => s.t)
-  const before = lines(change.before)
-  const after = lines(change.after)
 
   return (
     <div
@@ -126,28 +125,16 @@ function Row({
         </span>
       </div>
 
-      <div
-        className="mono mt-2 max-h-56 overflow-auto rounded p-2 text-[11px] leading-[1.45]"
-        style={{ background: 'var(--code-bg)', border: '1px solid var(--border)' }}
-      >
-        {before.map((line, index) => (
-          <div key={`b${index}`} className="flex whitespace-pre" style={{ color: 'var(--danger)' }}>
-            <span className="w-3 shrink-0 select-none opacity-70">−</span>
-            {/* The line itself stays the text's colour: a whole row in red is a row nobody
-                can read, and this one has to be checkable. */}
-            <span style={{ color: 'var(--text)' }}>{line}</span>
-          </div>
-        ))}
-        {after.map((line, index) => (
-          <div key={`a${index}`} className="flex whitespace-pre" style={{ color: 'var(--ok)' }}>
-            <span className="w-3 shrink-0 select-none opacity-70">+</span>
-            <span style={{ color: 'var(--text)' }}>{line}</span>
-          </div>
-        ))}
-        {before.length === 0 && after.length === 0 && (
-          <div className="faint">{t('change.empty')}</div>
-        )}
-      </div>
+      {/* Nothing to compare against: a file this app will not read as text has no diff, and
+          "no line differs" beside "not a text file" would be two answers to one question. */}
+      {change.blocked !== 'not-text' && (
+        <div
+          className="mt-2 max-h-56 overflow-auto rounded p-2"
+          style={{ background: 'var(--code-bg)', border: '1px solid var(--border)' }}
+        >
+          <HunkDiff hunks={change.hunks} newlineOnly={change.newlineOnly} />
+        </div>
+      )}
 
       {change.truncated && <div className="faint mt-1 text-[11px]">{t('changes.truncated')}</div>}
 
@@ -177,10 +164,3 @@ function Row({
   )
 }
 
-/** The lines of one side, with a file's trailing newline ignored — the same rule the
- * confirmation card's diff uses, so the two panes count a file the same way. */
-function lines(text: string): string[] {
-  if (text === '') return []
-  const body = text.endsWith('\n') ? text.slice(0, -1) : text
-  return body.split('\n')
-}

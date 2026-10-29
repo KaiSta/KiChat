@@ -29,6 +29,19 @@ func (a *asked) confirm(_ context.Context, req *ApprovalRequest) error {
 	return a.answer
 }
 
+// diffText is every row of a change's hunks, so a test can talk about what the card would
+// show without reaching into the hunk structure for each line.
+func diffText(change workspace.Change) string {
+	var b strings.Builder
+	for _, hunk := range change.Hunks {
+		for _, line := range hunk.Lines {
+			b.WriteString(line.Text)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 // writeService is projectService with a confirmer attached.
 func writeService(t *testing.T, files map[string]string, conf *asked) (*Service, string, string) {
 	t.Helper()
@@ -62,8 +75,10 @@ func TestAChangeIsShownBeforeItIsMade(t *testing.T) {
 	if req.Change.Path != "internal/store/notes.go" {
 		t.Errorf("path = %q, want the workspace-relative path the model wrote", req.Change.Path)
 	}
-	if !strings.Contains(req.Change.After, "type Note struct{}") {
-		t.Errorf("the question carries %q as the new text, which is not what was written", req.Change.After)
+	// What the card draws comes from the hunks now, so the text of the change has to be in
+	// them: a tool that filled a count but no rows would ask about a change nobody can read.
+	if shown := diffText(req.Change); !strings.Contains(shown, "type Note struct{}") {
+		t.Errorf("the question carries %q as its diff, which is not what was written", shown)
 	}
 	if req.Change.Added != 3 {
 		t.Errorf("Added = %d, want the three lines being written", req.Change.Added)
