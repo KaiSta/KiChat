@@ -564,21 +564,21 @@ const de = {
   // die entscheiden, was ohne Nachfrage läuft.
   'settings.coding': 'Coding-Agent',
   'settings.payloadHint':
-    'Große Tool-Ergebnisse werden von einem zweiten Modell gekürzt, bevor das Chat-Modell sie liest. Der vollständige Text bleibt am Tool-Aufruf sichtbar.',
+    'Große Tool-Ergebnisse — Seiten und große Dateien aus dem Projektordner — werden von einem zweiten Modell gekürzt, bevor das Chat-Modell sie liest. Der vollständige Text bleibt am Tool-Aufruf sichtbar.',
   'settings.digestModel': 'Modell für die Kürzung',
   'settings.digestModelDefault': 'Aus (kein Modell gewählt)',
   'settings.digestModelUnavailable': '(nicht verfügbar)',
   'settings.digestModelHint':
-    'Ein kleines, schnelles Modell — am besten auf einem anderen Backend als der Chat. Dasselbe Backend zahlt die Kürzung aus demselben Minuten-Budget wie die Antwort; ein gehostetes Kürzungs-Modell bekommt die Seiten zu lesen, die es kürzt.',
+    'Ein kleines, schnelles Modell — am besten auf einem anderen Backend als der Chat. Dasselbe Backend zahlt die Kürzung aus demselben Minuten-Budget wie die Antwort; ein gehostetes Kürzungs-Modell bekommt die Seiten und Dateien zu lesen, die es kürzt. Einen Abschnitt, den das Modell gezielt mit offset/limit liest, kürzt es nie — den braucht es unverändert zum Bearbeiten.',
   'settings.digestThreshold': 'Ab dieser Größe kürzen (Tokens)',
   'settings.digestThresholdHint':
-    'Darunter wird das Ergebnis unverändert übernommen — die zusätzliche Anfrage kostet mehr Zeit als Tokens.',
+    'Darunter wird das Ergebnis unverändert übernommen — die zusätzliche Anfrage kostet mehr Zeit als Tokens. Für Code gilt dasselbe: eine kurze Datei wird ganz übergeben.',
   'settings.digestMaxTokens': 'Max. Länge der Kürzung (Tokens)',
   'settings.digestMaxTokensHint':
-    'Wie lang die Zusammenfassung höchstens werden darf. Kurz halten — sie ersetzt die Seite im Kontext; für sehr lange Seiten darf es mehr sein als die Schwelle oben.',
+    'Wie lang die Zusammenfassung höchstens werden darf. Kurz halten — sie ersetzt die Seite oder Datei im Kontext; für sehr lange Seiten darf es mehr sein als die Schwelle oben.',
   'settings.backendDigest': 'Tool-Ergebnisse kürzen',
   'settings.backendDigestHint':
-    'Gilt nur für Antworten dieses Backends. Große Seiten werden vor dem Senden zusammengefasst; ein zweiter Aufruf derselben Seite liefert den Volltext.',
+    'Gilt nur für Antworten dieses Backends. Große Seiten und große Dateien werden vor dem Senden zusammengefasst; ein zweiter Aufruf derselben Seite liefert den Volltext.',
   'settings.payloadActive': 'Aktiv für:',
   'settings.payloadInactive': 'Für kein Backend aktiv — einschalten im Tab „Backends“.',
 
@@ -1843,21 +1843,21 @@ const en: Record<keyof typeof de, string> = {
   // what runs unasked.
   'settings.coding': 'Coding agent',
   'settings.payloadHint':
-    'Oversized tool results are condensed by a second model before the chat model reads them. The full text stays visible on the tool call.',
+    'Oversized tool results — pages and large files from the project folder — are condensed by a second model before the chat model reads them. The full text stays visible on the tool call.',
   'settings.digestModel': 'Condensation model',
   'settings.digestModelDefault': 'Off (no model chosen)',
   'settings.digestModelUnavailable': '(not available)',
   'settings.digestModelHint':
-    'A small, fast model — ideally on a backend other than the chat’s. The same backend pays for the condensation out of the same per-minute allowance as the answer, and a hosted condensation model gets to read the pages it condenses.',
+    'A small, fast model — ideally on a backend other than the chat’s. The same backend pays for the condensation out of the same per-minute allowance as the answer, and a hosted condensation model gets to read the pages and files it condenses. A section the model asked for with an offset or a limit is never condensed — it needs that text unchanged to edit it.',
   'settings.digestThreshold': 'Condense above (tokens)',
   'settings.digestThresholdHint':
-    'Below this the result is handed over unchanged — the extra request costs more in time than it saves in tokens.',
+    'Below this the result is handed over unchanged — the extra request costs more in time than it saves in tokens. The same holds for code: a short file arrives whole.',
   'settings.digestMaxTokens': 'Condensation length (tokens)',
   'settings.digestMaxTokensHint':
-    'The most the summary may write. Keep it short — it is what replaces the page in the context; for a very long page it may legitimately be more than the threshold above.',
+    'The most the summary may write. Keep it short — it is what replaces the page or file in the context; for a very long page it may legitimately be more than the threshold above.',
   'settings.backendDigest': 'Condense tool results',
   'settings.backendDigestHint':
-    'Applies to answers on this backend only. Large pages are summarised before sending; asking for the same page again returns the full text.',
+    'Applies to answers on this backend only. Large pages and large files are summarised before sending; asking for the same page again returns the full text.',
   'settings.payloadActive': 'Active for:',
   'settings.payloadInactive': 'Active for no backend — switch it on in the Backends tab.',
 
@@ -3051,20 +3051,20 @@ const zh: Record<keyof typeof de, string> = {
   'settings.payload': '工具结果',
   // 在项目文件夹中工作的模式。该标签页存放决定哪些操作无需询问即可执行的开关。
   'settings.coding': '编码代理',
-  'settings.payloadHint': '较大的工具结果会先由另一个模型压缩，再交给对话模型阅读。完整文本仍显示在工具调用上。',
+  'settings.payloadHint': '较大的工具结果——网页以及项目文件夹中的大文件——会先由另一个模型压缩，再交给对话模型阅读。完整文本仍显示在工具调用上。',
   'settings.digestModel': '压缩模型',
   'settings.digestModelDefault': '关闭（未选择模型）',
   'settings.digestModelUnavailable': '（不可用）',
   'settings.digestModelHint':
-    '选择一个小而快的模型——最好不要与对话在同一个后端。同一后端会用同一份每分钟额度支付压缩开销；若压缩模型在云端，它会读到这些网页内容。',
+    '选择一个小而快的模型——最好不要与对话在同一个后端。同一后端会用同一份每分钟额度支付压缩开销；若压缩模型在云端，它会读到这些网页和文件的内容。模型用 offset/limit 定向读取的片段绝不会被压缩——它需要原样的文本来修改。',
   'settings.digestThreshold': '超过此大小则压缩（tokens）',
-  'settings.digestThresholdHint': '低于此值时结果原样使用——额外请求花费的时间会多于节省的令牌。',
+  'settings.digestThresholdHint': '低于此值时结果原样使用——额外请求花费的时间会多于节省的令牌。代码同理：很短的文件会完整交付。',
   'settings.digestMaxTokens': '压缩结果的最大长度（tokens）',
   'settings.digestMaxTokensHint':
-    '摘要最多写多长。请保持简短——它将在上下文中取代原网页；对于很长的网页，可以合理地超过上面的阈值。',
+    '摘要最多写多长。请保持简短——它将在上下文中取代原网页或文件；对于很长的网页，可以合理地超过上面的阈值。',
   'settings.backendDigest': '压缩工具结果',
   'settings.backendDigestHint':
-    '仅对该后端的回答生效。较大的网页会在发送前被概括；再次请求同一网页会得到完整文本。',
+    '仅对该后端的回答生效。较大的网页和大文件会在发送前被概括；再次请求同一网页会得到完整文本。',
   'settings.payloadActive': '已启用：',
   'settings.payloadInactive': '未对任何后端启用——请在“后端”标签页中开启。',
 

@@ -338,6 +338,13 @@ sentence is the one reading that makes a model rewrite a file it thinks has noth
 rounds ago does not need it again. The memory is per turn and per chat, bounded, and dropped
 when the turn ends.
 
+**What arrives instead of a large file may be a summary.** With a condensation model chosen in
+Settings → Tool results, a `read_file` result above the threshold is condensed before the
+model reads it; the notice names the way back (`offset`/`limit`, which is never condensed) and
+the framing — the continuation line and the nearest `AGENTS.md` — is carried through verbatim.
+The rules live with the mechanism, in [COMPACT.md §17.6](COMPACT.md), because they belong to
+the condensation rather than to the read.
+
 **What it must never answer is "did my write land".** The cache is therefore *told* about
 changes rather than left to notice them from size and modification time: `write_file` and
 `edit_file` forget the path they touched, and `run_command` forgets the whole chat's memory,

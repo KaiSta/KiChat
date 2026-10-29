@@ -994,8 +994,9 @@ assume are covered.
 ## 17. Condensing a tool result (its sibling, not a fold)
 
 A fold is one answer to "this request is too large". The other one is to stop the large
-thing entering the context at all, and for a scraped page that is now a feature of its
-own: `internal/chat/digest.go`.
+thing entering the context at all, and that is now a feature of its own for the two places a
+tool result can be long — a scraped page and a file read out of the project folder
+(`internal/chat/digest.go`, §17.6 for the second one).
 
 ### 17.1 What it does
 
@@ -1131,7 +1132,12 @@ chats, a document chunk left alone, the configured cap reaching the request as
 `max_tokens`, a changed cap missing the cache, inline thinking stripped from the answer,
 and a thinking-only answer retried with a larger budget. `TestACondensationReplacesThePageTheModelReads`
 fails by design if the call in `runTool` is removed. The cap's resolution (0 = default,
-bounds, threshold) is pinned in `internal/config/config_test.go`.
+bounds, threshold) is pinned in `internal/config/config_test.go`. The file half is §17.6:
+`TestALargeReadIsCondensedBeforeTheModelSeesIt`, `TestATargetedReadIsNeverCondensed`,
+`TestAReadBelowTheThresholdIsHandedOverWhole`,
+`TestARepeatedReadIsCondensedAgainFromTheCache`, `TestAReadsFramingIsNotCondensed`,
+`TestAFileThatQuotesTheMarkersIsNotCutAtThem`, `TestABoundedReadIsRecognised` and
+`TestTheFoldersRulesSurviveACondensation`.
 
 ### 17.5 What the card says: the two sizes
 
@@ -1176,5 +1182,70 @@ pins the fourth, with one token of budget and no summary model.
 
 The harness fixture for the research chat carries all four, because three of them are
 only distinguishable by the words after the number.
+
+### 17.6 Reading a file out of the folder
+
+The same condensation covers `read_file` (`digestJobFile`), which is where it saves the
+most: a coding chat reads source, and a 2000-line read is ~20k tokens against a 15k–25k
+answer budget. Four things are different from a page, and each is a rule rather than a
+detail.
+
+**A file has its own prompt, because what may be lost is different.** `readFileSystemPrompt`
+keeps paths, line numbers, identifiers and signatures *verbatim*; the page prompt's
+"Stichpunkte, lass Navigation weg" would invite a summary to rename a function. A rename in
+a summary is not a lost detail — `edit_file` takes `old_string`, `read_file` continues from
+an `offset`, and a summary that invented either makes the next call wrong.
+Pinned by `TestALargeReadIsCondensedBeforeTheModelSeesIt` (which asserts the file prompt and
+`<file path="…">` reached the digester, not the page prompt).
+
+**A bounded read is never condensed.** A call with `offset` or `limit` is one the model has
+already decided about — it is what a coding chat does immediately before `edit_file` — so
+`targetedRead` refuses those. It is the same rule Spotify's shunt hook applies, for the same
+reason: the delegation is for *understanding*, and the edit needs the text.
+Pinned by `TestATargetedReadIsNeverCondensed`.
+
+**The framing is carried, not summarised.** `splitReadBody` cuts the result at the header
+and at either of the two trailers, and both trailers travel verbatim: the
+`Die Datei geht weiter … offset=N` line is the only way the model knows where a truncated
+file resumes, and `<project_agents_md …>` is the folder's rules — a summary of rules is not
+the rules. The markers live in `internal/tools` (`ReadContinueNotice`, `ReadGuidanceTag`) and
+are used by the tool that writes them, so the splitter cannot drift from the format.
+
+Neither trailer is found by its **first** occurrence, and that was a bug: this app's own
+`tools/project.go` writes both of those sentences, so reading it cut the body at the quote and
+handed the last 157 lines over uncondensed. What tells framing from content is the numbering —
+every line of the body starts with `%6d| `, so only real framing starts a line — and that is
+what `guidanceStart`/`continuationStart` check, from the end. The first version also matched
+`<project_agents_md>` complete, which never appears because the tag carries `path=`; that one
+was caught by `TestTheFoldersRulesSurviveACondensation`, and the quoting bug by
+`TestAFileThatQuotesTheMarkersIsNotCutAtThem`.
+
+**A file's escape hatch is a bounded read, so the ledger does not apply.** `digest`'s contract
+for a page is that asking again returns the full text (the `condensationLedger`), which works
+because the second scrape is a new result. For a file that rule is wrong in both directions:
+the way to the text is `read_file` with an `offset`/`limit` — never condensed — and exempting
+files after their first condensation would mean a *routine* re-read hands over 20k tokens, once
+per turn, for the rest of the chat. So `rereadIsEscape` is true only for `digestJobPage`, and a
+repeated read is condensed again from the cache: same job, model, cap and text is one key, so
+the repeat costs a lookup and no request. Pinned by
+`TestARepeatedReadIsCondensedAgainFromTheCache` and, for the page half, by the unchanged
+`TestTheSecondReadIsTheEscapeHatch`.
+
+The cache key carries the job as well as the model, the prompt version, the cap and the text
+(`digestKey`): the same words can be a page and a file, and the answers are not
+interchangeable. Adding it changed every key once, so the first read of a page or a file
+after that change missed the cache — a miss costs one request, while a shared entry would
+answer a question about a source file with a summary of a web page.
+
+**The other half of shunt is not here.** Spotify's plugin also routes boilerplate
+*generation* to the cheap model, writing the file straight to disk with the chat model never
+seeing it. That trade is not made here: the text a change consists of is what `edit_file`
+carries and what the person reviewing it reads, and a file nobody read is more expensive than
+the tokens it saved.
+
+Nothing new is configurable: `Digest.Model` empty is still **off**, `Digest.Threshold` still
+decides what is worth a second request, and `Backend.Digest` still gates it per backend. On a
+single-GPU setup the condense model competes with the chat model for VRAM, which is the
+reason the feature stays off until somebody picks a model, and the settings hints say so.
 
 ---
