@@ -1187,6 +1187,8 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 		{"messages", "sources_json"},
 		{"chats", "mode"},
 		{"chats", "workspace"},
+		{"file_snapshots", "reverted_at"},
+		{"file_snapshots", "noted_sha"},
 	} {
 		if _, err := st.DB().Exec(`ALTER TABLE ` + column.table + ` DROP COLUMN ` + column.name); err != nil {
 			t.Fatalf("drop %s.%s to build the older schema: %v", column.table, column.name, err)

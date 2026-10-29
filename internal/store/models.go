@@ -349,14 +349,25 @@ type ToolCallRecord struct {
 // The text is not marshalled to the window: the panel shows a diff of it, built in Go, and a
 // chat with fifty changed files would otherwise carry every one of them through the bridge.
 type FileSnapshot struct {
-	ChatID     string    `json:"chatId"`
-	Path       string    `json:"path"`
-	BeforeText string    `json:"-"`
-	Existed    bool      `json:"existed"`
-	AfterSHA   string    `json:"afterSha"`
-	Revisions  int       `json:"revisions"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ChatID     string `json:"chatId"`
+	Path       string `json:"path"`
+	BeforeText string `json:"-"`
+	Existed    bool   `json:"existed"`
+	AfterSHA   string `json:"afterSha"`
+	Revisions  int    `json:"revisions"`
+	// RevertedAt is when the user put the file back, or the zero value for a change that
+	// still stands. It is a marker rather than a deletion because the model's own history
+	// still claims what the file contains: a reverted row is one the panel leaves out and
+	// the next turn tells the model about, and then it is deleted.
+	RevertedAt time.Time `json:"revertedAt"`
+	// NotedSHA is the digest of an outside version of the file that a turn has already told
+	// the model about, empty when it has not. It is what makes "this file changed behind
+	// your back" a note rather than a permanent block: the same outside text is announced
+	// once, and a version edited again gets its own note. A write resets it, because from
+	// then on the file holds the model's own text again.
+	NotedSHA  string    `json:"notedSha,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // SearchCacheEntry caches a search provider response.

@@ -1089,11 +1089,20 @@ func (s *Store) PutFileSnapshot(snap FileSnapshot) error {
 	if snap.Revisions < 1 {
 		snap.Revisions = 1
 	}
+	// A change after a revert clears the marker: the file is the model's work again, so
+	// there is nothing to warn its next turn about. The pre-image is not touched — the text
+	// to put back stays the text from before this chat first touched the file.
+	//
+	// The outside-change marker is cleared here for the same reason: the digest it named is
+	// no longer the file, and a note already delivered about some older text must not stop
+	// the next one. Otherwise a file edited, announced, written by the model, and then
+	// hand-edited back to the announced version would match the stale marker and be silent.
 	_, err := s.db.Exec(`
-INSERT INTO file_snapshots (chat_id,path,before_text,existed,after_sha,revisions,created_at,updated_at)
-VALUES (?,?,?,?,?,?,?,?)
+INSERT INTO file_snapshots (chat_id,path,before_text,existed,after_sha,revisions,created_at,updated_at,reverted_at,noted_sha)
+VALUES (?,?,?,?,?,?,?,?,0,'')
 ON CONFLICT(chat_id,path) DO UPDATE SET after_sha=excluded.after_sha,
-  revisions=file_snapshots.revisions+1, updated_at=excluded.updated_at`,
+  revisions=file_snapshots.revisions+1, updated_at=excluded.updated_at,
+  reverted_at=0, noted_sha=''`,
 		snap.ChatID, snap.Path, snap.BeforeText, boolToInt(snap.Existed), snap.AfterSHA,
 		snap.Revisions, millis(snap.CreatedAt), millis(snap.UpdatedAt))
 	return err
@@ -1102,7 +1111,7 @@ ON CONFLICT(chat_id,path) DO UPDATE SET after_sha=excluded.after_sha,
 // GetFileSnapshot loads one file's undo record.
 func (s *Store) GetFileSnapshot(chatID, path string) (FileSnapshot, bool, error) {
 	row := s.db.QueryRow(`SELECT chat_id,path,before_text,existed,after_sha,revisions,
-  created_at,updated_at FROM file_snapshots WHERE chat_id=? AND path=?`, chatID, path)
+  reverted_at,noted_sha,created_at,updated_at FROM file_snapshots WHERE chat_id=? AND path=?`, chatID, path)
 	snap, err := scanFileSnapshot(row)
 	if err == sql.ErrNoRows {
 		return FileSnapshot{}, false, nil
@@ -1115,10 +1124,62 @@ func (s *Store) GetFileSnapshot(chatID, path string) (FileSnapshot, bool, error)
 
 // ListFileSnapshots returns a chat's changed files, most recently changed first — the order a
 // panel wants, because the file a turn just wrote is the one the person is looking at.
+//
+// A file the user put back is not one of them: the change it describes is no longer in the
+// folder, so listing it would offer an undo for something that already happened. Its row lives
+// on until the marker is cleared, because the model still has to be told (see PendingReverts).
 func (s *Store) ListFileSnapshots(chatID string) ([]FileSnapshot, error) {
-	rows, err := s.db.Query(`SELECT chat_id,path,before_text,existed,after_sha,revisions,
-  created_at,updated_at FROM file_snapshots WHERE chat_id=? ORDER BY updated_at DESC, path`,
-		chatID)
+	return s.fileSnapshots(`SELECT chat_id,path,before_text,existed,after_sha,revisions,
+  reverted_at,noted_sha,created_at,updated_at FROM file_snapshots
+WHERE chat_id=? AND reverted_at=0 ORDER BY updated_at DESC, path`, chatID)
+}
+
+// MarkFileSnapshotNoted records that a turn has told the model this outside version of a file.
+//
+// Only the digest, because only the question "is this the same outside text I already announced"
+// needs answering. A file the model then writes resets it (PutFileSnapshot), and a version edited
+// again afterwards has a different digest and is news in its own right.
+//
+// after is the digest the note was built against, and the update is conditional on it. The model
+// may rewrite the file during the very turn that carried the note: by then the row holds the new
+// text and a cleared marker, and stamping the old outside version over it would make a later edit
+// that happens to restore that same text look like one already announced.
+func (s *Store) MarkFileSnapshotNoted(chatID, path, sha, after string) error {
+	_, err := s.db.Exec(`UPDATE file_snapshots SET noted_sha=?
+WHERE chat_id=? AND path=? AND reverted_at=0 AND after_sha=?`, sha, chatID, path, after)
+	return err
+}
+
+// PendingReverts returns the files this chat's user put back, oldest first, whose marker has not
+// been cleared yet.
+//
+// It exists because of what the history says. A tool result in the transcript is a claim about a
+// file — "written, 40 lines" — and after a revert that claim is false; the model would reason
+// from text that is no longer in the folder, quote it, or edit around a line that moved. So the
+// next turn is told, and ClearReverts forgets the marker once that turn has had the note.
+func (s *Store) PendingReverts(chatID string) ([]FileSnapshot, error) {
+	return s.fileSnapshots(`SELECT chat_id,path,before_text,existed,after_sha,revisions,
+  reverted_at,noted_sha,created_at,updated_at FROM file_snapshots
+WHERE chat_id=? AND reverted_at>0 ORDER BY reverted_at, path`, chatID)
+}
+
+// MarkFileSnapshotReverted records that a file was put back. The row stays — the fact that the
+// model's own results are now wrong is worth keeping — and the marker is what makes it a note
+// for the next turn rather than an entry in the panel.
+func (s *Store) MarkFileSnapshotReverted(chatID, path string) error {
+	_, err := s.db.Exec(`UPDATE file_snapshots SET reverted_at=?
+WHERE chat_id=? AND path=? AND reverted_at=0`, millis(time.Now()), chatID, path)
+	return err
+}
+
+// ClearReverts drops the markers a turn has already told the model about.
+func (s *Store) ClearReverts(chatID string) error {
+	_, err := s.db.Exec(`DELETE FROM file_snapshots WHERE chat_id=? AND reverted_at>0`, chatID)
+	return err
+}
+
+func (s *Store) fileSnapshots(query string, chatID string) ([]FileSnapshot, error) {
+	rows, err := s.db.Query(query, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -1134,22 +1195,18 @@ func (s *Store) ListFileSnapshots(chatID string) ([]FileSnapshot, error) {
 	return out, rows.Err()
 }
 
-// DeleteFileSnapshot forgets one file's undo record, which is what a successful revert does:
-// the file is back to the state the record described, so there is nothing left to restore.
-func (s *Store) DeleteFileSnapshot(chatID, path string) error {
-	_, err := s.db.Exec(`DELETE FROM file_snapshots WHERE chat_id=? AND path=?`, chatID, path)
-	return err
-}
-
 func scanFileSnapshot(row interface{ Scan(...any) error }) (FileSnapshot, error) {
 	var snap FileSnapshot
 	var existed int
-	var created, updated int64
+	var reverted, created, updated int64
 	if err := row.Scan(&snap.ChatID, &snap.Path, &snap.BeforeText, &existed, &snap.AfterSHA,
-		&snap.Revisions, &created, &updated); err != nil {
+		&snap.Revisions, &reverted, &snap.NotedSHA, &created, &updated); err != nil {
 		return FileSnapshot{}, err
 	}
 	snap.Existed = existed != 0
+	if reverted > 0 {
+		snap.RevertedAt = fromMillis(reverted)
+	}
 	snap.CreatedAt = fromMillis(created)
 	snap.UpdatedAt = fromMillis(updated)
 	return snap, nil

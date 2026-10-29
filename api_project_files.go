@@ -178,7 +178,7 @@ func (a *App) RevertFileChange(chatID, path string) error {
 	if err != nil {
 		return uimsg.Errorf("project.changesFailed", err)
 	}
-	if !ok {
+	if !ok || !snap.RevertedAt.IsZero() {
 		// A second click on a row the first click already restored. Nothing went wrong, and
 		// the panel is about to be reloaded.
 		return nil
@@ -198,9 +198,12 @@ func (a *App) RevertFileChange(chatID, path string) error {
 	} else if err := root.Remove(snap.Path); err != nil {
 		return uimsg.Errorf("project.revertFailed", snap.Path, err)
 	}
-	// The record goes with the change it described: the file is back to the state it named,
-	// so there is nothing left to restore and a second press must not be offered.
-	if err := a.store.DeleteFileSnapshot(chatID, snap.Path); err != nil {
+	// The row is marked rather than deleted, and the mark is the one thing here that is about
+	// the model rather than about the folder: the transcript's tool results still claim this
+	// file contains what the model wrote, and the next turn has to be told otherwise or it
+	// will quote a line that is no longer there and edit around one that moved. The panel
+	// leaves a marked row out, so nothing offers to undo it twice.
+	if err := a.store.MarkFileSnapshotReverted(chatID, snap.Path); err != nil {
 		return uimsg.Errorf("project.changesFailed", err)
 	}
 	// A revert is a write like any other: whatever the turn remembered about this file is

@@ -90,6 +90,38 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 	// such rate and for every turn that fits in what the minute has left.
 	pacing := planTurnRequests(in.Provider, in.ModelID, maxIter)
 
+	// The files the user put back since this chat's last turn, if any. Their tool results are
+	// still in the history and still claim what the model wrote, so the note travels with the
+	// request that opens the turn — and the marker is cleared once a request carrying it has
+	// actually reached the model, so a turn that never left the app keeps its correction.
+	revertNote := e.revertNote(in.Chat)
+	revertDelivered := false
+	if revertNote != "" {
+		defer func() {
+			if revertDelivered {
+				e.persist(in.Chat.ID, "Die zurückgesetzten Dateien", e.Store.ClearReverts(in.Chat.ID))
+			}
+		}()
+	}
+
+	// And the other way a tool result goes false: the file was edited outside this app, so the
+	// text on disk is no longer what the model wrote, while its own results still say it is. The
+	// note is spent per outside version rather than per turn (Engine.externalNote), and a turn
+	// that never reaches the model keeps it, exactly like the revert note above.
+	diskNote, diskNoted := e.externalNote(in.Chat)
+	diskDelivered := false
+	if diskNote != "" {
+		defer func() {
+			if !diskDelivered {
+				return
+			}
+			for path, version := range diskNoted {
+				e.persist(in.Chat.ID, "Der Vermerk auf geänderte Dateien",
+					e.Store.MarkFileSnapshotNoted(in.Chat.ID, path, version.disk, version.after))
+			}
+		}()
+	}
+
 	for iteration := 0; iteration < maxIter; iteration++ {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
@@ -177,6 +209,25 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 				extraSystem += "\n\n" + captionRule
 			}
 		}
+		// Last, so the protocol hints above cannot overwrite them: these two are the only pieces
+		// of extra system text about the conversation rather than about this request. Only the
+		// round that opens the turn carries them — a later round in the same turn already has
+		// them in the history of the request that preceded it. The revert goes first, because a
+		// file that was both put back and edited since is the revert's to explain.
+		if iteration == 0 && (revertNote != "" || diskNote != "") {
+			if extraSystem != "" {
+				extraSystem += "\n\n"
+			}
+			if revertNote != "" {
+				extraSystem += revertNote
+			}
+			if revertNote != "" && diskNote != "" {
+				extraSystem += "\n\n"
+			}
+			if diskNote != "" {
+				extraSystem += diskNote
+			}
+		}
 		assembly, toolDefs, err := e.buildAssembly(ctx, &in.Chat,
 			in.BackendID, in.ModelID, in.Settings, in.Model, extraSystem)
 		if err != nil {
@@ -223,6 +274,13 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		requestStart := time.Now()
 		events, err := in.Provider.Chat(e.watchingRetries(ctx, in.Chat.ID), req)
 		requestMS := time.Since(requestStart).Milliseconds()
+		if err == nil && iteration == 0 {
+			// The model has the request in hand, which is as good as the note being read. A
+			// request that failed before this point leaves the markers alone, so the retry —
+			// or the next turn — carries the correction instead of losing it.
+			revertDelivered = revertNote != ""
+			diskDelivered = diskNote != ""
+		}
 		if err != nil {
 			e.traceReply(in, row.ID, requestMS, nil, err)
 			// The request never produced a byte, so there is no partial answer to

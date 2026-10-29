@@ -320,9 +320,51 @@ they may hold work the chat did not put there. A running turn is refused too: th
 be writing that file at this instant. A file that is binary or larger than a change may touch
 has no undo at all, and the panel says so instead of offering a button that could only fail.
 
-The record goes when it is no longer true: a successful revert deletes the row, and `/clear`
-and deleting the chat delete all of them — an undo offered for a change the history no longer
-describes is a button nobody can check.
+The record goes when it is no longer true: `/clear` and deleting the chat delete all of them —
+an undo offered for a change the history no longer describes is a button nobody can check. A
+revert is the one case that does not delete the row.
+
+**A revert is news to the model, not only to the folder.** A tool result in the transcript is a
+claim about a file — "written, 40 lines", "edited, 1 occurrence replaced (line 12)" — and it is
+replayed on every later turn. Put the file back and those claims become false while the
+history keeps making them, and that is the one failure the folder cannot correct: the folder is
+right, the transcript is wrong. So a revert marks the row (`file_snapshots.reverted_at`) instead
+of deleting it, the panel leaves a marked row out, and the next turn's prompt carries a
+`<project_reverted_files>` block naming each file with one sentence: your earlier results about
+these are out of date, read one again before you edit it or quote its contents. Three
+properties, each a decision:
+
+| | Choose | Why |
+| --- | --- | --- |
+| What it carries | paths, not contents | Sending the restored text back would be a second copy of a file the model can read with one call, and it grows with the file. The point is "what you think you know is stale". |
+| How often | once | The marker is cleared after the request that carried it has reached the model, so the note does not become a permanent part of every request. A turn that failed before that point keeps the marker, so the correction is not lost with it. |
+| Who gets it | a project, gated on its mode like the guidance | A chat with no folder cannot have changed a file of one; a research conversation whose store somehow holds a marker still gets no paths from a folder. |
+
+A later write of the same file clears the marker rather than starting a second row: the file is
+the model's work again, so there is nothing stale to report. The pre-image is not touched by any
+of this — the text to put back stays the text from before the chat first touched the file.
+
+**The other way a tool result goes stale is the user's own editor.** The snapshot already holds
+the digest of the text the app last wrote, so a file whose digest has moved on was changed
+somewhere the app cannot see — an editor, a formatter in another window, a checkout that
+replaced the tree — while the transcript still says the model's text is in there. The next
+turn's prompt therefore carries a `<project_changed_on_disk>` block, built at the start of the
+turn the same way the revert note is, naming each file (and saying when one is gone). It is
+*not* the revert note with another trigger, and the wording keeps them apart: nothing was
+undone, the text on disk is the person's own, and a model told otherwise would go looking for a
+version nobody restored.
+
+| | Choose | Why |
+| --- | --- | --- |
+| Whose files | the ones this chat wrote | Those are the ones with a recorded digest to compare against, and the ones a tool result in this transcript describes. A file the model merely read and the user then edited has no recorded version to differ from; within a turn the read shortcut's size-and-mtime stamp catches it, and the next read returns the text, which is the answer that matters there. |
+| How often | once per outside version | `file_snapshots.noted_sha` (migration 14) holds the digest that was announced, so a block the model ignored does not grow every request after it, while a file edited again after being announced is a new fact and speaks again. A write clears the marker with the digest, because then the file is the model's text again. |
+| Where it is checked | once, at the start of the turn, against the folder | The alternative — checking on every read — cannot help: the model has to be told *before* it decides what to do, which is the same reason the revert note is assembled up front rather than added to a tool result. |
+
+What it costs is one query and one read per file the chat ever wrote, at the start of a turn
+whose project has changed files at all; a chat whose folder is untouched by anyone reads the
+same files it wrote and finds the digests equal. A file that is now binary or too large to
+compare is skipped rather than announced — there is no digest to compare, and guessing at one
+would report a change nobody measured.
 
 **The panel** (`ProjectChanges.tsx`, beside the folder badge in a project's header) answers
 "what has this chat done to my folder" — the question the transcript answers only as a hundred

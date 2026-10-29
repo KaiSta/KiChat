@@ -525,6 +525,29 @@ CREATE TABLE IF NOT EXISTS file_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_file_snapshots_chat ON file_snapshots(chat_id, updated_at);
 `,
+	// 13: a file the user put back.
+	//
+	// The undo used to delete its row, which lost the one fact the model needs: the
+	// transcript's tool results still say the file contains what the model wrote. A revert
+	// therefore marks the row instead, and the next turn tells the model those files are no
+	// longer what its own results claim; the marker is cleared once that turn has the note.
+	//
+	// A later change to the same file clears the marker rather than starting a new row, which
+	// is also why the pre-image survives a revert: the text to put back is still the text from
+	// before this chat first touched the file, and a revert that was undone and redone must not
+	// drift into restoring the model's own draft. Appended here for the reason migrations 4–12
+	// are: the runner resumes at the version a database is already at.
+	`ALTER TABLE file_snapshots ADD COLUMN reverted_at INTEGER NOT NULL DEFAULT 0`,
+	// 14: a file the chat wrote, changed outside the app.
+	//
+	// A snapshot already knows the digest of the text the app last wrote, so a file whose
+	// digest differs has been edited since — in the user's editor, by a command, by a
+	// generator — and the transcript's tool results still describe the text the model put
+	// there. This column is the digest of that outside version once the next turn has been
+	// told about it, so the same change is news once rather than a block on every request.
+	// Empty for a file nobody has told the model about, and cleared by a write, which makes
+	// the file the model's own text again.
+	`ALTER TABLE file_snapshots ADD COLUMN noted_sha TEXT NOT NULL DEFAULT ''`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

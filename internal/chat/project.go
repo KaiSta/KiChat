@@ -71,3 +71,206 @@ func projectGuidance(c store.Chat) (guidance, detail string, ok bool) {
 	}
 	return sb.String(), detail, true
 }
+
+// The files a person put back, as the next turn's prompt says it.
+//
+// Why this exists at all: a tool result in the transcript is a claim about a file — "written,
+// 40 lines", "edited, 1 occurrence replaced (line 12)" — and it is replayed on every later turn.
+// A revert makes those claims false while the history keeps telling them, and a model with a
+// stale claim does the things it does with any fact: it quotes the line it thinks it wrote, it
+// edits around a block that has moved, or it concludes its change is still in place. Nothing in
+// the folder can correct that — the folder is right, the transcript is wrong — so the correction
+// has to travel beside the history, once.
+//
+// Three properties matter and each is a decision:
+//
+//   - **It names files, not contents.** Sending the restored text back would be a second copy of
+//     a file the model can read with one tool call, and it would grow with the file. The point is
+//     to say "what you think you know about this file is out of date", which paths do.
+//   - **It is one block, once.** The turn that carried it into a request clears the marker, so the
+//     note does not become a permanent part of every request (Engine.revertNote, and the clear at
+//     the end of Engine.generate).
+//   - **It is markup, like the AGENTS.md block, and it says what to do.** A model that reads
+//     "these were reverted" without an instruction treats it as news; the sentence tells it the
+//     one action that fixes the staleness: read the file again before touching it.
+const (
+	revertedOpen  = "<project_reverted_files>"
+	revertedClose = "</project_reverted_files>"
+)
+
+// revertedNotice renders one block naming every file this chat's user put back.
+//
+// The paths are sorted by when they were reverted, which is the order the turn's own rounds
+// happened in — so a model reading it can match the note to its own history if it cares.
+func revertedNotice(snaps []store.FileSnapshot) (string, bool) {
+	if len(snaps) == 0 {
+		return "", false
+	}
+	var sb strings.Builder
+	sb.WriteString(revertedOpen)
+	sb.WriteString("\nDer Nutzer hat diese Dateien nach deiner Änderung zurückgesetzt; sie enthalten " +
+		"wieder den Stand von vor deiner Änderung:\n")
+	for _, snap := range snaps {
+		sb.WriteString("- ")
+		sb.WriteString(snap.Path)
+		if !snap.Existed {
+			sb.WriteString(" (angelegt von dir, wieder entfernt)")
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("Deine früheren Ergebnisse zu diesen Dateien stimmen nicht mehr. Lies eine davon " +
+		"erneut, bevor du sie bearbeitest oder ihren Inhalt wiedergibst.\n")
+	sb.WriteString(revertedClose)
+	return sb.String(), true
+}
+
+// goneDigest stands in for "this file is not there" in the marker column.
+//
+// A snapshot's marker is otherwise a digest of text, and the empty one means "nothing has been
+// told yet". A deletion has no text to digest, and leaving the marker empty would make it news
+// on every request; so it gets a value that no sha256 can produce.
+const goneDigest = "-"
+
+// The files that changed outside the app, as the next turn's prompt says it.
+//
+// A snapshot already carries the digest of the text this app last wrote, which makes it the only
+// place the app can notice that the file has moved on without it: the user edited it in their
+// own editor, a formatter ran in another window, a branch was checked out, a generator rewrote
+// it. The transcript, meanwhile, still holds the tool result that says "written, 40 lines" — the
+// same false claim a revert produces, arrived at by a different road, and corrected the same way:
+// one block beside the history, naming the files and telling the model to read them again before
+// it trusts what it remembers.
+//
+// Three decisions, and the first one is what keeps this from being expensive:
+//
+//   - **Only files this chat wrote.** Those are the ones with a digest to compare, and the ones a
+//     tool result in this transcript describes. A file the model merely read and the user then
+//     edited has no recorded version to differ from; the read shortcut's size-and-mtime stamp
+//     (internal/tools/reads.go) catches it within a turn, and the next turn's read returns the
+//     text, which is the answer that matters there.
+//   - **Once per outside version, not once per turn.** The marker is the digest that was
+//     announced, so a block the model ignored does not grow every request after it, while a file
+//     edited again after being announced is a new fact and speaks again. A write clears the
+//     marker along with the digest, because then the file is the model's own text again.
+//   - **It is not a revert and does not claim to be.** The text is the user's, not the pre-image
+//     this chat restored, so the note must not suggest the change was undone.
+const (
+	diskOpen  = "<project_changed_on_disk>"
+	diskClose = "</project_changed_on_disk>"
+)
+
+// notedVersion is what the delivery marker needs to know: the outside text that was announced,
+// and the digest it was compared against. The second one is what keeps the marker from being
+// written over a file the same turn has since rewritten (Store.MarkFileSnapshotNoted).
+type notedVersion struct{ disk, after string }
+
+// externalNotice renders the block for the files whose outside text this turn is about to
+// announce.
+func externalNotice(changed []string) string {
+	if len(changed) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(diskOpen)
+	sb.WriteString("\nDiese Dateien wurden außerhalb dieser App geändert, seit du sie geschrieben hast:\n")
+	for _, name := range changed {
+		sb.WriteString("- ")
+		sb.WriteString(name)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("Dein Stand von diesen Dateien ist damit überholt. Lies eine davon erneut, " +
+		"bevor du sie bearbeitest oder ihren Inhalt wiedergibst.\n")
+	sb.WriteString(diskClose)
+	return sb.String()
+}
+
+// externalNote is what this turn has to say about files edited behind the app's back.
+//
+// The map is the marker the caller writes after the request that carried the note succeeded, so
+// a turn that never left the app has not spent it. It is empty when there is nothing to say.
+func (e *Engine) externalNote(c store.Chat) (string, map[string]notedVersion) {
+	if e == nil || e.Store == nil || c.ID == "" || !c.IsProject() {
+		return "", nil
+	}
+	snaps, err := e.Store.ListFileSnapshots(c.ID)
+	if err != nil {
+		// A chat that never changed a file fails here too, which is why the language is about
+		// the check rather than about a fault: without the list the turn proceeds on tool
+		// results that may be false, and that is the case worth filing in the trace.
+		e.warn(c.ID, fmt.Sprintf("Die Dateien des Projekts konnten nicht geprüft werden: %s", err.Error()))
+		return "", nil
+	}
+	if len(snaps) == 0 {
+		return "", nil
+	}
+	root, err := workspace.Open(c.Workspace)
+	if err != nil {
+		// The folder is gone or unreadable. The file tools report that where the model asks,
+		// and a note about which files changed in a folder nobody can read is noise.
+		return "", nil
+	}
+	changed := make([]string, 0, len(snaps))
+	noted := make(map[string]notedVersion, len(snaps))
+	for _, snap := range snaps {
+		text, readErr := root.Text(snap.Path)
+		if readErr != nil {
+			// Unreadable now, where it was readable when it was written: there is no digest to
+			// compare, and guessing at one would announce a change nobody measured.
+			continue
+		}
+		digest := goneDigest
+		if text.Existed {
+			if !text.Writable {
+				// Replaced by a binary or grown past what a change may touch. The undo knows the
+				// same limit, and the file tools say so where it matters.
+				continue
+			}
+			digest = workspace.Digest(text.Content)
+			if digest == snap.AfterSHA {
+				continue
+			}
+		}
+		if digest == snap.NotedSHA {
+			continue
+		}
+		name := snap.Path
+		if !text.Existed {
+			name += " (nicht mehr vorhanden)"
+		}
+		changed = append(changed, name)
+		noted[snap.Path] = notedVersion{disk: digest, after: snap.AfterSHA}
+	}
+	note := externalNotice(changed)
+	if note == "" {
+		return "", nil
+	}
+	return note, noted
+}
+
+// revertNote is what this turn has to say about the files the user put back.
+//
+// It reads the marker rather than the snapshots that still stand, because those two are
+// different questions: a snapshot that stands is a change the panel offers to undo, and a marker
+// is a correction the model owes. A store with no markers — every turn of a project the user has
+// not touched — costs one query and returns nothing to say.
+//
+// It is gated on the mode like every other project fact (projectGuidance): a chat with no folder
+// cannot have changed a file of it, so a marker that somehow pointed at one still must not put
+// paths from a folder into its prompt.
+func (e *Engine) revertNote(c store.Chat) string {
+	if e == nil || e.Store == nil || c.ID == "" || !c.IsProject() {
+		return ""
+	}
+	snaps, err := e.Store.PendingReverts(c.ID)
+	if err != nil {
+		// Worth saying out loud: without the note the turn proceeds on a history that is
+		// wrong about the folder, which is exactly the case this exists to prevent.
+		e.warn(c.ID, fmt.Sprintf("Die zurückgesetzten Dateien konnten nicht gelesen werden: %s", err.Error()))
+		return ""
+	}
+	note, ok := revertedNotice(snaps)
+	if !ok {
+		return ""
+	}
+	return note
+}

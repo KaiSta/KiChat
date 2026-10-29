@@ -63,7 +63,7 @@ func recordChange(t *testing.T, st *store.Store, path, before, after string, exi
 }
 
 // TestARevertPutsTheFileBack is the promise of the whole feature: after it, the file is what it
-// was before the chat touched it, and the row that offered it is gone.
+// was before the chat touched it, and the panel no longer offers to undo it.
 func TestARevertPutsTheFileBack(t *testing.T) {
 	a, st, folder := filesTestApp(t)
 	writeDisk(t, folder, "main.go", "package changed\n")
@@ -86,6 +86,54 @@ func TestARevertPutsTheFileBack(t *testing.T) {
 	// showing the list it was handed a moment ago.
 	if err := a.RevertFileChange("p1", "main.go"); err != nil {
 		t.Errorf("a repeat revert failed: %v", err)
+	}
+}
+
+// TestARevertLeavesANoteForTheNextTurn is the seam between the button and the model. The row is
+// gone from the panel — there is nothing left to undo — but it is not gone from the store: the
+// transcript still claims what the model wrote into that file, so the chat layer has to be able
+// to tell its next turn that the claim is false. A later write of the same file is the case that
+// ends the note: the file is the model's work again and there is nothing stale to report.
+func TestARevertLeavesANoteForTheNextTurn(t *testing.T) {
+	a, st, folder := filesTestApp(t)
+	writeDisk(t, folder, "main.go", "package mine\n// changed\n")
+	recordChange(t, st, "main.go", "package mine\n", "package mine\n// changed\n", true)
+
+	if err := a.RevertFileChange("p1", "main.go"); err != nil {
+		t.Fatalf("RevertFileChange: %v", err)
+	}
+	if got := readDisk(t, folder, "main.go"); got != "package mine\n" {
+		t.Fatalf("the file reads %q, want the text from before the change", got)
+	}
+	if changes, err := a.ProjectFileChanges("p1"); err != nil {
+		t.Fatalf("ProjectFileChanges: %v", err)
+	} else if len(changes) != 0 {
+		t.Errorf("the restored file is still offered for undo: %+v", changes)
+	}
+	pending, err := st.PendingReverts("p1")
+	if err != nil {
+		t.Fatalf("PendingReverts: %v", err)
+	}
+	if len(pending) != 1 || pending[0].Path != "main.go" {
+		t.Fatalf("the next turn is not told about the revert: %+v", pending)
+	}
+	// The note names what the user is looking at, and for a file the chat created that means
+	// saying the file is gone rather than leaving a path pointing at nothing.
+	if !pending[0].Existed {
+		t.Error("a restored file reads as one that never existed, so the note would say it was removed")
+	}
+
+	// A change after the revert: the marker goes, and the panel offers the change again.
+	recordChange(t, st, "main.go", "package mine\n", "package mine\n// again\n", true)
+	if pending, err := st.PendingReverts("p1"); err != nil {
+		t.Fatalf("PendingReverts: %v", err)
+	} else if len(pending) != 0 {
+		t.Errorf("a new change left %d stale notes behind", len(pending))
+	}
+	if changes, err := a.ProjectFileChanges("p1"); err != nil {
+		t.Fatalf("ProjectFileChanges: %v", err)
+	} else if len(changes) != 1 {
+		t.Errorf("%d changes are listed after a new write, want 1", len(changes))
 	}
 }
 
