@@ -249,15 +249,29 @@ func (s *Service) readFile(ctx context.Context, chatID, argsJSON string) (Result
 			"tool.sum.readBinary", file.Path), nil
 	}
 	var sb strings.Builder
-	if file.Total > 0 {
-		fmt.Fprintf(&sb, "%s — Zeilen %d–%d von %d\n\n", file.Path, file.From, file.From+file.Returned-1, file.Total)
+	if file.Returned > 0 {
+		if file.Total > 0 {
+			fmt.Fprintf(&sb, "%s — Zeilen %d–%d von %d\n\n", file.Path, file.From, file.From+file.Returned-1, file.Total)
+		} else {
+			fmt.Fprintf(&sb, "%s — Zeilen %d–%d\n\n", file.Path, file.From, file.From+file.Returned-1)
+		}
 	} else {
-		fmt.Fprintf(&sb, "%s — Zeilen %d–%d\n\n", file.Path, file.From, file.From+file.Returned-1)
+		// No window at all: there is no range to name, and "Zeilen 1–0" is not one.
+		fmt.Fprintf(&sb, "%s\n\n", file.Path)
 	}
 	if file.Returned == 0 {
-		// An offset past the last line, or an empty file. Saying which it is keeps the
-		// model from retrying the same read.
-		if file.Total > 0 {
+		// Three different nothings, and the model's next move differs for each: a line too long
+		// for the window, an offset past the last line, an empty file.
+		switch {
+		case file.Truncated:
+			// One line larger than the whole window — a minified bundle, a one-line JSON. This
+			// used to be reported as an empty file, which is the one wrong answer of the three:
+			// the model stops, or rewrites the file from nothing.
+			fmt.Fprintf(&sb, "Zeile %d ist länger als das Textfenster (%d kB) und wird nicht "+
+				"ausgegeben. Suche mit search_files nach der Stelle, die du brauchst, oder lies ab "+
+				"einer anderen Zeile.", file.From, workspace.MaxReadBytes/1024)
+			return summarized(sb.String(), "tool.sum.readLineTooLong", file.Path, fmt.Sprint(file.From)), nil
+		case file.Total > 0:
 			fmt.Fprintf(&sb, "Die Datei hat %d Zeilen; ab Zeile %d steht nichts mehr.", file.Total, file.From)
 			return summarized(sb.String(), "tool.sum.readEnd",
 				file.Path, fmt.Sprint(file.Total), fmt.Sprint(file.From)), nil
@@ -282,7 +296,13 @@ func (s *Service) readFile(ctx context.Context, chatID, argsJSON string) (Result
 		s.rememberRead(key, stamp)
 	}
 	// The summary is the window's sentence rather than a translation of this one: a range and
-	// a total, which is what a person scanning a long turn wants to see.
+	// a total, which is what a person scanning a long turn wants to see. A window of a longer
+	// file has no total to name — the read stopped counting when it stopped reading — and the
+	// template for it therefore has no fourth field, rather than a zero where a length goes.
+	if file.Truncated {
+		return summarized(sb.String(), "tool.sum.readPart",
+			file.Path, fmt.Sprint(file.From), fmt.Sprint(file.From+file.Returned-1)), nil
+	}
 	return summarized(sb.String(), "tool.sum.read",
 		file.Path, fmt.Sprint(file.From), fmt.Sprint(file.From+file.Returned-1), fmt.Sprint(file.Total)), nil
 }
@@ -347,7 +367,14 @@ func (s *Service) searchFiles(chatID, argsJSON string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	matches, err := root.Search(args.Query, looseInt(args.Limit, 0))
+	// The default the tool's own schema states. It used to be left to the workspace's cap, so a
+	// model that named no limit was handed 200 hits where the description promised 60 — three
+	// times the context for a search it had not asked to be wide.
+	limit := looseInt(args.Limit, 0)
+	if limit <= 0 {
+		limit = 60
+	}
+	matches, err := root.Search(args.Query, limit)
 	if err != nil {
 		return Result{}, projectError(args.Query, err)
 	}

@@ -286,6 +286,35 @@ func TestSearchIsLiteralAndCaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestAHitIsAWindowAroundTheMatch is the file a search answers worst: one minified line, or a
+// generated JSON, is a single line of megabytes. Returning it whole spends the answer's whole
+// tool budget on one hit and holds two hundred of them in memory; returning its first 300 bytes
+// hides the text that made it a hit. So a hit is a window, and the match is in it.
+func TestAHitIsAWindowAroundTheMatch(t *testing.T) {
+	line := strings.Repeat("var a=1;", 900) + "needle" + strings.Repeat(";", 900)
+	root, _ := project(t, map[string]string{"bundle.min.js": line + "\n"})
+
+	found, err := root.Search("needle", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found.Hits) != 1 {
+		t.Fatalf("hits = %+v, want the one line", found.Hits)
+	}
+	hit := found.Hits[0]
+	if len(hit.Text) > MaxHitLine+len("……") {
+		t.Errorf("a hit is %d bytes, more than the %d window", len(hit.Text), MaxHitLine)
+	}
+	if !strings.Contains(hit.Text, "needle") {
+		t.Errorf("the window cut the match out of the hit: %q", hit.Text)
+	}
+	// The line number is what locates it precisely, so the window may be a fragment — but it has
+	// to look like one rather than like the start of the line.
+	if !strings.HasPrefix(hit.Text, "…") {
+		t.Errorf("a window from the middle of a line does not say so: %q", hit.Text[:20])
+	}
+}
+
 // TestAgentsFileReadsTheProjectGuidance is the file the whole project rule is about.
 func TestAgentsFileReadsTheProjectGuidance(t *testing.T) {
 	ForgetAgentDocs()

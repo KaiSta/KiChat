@@ -307,7 +307,6 @@ func commandTimeout(asked int) time.Duration {
 	return time.Duration(asked) * time.Second
 }
 
-// execCommand runs one line in the project folder and renders the result.
 // commandKey is one running command: the chat it belongs to and the call that started it.
 // Both halves are needed because two chats can run the same line at the same time.
 type commandKey struct {
@@ -377,6 +376,7 @@ func (s *Service) endCommand(key commandKey) {
 	s.runningMu.Unlock()
 }
 
+// execCommand runs one line in the project folder and renders the result.
 func (s *Service) execCommand(ctx context.Context, chatID string, root workspace.Root, line string, timeout time.Duration) (Result, error) {
 	// A context of its own, so the window's stop can end this command without ending the turn
 	// it belongs to. The turn's cancellation is still the parent: stopping the turn stops it.

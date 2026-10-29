@@ -310,6 +310,15 @@ so a model can ask "which tests exist" in one call instead of walking a tree a l
 and `search_files`/`find_files` both skip what `.gitignore` excludes (counted in the result, so
 an empty answer does not read as an empty folder).
 
+**A hit is a window, not a line.** `search_files` returns at most `MaxHitLine` bytes per hit,
+taken *around* the match with an ellipsis on whichever side was cut (`workspace.clipHit`). A
+line is the unit a reader thinks in, but a minified bundle or a generated JSON is one line of
+megabytes: returning it whole spends the answer's tool budget on a single hit, and cutting from
+the start hides the very text that made the line a hit. The same bound is why a `read_file`
+whose line is larger than the whole 80 kB window answers *"line 1 is longer than the window,
+search for it"* instead of *"the file is empty"* — the window never starts, and the second
+sentence is the one reading that makes a model rewrite a file it thinks has nothing in it.
+
 **A repeat read of an unchanged range is answered with a sentence** rather than the file
 (`internal/tools/reads.go`): a model checking whether it still remembers a file it read four
 rounds ago does not need it again. The memory is per turn and per chat, bounded, and dropped

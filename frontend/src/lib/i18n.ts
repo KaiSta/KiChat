@@ -940,8 +940,12 @@ const de = {
   // Die Zusammenfassung über einem Tool-Ergebnis. Der Text darunter bleibt der, den das
   // Modell gelesen hat; diese Sätze sind die Fassung für das Fenster, in seiner Sprache.
   'tool.sum.read': '{{1}}: Zeilen {{2}}–{{3}} von {{4}}',
+  // Eine gelesene Spanne aus einer längeren Datei: die Gesamtzahl Zeilen kennt der Lesevorgang
+  // hier nicht, weil er aufgehört hat zu zählen, als er aufgehört hat zu lesen.
+  'tool.sum.readPart': '{{1}}: Zeilen {{2}}–{{3}} (Datei geht weiter)',
   'tool.sum.readEnd': '{{1}}: {{2}} Zeilen, ab Zeile {{3}} nichts mehr',
   'tool.sum.readEmpty': '{{1}} ist leer',
+  'tool.sum.readLineTooLong': '{{1}}: Zeile {{2}} ist länger als das Textfenster',
   'tool.sum.readBinary': '{{1}} ist keine Textdatei',
   'tool.sum.list': '{{1}}: {{2}} Einträge',
   'tool.sum.listSome': '{{1}}: {{2}} Einträge, {{3}} nicht gezeigt',
@@ -2194,8 +2198,10 @@ const en: Record<keyof typeof de, string> = {
   // The summary above a tool result. The text below it stays whatever the model read; these
   // sentences are the window's own rendering, in its language.
   'tool.sum.read': '{{1}}: lines {{2}}–{{3}} of {{4}}',
+  'tool.sum.readPart': '{{1}}: lines {{2}}–{{3}} (the file continues)',
   'tool.sum.readEnd': '{{1}}: {{2}} lines, nothing after line {{3}}',
   'tool.sum.readEmpty': '{{1}} is empty',
+  'tool.sum.readLineTooLong': '{{1}}: line {{2}} is longer than the read window',
   'tool.sum.readBinary': '{{1}} is not a text file',
   'tool.sum.list': '{{1}}: {{2}} entries',
   'tool.sum.listSome': '{{1}}: {{2}} entries, {{3}} not shown',
@@ -3364,8 +3370,10 @@ const zh: Record<keyof typeof de, string> = {
   'tool.liveOutput': '输出',
   // 工具结果上方的摘要。下方文本仍是模型读到的原文；这些句子是窗口用自身语言给出的说法。
   'tool.sum.read': '{{1}}：第 {{2}}–{{3}} 行，共 {{4}} 行',
+  'tool.sum.readPart': '{{1}}：第 {{2}}–{{3}} 行（文件未结束）',
   'tool.sum.readEnd': '{{1}} 共 {{2}} 行，第 {{3}} 行之后没有内容',
   'tool.sum.readEmpty': '{{1}} 为空',
+  'tool.sum.readLineTooLong': '{{1}}：第 {{2}} 行超过读取窗口长度',
   'tool.sum.readBinary': '{{1}} 不是文本文件',
   'tool.sum.list': '{{1}}：{{2}} 个条目',
   'tool.sum.listSome': '{{1}}：{{2}} 个条目，{{3}} 个未显示',

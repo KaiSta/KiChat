@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,6 +107,42 @@ func TestReadFileContinuesWhereItStopped(t *testing.T) {
 	if !strings.Contains(second, "    11| line") || strings.Contains(second, "    10| line") {
 		t.Errorf("the second window does not start where the first ended:\n%s", second)
 	}
+
+	// The card's sentence, not the model's: a window of a longer file has no total to name, so
+	// its template has three fields rather than four with a zero where the length goes.
+	window, err := service.ExecuteWithSummary(context.Background(), chatID, ToolReadFile,
+		`{"path": "long.txt", "limit": 10}`)
+	if err != nil {
+		t.Fatalf("read_file: %v", err)
+	}
+	if window.Summary == nil || window.Summary.Code != "tool.sum.readPart" || len(window.Summary.Args) != 3 {
+		t.Errorf("a truncated read is summarised as %+v, want tool.sum.readPart with three fields", window.Summary)
+	}
+}
+
+// TestReadFileSaysWhenOneLineIsTooLongForTheWindow is the shape a read answers worst: a
+// minified bundle or a one-line JSON export is a single line larger than the whole window, so the
+// window never starts. That used to be reported as an empty file — the one reading that makes a
+// model conclude there is nothing to look at, or write the file from nothing.
+func TestReadFileSaysWhenOneLineIsTooLongForTheWindow(t *testing.T) {
+	service, chatID, _ := projectService(t, map[string]string{
+		"bundle.min.js": strings.Repeat("x", 200<<10),
+	})
+	out, err := service.Execute(context.Background(), chatID, ToolReadFile, `{"path": "bundle.min.js"}`)
+	if err != nil {
+		t.Fatalf("read_file: %v", err)
+	}
+	if strings.Contains(out, "ist leer") {
+		t.Fatalf("a file with one very long line was reported as empty:\n%s", out)
+	}
+	if strings.Contains(out, "Zeilen 1–0") {
+		t.Errorf("the answer names an impossible range:\n%s", out)
+	}
+	for _, want := range []string{"Zeile 1", "Textfenster", "search_files"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the answer is missing %q, so the model cannot tell what happened:\n%s", want, out)
+		}
+	}
 }
 
 // TestReadFileRefusesAPathOutsideTheProject is the boundary as the model meets it: it
@@ -204,6 +241,29 @@ func TestListDirShowsFoldersBeforeFiles(t *testing.T) {
 	}
 	if !strings.Contains(sub, "a.go") {
 		t.Errorf("a subfolder listing lost its file:\n%s", sub)
+	}
+}
+
+// TestSearchFilesStopsAtTheDefaultItAdvertises is the schema and the code agreeing: the
+// description promises 60 hits when the model names no limit, and the workspace cap (200) is a
+// bound rather than a default — a model that asked for nothing was being handed three times the
+// context the tool said it would.
+func TestSearchFilesStopsAtTheDefaultItAdvertises(t *testing.T) {
+	files := map[string]string{}
+	for i := 0; i < 80; i++ {
+		files[fmt.Sprintf("f%02d.go", i)] = "needle\n"
+	}
+	service, chatID, _ := projectService(t, files)
+
+	out, err := service.Execute(context.Background(), chatID, ToolSearchFiles, `{"query": "needle"}`)
+	if err != nil {
+		t.Fatalf("search_files: %v", err)
+	}
+	if !strings.Contains(out, "60 Treffer") {
+		t.Fatalf("a search with no limit did not stop at the 60 the schema names:\n%s", out)
+	}
+	if hits := strings.Count(out, ":1: needle"); hits > 60 {
+		t.Errorf("the answer carries %d hits, more than the 60 it promised", hits)
 	}
 }
 

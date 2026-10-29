@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Limits. They are exported because a caller that has to *say* what it left out —
@@ -530,6 +531,59 @@ type Hit struct {
 	Text string
 }
 
+// MaxHitLine bounds one hit's text. A line is not a useful unit for a minified bundle or a
+// one-line JSON export: those are megabytes on one line, and a search that returned them whole
+// would spend the answer's entire tool budget on one match while holding 200 of them in memory.
+// A hit is a pointer to a place in a file, and 300 bytes of it locate that place.
+const MaxHitLine = 300
+
+// clipHit cuts a hit's text to a window around the match, with an ellipsis on whichever side was
+// cut.
+//
+// Around the match rather than from the start, because the match is the reason the line is in
+// the list: cutting a 200 kB minified line at byte 300 would show 300 bytes of setup and hide
+// the text that was searched for. The window keeps a little of what precedes the match, so the
+// hit still reads as code rather than as a fragment.
+//
+// Both ends are moved onto rune boundaries, so what a model reads is valid UTF-8 whatever the
+// line is spelled in.
+func clipHit(line, needle string) string {
+	if len(line) <= MaxHitLine {
+		return line
+	}
+	const lead = 80
+	at := strings.Index(strings.ToLower(line), needle)
+	if at < 0 || at > len(line) {
+		at = 0
+	}
+	start := at - lead
+	if start < 0 {
+		start = 0
+	}
+	end := start + MaxHitLine
+	if end > len(line) {
+		end = len(line)
+		start = end - MaxHitLine
+		if start < 0 {
+			start = 0
+		}
+	}
+	for start < end && !utf8.RuneStart(line[start]) {
+		start++
+	}
+	for end > start && !utf8.RuneStart(line[end]) {
+		end--
+	}
+	out := line[start:end]
+	if start > 0 {
+		out = "…" + out
+	}
+	if end < len(line) {
+		out += "…"
+	}
+	return out
+}
+
 // Matches is a text search's result.
 type Matches struct {
 	Query string
@@ -658,7 +712,7 @@ func (r Root) searchFile(path, needle string, maxHits int, out *Matches) error {
 		if len(out.Hits) >= maxHits {
 			return nil
 		}
-		out.Hits = append(out.Hits, Hit{Path: rel, Line: line, Text: strings.TrimSpace(text)})
+		out.Hits = append(out.Hits, Hit{Path: rel, Line: line, Text: clipHit(strings.TrimSpace(text), needle)})
 	}
 	return nil
 }
