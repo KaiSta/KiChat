@@ -1779,11 +1779,28 @@ func (a *App) UpdateChat(c store.Chat) (store.Chat, error) {
 	if existing.Backend != c.Backend || existing.Model != c.Model {
 		a.currentEngine().InvalidateMeasurement(c.ID)
 	}
-	if err := a.store.UpdateChat(c); err != nil {
+	if err := a.store.UpdateChat(updateFromWindow(c, existing)); err != nil {
 		return store.Chat{}, err
 	}
 	a.emit(events.ChatsChanged, map[string]any{})
 	return a.store.GetChat(c.ID)
+}
+
+// updateFromWindow is the chat a window's update is allowed to produce: everything it shows
+// and edits, and neither of the two fields that decide what a chat *is*.
+//
+// `Mode` and `Workspace` are settled where a project is created (the folder is resolved on
+// disk there, and refused if another project works in it). A value echoed back from the window
+// is a value nobody validated: accepting it would let a stale or foreign caller point the file
+// tools at any absolute path, or make a project out of a chat that was never given a folder —
+// which is the boundary `internal/workspace` exists to keep, defeated one layer above it. Both
+// fields are preserved rather than compared, because neither is editable in the window.
+func updateFromWindow(incoming, existing store.Chat) store.Chat {
+	incoming.ID = existing.ID
+	incoming.Mode = existing.Mode
+	incoming.Workspace = existing.Workspace
+	incoming.CreatedAt = existing.CreatedAt
+	return incoming
 }
 
 // RenameChat sets a chat title.
