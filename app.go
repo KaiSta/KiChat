@@ -1484,12 +1484,31 @@ func (a *App) CreateProject(workspacePath string) (store.Chat, error) {
 	settings := a.Settings()
 	backend, model := a.defaultChatModel(settings.DefaultModel)
 
+	// One project per folder, because a project *is* its conversation (`/clear` exists so a
+	// second one is never needed). A second chat on the same folder would carry its own undo
+	// records and its own history of writes to files the first one believes it knows, and the
+	// two would contradict each other in exactly the place a coding agent must be reliable. The
+	// check is by folder rather than by path string, so a symlink and its target are one project
+	// and a folder that was renamed is still the same one.
+	//
+	// Archived chats are left out of the query as well as out of the rule: an archived project
+	// is one the user has finished with, and it must not keep a folder unusable.
+	chats, err := a.store.ListChats(false)
+	if err != nil {
+		// Not a duplicate check that can be skipped: without the list, the one invariant this
+		// method enforces would be unenforced, and a failure to read the store is worth saying.
+		return store.Chat{}, err
+	}
+	if existing, claimed := projectClaimingFolder(chats, root.Path()); claimed {
+		return store.Chat{}, uimsg.Errorf("project.alreadyOpen", existing.Title)
+	}
+
 	project := chatDefaults(settings)
 	project.ID = newID()
 	project.Title = filepath.Base(root.Path())
 	project.Backend = backend
 	project.Model = model
-	project.SystemPrompt = config.PromptBody(config.PresetCodingAgent, settings.Language)
+	project.SystemPrompt = codingAgentPrompt(settings)
 	project.SystemPromptPreset = config.PresetCodingAgent
 	project.Mode = store.ModeCoding
 	project.Workspace = root.Path()
@@ -1499,6 +1518,60 @@ func (a *App) CreateProject(workspacePath string) (store.Chat, error) {
 	}
 	a.emit(events.ChatsChanged, map[string]any{})
 	return project, nil
+}
+
+// projectClaimingFolder reports the project that already works in path, if there is one.
+//
+// Archived projects do not claim a folder: an archived chat is one the user has finished with,
+// and refusing forever because of it would make the folder unusable with nothing on screen to
+// explain why. A chat-mode conversation never claims one, because it has no folder.
+func projectClaimingFolder(chats []store.Chat, path string) (store.Chat, bool) {
+	for _, existing := range chats {
+		if !existing.IsProject() || existing.Archived {
+			continue
+		}
+		if sameFolder(existing.Workspace, path) {
+			return existing, true
+		}
+	}
+	return store.Chat{}, false
+}
+
+// codingAgentPrompt is the prompt a new project starts on: the user's own version of the
+// coding-agent preset when they have edited it, the shipped body otherwise.
+//
+// Reading the preset rather than the shipped constant matters because that is the textarea
+// Settings → Prompts offers: somebody who rewrote the instructions for their own projects
+// expects the next project to start with what they wrote, not with what the app ships. A
+// preset that has been emptied is treated as absent, because an empty prompt on a coding
+// project is a worse default than the one the app knows works.
+func codingAgentPrompt(settings config.Settings) string {
+	for _, preset := range settings.PromptPresets {
+		if preset.ID == config.PresetCodingAgent && strings.TrimSpace(preset.Prompt) != "" {
+			return preset.Prompt
+		}
+	}
+	return config.PromptBody(config.PresetCodingAgent, settings.Language)
+}
+
+// sameFolder reports whether two paths name the same directory on this machine.
+//
+// The string comparison alone is wrong in both directions: a symlink and its target are one
+// folder with two names, and a case-insensitive filesystem gives one folder two spellings.
+// os.SameFile asks the filesystem, which is the only thing that knows.
+func sameFolder(a, b string) bool {
+	if a == b {
+		return true
+	}
+	left, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	right, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(left, right)
 }
 
 // PickProjectFolder asks for the folder a project works in.

@@ -24,6 +24,20 @@ The frontend asks the same question (`App.tsx`, the sidebar's two groups) so the
 cannot disagree with the gate about which rows are projects. `IsProject` on the Go side is the
 one that decides what runs.
 
+**One project per folder.** `CreateProject` refuses a folder another project already works in,
+with a sentence naming that project and pointing at `/clear`. This is the same rule §7 states
+from the other side — a project *is* its conversation — and the reason it is enforced rather
+than documented is that two chats on one folder would each keep their own undo record and
+their own history of writes to files the other believes it knows. The comparison asks the
+filesystem (`os.SameFile`) rather than comparing strings, because a symlink and its target are
+one folder with two names. Archived projects do not claim one: an archived chat is one the
+user has finished with.
+
+The prompt a project starts on is the user's **coding-agent preset** when they have edited it
+(`codingAgentPrompt` in `app.go`), and the shipped body otherwise — the textarea under
+Settings → Prompts is where those instructions are meant to live, so a rewritten one has to be
+what the next project starts with.
+
 ## 2. The folder boundary
 
 `internal/workspace` owns it. `Root.Resolve` resolves every path the model writes against the

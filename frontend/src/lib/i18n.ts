@@ -1254,6 +1254,8 @@ const de = {
   'err.tools.fileUnreadable': '{{1}} ist nicht lesbar',
   'err.project.badFolder':
     '{{1}} ist kein Ordner, den ein Projekt verwenden kann.',
+  'err.project.alreadyOpen':
+    'In diesem Ordner arbeitet bereits das Projekt „{{1}}“. Öffne es in der Seitenleiste — oder leere dort mit /clear den Kontext, um neu zu beginnen.',
   'err.project.noTerminal':
     'Auf diesem Rechner wurde kein Terminal gefunden, das KiChat öffnen könnte. Öffne eines selbst und wechsle in den Projektordner.',
   'err.project.terminalFailed': 'Das Terminal ließ sich nicht starten: {{1}}',
@@ -2504,6 +2506,8 @@ const en: Record<keyof typeof de, string> = {
     '{{1}} is outside the project folder. Paths have to be inside the project.',
   'err.tools.fileUnreadable': '{{1}} cannot be read',
   'err.project.badFolder': '{{1}} is not a folder a project can use.',
+  'err.project.alreadyOpen':
+    'The project "{{1}}" already works in this folder. Open it in the sidebar — or use /clear there to start over.',
   'err.project.noTerminal':
     'no terminal was found that KiChat could open. Open one yourself and change into the project folder.',
   'err.project.terminalFailed': 'the terminal could not be started: {{1}}',
@@ -3648,6 +3652,7 @@ const zh: Record<keyof typeof de, string> = {
   'err.tools.outsideWorkspace': '{{1}} 位于项目文件夹之外。路径必须位于项目内部。',
   'err.tools.fileUnreadable': '无法读取 {{1}}',
   'err.project.badFolder': '{{1}} 不是项目可以使用的文件夹。',
+  'err.project.alreadyOpen': '这个文件夹中已有项目“{{1}}”。请在侧边栏中打开它 —— 或在那里用 /clear 清空上下文重新开始。',
   'err.project.noTerminal': '找不到 KiChat 可以打开的终端。请自行打开一个并进入项目文件夹。',
   'err.project.terminalFailed': '无法启动终端：{{1}}',
   // 更改列表与撤销。冲突这句最重要：它说明有人在之后编辑了该文件，因此不会覆盖它。
