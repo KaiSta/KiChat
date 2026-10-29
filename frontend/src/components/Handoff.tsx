@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { App as Api } from '../lib/api'
+import { copyText } from '../lib/clipboard'
 import { errText, useStore } from '../store'
 
 /**
@@ -57,12 +58,16 @@ export function Handoff() {
           type="button"
           className="btn btn-sm btn-primary"
           onClick={() => {
-            navigator.clipboard.writeText(handoff.command).then(
+            // A refused copy used to be swallowed, leaving a button that said nothing and a
+            // person pasting nothing into their terminal. The clipboard is a permission in a
+            // webview, so the refusal is a state this can reach; the sentence says what to do
+            // instead, which is select the line and copy it by hand.
+            void copyText(handoff.command).then(
               () => {
                 setCopied(true)
                 window.setTimeout(() => setCopied(false), 1500)
               },
-              () => undefined,
+              () => useStore.getState().toast('error', t('chat.copyFailed')),
             )
           }}
         >

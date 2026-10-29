@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { App, formatDuration, formatNumber, formatSpeed } from '../lib/api'
 import type { store as storeTypes, tools as toolTypes } from '../lib/api'
+import { copyText } from '../lib/clipboard'
 import type { MessageKey } from '../lib/i18n'
 import { useThrottled } from '../lib/stream'
 import { errText, useStore } from '../store'
@@ -349,12 +350,14 @@ function CopyLine({ text, label }: { text: string; label: string }) {
       className="btn btn-sm shrink-0"
       title={text}
       onClick={() => {
-        navigator.clipboard.writeText(text).then(
+        // A refusal is reported rather than swallowed: this button exists for a line the app
+        // would not run, and a click that silently copies nothing is worse than no button.
+        void copyText(text).then(
           () => {
             setCopied(true)
             window.setTimeout(() => setCopied(false), 1500)
           },
-          () => undefined,
+          () => useStore.getState().toast('error', t('chat.copyFailed')),
         )
       }}
     >

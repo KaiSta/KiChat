@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 // component called App; `Api.PickProjectFolder` reads as the binding it is.
 import { modelLabel, timeAgo, App as Api, type store as storeTypes } from './lib/api'
 import { LANGS } from './lib/i18n'
-import { useStore } from './store'
+import { errText, useStore } from './store'
 import { ChatView, permissionBadge } from './components/ChatView'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Settings } from './components/settings/Settings'
@@ -123,7 +123,9 @@ function Sidebar() {
       if (!folder) return
       await useStore.getState().newProject(folder)
     } catch (err) {
-      useStore.getState().toast('error', String(err))
+      // Through errText, like every other catch that puts a failure on screen: the dialog can
+      // fail with a code, and a raw `i18n:{…}` in a toast is the app's plumbing leaking out.
+      useStore.getState().toast('error', errText(err))
     }
   }
 
