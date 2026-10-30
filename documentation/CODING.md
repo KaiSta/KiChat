@@ -185,6 +185,32 @@ which holds whatever shape the request takes. What the parser buys is a saved cl
 instruction instead of a mystery failure — and it does not fire on a line that merely mentions
 the word (`grep sudo README.md`, `echo sudo`, `sudoku`), because a false refusal has no override.
 
+**A line that would discard uncommitted work is refused too.** The file tools can take a change
+back, because every write keeps the text it replaced; a command cannot be given the same
+treatment, and the reason is the shape of that record: it is keyed by (chat, path) and keeps the
+*first* pre-image the chat saw, so a snapshot taken before `git reset --hard` would mean two
+things in one row — "before this chat touched the file" and "before this command" — and the
+panel has one button for both. So the promise is the narrow, honest one: the work is not lost.
+
+`refuseDestructiveGit` reads the simple commands of the line, as `elevationRequest` does, and
+recognises the forms that throw text away: `checkout -- <paths>` (with a tree-ish before the
+`--`, and the dot form `git checkout .`, because a ref may not begin with a dot), a forced
+checkout, `restore` of the working copy (`--staged` alone only unstages, which loses nothing),
+`reset --hard`, and `clean -f` without `-n`. The scope — the pathspecs, or the whole folder — is
+measured against `git status --porcelain` with those same pathspecs, so `git checkout -- b.go`
+is allowed while `a.go` is dirty, and `clean` counts untracked paths while `reset --hard` counts
+tracked ones and leaves untracked alone. It fires before the card is built, for the reason the
+elevation refusal does — nobody should be asked to approve a line the app will not run — and
+again on an edited line, because the card is a text field. On a clean tree the same line is a
+no-op and runs, so the guard only ever speaks when there is something to lose.
+
+It is a guard and not a boundary, and the limits are named rather than hidden: `bash -c "git
+reset --hard"`, an alias, `cd sub && git reset --hard`, `git -C ../elsewhere …` and a line with a
+quoted path are all left alone — the first two because the words are not the command, the third
+because the pathspecs are relative to another folder, the fourth because the scope would be
+measured in the wrong tree, and the last because the word split cannot size it. What it buys is
+the routine mistake, which is the one that actually happens.
+
 **The line stays copyable on the card**, for every command rather than only a refused one: a
 command worth refusing is a command worth copying, and a button that appears only once something
 broke is one nobody knows is there. The card copies the unedited string the tool was given, not
@@ -345,6 +371,82 @@ the framing — the continuation line and the nearest `AGENTS.md` — is carried
 The rules live with the mechanism, in [COMPACT.md §17.6](COMPACT.md), because they belong to
 the condensation rather than to the read.
 
+**A big file has a fourth answer: ask for the map.** `read_file` with `"outline": true` lists
+the declarations it recognises with the line each starts on, and no bodies: `app.go` is 1 939
+lines, 79 declarations, **24 429 tokens whole and 1 597 as an outline** — and the numbers in it
+are the numbers a read prints, so the next call is `offset=N&limit=M` for the forty lines that
+matter. (Measured on this checkout with `llm.EstimateTokens` over the file and over the list,
+not estimated.) It is a line
+scanner rather than a parser (`workspace.Root.Outline`), which is a trade: it can miss a shape it
+does not know, so it says when it found nothing instead of listing guesses, and a log or a data
+file gets *no declarations recognised* plus a pointer at the window. Four rules keep it honest —
+the families are chosen by extension (Go, JS/TS, Python/Ruby, Rust, shell, C-like, and Markdown
+headings outside code fences); leading indentation is kept, so a Python method or a Rust `impl`
+member reads as one instead of looking module-level; what it cannot see it does not invent — a JS
+class method is not listed, and JSON and SQL get an empty list and the "no declarations"
+sentence, all pinned per family in `TestOutlineReadsEachLanguageFamily`.
+
+What is left over gets two answers rather than none, because "no declarations recognised" was
+true of the scanner and useless to the reader: `Makefile`, `Dockerfile`/`Containerfile` and
+`go.mod`/`go.work` are matched **by name**, since their name is their format, and everything else
+gets a generic one. On this checkout: the 673-line `Makefile` is **14 709 tokens whole and
+1 498 as a map of its 91 targets and variables** — a recipe line starts with a tab, so none of
+the commands are in it — and the 61-line `go.mod` is **1 080 against 26**, because it lists the
+directives (`module`, `go`, `require`) and not the requirement lines they open. A Dockerfile
+lists its instruction keywords instead. The rest — a `.yaml`, a `.toml`, an `.ini`, a `.conf`, a
+file with no extension — lists `key:`/`key =`/`[section]` lines, so a Kubernetes manifest or a
+`tox.ini` gives a map instead of nothing. **That fallback keeps the key and drops the value**
+(`keyOf`): it runs on files this app does not know, which is where a password or an API key is
+kept, and the list goes into the model's context — `POSTGRES_PASSWORD=hunter2` arrives as
+`POSTGRES_PASSWORD=`, pinned by `TestAGenericOutlineKeepsTheKeyAndNotTheValue`. The Makefile is
+the one that keeps its values, and deliberately: `windows: TARGETOS := windows` and
+`windows: build` are different declarations of the same target, which a cut to `windows:` would
+print three times as if it were a bug. A record or a pattern per line is still refused —
+`.json`, `.jsonl`/`.ndjson`, `.csv`/`.tsv`, `.log`, `.txt`, and the generated `.lock`/`.sum`/
+`.map`, since a lockfile's four hundred package names are a list the manifest above it already
+contains. `TestOutlineFallsBackForUnrecognisedFiles` holds all of these shapes.
+
+C and C++ needed their own rule because their definitions carry no keyword: `int main(void) {` is recognised by *shape* — a return type,
+a name, an argument list and a brace — and refused when it is a statement, which is the same
+shape `if (x) {` and `for (int i = 0; …) {` have. The refusal is where the work is: the text
+before the argument list has to look like a type and a name (`cSignaturePrefix`), a lambda or
+assignment is refused on its `=`, `operator==` is exempted from that refusal, and a leading
+non-letter refuses `} else if (…)` and a preprocessor line. `TestOutlineCatchesCFunctions`
+holds 11 definitions that must be listed and 19 lines that must not be, because a false
+positive there sends the model to a line that is not a declaration. What that rule still
+misses: the brace on its own line (Allman style), a macro wrapper such as `TEST_F(A, B) {`, a
+definition split across lines, and a prototype (`int f(void);`) — so a header whose functions
+are only declared lists its structs and enums and none of its functions; it stops at 400 declarations and 4 MB scanned and says how
+much it left out; it reads the whole
+file, because the cost it saves is the model's context and not this process's memory; and it
+never touches the turn's read memory, because a map is not a reading of the section — a model
+that outlines a file and then asks for it gets the file, and one that has read the file and then
+asks for the map has not "already read" it. It is also exempt from the condensation below, which
+is a rule stated in [COMPACT.md §17.6](COMPACT.md).
+
+**How it gets read is recorded, not guessed.** Every `read_file` call leaves one `tool.call` in
+the diagnostic trace with `phase` set to one of four words: `bare` (a whole-file read),
+`bounded` (a window the model chose), `outline`, or `continuation` — a window taken from this
+app's own `offset=N` offer, which no argument can tell apart from a model guessing at a line
+(`tools.Result.Shape`, `ReadShape*` in `internal/tools/project.go`; the offer is kept per turn
+beside the read memory in `internal/tools/reads.go` and dropped by a write or a command, because
+a write moves the lines it names). Settings → About shows the trace's path; a session is then
+one line of shell — `grep` rather than `jq`, because `jq` is not installed on the machine this
+was written on:
+
+```sh
+# in the folder Settings → About names
+grep '"tool":"read_file"' kichat-trace.jsonl | grep -o '"phase":"[a-z]*"' | cut -d'"' -f4 | sort | uniq -c
+```
+
+The filter by tool is not decoration: `turn.end` writes `complete`, `failed` or `interrupted`
+and a search writes `cached` into the same field. A read that failed writes no phase at all, so
+the four counts need not add up to the number of read cards in the transcript.
+
+The trace has no content field and no path field, so what comes back is a distribution and
+nothing else — which is the whole point: this is the measurement the outline was shipped on. If the counts stay
+dominated by `bare`, the tool description needs work before the feature does.
+
 **What it must never answer is "did my write land".** The cache is therefore *told* about
 changes rather than left to notice them from size and modification time: `write_file` and
 `edit_file` forget the path they touched, and `run_command` forgets the whole chat's memory,
@@ -483,9 +585,37 @@ it appears in the context meter and in what a compaction has to fit.
 It is the *project's* file that is read, never this repository's: a project points at its own
 folder, and a project whose folder has no `AGENTS.md` gets no block at all. The everyday cost
 is therefore that file's tokens — hundreds for a typical file, thousands for a dense one — and
-the Context Inspector shows the real count for the folder actually opened. The cap is a share
-of the model's window, because a flat byte count cannot express the rule that matters: this
-file must never dominate a small model's context.
+the Context Inspector shows the real count for the folder actually opened.
+
+The cap is a flat **48 KiB** (`workspace.MaxAgentsBytes`), measured in bytes of the file and cut
+back to the last complete line that fits, with `truncated="true"` on the block so a model that
+finds no answer in what it was given can say the guidance was incomplete instead of concluding
+the project has no rule about it. It is not a share of the model's window: what the
+block costs against that window is the meter's subject, since it is charged to `budget.Memory`
+and a compaction has to fit it like any other segment.
+
+Beside it, when the folder is a git working tree, travels the **working tree's state**
+(`SegmentGit`, labelled `Git-Status`): the branch (or `detached="true"`), how far it is ahead or
+behind its upstream, and every pending path with the half of it that is staged, the kind of
+change and its line counts. It answers the question the transcript cannot — is the earlier work
+finished, staged, or already committed — without spending a tool round and a confirmation card
+on `git status`, and it is what the model reads before it decides that a file it remembers is
+still unmodified.
+
+It is read from `git status --porcelain=v1 --branch` and `git diff HEAD --numstat`, and the
+`--porcelain` format reports paths from the *repository* root, so the repository prefix is
+stripped and anything outside the project folder is dropped: a project that is a subdirectory of
+a larger repository is given paths relative to its own folder, never the surrounding tree's.
+Three properties are load-bearing. It never writes (`GIT_OPTIONAL_LOCKS=0`, because `git status`
+otherwise refreshes the index) and it never executes anything the repository configures
+(`core.fsmonitor=false`, `--no-ext-diff`, `--no-textconv`) — a cloned project is somebody else's
+config, and this runs unprompted, unlike a command the user allows. It is bounded twice: one
+three-second deadline covers every call, `MaxGitEntries` (40) and a 4 KiB render cap bound the
+list, and whatever is left out is counted. And it fails silently: a plain folder, a machine
+without git and a probe that ran out of time all return `ErrNoGit`, which is the absence of a
+block rather than a warning. Measured about **11 ms per git call** on this checkout (390 files,
+20 runs); the assembly is rebuilt on every tool round, so a long turn pays that per round, which
+is the number to revisit if the probe ever becomes noticeable on a large repository.
 
 ## 9. Watching it without the app
 
