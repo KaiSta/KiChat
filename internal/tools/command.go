@@ -207,6 +207,9 @@ func commandDefinitions() []llm.ToolDefinition {
 				"ein Ergebnis, kein Fehler: lies die Ausgabe und arbeite damit. Es gibt keine Eingabe " +
 				"(die Standardeingabe ist geschlossen) und keine Administratorrechte — Befehle mit sudo, " +
 				"doas oder pkexec werden abgelehnt; schlage sie dem Nutzer vor, statt sie zu wiederholen. " +
+				"Befehle, die nicht committete Arbeit verwerfen (git reset --hard, git checkout --, git " +
+				"restore, git clean -f), werden ebenso abgelehnt — committe oder stashe die Änderungen " +
+				"zuerst. " +
 				"Schreibe keine Befehle, die eine Frage stellen, und starte keinen Server oder Beobachter, " +
 				"der weiterläuft: er wird nach dem Timeout abgebrochen. Dateien, die du ändern willst, " +
 				"änderst du mit edit_file/write_file, nicht über die Shell. Der Nutzer sieht den Befehl " +
@@ -257,6 +260,14 @@ func (s *Service) runCommand(ctx context.Context, chatID, argsJSON string) (Resu
 		return Result{}, err
 	}
 	timeout := commandTimeout(looseInt(args.Timeout, 0))
+	// Before the card, for the reason the elevation refusal is: the person should not be asked
+	// to approve a line the app already knows it will not run. Nothing is snapshotted — the undo
+	// record is per file and keeps the chat's first pre-image, so it cannot represent "the
+	// working tree just before this command" (gitguard.go has the argument) — which makes the
+	// promise the narrow one: the work is not lost, or the line does not run.
+	if err := refuseDestructiveGit(root, line); err != nil {
+		return Result{}, err
+	}
 	// The line can come back from the card edited: a person who spots a typo in an approval
 	// should be able to fix it there instead of declining and typing it again in the composer.
 	// The edited line is a *new* line, so the elevation check runs on it too — the card is a
@@ -286,6 +297,11 @@ func (s *Service) runCommand(ctx context.Context, chatID, argsJSON string) (Resu
 					"run it themselves, or suggest a way that needs no elevation", program))
 		}
 		line = request.EditedLine
+		// The edited line is a new line, so it is checked like one: the card is a text field,
+		// and the one thing an edit must not do is turn a harmless command into a destructive one.
+		if err := refuseDestructiveGit(root, line); err != nil {
+			return Result{}, err
+		}
 	}
 	// A command is the one tool whose effect cannot be enumerated — `gofmt -w .` rewrites
 	// every file under a folder — so the read cache is dropped for the whole chat, whatever

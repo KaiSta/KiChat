@@ -1290,6 +1290,10 @@ const de = {
   // kopieren — das ist der Weg, den der Satz nennt.
   'err.tools.needsElevation':
     'KiChat kann keine Administratorrechte erteilen — es gibt kein Terminal für die Passwortabfrage. Führe den Befehl selbst aus; die Zeile steht in der Karte und lässt sich dort kopieren.',
+  // Vor der Bestätigung abgelehnt, weil der Befehl Arbeit vernichten würde, die kein Zurück
+  // hat: die Undo-Aufzeichnung gilt einer Datei, nicht einem Kommando. Der Ausweg steht im Satz.
+  'err.tools.destructiveGit':
+    'Der Befehl würde {{1}} ungesicherte Änderung(en) verwerfen ({{2}}). Committe oder stashe sie zuerst, oder führe den Befehl selbst aus.',
   'err.tools.noScrape': 'Web-Scraping ist nicht konfiguriert',
   'err.tools.noDocsSearch': 'Dokumentensuche ist nicht verfügbar',
   'err.tools.noFts': 'Volltextsuche ist in diesem Build nicht verfügbar',
@@ -2544,6 +2548,10 @@ const en: Record<keyof typeof de, string> = {
   // into. The line stays on the card, ready to copy — that is the way out the sentence names.
   'err.tools.needsElevation':
     'KiChat cannot grant administrator rights — there is no terminal to ask for the password. Run the command yourself; the line is on the card, ready to copy.',
+  // Refused before the confirmation because it would destroy work with no way back: the undo
+  // record belongs to a file, not to a command. The sentence names the way out.
+  'err.tools.destructiveGit':
+    'This command would discard {{1}} uncommitted change(s) ({{2}}). Commit or stash them first, or run it yourself.',
   'err.tools.noScrape': 'web scraping is not configured',
   'err.tools.noDocsSearch': 'document search is not available',
   'err.tools.noFts': 'full-text search is not available in this build',
@@ -3685,6 +3693,9 @@ const zh: Record<keyof typeof de, string> = {
   // 可直接复制 —— 这就是提示语所说的办法。
   'err.tools.needsElevation':
     'KiChat 无法授予管理员权限 —— 这里没有可输入密码的终端。请自行运行该命令；命令保留在卡片上，可直接复制。',
+  // 在确认之前就拒绝，因为它会毁掉无法恢复的改动：撤销记录属于文件，而不是命令。
+  'err.tools.destructiveGit':
+    '该命令会丢弃 {{1}} 处未提交的更改（{{2}}）。请先提交或暂存，或自行运行该命令。',
   'err.tools.noScrape': '未配置网页抓取',
   'err.tools.noDocsSearch': '文档搜索不可用',
   'err.tools.noFts': '此构建中没有全文搜索',
