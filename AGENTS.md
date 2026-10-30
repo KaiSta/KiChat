@@ -27,10 +27,11 @@ make build        # build/bin/kichat
 make run          # build and launch
 ```
 
-Two things bite on this machine: **node is not on `PATH`** (it lives in
-`~/.local/node/bin`, and npm's shebang needs node, not a path to npm), and **every
-Linux build needs `-tags webkit2_41`** because only webkit2gtk-4.1 is installed.
-`make` handles both; a raw `wails build` needs the tag and the `PATH` export.
+One thing bites on this machine: **every Linux build needs `-tags webkit2_41`**
+because only webkit2gtk-4.1 is installed. `make` handles it; a raw `wails build`
+needs the tag. Node used to be the second — it lived in `~/.local/node/bin` and was
+not on `PATH` — and it is now the system install in `/usr/bin`, so nothing has to be
+exported; the Makefile still falls back to that directory when `npm` is not found.
 
 ## Where things live
 
@@ -88,9 +89,9 @@ table mapping "to add X, touch Y" to the right skill.
 
 | Tool | Here | Consequence |
 | --- | --- | --- |
-| Go | 1.26.0 | fine |
+| Go | 1.27.3 | fine; the language version is `go.mod`'s `go 1.27.0`, which is also the toolchain CI installs, so the two agree |
 | Wails CLI | 2.15.0 | fine |
-| Node / npm | 22.23.3 / 10.9.9 in `~/.local/node/bin` | **not on `PATH`**; export the directory, or install Node system-wide |
+| Node / npm | 22.23.4 / 12.2.1 in `/usr/bin` | on `PATH`; the Makefile's `~/.local/node/bin` fallback is no longer used here |
 | webkit2gtk | 4.1 only | **every Linux build needs `-tags webkit2_41`** |
 
 `vite dev` needs Node ≥ 20.19 / ≥ 22.12 (below that, Vite 7 dies with

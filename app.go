@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"kichat/internal/backup"
@@ -1936,4 +1936,4 @@ func (a *App) GetBudget(chatID, backend, model string) (chat.ContextBudget, erro
 }
 
 // newID returns a fresh identifier.
-func newID() string { return uuid.NewString() }
+func newID() string { return uuid.New().String() }

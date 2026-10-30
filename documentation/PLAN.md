@@ -169,7 +169,7 @@ the working tree, so they cannot be committed by accident.
 
 ### Versions
 
-Go 1.26.0 · Wails v2.15.0 · React ^19.1.0 · zustand ^5.0.15 · Vite ^7 · TypeScript ^5.6.3
+Go 1.27.0 · Wails v2.15.0 · React ^19.1.0 · zustand ^5.0.15 · Vite ^7 · TypeScript ^5.6.3
 
 ---
 

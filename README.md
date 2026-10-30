@@ -19,7 +19,7 @@ No KiChat account, no service of its own, no telemetry. Nothing leaves the machi
 you picked a hosted model or asked for a web search.
 
 <p>
-  <img alt="Go 1.26" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.27" src="https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white">
   <img alt="Wails v2" src="https://img.shields.io/badge/Wails-v2-E83524">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white">
   <img alt="Linux, macOS and Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-4c8dff">
@@ -578,7 +578,7 @@ viewable, and a compaction is a separate row you can inspect or delete.
 
 ### Requirements
 
-- **Go** 1.26+ (see `go.mod`)
+- **Go** 1.27+ (see `go.mod`)
 - **Wails CLI v2** — `go install github.com/wailsapp/wails/v2/cmd/wails@latest`
 - **Node 20.19+ or 22.12+** (so npm 10+)
 - **Linux**: GTK3 and WebKit2GTK, plus the build tag described below

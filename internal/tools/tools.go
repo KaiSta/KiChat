@@ -13,8 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"kichat/internal/config"
 	"kichat/internal/images"
@@ -121,7 +120,7 @@ func New(st *store.Store, chain *research.Chain, scraper *research.Scraper) *Ser
 }
 
 // newID names a document this package indexes itself.
-func newID() string { return uuid.NewString() }
+func newID() string { return uuid.New().String() }
 
 // Definitions returns the tool schemas advertised to the model.
 //

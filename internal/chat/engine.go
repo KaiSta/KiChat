@@ -7,8 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"kichat/internal/config"
 	"kichat/internal/events"
@@ -734,7 +733,7 @@ func (e *Engine) emitBudget(chatID string, chat *store.Chat,
 // appendUserMessage persists the user's turn and links any attachments.
 func (e *Engine) appendUserMessage(req TurnRequest, backendID, modelID string) error {
 	msg, err := e.Store.AppendMessage(store.Message{
-		ID:        uuid.NewString(),
+		ID:        uuid.New().String(),
 		ChatID:    req.ChatID,
 		Role:      string(llm.RoleUser),
 		Content:   req.Text,
@@ -766,7 +765,7 @@ func (e *Engine) appendUserMessage(req TurnRequest, backendID, modelID string) e
 // createAssistantMessage inserts the placeholder row for the reply.
 func (e *Engine) createAssistantMessage(chatID, backendID, modelID string) (store.Message, error) {
 	msg, err := e.Store.AppendMessage(store.Message{
-		ID:        uuid.NewString(),
+		ID:        uuid.New().String(),
 		ChatID:    chatID,
 		Role:      string(llm.RoleAssistant),
 		Status:    store.StatusStreaming,
