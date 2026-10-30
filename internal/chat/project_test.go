@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -161,6 +162,134 @@ func TestGuidanceCostIsOnTheMeter(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("the injected guidance is missing from the context budget: %+v", assembly.Budget.Segments)
+	}
+}
+
+// gitFolder makes a repository with one commit and one uncommitted edit, and returns its path.
+//
+// The host's git configuration is cleared so a `commit.gpgsign`, an `init.defaultBranch` or an
+// alias cannot change what the test reads — the same isolation the workspace's own git tests
+// use. A machine without git skips: the block is an addition to the prompt, not a prerequisite.
+func gitFolder(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(cmd.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1",
+			"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	git("config", "user.email", "test@example.com")
+	git("config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-q", "-m", "first")
+	if err := os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestAProjectsPromptCarriesItsGitState is the block's whole purpose: the model is told which
+// branch it is on and what has changed since the last commit, on the turn it starts, without
+// spending a tool round and a confirmation card on `git status`. A chat that is not a project
+// gets nothing, even when it is pointed at the same repository, and a project folder that is not
+// a repository is silent rather than reported as a failure.
+func TestAProjectsPromptCarriesItsGitState(t *testing.T) {
+	folder := gitFolder(t)
+
+	st := newTestStore(t)
+	project := store.Chat{
+		ID: "project-1", Title: "Projekt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.\nVerfügbare Tools: {{tool_list}}",
+		Temperature:  0.7, TopP: 0.9, AutoCompact: false,
+		Mode: store.ModeCoding, Workspace: folder,
+	}
+	plain := store.Chat{
+		ID: "chat-1", Title: "Chat", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.\nVerfügbare Tools: {{tool_list}}",
+		Temperature:  0.7, TopP: 0.9, AutoCompact: false,
+		// The same repository, deliberately: the mode is what decides.
+		Mode: store.ModeChat, Workspace: folder,
+	}
+	for _, c := range []store.Chat{project, plain} {
+		if err := st.CreateChat(c); err != nil {
+			t.Fatalf("create chat %s: %v", c.ID, err)
+		}
+	}
+
+	settings := config.Default()
+	settings.AutoTitle = false
+	engine := NewEngine(st, llm.NewRegistry(nil), nil,
+		func() config.Settings { return settings }, (&eventLog{}).emit)
+
+	system := systemMessage(t, engine, project)
+	if !strings.Contains(system, `<project_git branch="main"`) {
+		t.Fatalf("a project's system prompt carries no git state:\n%s", system)
+	}
+	if !strings.Contains(system, "Änderungen seit dem letzten Commit (1)") {
+		t.Errorf("the block does not say how much changed:\n%s", system)
+	}
+	// The change itself, with the half of it that is staged and the size of the diff: that is what
+	// makes the block useful rather than a branch name.
+	if !strings.Contains(system, "main.go: nicht gestaged (geändert) +2 −0") {
+		t.Errorf("the block does not describe the modified file:\n%s", system)
+	}
+
+	if plainSystem := systemMessage(t, engine, plain); strings.Contains(plainSystem, "<project_git") {
+		t.Errorf("a chat with no coding mode got the project's git state:\n%s", plainSystem)
+	}
+
+	// A project folder that is nobody's repository: no block, no error, no warning.
+	plainFolder := store.Chat{
+		ID: "project-2", Title: "Ordner", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.\nVerfügbare Tools: {{tool_list}}",
+		Temperature:  0.7, TopP: 0.9, AutoCompact: false,
+		Mode: store.ModeCoding, Workspace: t.TempDir(),
+	}
+	if err := st.CreateChat(plainFolder); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if scratch := systemMessage(t, engine, plainFolder); strings.Contains(scratch, "<project_git") {
+		t.Errorf("a folder that is not a repository got a git block:\n%s", scratch)
+	}
+
+	// And it is on the meter: a block nobody can account for is context that grows without
+	// anyone deciding it should.
+	assembly, _, err := engine.buildAssembly(context.Background(), &project, project.Backend, project.Model,
+		settings, llm.ModelInfo{ID: project.Model, Backend: project.Backend, ContextLimit: 8192}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, seg := range assembly.Budget.Segments {
+		if seg.Kind != SegmentGit {
+			continue
+		}
+		found = true
+		if seg.Tokens <= 0 {
+			t.Errorf("the git segment reports %d tokens", seg.Tokens)
+		}
+		if !strings.Contains(seg.Detail, "main") {
+			t.Errorf("the git segment is described as %q, want it to name the branch", seg.Detail)
+		}
+	}
+	if !found {
+		t.Errorf("the git state is missing from the context budget: %+v", assembly.Budget.Segments)
 	}
 }
 

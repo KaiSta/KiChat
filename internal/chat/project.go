@@ -72,6 +72,177 @@ func projectGuidance(c store.Chat) (guidance, detail string, ok bool) {
 	return sb.String(), detail, true
 }
 
+// The project's working tree, as the next turn's prompt says it.
+//
+// The gap this closes is not that the model cannot run `git status` — it can, through the
+// terminal — but that it has no reason to: the transcript already says what it wrote, and
+// nothing there says whether that work is staged, committed, or gone. So the state is read on
+// every turn and travels beside the guidance file, as one block, exactly like the notes below.
+//
+// Three decisions:
+//
+//   - **Markup, not prose.** The system prompt exists once per interface language and this
+//     payload is the same in all of them; the attributes carry the machine-readable half (branch,
+//     how many changes) so the window can show it cheaply too (see context.go's segment).
+//   - **It says when it was taken.** The block is a snapshot from the moment the turn was
+//     assembled, and a turn that edits three files has made it wrong before it is done. Saying so
+//     is what keeps the model from treating a stale "clean" as permission to assume a file is
+//     untouched.
+//   - **It is not authority.** A path here is a hint about where to look, not a substitute for
+//     reading, and the folder's own instructions never arrive through it — that is the AGENTS.md
+//     block, which has its own rule about being knowledge rather than permission.
+const (
+	gitOpen  = "<project_git"
+	gitClose = "</project_git>"
+	// maxGitBlockBytes bounds the rendered block. The entry count is capped where the state is
+	// read (workspace.MaxGitEntries); this is the second bound, because a path may itself be long
+	// and forty of them are not necessarily small.
+	maxGitBlockBytes = 4 << 10
+)
+
+// projectGitState renders the folder's git state for the system prompt.
+//
+// ok is false for a chat that is not a project, for a folder that has gone, and for a folder
+// that is not a git working tree — git missing included. None of those is worth reporting: the
+// block is an addition to the conversation, and a turn without it is the turn that existed
+// before it.
+func projectGitState(c store.Chat) (block, detail string, ok bool) {
+	if !c.IsProject() {
+		return "", "", false
+	}
+	root, err := workspace.Open(c.Workspace)
+	if err != nil {
+		return "", "", false
+	}
+	state, err := root.GitState()
+	if err != nil {
+		return "", "", false
+	}
+	return renderGitState(state), gitStateDetail(state), true
+}
+
+// renderGitState writes the block. Its one instruction is about staleness rather than about
+// what to do with the list: the list is context, and telling a coding model what to conclude
+// from context is how a prompt starts overriding the person.
+func renderGitState(state workspace.GitState) string {
+	var sb strings.Builder
+	sb.WriteString(gitOpen)
+	if state.Detached {
+		sb.WriteString(` detached="true"`)
+	} else {
+		fmt.Fprintf(&sb, ` branch=%q`, state.Branch)
+	}
+	if state.Total > 0 {
+		fmt.Fprintf(&sb, ` changed="%d"`, state.Total)
+	}
+	if state.Ahead > 0 {
+		fmt.Fprintf(&sb, ` ahead="%d"`, state.Ahead)
+	}
+	if state.Behind > 0 {
+		fmt.Fprintf(&sb, ` behind="%d"`, state.Behind)
+	}
+	sb.WriteString(">\n")
+	sb.WriteString("Der Zustand des Projektordners laut git, als dieser Turn zusammengestellt wurde. " +
+		"Er kann sich während des Turns ändern; was du bearbeitest, prüfst du an der Datei.\n")
+	if state.Total == 0 {
+		sb.WriteString("Keine Änderungen seit dem letzten Commit.\n")
+	} else {
+		fmt.Fprintf(&sb, "Änderungen seit dem letzten Commit (%d):\n", state.Total)
+		shown := 0
+		for _, entry := range state.Entries {
+			line := "- " + gitEntryLine(entry) + "\n"
+			if sb.Len()+len(line) > maxGitBlockBytes {
+				break
+			}
+			sb.WriteString(line)
+			shown++
+		}
+		// One line for both ways the list can be short: the read caps the entries, and this
+		// renderer caps the bytes.
+		if rest := state.Total - shown; rest > 0 {
+			fmt.Fprintf(&sb, "- … und %d weitere\n", rest)
+		}
+	}
+	sb.WriteString(gitClose)
+	return sb.String()
+}
+
+// gitEntryLine is one path, with what git says about it: which half of the change is staged, what
+// kind of change it is, and how many lines it moved.
+func gitEntryLine(entry workspace.GitEntry) string {
+	if entry.Index == '?' && entry.Worktree == '?' {
+		return entry.Path + ": unversioniert"
+	}
+	line := entry.Path + ": " + gitChangeText(entry)
+	if entry.Counted {
+		line += fmt.Sprintf(" +%d −%d", entry.Added, entry.Deleted)
+	}
+	return line
+}
+
+// gitChangeText names the change in the terms the two porcelain columns mean: the first is the
+// index (what the next commit would contain), the second the working tree.
+func gitChangeText(entry workspace.GitEntry) string {
+	if gitConflict(entry) {
+		return "Konflikt (ungeklärt)"
+	}
+	staged, unstaged := gitChangeKind(entry.Index), gitChangeKind(entry.Worktree)
+	switch {
+	case staged != "" && unstaged != "" && staged != unstaged:
+		return fmt.Sprintf("gestaged (%s), nicht gestaged (%s)", staged, unstaged)
+	case staged != "" && unstaged != "":
+		return fmt.Sprintf("teils gestaged (%s)", staged)
+	case staged != "":
+		return fmt.Sprintf("gestaged (%s)", staged)
+	case unstaged != "":
+		return fmt.Sprintf("nicht gestaged (%s)", unstaged)
+	}
+	return "geändert"
+}
+
+// gitConflict reports an unmerged entry. The pairs are UU, AA, DD, AU, UA, DU and UD: either half
+// is U, or both halves are the same add or delete. A plain staged addition is `A `, which is why
+// the test is a pair and not a letter.
+func gitConflict(entry workspace.GitEntry) bool {
+	return entry.Index == 'U' || entry.Worktree == 'U' ||
+		(entry.Index == 'A' && entry.Worktree == 'A') ||
+		(entry.Index == 'D' && entry.Worktree == 'D')
+}
+
+func gitChangeKind(code byte) string {
+	switch code {
+	case 'M':
+		return "geändert"
+	case 'A':
+		return "neu"
+	case 'D':
+		return "gelöscht"
+	case 'R':
+		return "umbenannt"
+	case 'C':
+		return "kopiert"
+	case 'T':
+		return "Typ geändert"
+	}
+	return ""
+}
+
+// gitStateDetail is the line the context meter shows next to the segment: which branch, and how
+// much is pending. It is short because it sits in a table row, not because it is unread.
+func gitStateDetail(state workspace.GitState) string {
+	where := "git"
+	switch {
+	case state.Detached:
+		where = "git, detached"
+	case state.Branch != "":
+		where = "git " + state.Branch
+	}
+	if state.Total == 0 {
+		return where + ", keine Änderungen"
+	}
+	return fmt.Sprintf("%s, %d Änderungen", where, state.Total)
+}
+
 // The files a person put back, as the next turn's prompt says it.
 //
 // Why this exists at all: a tool result in the transcript is a claim about a file — "written,

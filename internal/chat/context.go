@@ -19,7 +19,12 @@ const (
 	// part of the system prompt because it is not something the app says — it is text
 	// out of the user's working tree, it changes between turns, and the meter should let
 	// somebody see what it is costing them.
-	SegmentProject     = "project"
+	SegmentProject = "project"
+	// SegmentGit is the same folder's version-control state: which branch, and what has changed
+	// since the last commit. It is a kind of its own for the same reason the guidance file is —
+	// it is read out of the user's tree rather than said by the app, and the meter should show
+	// what it costs.
+	SegmentGit         = "git"
 	SegmentMemory      = "memory"
 	SegmentAttachments = "attachments"
 	SegmentHistory     = "history"
@@ -251,6 +256,21 @@ func Assemble(in AssemblyInput) Assembly {
 		budget.Segments = append(budget.Segments, ContextSegment{
 			Kind:   SegmentProject,
 			Label:  workspace.AgentsFileName,
+			Tokens: tokens,
+			Detail: detail,
+		})
+	}
+
+	// The working tree, when the folder is a git repository. It follows the guidance file because
+	// it is the same kind of fact — read out of the project on every turn — and it is silent for
+	// a folder that is not a repository, which is the ordinary case of a scratch folder.
+	if state, detail, ok := projectGitState(in.Chat); ok {
+		systemParts = append(systemParts, state)
+		tokens := llm.EstimateTokens(state)
+		budget.Memory += tokens
+		budget.Segments = append(budget.Segments, ContextSegment{
+			Kind:   SegmentGit,
+			Label:  "Git-Status",
 			Tokens: tokens,
 			Detail: detail,
 		})
