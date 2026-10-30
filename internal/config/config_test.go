@@ -66,6 +66,57 @@ func TestLoadKeepsDefaultsForFieldsAddedLater(t *testing.T) {
 	}
 }
 
+// TestToolLoopDefaultsSuitACodingProject pins the two figures the coding path is
+// measured against: a reply gets enough rounds to read, edit and run a check more than
+// once, and enough tool-result tokens for a failing check plus several reads. Both were
+// sized for a research turn — 6 rounds and 25 000 tokens — which a two-file change
+// exhausts before it has read the failure.
+func TestToolLoopDefaultsSuitACodingProject(t *testing.T) {
+	def := Default()
+	if def.ToolIterations != 24 {
+		t.Errorf("ToolIterations = %d, want 24", def.ToolIterations)
+	}
+	if def.ToolTokenBudget != 60000 {
+		t.Errorf("ToolTokenBudget = %d, want 60000", def.ToolTokenBudget)
+	}
+	// The ceiling has to leave room above the default, or the default is the ceiling: a
+	// refactor with a few more files than usual is a choice the user can make.
+	if MaxToolIterations <= DefaultToolIterations {
+		t.Errorf("MaxToolIterations = %d, want more than the default %d",
+			MaxToolIterations, DefaultToolIterations)
+	}
+}
+
+// TestToolLoopRepairKeepsAChoiceAndBoundsAHandEditedBlob pins the three readings of
+// the stored number: zero is "nobody chose" and takes the default, a value above the
+// ceiling is clamped like every other bounded field, and a value the user picked — the
+// old default of 6 included — is left alone. Guessing that 6 meant "not chosen" would
+// silently override somebody who deliberately set it.
+func TestToolLoopRepairKeepsAChoiceAndBoundsAHandEditedBlob(t *testing.T) {
+	unset := Settings{}
+	unset.normalise()
+	if unset.ToolIterations != DefaultToolIterations {
+		t.Errorf("an unset ToolIterations became %d, want the default %d",
+			unset.ToolIterations, DefaultToolIterations)
+	}
+	if unset.ToolTokenBudget != DefaultToolTokenBudget {
+		t.Errorf("an unset ToolTokenBudget became %d, want the default %d",
+			unset.ToolTokenBudget, DefaultToolTokenBudget)
+	}
+
+	huge := Settings{ToolIterations: 5000}
+	huge.normalise()
+	if huge.ToolIterations != MaxToolIterations {
+		t.Errorf("a stored 5000 became %d, want the %d ceiling", huge.ToolIterations, MaxToolIterations)
+	}
+
+	chosen := Settings{ToolIterations: 6}
+	chosen.normalise()
+	if chosen.ToolIterations != 6 {
+		t.Errorf("a stored 6 became %d, want it kept", chosen.ToolIterations)
+	}
+}
+
 // TestMidTurnCheckShipsOffAndSurvivesARestart pins both halves of the switch: the
 // shipped default (off, because it spends a request inside an answer somebody is waiting
 // for) and the round trip through the one JSON row the settings blob is.
@@ -371,7 +422,7 @@ var shippedLanguages = []string{LangEnglish, LangGerman, LangChinese}
 // fell back to English would look like a pass to every other test here, so the
 // bodies are compared against each other rather than merely checked for content.
 func TestEveryPresetExistsInEveryLanguage(t *testing.T) {
-	for _, id := range []string{PresetResearch, PresetSmallLocal, PresetAssistant, PresetCoding} {
+	for _, id := range []string{PresetResearch, PresetSmallLocal, PresetAssistant, PresetCoding, PresetCodingAgent} {
 		bodies := map[string]string{}
 		for _, lang := range shippedLanguages {
 			body := PromptBody(id, lang)
@@ -1081,6 +1132,42 @@ func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 // install of its own, so probing an address for a feature nobody has asked for
 // would report a failure before the user has done anything — the same reason the
 // metered chat backends ship disabled.
+// TestAutoApproveShipsOffAndStaysOffWhenAbsent pins the two switches that turn the
+// confirmation gate off. Both are off in Default() for the reason the hosted backends are:
+// an installation whose first surprise is a file it did not expect is the wrong first
+// impression. And a blob written before the group existed has to arrive at exactly that —
+// an absent boolean read as "yes" would be a permission nobody granted.
+func TestAutoApproveShipsOffAndStaysOffWhenAbsent(t *testing.T) {
+	if s := Default(); s.AutoApprove.Files || s.AutoApprove.Commands {
+		t.Fatalf("auto-approval is on in Default(): %+v", s.AutoApprove)
+	}
+
+	// The decode is where an absent field could have arrived as something else.
+	older := Default()
+	if err := json.Unmarshal([]byte(`{"language":"en","toolIterations":6}`), &older); err != nil {
+		t.Fatalf("unmarshal an older blob: %v", err)
+	}
+	if older.AutoApprove.Files || older.AutoApprove.Commands {
+		t.Errorf("an older blob arrived with a permission nobody gave: %+v", older.AutoApprove)
+	}
+
+	// And a yes the user gave once has to survive a save and a restart, because that is what
+	// a standing answer means. The other half stays off: the two are separate questions.
+	stored := Default()
+	stored.AutoApprove = AutoApproveSettings{Files: true}
+	blob, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	again := Default()
+	if err := json.Unmarshal(blob, &again); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !again.AutoApprove.Files || again.AutoApprove.Commands {
+		t.Errorf("the stored answer came back as %+v, want files allowed only", again.AutoApprove)
+	}
+}
+
 func TestDefaultLeavesImageGenerationOff(t *testing.T) {
 	s := Default()
 	if s.Images.Enabled {

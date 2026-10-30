@@ -127,6 +127,20 @@ export namespace chat {
 
 export namespace config {
 	
+	export class AutoApproveSettings {
+	    files: boolean;
+	    commands: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new AutoApproveSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.files = source["files"];
+	        this.commands = source["commands"];
+	    }
+	}
 	export class CompactSettings {
 	    enabled: boolean;
 	    midTurnCheck: boolean;
@@ -493,6 +507,7 @@ export namespace config {
 	    hiddenModels?: string[];
 	    images: ImageSettings;
 	    imageProfiles?: ImageProfile[];
+	    autoApprove: AutoApproveSettings;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -520,6 +535,7 @@ export namespace config {
 	        this.hiddenModels = source["hiddenModels"];
 	        this.images = this.convertValues(source["images"], ImageSettings);
 	        this.imageProfiles = this.convertValues(source["imageProfiles"], ImageProfile);
+	        this.autoApprove = this.convertValues(source["autoApprove"], AutoApproveSettings);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -954,6 +970,57 @@ export namespace main {
 	        this.remembered = source["remembered"];
 	        this.reason = source["reason"];
 	    }
+	}
+	export class FileChange {
+	    path: string;
+	    operation: string;
+	    revisions: number;
+	    hunks: workspace.Hunk[];
+	    added: number;
+	    removed: number;
+	    truncated: boolean;
+	    newlineOnly: boolean;
+	    canRevert: boolean;
+	    blocked: string;
+	    // Go type: time
+	    changedAt: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new FileChange(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.operation = source["operation"];
+	        this.revisions = source["revisions"];
+	        this.hunks = this.convertValues(source["hunks"], workspace.Hunk);
+	        this.added = source["added"];
+	        this.removed = source["removed"];
+	        this.truncated = source["truncated"];
+	        this.newlineOnly = source["newlineOnly"];
+	        this.canRevert = source["canRevert"];
+	        this.blocked = source["blocked"];
+	        this.changedAt = this.convertValues(source["changedAt"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class ImageCache {
 	    count: number;
@@ -1399,6 +1466,20 @@ export namespace main {
 	        this.interruptError = source["interruptError"];
 	    }
 	}
+	export class TerminalStatus {
+	    program: string;
+	    path: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TerminalStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.program = source["program"];
+	        this.path = source["path"];
+	    }
+	}
 	export class UpscalerInstall {
 	    busy: boolean;
 	    phase: string;
@@ -1738,6 +1819,8 @@ export namespace store {
 	    model: string;
 	    systemPrompt: string;
 	    systemPromptPreset: string;
+	    mode: string;
+	    workspace: string;
 	    temperature: number;
 	    topP: number;
 	    numCtx: number;
@@ -1761,6 +1844,8 @@ export namespace store {
 	        this.model = source["model"];
 	        this.systemPrompt = source["systemPrompt"];
 	        this.systemPromptPreset = source["systemPromptPreset"];
+	        this.mode = source["mode"];
+	        this.workspace = source["workspace"];
 	        this.temperature = source["temperature"];
 	        this.topP = source["topP"];
 	        this.numCtx = source["numCtx"];
@@ -2092,6 +2177,59 @@ export namespace tools {
 	        this.models = source["models"];
 	        this.error = source["error"];
 	    }
+	}
+
+}
+
+export namespace workspace {
+	
+	export class DiffLine {
+	    kind: string;
+	    text: string;
+	    old: number;
+	    new: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DiffLine(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.text = source["text"];
+	        this.old = source["old"];
+	        this.new = source["new"];
+	    }
+	}
+	export class Hunk {
+	    lines: DiffLine[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Hunk(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.lines = this.convertValues(source["lines"], DiffLine);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"kichat/internal/llm"
+	"kichat/internal/tools"
 	"kichat/internal/trace"
 )
 
@@ -90,6 +91,46 @@ func TestTurnTraceKeepsTheShapeAndNotTheText(t *testing.T) {
 	}
 	if !seenStart || !seenEnd {
 		t.Fatalf("turn was not bracketed in the trace (start=%v end=%v):\n%s", seenStart, seenEnd, text)
+	}
+}
+
+// TestTheShapeOfAReadReachesTheTrace is what makes the question answerable after real use:
+// every `read_file` call leaves one word in the trace — bare, bounded, outline or
+// continuation — so a week of chats can be counted instead of argued about.
+func TestTheShapeOfAReadReachesTheTrace(t *testing.T) {
+	folder := t.TempDir()
+	name := sourceFile(t, folder, "big.go", 60)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: readFileCall(name, `, "outline": true`)}},
+			{{Type: llm.EventDelta, Text: "Fertig."}, {Type: llm.EventDone}},
+		},
+	}
+	digester := newDigester([]llm.StreamEvent{{Type: llm.EventDelta, Text: "sollte nicht laufen"}})
+	engine, _ := codingDigestEngine(t, folder, digestSettings(), provider, digester)
+	dir := t.TempDir()
+	engine.Trace = trace.New(dir)
+	t.Cleanup(engine.Trace.Close)
+	runTurn(t, engine, "project-1", "Gib mir den Umriss von big.go")
+	engine.Trace.Close()
+
+	raw, err := os.ReadFile(filepath.Join(dir, trace.Name))
+	if err != nil {
+		t.Fatalf("trace file: %v", err)
+	}
+	var shapes []string
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var ev trace.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line is not an event: %v (%q)", err, line)
+		}
+		if ev.Event == trace.EvToolCall && ev.Tool == tools.ToolReadFile {
+			shapes = append(shapes, ev.Phase)
+		}
+	}
+	if len(shapes) != 1 || shapes[0] != tools.ReadShapeOutline {
+		t.Errorf("read_file phases = %v, want one %q", shapes, tools.ReadShapeOutline)
 	}
 }
 

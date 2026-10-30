@@ -32,6 +32,16 @@ const (
 	Title      = "chat:title"
 	// Attachments reports that a chat's attachments changed.
 	Attachments = "chat:attachments"
+	// ToolOutput carries a running tool's output while it is still producing it. It is
+	// its own event rather than a Status or a repeated Tool: it is high-frequency and
+	// keyed to one call, and a Tool event carries a *record* — a status and a result —
+	// which is the opposite of "this is not finished yet".
+	ToolOutput = "chat:tool-output"
+	// Approval carries a change to a project folder that is waiting for the user's
+	// answer. The turn that asked is blocked until ResolveToolApproval answers it, which
+	// is why it cannot ride on Status: a phase string tells the window what is happening,
+	// and this one asks it to decide something before anything else can.
+	Approval = "chat:approval"
 	// ImageProgress carries one report from a picture being drawn: a step counter and,
 	// usually, a small preview of the draw so far. It is its own event rather than a Status
 	// because it is high-frequency and structured — a draw reports once per step, and a
@@ -47,6 +57,6 @@ func All() []string {
 	return []string{
 		Delta, Reasoning, Start, Done, Message, Tool, Status,
 		Error, Warning, Budget, Compaction, Title, Attachments, ChatsChanged,
-		ImageProgress,
+		ImageProgress, Approval, ToolOutput,
 	}
 }

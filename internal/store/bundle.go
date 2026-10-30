@@ -157,12 +157,12 @@ func (s *Store) SaveChatBundle(b ChatBundle) error {
 	if _, err := tx.Exec(`
 INSERT INTO chats (id,title,created_at,updated_at,backend,model,system_prompt,
   system_prompt_preset,temperature,top_p,num_ctx,archived,auto_compact,
-  compact_threshold,keep_recent_turns,search_first)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  compact_threshold,keep_recent_turns,search_first,mode,workspace)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		c.ID, c.Title, created, updated, c.Backend, c.Model, c.SystemPrompt,
 		c.SystemPromptPreset, c.Temperature, c.TopP, c.NumCtx, boolToInt(c.Archived),
 		boolToInt(c.AutoCompact), c.CompactThreshold, c.KeepRecentTurns,
-		boolToInt(c.SearchFirst)); err != nil {
+		boolToInt(c.SearchFirst), NormaliseMode(c.Mode), c.Workspace); err != nil {
 		return fmt.Errorf("write chat %s: %w", c.ID, err)
 	}
 

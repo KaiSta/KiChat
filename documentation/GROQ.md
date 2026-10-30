@@ -443,7 +443,7 @@ turn. `internal/chat/oversize.go`:
    result alone is bigger than the whole allowance. A fold cuts at user-turn boundaries, so the
    reply and the tool traffic of the turn being answered stay verbatim — which is exactly the
    material that has to shrink. The user's own tool budget is no help either: it defaults to
-   **25000** tokens, three times an 8K allowance, and one `scrape_url` may ask for **12000** on
+   **60000** tokens, seven times an 8K allowance, and one `scrape_url` may ask for **12000** on
    its own. So `generate` budgets the result against what the next request can actually carry —
    `roomForToolResults` is the effective limit less what the assembly already priced, the
    reserve for the answer and the reply this round wrote, and the backend's **own count** of the

@@ -31,6 +31,7 @@ export namespace chat {
 export namespace config {
   export type SearchSettings = Plain<Gen.config.SearchSettings>
   export type CompactSettings = Plain<Gen.config.CompactSettings>
+  export type AutoApproveSettings = Plain<Gen.config.AutoApproveSettings>
   export type SamplerSettings = Plain<Gen.config.SamplerSettings>
   export type PromptPreset = Plain<Gen.config.PromptPreset>
   export type Settings = Plain<Gen.config.Settings>
@@ -82,6 +83,17 @@ export namespace runtime {
 
 export namespace main {
   export type AppInfo = Plain<Gen.main.AppInfo>
+  /** The terminal the coding hand-off would open, or empty when there is none. */
+  export type TerminalStatus = Plain<Gen.main.TerminalStatus>
+  /**
+   * One file a project chat changed, as the changes panel lists it.
+   *
+   * The two texts are clamped previews, not whole files, and `canRevert` is the app's own
+   * answer to "would undo be safe": false comes with `blocked`, a code the panel translates
+   * ("outside" for a file edited after the app wrote it, "not-text" for one it will not
+   * rewrite).
+   */
+  export type FileChange = Plain<Gen.main.FileChange>
   export type ChatState = Plain<Gen.main.ChatState>
   export type SearchStatus = Plain<Gen.main.SearchStatus>
   export type SecretStatus = Plain<Gen.main.SecretStatus>
@@ -206,6 +218,10 @@ export const EV = {
   start: 'chat:start',
   message: 'chat:message',
   tool: 'chat:tool',
+  // A running tool's output, keyed to the call it belongs to. Its own name rather than a
+  // shape inside `tool`, because a tool event carries a *record* — a status and a result —
+  // and this one says the opposite: not finished yet.
+  toolOutput: 'chat:tool-output',
   status: 'chat:status',
   done: 'chat:done',
   error: 'chat:error',
@@ -215,6 +231,7 @@ export const EV = {
   title: 'chat:title',
   chatsChanged: 'chats:changed',
   attachments: 'chat:attachments',
+  approval: 'chat:approval',
   // Not a `chat:` name, because a draw is not something a chat engine does: it is the
   // picture backend talking about work it is doing right now, and the row it lands on can
   // be a picture that does not exist yet.
@@ -237,6 +254,18 @@ export interface ToolPayload {
   chatId: string
   toolCall: store.ToolCallRecord
 }
+/**
+ * The output of a tool that is still running — today only `run_command`.
+ *
+ * `text` is the output so far, not a delta: the backend keeps a bounded tail and replaces
+ * it, so the card can set one string and drop it when the call's own record arrives.
+ */
+export interface ToolOutputPayload {
+  chatId: string
+  toolCallId: string
+  text: string
+}
+
 export interface StatusPayload {
   chatId: string
   phase: string
@@ -296,6 +325,114 @@ export interface ImageProgressPayload {
   /** True for the report that ends a draw, which exists so a progress row cannot outlive it. */
   done?: boolean
 }
+
+/**
+ * A change to a project folder that is waiting for the user's answer.
+ *
+ * The turn that asked is blocked until `App.ResolveToolApproval` answers this id, so the
+ * card is not a notification: nothing else in that chat happens while it is on screen.
+ *
+ * The change is sent as fields rather than as a rendered diff, because the window is what
+ * decides how to show it — and because a second rendering in Go would be a second opinion
+ * about what is being approved. `hunks` is the comparison itself (see `DiffHunk`), `added`
+ * and `removed` count its lines, and `truncated` says more change exists than those hunks
+ * show. The comparison is computed in Go: it is the same one the changes panel draws, and a
+ * byte budget at the transport is not a shape hunks can be cut from.
+ */
+export interface ApprovalChange {
+  /** Workspace-relative, the form the model wrote. */
+  path: string
+  /** `create`, `overwrite` or `edit`. */
+  operation: string
+  /** Never null: a change with nothing to show is an empty list. */
+  hunks: DiffHunk[]
+  added: number
+  removed: number
+  truncated: boolean
+  /**
+   * The only difference is the newline at the end of the file: there are no hunks, and the card
+   * says which it is instead of claiming no line differs.
+   */
+  newlineOnly: boolean
+  /**
+   * How many places an edit replaces; 0 for a write. The preview can only show one of them, so
+   * the card says how many there are when it is more than one.
+   */
+  occurrences: number
+  /** Folders that will be created to hold the file, outermost first. Never null. */
+  createsDirs: string[]
+}
+
+/** One row of a diff: an unchanged line, one that goes, or one that arrives. */
+export interface DiffLine {
+  /** `context`, `removed` or `added`. */
+  kind: string
+  text: string
+  /** The line's number before the change, or 0 for a line the old text did not have. */
+  old: number
+  /** The line's number after it, or 0 for a line that is no longer there. */
+  new: number
+}
+
+/**
+ * A run of changed lines with the unchanged lines around them, as the card draws it.
+ *
+ * Hunks rather than whole files is the point: a one-line change in a four-hundred-line file
+ * arrives as that line and three either side, numbered on both sides. The unchanged span
+ * between two hunks is not sent at all.
+ */
+export interface DiffHunk {
+  lines: DiffLine[]
+}
+
+/** One command line waiting for an answer: what runs, where, for how long. */
+export interface ApprovalCommand {
+  /** Exactly what the shell will be given. */
+  line: string
+  /** Where it runs — the project folder. */
+  dir: string
+  timeoutSec: number
+  /** The program that interprets the line, e.g. `/bin/sh -c` or `cmd.exe /C`. */
+  shell: string
+}
+
+/** What every confirmation carries, whichever of the two it is. */
+interface ApprovalCommon {
+  /** The identity the answer names, which is the tool call's own id. */
+  approvalId: string
+  chatId: string
+  /** The assistant row the call is rendered on. */
+  messageId: string
+  toolCallId: string
+  /** The tool's name — `write_file`, `edit_file` or `run_command`. */
+  tool: string
+}
+
+/**
+ * A change to a project folder that is waiting for the user's answer.
+ *
+ * The turn that asked is blocked until `App.ResolveToolApproval` answers this id, so the
+ * card is not a notification: nothing else in that chat happens while it is on screen.
+ *
+ * There are two kinds of question and the union says so: a file change, which is answered by
+ * reading a diff, and a command, which is answered by reading a line. Exactly one of the two
+ * payloads is present; the other is null, and the compiler makes every reader say which kind
+ * it is handling.
+ */
+export type ApprovalPayload = ApprovalCommon &
+  (
+    | { kind: 'change'; change: ApprovalChange; command: null }
+    | { kind: 'command'; command: ApprovalCommand; change: null }
+  )
+
+/**
+ * The answers a change can be given.
+ *
+ * `always` allows every later change in that chat, and it lasts as long as the chat is
+ * open in this process: a permission given for a task the user was watching, remembered
+ * invisibly the next morning, is a permission nobody remembers giving.
+ */
+export type ApprovalDecision = 'once' | 'always' | 'deny'
 
 /**
  * Subscribe to a backend event. Returns an unsubscribe function so React effect

@@ -2,14 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"kichat/internal/backup"
@@ -24,10 +25,12 @@ import (
 	rt "kichat/internal/runtime"
 	"kichat/internal/secret"
 	"kichat/internal/store"
+	"kichat/internal/terminal"
 	"kichat/internal/tools"
 	"kichat/internal/trace"
 	"kichat/internal/uimsg"
 	"kichat/internal/version"
+	"kichat/internal/workspace"
 )
 
 // Event names live in internal/events so the emitters and the frontend's
@@ -95,6 +98,19 @@ type App struct {
 	// the sheet it was opened for.
 	backupMu      sync.Mutex
 	pendingBackup *backup.Archive
+
+	// changes are the project-folder changes waiting for a person's answer; see
+	// api_changes.go. One mutex covers both maps because they are read and written from
+	// different goroutines than the turn that asks — the question is emitted from a
+	// turn's goroutine and answered on the one Wails reads the click on.
+	changesMu      sync.Mutex
+	changes        map[string]*pendingChange
+	allowedChanges map[string]bool
+
+	// openTerminal starts a terminal in a folder. Nil means runtime.OpenTerminal, which
+	// is what the window gets; a test sets it to record the folder without opening
+	// anything on the machine running the suite.
+	openTerminal func(dir string) error
 
 	dataDir string
 	// trace is the content-free diagnostic log beside the encrypted database. It is
@@ -888,6 +904,10 @@ func (a *App) rebuildServices(settings config.Settings) {
 	toolService.Progress = a.reportDrawProgress
 	toolService.Caption = a.captionImage
 	toolService.TryDraw = a.tryDraw
+	// A change to a project folder stops here and asks the person at the window; see
+	// api_changes.go. It is set on every rebuild because the rebuilt service is the one
+	// the engine gets, and a service without a confirmer refuses every change.
+	toolService.Confirm = a.confirmChange
 	// A nil turns is only possible before init has run; NewEngineWithState makes its
 	// own in that case, so a half-initialised app cannot panic here.
 	engine := chat.NewEngineWithState(a.store, registry, toolService, a.Settings, a.emit, a.turns)
@@ -1395,6 +1415,26 @@ func (a *App) ListChats(includeArchived bool) ([]store.Chat, error) {
 	return a.store.ListChats(includeArchived)
 }
 
+// chatDefaults is the starting state every new conversation of either kind shares: the
+// sampler values from the configuration and the compaction defaults.
+//
+// Extracted so a new chat and a new project cannot drift apart on the settings nobody
+// is looking at. What differs between them is set by each caller: the prompt, the mode,
+// and — for a project — the folder.
+func chatDefaults(settings config.Settings) store.Chat {
+	now := time.Now()
+	return store.Chat{
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		Temperature:      settings.Sampler.Temperature,
+		TopP:             settings.Sampler.TopP,
+		AutoCompact:      true,
+		CompactThreshold: settings.Compact.Threshold,
+		KeepRecentTurns:  settings.Compact.KeepRecentTurns,
+		Mode:             store.ModeChat,
+	}
+}
+
 // CreateChat makes a new chat, starting on the model the settings name and
 // falling back to the first available one when nothing is configured.
 func (a *App) CreateChat(backend, model string) (store.Chat, error) {
@@ -1405,27 +1445,236 @@ func (a *App) CreateChat(backend, model string) (store.Chat, error) {
 	if backend == "" || model == "" {
 		backend, model = a.defaultChatModel(settings.DefaultModel)
 	}
-	now := time.Now()
-	newChat := store.Chat{
-		ID:                 newID(),
-		Title:              "",
-		CreatedAt:          now,
-		UpdatedAt:          now,
-		Backend:            backend,
-		Model:              model,
-		SystemPrompt:       settings.DefaultSystemPrompt,
-		SystemPromptPreset: config.PresetResearch,
-		Temperature:        settings.Sampler.Temperature,
-		TopP:               settings.Sampler.TopP,
-		AutoCompact:        true,
-		CompactThreshold:   settings.Compact.Threshold,
-		KeepRecentTurns:    settings.Compact.KeepRecentTurns,
-	}
+	newChat := chatDefaults(settings)
+	newChat.ID = newID()
+	newChat.Backend = backend
+	newChat.Model = model
+	newChat.SystemPrompt = settings.DefaultSystemPrompt
+	newChat.SystemPromptPreset = config.PresetResearch
 	if err := a.store.CreateChat(newChat); err != nil {
 		return store.Chat{}, err
 	}
 	a.emit(events.ChatsChanged, map[string]any{})
 	return newChat, nil
+}
+
+// CreateProject makes a new coding project: a chat that works in a folder the user
+// picked, on the prompt written for working in one.
+//
+// The folder is resolved *here* rather than on the first tool call, and the resolved
+// path is what is stored. Three things follow from that. The user finds out immediately
+// when the folder cannot be used, instead of after writing a message and waiting for a
+// tool call to fail. The path in the row is the path on disk, so the window shows what
+// the app will actually read, even when the user picked a symlink. And it is stable
+// while the chat lives: a path that resolves differently later — a symlink re-pointed, a
+// folder renamed onto another one — would silently move the project somewhere else, and
+// the file tools resolve against this stored string rather than against a fresh answer.
+//
+// The title starts as the folder's own name, because a project's identity *is* the
+// folder: an empty title would leave the sidebar showing "New chat" for a project the
+// user can already name.
+func (a *App) CreateProject(workspacePath string) (store.Chat, error) {
+	if err := a.ensure(); err != nil {
+		return store.Chat{}, err
+	}
+	root, err := workspace.Open(workspacePath)
+	if err != nil {
+		return store.Chat{}, uimsg.Errorf("project.badFolder", strings.TrimSpace(workspacePath))
+	}
+	settings := a.Settings()
+	backend, model := a.defaultChatModel(settings.DefaultModel)
+
+	// One project per folder, because a project *is* its conversation (`/clear` exists so a
+	// second one is never needed). A second chat on the same folder would carry its own undo
+	// records and its own history of writes to files the first one believes it knows, and the
+	// two would contradict each other in exactly the place a coding agent must be reliable. The
+	// check is by folder rather than by path string, so a symlink and its target are one project
+	// and a folder that was renamed is still the same one.
+	//
+	// Archived chats are left out of the query as well as out of the rule: an archived project
+	// is one the user has finished with, and it must not keep a folder unusable.
+	chats, err := a.store.ListChats(false)
+	if err != nil {
+		// Not a duplicate check that can be skipped: without the list, the one invariant this
+		// method enforces would be unenforced, and a failure to read the store is worth saying.
+		return store.Chat{}, err
+	}
+	if existing, claimed := projectClaimingFolder(chats, root.Path()); claimed {
+		return store.Chat{}, uimsg.Errorf("project.alreadyOpen", existing.Title)
+	}
+
+	project := chatDefaults(settings)
+	project.ID = newID()
+	project.Title = filepath.Base(root.Path())
+	project.Backend = backend
+	project.Model = model
+	project.SystemPrompt = codingAgentPrompt(settings)
+	project.SystemPromptPreset = config.PresetCodingAgent
+	project.Mode = store.ModeCoding
+	project.Workspace = root.Path()
+
+	if err := a.store.CreateChat(project); err != nil {
+		return store.Chat{}, err
+	}
+	a.emit(events.ChatsChanged, map[string]any{})
+	return project, nil
+}
+
+// projectClaimingFolder reports the project that already works in path, if there is one.
+//
+// Archived projects do not claim a folder: an archived chat is one the user has finished with,
+// and refusing forever because of it would make the folder unusable with nothing on screen to
+// explain why. A chat-mode conversation never claims one, because it has no folder.
+func projectClaimingFolder(chats []store.Chat, path string) (store.Chat, bool) {
+	for _, existing := range chats {
+		if !existing.IsProject() || existing.Archived {
+			continue
+		}
+		if sameFolder(existing.Workspace, path) {
+			return existing, true
+		}
+	}
+	return store.Chat{}, false
+}
+
+// codingAgentPrompt is the prompt a new project starts on: the user's own version of the
+// coding-agent preset when they have edited it, the shipped body otherwise.
+//
+// Reading the preset rather than the shipped constant matters because that is the textarea
+// Settings → Prompts offers: somebody who rewrote the instructions for their own projects
+// expects the next project to start with what they wrote, not with what the app ships. A
+// preset that has been emptied is treated as absent, because an empty prompt on a coding
+// project is a worse default than the one the app knows works.
+func codingAgentPrompt(settings config.Settings) string {
+	for _, preset := range settings.PromptPresets {
+		if preset.ID == config.PresetCodingAgent && strings.TrimSpace(preset.Prompt) != "" {
+			return preset.Prompt
+		}
+	}
+	return config.PromptBody(config.PresetCodingAgent, settings.Language)
+}
+
+// sameFolder reports whether two paths name the same directory on this machine.
+//
+// The string comparison alone is wrong in both directions: a symlink and its target are one
+// folder with two names, and a case-insensitive filesystem gives one folder two spellings.
+// os.SameFile asks the filesystem, which is the only thing that knows.
+func sameFolder(a, b string) bool {
+	if a == b {
+		return true
+	}
+	left, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	right, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(left, right)
+}
+
+// PickProjectFolder asks for the folder a project works in.
+//
+// The title comes from the UI so it follows the interface language, as the other
+// dialogs' do. An empty answer is a cancelled dialog — neither success nor failure — and
+// is left for the caller to ignore. The folder is not inspected here: whether it can be
+// used is CreateProject's answer to give, once, rather than twice with two wordings.
+func (a *App) PickProjectFolder(title string) (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+}
+
+// TerminalStatus is the terminal the hand-off would open.
+//
+// Two fields rather than one because they answer two questions: the program's name is what a
+// person recognises in the About row, and the resolved path is what a bug report needs when
+// the name resolves to a wrapper script that turns out to be broken.
+type TerminalStatus struct {
+	Program string `json:"program"`
+	Path    string `json:"path"`
+}
+
+// StopToolCommand ends one running command without ending the turn.
+//
+// A command has its own stop for a reason the turn's stop cannot serve: killing a `go test`
+// that was started with the wrong flags should not also throw away the answer being written.
+// The tool reports the stop to the model as a result, so the turn carries on and the model can
+// ask what to do next.
+//
+// It reports whether there was a command to stop: a click that arrives a moment after the
+// command finished is not an error, and a toast about it would be noise.
+func (a *App) StopToolCommand(chatID, toolCallID string) bool {
+	if err := a.ensure(); err != nil || a.toolSvc == nil {
+		return false
+	}
+	return a.toolSvc.StopCommand(chatID, toolCallID)
+}
+
+// DetectTerminal reports which terminal this machine has, without opening one.
+//
+// It exists because the launcher's platform lists are the part of coding mode nobody can
+// test for on another operating system: the suite runs on one machine, and CI compiles the
+// others. A row in About that names the resolved program turns "it should work on Windows"
+// into something the person on Windows can check in one glance — and it lets the hand-off's
+// button be honest before the click rather than after it.
+func (a *App) DetectTerminal() (TerminalStatus, error) {
+	if err := a.ensure(); err != nil {
+		return TerminalStatus{}, err
+	}
+	program, err := terminal.Detect()
+	if err != nil {
+		if errors.Is(err, terminal.ErrNoTerminal) {
+			// No terminal is a state, not a failure: the About row says so in the user's
+			// language, and the hand-off's own sentence covers the click.
+			return TerminalStatus{}, nil
+		}
+		return TerminalStatus{}, uimsg.Errorf("project.terminalFailed", err)
+	}
+	return TerminalStatus{Program: program.Name, Path: program.Path}, nil
+}
+
+// OpenProjectTerminal opens the user's own terminal in a project's folder.
+//
+// The app runs no terminal and is not getting one; what needs a terminal is something the
+// app *cannot* do — a command that asks for administrator rights, where a password prompt
+// has nowhere to go. The honest hand-off for that is the program the user already has,
+// opened at the folder they are working in. Nothing is executed by this call: the window
+// opens, the prompt waits, and whatever gets typed there is theirs.
+//
+// The folder is checked before a terminal is started in it. A terminal opened "somewhere
+// nearby" because the directory is gone would be a window in a folder the person never
+// asked for, which is worse than the sentence saying the folder cannot be used.
+func (a *App) OpenProjectTerminal(chatID string) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	chat, err := a.store.GetChat(chatID)
+	if err != nil {
+		return uimsg.Errorf("chat.gone")
+	}
+	if !chat.IsProject() {
+		return uimsg.Errorf("tools.noWorkspace")
+	}
+	root, err := workspace.Open(chat.Workspace)
+	if err != nil {
+		return uimsg.Errorf("project.badFolder", chat.Workspace)
+	}
+	// The launcher is a field so a test can watch what it is handed without a terminal
+	// appearing on somebody's desktop.
+	start := a.openTerminal
+	if start == nil {
+		start = terminal.Open
+	}
+	if err := start(root.Path()); err != nil {
+		if errors.Is(err, terminal.ErrNoTerminal) {
+			return uimsg.Errorf("project.noTerminal")
+		}
+		return uimsg.Errorf("project.terminalFailed", err)
+	}
+	return nil
 }
 
 // defaultChatModel picks the model a new chat opens on: the one the settings name
@@ -1530,11 +1779,28 @@ func (a *App) UpdateChat(c store.Chat) (store.Chat, error) {
 	if existing.Backend != c.Backend || existing.Model != c.Model {
 		a.currentEngine().InvalidateMeasurement(c.ID)
 	}
-	if err := a.store.UpdateChat(c); err != nil {
+	if err := a.store.UpdateChat(updateFromWindow(c, existing)); err != nil {
 		return store.Chat{}, err
 	}
 	a.emit(events.ChatsChanged, map[string]any{})
 	return a.store.GetChat(c.ID)
+}
+
+// updateFromWindow is the chat a window's update is allowed to produce: everything it shows
+// and edits, and neither of the two fields that decide what a chat *is*.
+//
+// `Mode` and `Workspace` are settled where a project is created (the folder is resolved on
+// disk there, and refused if another project works in it). A value echoed back from the window
+// is a value nobody validated: accepting it would let a stale or foreign caller point the file
+// tools at any absolute path, or make a project out of a chat that was never given a folder —
+// which is the boundary `internal/workspace` exists to keep, defeated one layer above it. Both
+// fields are preserved rather than compared, because neither is editable in the window.
+func updateFromWindow(incoming, existing store.Chat) store.Chat {
+	incoming.ID = existing.ID
+	incoming.Mode = existing.Mode
+	incoming.Workspace = existing.Workspace
+	incoming.CreatedAt = existing.CreatedAt
+	return incoming
 }
 
 // RenameChat sets a chat title.
@@ -1559,6 +1825,45 @@ func (a *App) DeleteChat(chatID string) error {
 		return err
 	}
 	a.currentEngine().InvalidateMeasurement(chatID)
+	// A permission was given for this conversation, so it goes with it: leaving it behind
+	// would keep a chat id that no longer exists able to write to a folder unprompted.
+	a.forgetChanges(chatID)
+	a.emit(events.ChatsChanged, map[string]any{})
+	return nil
+}
+
+// ClearChat empties a conversation and keeps the chat: its folder, prompt, model and
+// title stay, and the next turn starts like the first one. The window offers it as
+// `/clear`, and the reason it has to exist rather than "just open a new chat" is the
+// project: one project is one conversation about one folder, so a second project would
+// duplicate the settings that make it that project.
+//
+// What it does *not* do is clear a chat mid-turn. A running turn appends its reply and its
+// tool results as it goes, so clearing underneath it would delete the messages and then
+// watch them come back — a chat that is neither cleared nor whole. The refusal is a
+// sentence rather than a silent queue: the user is looking at the answer being written and
+// can press Stop, and "cleared" would be a lie about what happened to it.
+func (a *App) ClearChat(chatID string) error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	if a.currentEngine().IsRunning(chatID) {
+		// The same sentence a second send gets, because it is the same condition.
+		return uimsg.Errorf("chat.turnRunning")
+	}
+	// An id nothing in the database knows is a refusal, not a no-op: a stale window would
+	// otherwise be told the context was cleared when there was nothing to clear.
+	if _, err := a.store.GetChat(chatID); err != nil {
+		return uimsg.Errorf("chat.gone", chatID)
+	}
+	if err := a.store.ClearChat(chatID); err != nil {
+		return err
+	}
+	// The same two pieces of state DeleteChat drops, for the same reasons: the measured
+	// prompt size describes messages that are gone, and a permission granted for this
+	// conversation belonged to a conversation that has ended.
+	a.currentEngine().InvalidateMeasurement(chatID)
+	a.forgetChanges(chatID)
 	a.emit(events.ChatsChanged, map[string]any{})
 	return nil
 }
@@ -1631,4 +1936,4 @@ func (a *App) GetBudget(chatID, backend, model string) (chat.ContextBudget, erro
 }
 
 // newID returns a fresh identifier.
-func newID() string { return uuid.NewString() }
+func newID() string { return uuid.New().String() }

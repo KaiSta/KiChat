@@ -477,6 +477,77 @@ ALTER TABLE tool_calls ADD COLUMN condensed INTEGER NOT NULL DEFAULT 0;
 	// text this app no longer keeps in that shape. An empty string is every row
 	// written before citations existed, and renders no list.
 	`ALTER TABLE messages ADD COLUMN sources_json TEXT NOT NULL DEFAULT ''`,
+	// 11: a chat's mode, and the folder a coding project works in.
+	//
+	// Two columns rather than one, because they answer different questions: `mode`
+	// decides which tools exist and is a property of the conversation, while
+	// `workspace` is a path that may be deleted, moved or renamed underneath the
+	// row. A coding chat whose folder is gone is still a coding chat — the file
+	// tools then report that the folder is unusable (internal/tools), which is a
+	// better answer than a chat that silently became a research assistant.
+	//
+	// 'chat' rather than an empty default, because that is what every row written
+	// before this migration is: a research conversation, with no folder to read.
+	`
+ALTER TABLE chats ADD COLUMN mode TEXT NOT NULL DEFAULT 'chat';
+ALTER TABLE chats ADD COLUMN workspace TEXT NOT NULL DEFAULT '';
+`,
+	// 12: what a file looked like before this chat changed it.
+	//
+	// It exists for one button: put this file back the way it was before the model touched it.
+	// A change a model made is only safe to accept if it can be taken back — the folder is the
+	// user's, the model is guessing, and "I would rather have the old version" is a thing people
+	// say about their own code — and nothing in the tool call record can answer it: the args
+	// hold what was written, never what was there against it.
+	//
+	// One row per (chat, file) rather than one per change. The question a person asks is "undo
+	// what this chat did to this file", not "undo round seven but keep round eight", and the
+	// before_text is therefore the state before the chat first touched the file. after_sha is
+	// the latest content the app wrote, which is how a revert notices that somebody edited the
+	// file in between and refuses instead of overwriting that edit.
+	//
+	// Both texts are in the database rather than in a folder beside it, because this database is
+	// encrypted at rest (ENCRYPTION.md) and a copy of somebody's source in a plain directory
+	// next to it would be the one thing the encryption did not cover. Appended here for the
+	// reason migrations 4–11 are: the runner resumes at the version a database is already at, so
+	// an existing installation runs this entry and nothing earlier.
+	`
+CREATE TABLE IF NOT EXISTS file_snapshots (
+  chat_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  before_text TEXT NOT NULL DEFAULT '',
+  existed INTEGER NOT NULL DEFAULT 0,
+  after_sha TEXT NOT NULL DEFAULT '',
+  revisions INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_file_snapshots_chat ON file_snapshots(chat_id, updated_at);
+`,
+	// 13: a file the user put back.
+	//
+	// The undo used to delete its row, which lost the one fact the model needs: the
+	// transcript's tool results still say the file contains what the model wrote. A revert
+	// therefore marks the row instead, and the next turn tells the model those files are no
+	// longer what its own results claim; the marker is cleared once that turn has the note.
+	//
+	// A later change to the same file clears the marker rather than starting a new row, which
+	// is also why the pre-image survives a revert: the text to put back is still the text from
+	// before this chat first touched the file, and a revert that was undone and redone must not
+	// drift into restoring the model's own draft. Appended here for the reason migrations 4–12
+	// are: the runner resumes at the version a database is already at.
+	`ALTER TABLE file_snapshots ADD COLUMN reverted_at INTEGER NOT NULL DEFAULT 0`,
+	// 14: a file the chat wrote, changed outside the app.
+	//
+	// A snapshot already knows the digest of the text the app last wrote, so a file whose
+	// digest differs has been edited since — in the user's editor, by a command, by a
+	// generator — and the transcript's tool results still describe the text the model put
+	// there. This column is the digest of that outside version once the next turn has been
+	// told about it, so the same change is news once rather than a block on every request.
+	// Empty for a file nobody has told the model about, and cleared by a write, which makes
+	// the file the model's own text again.
+	`ALTER TABLE file_snapshots ADD COLUMN noted_sha TEXT NOT NULL DEFAULT ''`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

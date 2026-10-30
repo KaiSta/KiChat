@@ -84,6 +84,11 @@ const de = {
   'settings.db.passphraseSaved': 'Passwort-Sicherung gespeichert.',
 
   'nav.newChat': 'Neuer Chat',
+  'nav.newProject': 'Neues Projekt',
+  'nav.newProjectHint': 'Ein Ordner zum Arbeiten — das Modell liest den Code darin.',
+  // Die zwei Listen der Seitenleiste: ein Projekt arbeitet in einem Ordner, ein Chat
+  // führt ein Gespräch.
+  'nav.projects': 'Projekte',
   'nav.chats': 'Chats',
   'nav.settings': 'Einstellungen',
   'nav.noChats': 'Noch keine Chats',
@@ -94,6 +99,31 @@ const de = {
   'chat.empty.title': 'Neuer Chat',
   'chat.empty.hint':
     'Wähle unten ein Modell und stelle eine Frage. Dateien können per Drag & Drop hinzugefügt werden.',
+  'project.folder': 'Projektordner',
+  'project.pickTitle': 'Projektordner wählen',
+  'project.emptyHint': 'Frage nach dem Code in diesem Ordner. Das Modell liest die Dateien selbst.',
+  'project.confirmed':
+    'Das Modell kann diesen Ordner lesen und ändern — jede Änderung siehst du vorher und bestätigst sie.',
+  'project.confirmedBadge': 'Mit Bestätigung',
+  // Was der Kopf eines Projekt-Chats über die Berechtigung seines Ordners sagt. Ist die
+  // Nachfrage abgeschaltet, muss er das sagen: „Mit Bestätigung“ wäre sonst die eine Stelle
+  // im Fenster, die über das lügt, was das Modell mit dem Ordner tun darf.
+  'project.autoFilesBadge': 'Schreiben ohne Nachfrage',
+  'project.autoCommandsBadge': 'Befehle ohne Nachfrage',
+  'project.autoBothBadge': 'Schreiben und Befehle ohne Nachfrage',
+  // Dieselben drei Stände, kurz — für die Zeile in der Seitenleiste, wo neben dem Ordner
+  // nur eine Spanne bleibt. Nur die Wortlänge ändert sich, nie die Aussage: die Zeile und
+  // der Kopf eines Projekts dürfen nicht verschieden viel versprechen.
+  'project.shortConfirmed': 'fragt nach',
+  'project.shortFiles': 'schreibt ohne Nachfrage',
+  'project.shortCommands': 'Befehle ohne Nachfrage',
+  'project.shortBoth': 'beides ohne Nachfrage',
+  'project.autoHint':
+    'Abgeschaltet in den Einstellungen, Tab „Coding-Agent“. Änderungen erscheinen danach als Karte im Verlauf, bei Befehlen nur die Ausgabe.',
+  // Der eine Slash-Befehl: er leert die Unterhaltung dieses Chats und lässt Ordner,
+  // Prompt und Modell stehen. Deshalb steht er im Composer und nicht in einem Menü.
+  'chat.clearHint': '/clear leert den Chat',
+  'chat.cleared': 'Unterhaltung geleert. Die Einstellungen des Chats bleiben.',
   'chat.placeholder': 'Nachricht schreiben … (Enter senden, Shift+Enter Zeilenumbruch)',
   'chat.transcript': 'Unterhaltung',
   'chat.composerLabel': 'Nachricht',
@@ -111,6 +141,8 @@ const de = {
   'chat.regenerate': 'Neu generieren',
   'chat.copy': 'Kopieren',
   'chat.copied': 'Kopiert',
+  'chat.copyFailed':
+    'Die Zwischenablage hat die Kopie abgelehnt — markiere den Text und kopiere ihn von Hand.',
   'chat.sources': 'Quellen',
   'chat.interrupted': 'Abgebrochen',
   'chat.failed': 'Unvollständig',
@@ -348,6 +380,8 @@ const de = {
   'settings.platform': 'Plattform',
   'settings.runtime': 'Laufzeit',
   'settings.copyVersion': 'Versionsinfo kopieren',
+  'settings.terminal': 'Terminal',
+  'settings.terminalNone': 'keins gefunden',
   'settings.trace': 'Diagnose-Protokoll',
   'settings.traceNote': 'Abläufe, Zeiten und Fehlerarten – keine Inhalte.',
   'settings.copyTrace': 'Protokollpfad kopieren',
@@ -500,6 +534,7 @@ const de = {
   'preset.small-local': 'Kleine lokale Modelle',
   'preset.assistant': 'Neutraler Assistent',
   'preset.coding': 'Code & Technik',
+  'preset.coding-agent': 'Coding-Agent (Projekt)',
   'preset.blank': 'Leer',
   'settings.promptReset': 'Auf Standard zurücksetzen',
   'settings.promptReload': 'Gespeicherte Prompt-Vorlagen neu laden',
@@ -525,22 +560,25 @@ const de = {
   'settings.maxTokens': 'Max. Antwort-Tokens (0 = unbegrenzt)',
   'settings.compaction': 'Kompaktierung',
   'settings.payload': 'Tool-Ergebnisse',
+  // Der Modus, in dem in einem Projektordner gearbeitet wird. Der Tab hält die Schalter,
+  // die entscheiden, was ohne Nachfrage läuft.
+  'settings.coding': 'Coding-Agent',
   'settings.payloadHint':
-    'Große Tool-Ergebnisse werden von einem zweiten Modell gekürzt, bevor das Chat-Modell sie liest. Der vollständige Text bleibt am Tool-Aufruf sichtbar.',
+    'Große Tool-Ergebnisse — Seiten und große Dateien aus dem Projektordner — werden von einem zweiten Modell gekürzt, bevor das Chat-Modell sie liest. Der vollständige Text bleibt am Tool-Aufruf sichtbar.',
   'settings.digestModel': 'Modell für die Kürzung',
   'settings.digestModelDefault': 'Aus (kein Modell gewählt)',
   'settings.digestModelUnavailable': '(nicht verfügbar)',
   'settings.digestModelHint':
-    'Ein kleines, schnelles Modell — am besten auf einem anderen Backend als der Chat. Dasselbe Backend zahlt die Kürzung aus demselben Minuten-Budget wie die Antwort; ein gehostetes Kürzungs-Modell bekommt die Seiten zu lesen, die es kürzt.',
+    'Ein kleines, schnelles Modell — am besten auf einem anderen Backend als der Chat. Dasselbe Backend zahlt die Kürzung aus demselben Minuten-Budget wie die Antwort; ein gehostetes Kürzungs-Modell bekommt die Seiten und Dateien zu lesen, die es kürzt. Einen Abschnitt, den das Modell gezielt mit offset/limit liest, kürzt es nie — den braucht es unverändert zum Bearbeiten.',
   'settings.digestThreshold': 'Ab dieser Größe kürzen (Tokens)',
   'settings.digestThresholdHint':
-    'Darunter wird das Ergebnis unverändert übernommen — die zusätzliche Anfrage kostet mehr Zeit als Tokens.',
+    'Darunter wird das Ergebnis unverändert übernommen — die zusätzliche Anfrage kostet mehr Zeit als Tokens. Für Code gilt dasselbe: eine kurze Datei wird ganz übergeben.',
   'settings.digestMaxTokens': 'Max. Länge der Kürzung (Tokens)',
   'settings.digestMaxTokensHint':
-    'Wie lang die Zusammenfassung höchstens werden darf. Kurz halten — sie ersetzt die Seite im Kontext; für sehr lange Seiten darf es mehr sein als die Schwelle oben.',
+    'Wie lang die Zusammenfassung höchstens werden darf. Kurz halten — sie ersetzt die Seite oder Datei im Kontext; für sehr lange Seiten darf es mehr sein als die Schwelle oben.',
   'settings.backendDigest': 'Tool-Ergebnisse kürzen',
   'settings.backendDigestHint':
-    'Gilt nur für Antworten dieses Backends. Große Seiten werden vor dem Senden zusammengefasst; ein zweiter Aufruf derselben Seite liefert den Volltext.',
+    'Gilt nur für Antworten dieses Backends. Große Seiten und große Dateien werden vor dem Senden zusammengefasst; ein zweiter Aufruf derselben Seite liefert den Volltext.',
   'settings.payloadActive': 'Aktiv für:',
   'settings.payloadInactive': 'Für kein Backend aktiv — einschalten im Tab „Backends“.',
 
@@ -879,14 +917,62 @@ const de = {
 
   'tool.search_web': 'Websuche',
   'tool.scrape_url': 'Seite lesen',
+  // Die Projekt-Tools. Ein Werkzeugkarte, die `read_file` zeigt, ist der Name im Code
+  // und nicht der Vorgang, um den es geht.
+  'tool.read_file': 'Datei lesen',
+  'tool.list_dir': 'Ordner auflisten',
+  'tool.search_files': 'Im Projekt suchen',
+  'tool.write_file': 'Datei schreiben',
+  'tool.edit_file': 'Stelle ersetzen',
+  'tool.run_command': 'Befehl ausführen',
   'tool.search_documents': 'Dokumente durchsuchen',
   'tool.read_pages': 'Dokumentabschnitt lesen',
   'tool.running': 'läuft',
   'tool.ok': 'fertig',
   'tool.error': 'Fehler',
   'tool.cancelled': 'abgebrochen',
+  'tool.denied': 'abgelehnt',
   'tool.arguments': 'Argumente',
   'tool.result': 'Ergebnis',
+  // The output of a command that is still running: what the card shows instead of
+  // waiting for a result that is a build away.
+  'tool.liveOutput': 'Ausgabe',
+  // Der Befehl als Zeile, die man in ein eigenes Terminal einfügen kann — der Ausweg bei
+  // einem abgelehnten Befehl, deshalb auf jedem Terminal-Aufruf und nicht nur im Fehlerfall.
+  // Die Zusammenfassung über einem Tool-Ergebnis. Der Text darunter bleibt der, den das
+  // Modell gelesen hat; diese Sätze sind die Fassung für das Fenster, in seiner Sprache.
+  'tool.sum.read': '{{1}}: Zeilen {{2}}–{{3}} von {{4}}',
+  // Eine gelesene Spanne aus einer längeren Datei: die Gesamtzahl Zeilen kennt der Lesevorgang
+  // hier nicht, weil er aufgehört hat zu zählen, als er aufgehört hat zu lesen.
+  'tool.sum.readPart': '{{1}}: Zeilen {{2}}–{{3}} (Datei geht weiter)',
+  'tool.sum.readEnd': '{{1}}: {{2}} Zeilen, ab Zeile {{3}} nichts mehr',
+  'tool.sum.readEmpty': '{{1}} ist leer',
+  'tool.sum.readLineTooLong': '{{1}}: Zeile {{2}} ist länger als das Textfenster',
+  'tool.sum.readBinary': '{{1}} ist keine Textdatei',
+  'tool.sum.readOutline': '{{1}}: Umriss, {{2}} Zeilen, {{3}} Deklarationen',
+  'tool.sum.readOutlineNone': '{{1}}: keine Deklarationen erkannt',
+  'tool.sum.list': '{{1}}: {{2}} Einträge',
+  'tool.sum.listSome': '{{1}}: {{2}} Einträge, {{3}} nicht gezeigt',
+  'tool.sum.listEmpty': '{{1}}: leer',
+  'tool.sum.search': '{{2}} Treffer für „{{1}}“ in {{3}} Dateien',
+  'tool.sum.searchNone': 'Kein Treffer für „{{1}}“ in {{2}} Dateien',
+  'tool.sum.searchStopped': '{{2}} Treffer für „{{1}}“, Suche nach {{3}} Dateien abgebrochen',
+  'tool.sum.find': '{{1}} Dateien für „{{2}}“',
+  'tool.sum.write': '{{1}} geschrieben: {{2}} Zeilen (vorher {{3}})',
+  'tool.sum.writeNew': '{{1}} angelegt: {{2}} Zeilen',
+  'tool.sum.edit': '{{1}}: {{2}} Vorkommen ersetzt (Zeile {{3}})',
+  'tool.sum.readSame': '{{1}}: unverändert seit dem Lesen in diesem Turn',
+  'tool.sum.command': 'Exit-Code {{1}} · {{2}}',
+  'tool.sum.commandStopped': 'von dir nach {{1}} abgebrochen',
+  'tool.sum.commandTimeout': 'nach {{1}} abgebrochen',
+  'tool.sum.commandUnknown': 'ohne Exit-Code beendet · {{1}}',
+  'tool.find_files': 'Dateien finden',
+  'tool.copyCommand': 'Befehl kopieren',
+  // Der zweite Stopp neben dem des Turns: dieser beendet nur den Befehl, damit die Antwort
+  // weiterläuft — deshalb sagt der Tooltip, was danach passiert.
+  'tool.stopCommand': 'Befehl abbrechen',
+  'tool.stopCommandHint':
+    'Beendet nur diesen Befehl, nicht die Antwort. Das Modell liest die bisherige Ausgabe und macht weiter.',
   'tool.tokensOne': '{{tokens}} Tokens',
   'tool.tokensCut': '{{source}} → {{context}} Tokens',
   'tool.tokensBudgetTag': 'Budget',
@@ -898,6 +984,94 @@ const de = {
     'Das Tool hat {{source}} Tokens zurückgegeben; ein zweites Modell hat sie auf {{context}} Tokens gekürzt, und so stehen sie im Kontext.',
   'tool.tokensBudgetHint':
     'Das Tool hat {{source}} Tokens zurückgegeben; das Token-Budget dieser Antwort hat nur {{context}} davon in den Kontext gelassen.',
+
+  // Das Schreib-Tool. Es hält den Chat an, bis geantwortet ist — deshalb steht hier, was
+  // passiert, und nicht nur, was gefragt wird.
+  'confirm.title': 'Bestätigung für das Projekt',
+  'change.title': 'Änderung am Projektordner',
+  'change.create': 'Neue Datei',
+  'change.overwrite': 'Datei ersetzen',
+  'change.edit': 'Stelle ersetzen',
+  'change.waiting': 'Dieser Chat wartet auf deine Entscheidung.',
+  'change.noLines': 'Keine Zeile unterscheidet sich — es gibt nichts zu vergleichen.',
+  'change.newlineOnly': 'Nur der Zeilenumbruch am Dateiende ändert sich — der Inhalt bleibt gleich.',
+  'change.truncated': 'Der Diff endet, bevor die Änderung zu Ende ist.',
+  'change.createsDirs': 'Ordner wird angelegt: {{folders}}',
+  'change.occurrences':
+    'Ersetzt {{count}} Vorkommen — gezeigt wird das erste. Die Vorschau ist damit nicht die ganze Änderung.',
+  'change.once': 'Einmal erlauben',
+  'change.always': 'Immer in diesem Chat',
+  'change.alwaysHint':
+    'Solange dieser Chat offen ist, werden Änderungen *und Befehle* in diesem Ordner ohne Nachfrage ausgeführt. Nach einem Neustart gilt das nicht mehr.',
+  'change.decline': 'Ablehnen',
+  'change.declineHint':
+    'Abgelehnt heißt: nicht geändert. Das Modell erfährt davon und versucht es nicht erneut.',
+
+  // Der eine Klick, der die Frage dauerhaft abstellt: dieselbe Wirkung wie der Schalter im
+  // Reiter „Coding-Agent“, angeboten dort, wo die Frage gerade steht. Deshalb steht hier,
+  // dass es auch nach einem Neustart gilt und wo man es zurücknimmt.
+  'confirm.stopAskingFiles': 'Nicht mehr bei Dateiänderungen fragen',
+  'confirm.stopAskingCommands': 'Nicht mehr bei Befehlen fragen',
+  'confirm.stopAskingHint':
+    'Erlaubt diese Änderung und schaltet die Nachfrage ab jetzt ab — in jedem Projekt, auch nach einem Neustart. Zurückzunehmen unter Einstellungen → Coding-Agent.',
+  'confirm.stoppedAskingFiles':
+    'Dateiänderungen werden ab jetzt ohne Nachfrage geschrieben. Einstellungen → Coding-Agent.',
+  'confirm.stoppedAskingCommands':
+    'Befehle laufen ab jetzt ohne Nachfrage. Einstellungen → Coding-Agent.',
+
+  // Die Änderungsliste neben dem Chat: was dieser Chat im Ordner verändert hat, und der eine
+  // Knopf, der es zurücknimmt. Sie beantwortet die Frage, die der Verlauf nur in Form von
+  // hundert Tool-Karten beantwortet — und ohne zu sagen, welche Datei wie oft geschrieben wurde.
+  'changes.button': 'Änderungen',
+  'changes.hint': 'Zeigt, welche Dateien dieser Chat geändert hat — mit Diff und Rückgängig.',
+  'changes.title': 'Änderungen in diesem Projekt',
+  'changes.empty': 'Dieser Chat hat noch keine Datei geändert.',
+  'changes.created': 'angelegt',
+  'changes.changed': 'geändert',
+  'changes.revisions': '{{count}}× geschrieben',
+  'changes.revert': 'Zurücksetzen',
+  'changes.revertHint':
+    'Schreibt die Datei so zurück, wie dieser Chat sie vorgefunden hat. Eine Datei, die seitdem selbst bearbeitet wurde, bleibt unangetastet.',
+  'changes.blockedOutside': 'Seit der Änderung selbst bearbeitet — bleibt unangetastet.',
+  'changes.blockedBinary': 'Keine Textdatei — nicht sicherbar, deshalb kein Zurücksetzen.',
+  'changes.truncated': 'Diff gekürzt.',
+  'changes.close': 'Schließen',
+
+  // Der Terminal-Aufruf. Ein Befehl lässt sich nicht vorher zeigen — die Zeile *ist* die
+  // Beschreibung —, deshalb steht hier alles, was man zum Beurteilen braucht.
+  'command.title': 'Befehl ausführen',
+  'command.dir': 'Läuft im Projektordner {{folder}}',
+  'command.timeout': 'wird nach {{seconds}} s abgebrochen',
+  // Die Zeile ist ein Feld, kein Zitat: ein Tippfehler ist im Augenblick der Frage am
+  // billigsten zu beheben, und Ablehnen-und-neu-tippen kostet den ganzen Satz. Der Hinweis
+  // darunter sagt, dass die Prüfung auf Administratorrechte auch für die eigene Fassung gilt.
+  'command.editLabel': 'Zeile — vor dem Ausführen änderbar',
+  'command.edited':
+    'Ausgeführt wird deine Fassung — die Prüfung auf Administratorrechte gilt auch für sie.',
+  'command.reset': 'Zeile zurücksetzen',
+
+  // Die Übergabe nach einer abgelehnten Administrator-Zeile: der Befehl landet nicht in der
+  // Unterhaltung, sondern in der Zwischenablage und im eigenen Terminal des Nutzers. Der Satz
+  // nennt den zweiten Schritt, weil der erste allein die Antwort nicht weiterbringt.
+  'handoff.title': 'Selbst ausführen',
+  'handoff.hint':
+    'Dieser Befehl braucht Administratorrechte. Öffne ein Terminal im Projektordner, führe ihn dort aus und füge die Ausgabe danach hier ein — das Modell liest sie als Nächstes.',
+  'handoff.openTerminal': 'Terminal öffnen',
+  'handoff.terminalOpened': 'Terminal im Projektordner geöffnet.',
+
+  // Die zwei Schalter, die genau die Fragen darüber abschalten. Deshalb stehen sie hier und
+  // nicht bei den Sampler-Werten: sie gehören zu den Karten, die sie ersetzen.
+  'settings.autoApprove': 'Ohne Nachfrage ausführen',
+  'settings.autoApproveHint':
+    'Projekttools halten sonst bei jeder Änderung und jedem Befehl an. Diese zwei Schalter erlauben es dauerhaft — in jedem Projekt und in jedem Chat, auch in denen, die du später anlegst.',
+  'settings.autoApproveFiles': 'Dateien schreiben und ändern',
+  'settings.autoApproveFilesHint':
+    'write_file und edit_file schreiben sofort, statt dir die Änderung vorher zu zeigen. Den Diff liest du danach in der Karte im Verlauf. Rückversicherung ist hier die Versionsverwaltung, nicht die Frage.',
+  'settings.autoApproveCommands': 'Befehle ausführen',
+  'settings.autoApproveCommandsHint':
+    'run_command läuft sofort. Befehle laufen mit deinen Rechten, werden nicht geprüft und können den Projektordner verlassen — es gibt keine Vorschau, nur die Ausgabe danach.',
+  'settings.autoApproveAsk': 'fragt nach',
+  'settings.autoApproveSkip': 'ohne Nachfrage',
 
   'common.cancel': 'Abbrechen',
   'common.close': 'Schließen',
@@ -991,6 +1165,7 @@ const de = {
   'err.chat.summaryBackendUnknown':
     'das Zusammenfassungs-Modell {{1}} gehört zum Backend {{2}}, das nicht konfiguriert ist',
   'err.chat.turnRunning': 'für diesen Chat läuft bereits eine Generierung',
+  'err.chat.gone': 'diesen Chat gibt es nicht mehr',
   'err.chat.malformedToolCall':
     'das Modell hat einen Tool-Aufruf mit einem Namen erzeugt, den die Anfrage nicht deklariert hat — der Anbieter hat die Anfrage deshalb abgelehnt. Sende die Nachricht erneut; geschieht es wieder, wähle für diesen Chat ein anderes Modell.',
   'err.chat.noModelInChat': 'Kein Modell ausgewählt. Bitte oben im Chat ein Modell wählen.',
@@ -1073,6 +1248,52 @@ const de = {
   'err.tools.queryMissing': 'query fehlt',
   'err.tools.noSearch': 'Websuche ist nicht konfiguriert',
   'err.tools.urlMissing': 'url fehlt',
+  'err.tools.pathMissing': 'path fehlt',
+  'err.tools.noWorkspace':
+    'Dieser Chat hat keinen Projektordner, deshalb gibt es darin nichts zu lesen.',
+  'err.tools.workspaceGone':
+    'Der Projektordner {{1}} lässt sich nicht öffnen — existiert er noch?',
+  'err.tools.outsideWorkspace':
+    '{{1}} liegt außerhalb des Projektordners. Pfade müssen innerhalb des Projekts liegen.',
+  'err.tools.fileUnreadable': '{{1}} ist nicht lesbar',
+  'err.project.badFolder':
+    '{{1}} ist kein Ordner, den ein Projekt verwenden kann.',
+  'err.project.alreadyOpen':
+    'In diesem Ordner arbeitet bereits das Projekt „{{1}}“. Öffne es in der Seitenleiste — oder leere dort mit /clear den Kontext, um neu zu beginnen.',
+  'err.project.noTerminal':
+    'Auf diesem Rechner wurde kein Terminal gefunden, das KiChat öffnen könnte. Öffne eines selbst und wechsle in den Projektordner.',
+  'err.project.terminalFailed': 'Das Terminal ließ sich nicht starten: {{1}}',
+  // Die Änderungsliste und ihr Rückgängig. Der Konflikt ist der wichtigste Satz hier: er sagt,
+  // dass jemand die Datei danach selbst bearbeitet hat, und deshalb nicht überschrieben wird.
+  'err.project.changesFailed': 'Die Änderungen ließen sich nicht lesen: {{1}}',
+  'err.project.folderGone': 'Der Projektordner {{1}} lässt sich nicht öffnen — existiert er noch?',
+  'err.project.pathMissing': 'Kein Pfad angegeben — wähle eine Datei aus der Liste.',
+  'err.project.revertWhileRunning':
+    'Die Antwort läuft noch. Warte, bis sie fertig ist, und mach die Änderung dann rückgängig.',
+  'err.project.revertConflict':
+    '{{1}} wurde nach der Änderung von KiChat selbst bearbeitet — die Datei bleibt, wie sie ist.',
+  'err.project.revertFailed': '{{1}} ließ sich nicht zurücksetzen: {{2}}',
+  'err.tools.editNoMatch':
+    '{{1}} enthält diesen Text nicht — lies die Datei erneut und übernimm die Zeile genau.',
+  'err.tools.editAmbiguous':
+    'Dieser Text kommt in {{1}} {{2}}× vor (erstes Vorkommen in Zeile {{3}}). Nimm die umgebenden Zeilen mit auf.',
+  'err.tools.changeFailed': '{{1}} konnte nicht geändert werden: {{2}}',
+  'err.tools.denied':
+    'Die Änderung wurde nicht bestätigt und deshalb nicht vorgenommen. Wiederhole sie nicht von selbst.',
+  'err.tools.commandMissing': 'command fehlt — nenne eine Kommandozeile.',
+  'err.tools.patternMissing': 'pattern fehlt — nenne ein Muster wie **/*.go.',
+  'err.tools.badPattern': 'Das Muster {{1}} ließ sich nicht verwenden — prüfe die Klammern.',
+  'err.tools.commandFailed': 'Der Befehl konnte nicht gestartet werden: {{1}}',
+  'err.tools.commandStopped': 'Der Turn wurde gestoppt, deshalb wurde der Befehl beendet.',
+  // Vor der Bestätigung abgelehnt, nicht danach: KiChat hat kein Terminal, in dem ein
+  // Passwort eingegeben werden könnte. Der Befehl steht in der Karte und lässt sich dort
+  // kopieren — das ist der Weg, den der Satz nennt.
+  'err.tools.needsElevation':
+    'KiChat kann keine Administratorrechte erteilen — es gibt kein Terminal für die Passwortabfrage. Führe den Befehl selbst aus; die Zeile steht in der Karte und lässt sich dort kopieren.',
+  // Vor der Bestätigung abgelehnt, weil der Befehl Arbeit vernichten würde, die kein Zurück
+  // hat: die Undo-Aufzeichnung gilt einer Datei, nicht einem Kommando. Der Ausweg steht im Satz.
+  'err.tools.destructiveGit':
+    'Der Befehl würde {{1}} ungesicherte Änderung(en) verwerfen ({{2}}). Committe oder stashe sie zuerst, oder führe den Befehl selbst aus.',
   'err.tools.noScrape': 'Web-Scraping ist nicht konfiguriert',
   'err.tools.noDocsSearch': 'Dokumentensuche ist nicht verfügbar',
   'err.tools.noFts': 'Volltextsuche ist in diesem Build nicht verfügbar',
@@ -1156,6 +1377,10 @@ const en: Record<keyof typeof de, string> = {
   'settings.db.passphraseSaved': 'Passphrase copy saved.',
 
   'nav.newChat': 'New chat',
+  'nav.newProject': 'New project',
+  'nav.newProjectHint': 'A folder to work in — the model reads the code inside it.',
+  // The sidebar's two lists: a project works in a folder, a chat is a conversation.
+  'nav.projects': 'Projects',
   'nav.chats': 'Chats',
   'nav.settings': 'Settings',
   'nav.noChats': 'No chats yet',
@@ -1166,6 +1391,31 @@ const en: Record<keyof typeof de, string> = {
   'chat.empty.title': 'New chat',
   'chat.empty.hint':
     'Pick a model below and ask a question. Files can be added by drag and drop.',
+  'project.folder': 'Project folder',
+  'project.pickTitle': 'Choose the project folder',
+  'project.emptyHint': 'Ask about the code in this folder. The model reads the files itself.',
+  'project.confirmed':
+    'The model can read and change this folder — you see every change before it is made, and confirm it.',
+  'project.confirmedBadge': 'With confirmation',
+  // What a project chat's header says about its folder's permission. With the question
+  // switched off it has to say so: "with confirmation" would otherwise be the one place in
+  // the window that lies about what the model may do to the folder.
+  'project.autoFilesBadge': 'Writes without asking',
+  'project.autoCommandsBadge': 'Commands without asking',
+  'project.autoBothBadge': 'Writes and commands without asking',
+  // The same three states, short — for the sidebar row, where only one span is left beside
+  // the folder. Only the length of the words changes, never the claim: a row and a header
+  // must not promise different amounts.
+  'project.shortConfirmed': 'asks',
+  'project.shortFiles': 'writes without asking',
+  'project.shortCommands': 'commands without asking',
+  'project.shortBoth': 'both without asking',
+  'project.autoHint':
+    'Switched off in Settings, on the “Coding agent” tab. Changes still appear as a card in the transcript afterwards; for a command, only its output.',
+  // The one slash command: it empties this chat's conversation and leaves the folder, the
+  // prompt and the model in place, which is why it says so where a message is written.
+  'chat.clearHint': '/clear empties the chat',
+  'chat.cleared': 'Conversation cleared. The chat keeps its settings.',
   'chat.placeholder': 'Write a message … (Enter to send, Shift+Enter for a new line)',
   'chat.transcript': 'Conversation',
   'chat.composerLabel': 'Message',
@@ -1183,6 +1433,7 @@ const en: Record<keyof typeof de, string> = {
   'chat.regenerate': 'Regenerate',
   'chat.copy': 'Copy',
   'chat.copied': 'Copied',
+  'chat.copyFailed': 'The clipboard refused the copy — select the text and copy it by hand.',
   'chat.sources': 'Sources',
   'chat.interrupted': 'Stopped',
   'chat.failed': 'Incomplete',
@@ -1416,6 +1667,8 @@ const en: Record<keyof typeof de, string> = {
   'settings.platform': 'Platform',
   'settings.runtime': 'Runtime',
   'settings.copyVersion': 'Copy version info',
+  'settings.terminal': 'Terminal',
+  'settings.terminalNone': 'none found',
   'settings.trace': 'Diagnostic trace',
   'settings.traceNote': 'Flow, timings and failure kinds – never content.',
   'settings.copyTrace': 'Copy trace path',
@@ -1566,6 +1819,7 @@ const en: Record<keyof typeof de, string> = {
   'preset.small-local': 'Small local models',
   'preset.assistant': 'Neutral assistant',
   'preset.coding': 'Code & engineering',
+  'preset.coding-agent': 'Coding agent (project)',
   'preset.blank': 'Empty',
   'settings.promptReset': 'Reset to default',
   'settings.promptReload': 'Reload the stored prompt presets',
@@ -1591,22 +1845,25 @@ const en: Record<keyof typeof de, string> = {
   'settings.maxTokens': 'Max reply tokens (0 = unlimited)',
   'settings.compaction': 'Compaction',
   'settings.payload': 'Tool results',
+  // The mode in which a project folder is worked in. The tab holds the switches that decide
+  // what runs unasked.
+  'settings.coding': 'Coding agent',
   'settings.payloadHint':
-    'Oversized tool results are condensed by a second model before the chat model reads them. The full text stays visible on the tool call.',
+    'Oversized tool results — pages and large files from the project folder — are condensed by a second model before the chat model reads them. The full text stays visible on the tool call.',
   'settings.digestModel': 'Condensation model',
   'settings.digestModelDefault': 'Off (no model chosen)',
   'settings.digestModelUnavailable': '(not available)',
   'settings.digestModelHint':
-    'A small, fast model — ideally on a backend other than the chat’s. The same backend pays for the condensation out of the same per-minute allowance as the answer, and a hosted condensation model gets to read the pages it condenses.',
+    'A small, fast model — ideally on a backend other than the chat’s. The same backend pays for the condensation out of the same per-minute allowance as the answer, and a hosted condensation model gets to read the pages and files it condenses. A section the model asked for with an offset or a limit is never condensed — it needs that text unchanged to edit it.',
   'settings.digestThreshold': 'Condense above (tokens)',
   'settings.digestThresholdHint':
-    'Below this the result is handed over unchanged — the extra request costs more in time than it saves in tokens.',
+    'Below this the result is handed over unchanged — the extra request costs more in time than it saves in tokens. The same holds for code: a short file arrives whole.',
   'settings.digestMaxTokens': 'Condensation length (tokens)',
   'settings.digestMaxTokensHint':
-    'The most the summary may write. Keep it short — it is what replaces the page in the context; for a very long page it may legitimately be more than the threshold above.',
+    'The most the summary may write. Keep it short — it is what replaces the page or file in the context; for a very long page it may legitimately be more than the threshold above.',
   'settings.backendDigest': 'Condense tool results',
   'settings.backendDigestHint':
-    'Applies to answers on this backend only. Large pages are summarised before sending; asking for the same page again returns the full text.',
+    'Applies to answers on this backend only. Large pages and large files are summarised before sending; asking for the same page again returns the full text.',
   'settings.payloadActive': 'Active for:',
   'settings.payloadInactive': 'Active for no backend — switch it on in the Backends tab.',
 
@@ -1931,14 +2188,56 @@ const en: Record<keyof typeof de, string> = {
 
   'tool.search_web': 'Web search',
   'tool.scrape_url': 'Read page',
+  // The project tools. A card reading `read_file` shows the name in the code rather than
+  // the thing being done.
+  'tool.read_file': 'Read file',
+  'tool.list_dir': 'List folder',
+  'tool.search_files': 'Search the project',
+  'tool.write_file': 'Write file',
+  'tool.edit_file': 'Replace text',
+  'tool.run_command': 'Run command',
   'tool.search_documents': 'Search documents',
   'tool.read_pages': 'Read document section',
   'tool.running': 'running',
   'tool.ok': 'done',
   'tool.error': 'error',
   'tool.cancelled': 'cancelled',
+  'tool.denied': 'declined',
   'tool.arguments': 'Arguments',
   'tool.result': 'Result',
+  'tool.liveOutput': 'Output',
+  // The summary above a tool result. The text below it stays whatever the model read; these
+  // sentences are the window's own rendering, in its language.
+  'tool.sum.read': '{{1}}: lines {{2}}–{{3}} of {{4}}',
+  'tool.sum.readPart': '{{1}}: lines {{2}}–{{3}} (the file continues)',
+  'tool.sum.readEnd': '{{1}}: {{2}} lines, nothing after line {{3}}',
+  'tool.sum.readEmpty': '{{1}} is empty',
+  'tool.sum.readLineTooLong': '{{1}}: line {{2}} is longer than the read window',
+  'tool.sum.readBinary': '{{1}} is not a text file',
+  'tool.sum.readOutline': '{{1}}: outline, {{2}} lines, {{3}} declarations',
+  'tool.sum.readOutlineNone': '{{1}}: no declarations found',
+  'tool.sum.list': '{{1}}: {{2}} entries',
+  'tool.sum.listSome': '{{1}}: {{2}} entries, {{3}} not shown',
+  'tool.sum.listEmpty': '{{1}}: empty',
+  'tool.sum.search': '{{2}} hits for “{{1}}” in {{3}} files',
+  'tool.sum.searchNone': 'no hits for “{{1}}” in {{2}} files',
+  'tool.sum.searchStopped': '{{2}} hits for “{{1}}”, search stopped after {{3}} files',
+  'tool.sum.find': '{{1}} files for “{{2}}”',
+  'tool.sum.write': '{{1}} written: {{2}} lines (was {{3}})',
+  'tool.sum.writeNew': '{{1}} created: {{2}} lines',
+  'tool.sum.edit': '{{1}}: {{2}} occurrences replaced (line {{3}})',
+  'tool.sum.readSame': '{{1}}: unchanged since you read it in this turn',
+  'tool.sum.command': 'exit code {{1}} · {{2}}',
+  'tool.sum.commandStopped': 'stopped by you after {{1}}',
+  'tool.sum.commandTimeout': 'stopped after {{1}}',
+  'tool.sum.commandUnknown': 'ended without an exit code · {{1}}',
+  'tool.find_files': 'Find files',
+  'tool.copyCommand': 'Copy command',
+  // The second stop beside the turn's: this one ends only the command, so the answer keeps
+  // going — which is why the tooltip says what happens next.
+  'tool.stopCommand': 'Stop the command',
+  'tool.stopCommandHint':
+    'Ends this command only, not the answer. The model reads the output so far and carries on.',
   'tool.tokensOne': '{{tokens}} tokens',
   'tool.tokensCut': '{{source}} → {{context}} tokens',
   'tool.tokensBudgetTag': 'budget',
@@ -1950,6 +2249,93 @@ const en: Record<keyof typeof de, string> = {
     'The tool returned {{source}} tokens; a second model condensed them to {{context}}, which is what stands in the context.',
   'tool.tokensBudgetHint':
     'The tool returned {{source}} tokens; this answer’s tool budget let only {{context}} of them into the context.',
+
+  // The write tool. It stops the chat until it is answered, which is why these say what
+  // is happening and not only what is being asked.
+  'confirm.title': 'Confirmation for this project',
+  'change.title': 'Change to the project folder',
+  'change.create': 'New file',
+  'change.overwrite': 'Replace file',
+  'change.edit': 'Replace text',
+  'change.waiting': 'This chat is waiting for your decision.',
+  'change.noLines': 'No line differs — there is nothing to compare.',
+  'change.newlineOnly': 'Only the newline at the end of the file changes — the content stays the same.',
+  'change.truncated': 'The diff stops before the change does.',
+  'change.createsDirs': 'Creates the folder: {{folders}}',
+  'change.occurrences':
+    'Replaces {{count}} occurrences — the first one is shown, so the preview is not the whole change.',
+  'change.once': 'Allow once',
+  'change.always': 'Always in this chat',
+  'change.alwaysHint':
+    'While this chat is open, changes *and commands* in this folder are made without asking further. It does not survive a restart.',
+  'change.decline': 'Decline',
+  'change.declineHint':
+    'Declining means nothing is changed. The model is told, and will not try the same change again.',
+
+  // The one click that turns the question off for good: the same effect as the switch in the
+  // Coding agent tab, offered where the question is. It says that it survives a restart and
+  // where to undo it, because a permission granted in passing is one nobody remembers giving.
+  'confirm.stopAskingFiles': 'Stop asking about file changes',
+  'confirm.stopAskingCommands': 'Stop asking about commands',
+  'confirm.stopAskingHint':
+    'Allows this change and turns the question off from now on — in every project, and after a restart. Undo it in Settings → Coding agent.',
+  'confirm.stoppedAskingFiles':
+    'File changes are written without asking from now on. Settings → Coding agent.',
+  'confirm.stoppedAskingCommands': 'Commands run without asking from now on. Settings → Coding agent.',
+
+  // The changed-file list beside the chat: what this chat did to the folder, and the one button
+  // that undoes it. It answers the question the transcript answers only in the form of a
+  // hundred tool cards — and never says which file was written, or how often.
+  'changes.button': 'Changes',
+  'changes.hint': 'Shows which files this chat changed — with a diff and an undo.',
+  'changes.title': 'Changes in this project',
+  'changes.empty': 'This chat has not changed a file yet.',
+  'changes.created': 'created',
+  'changes.changed': 'changed',
+  'changes.revisions': 'written {{count}}×',
+  'changes.revert': 'Put back',
+  'changes.revertHint':
+    'Writes the file back the way this chat found it. A file edited since then is left alone.',
+  'changes.blockedOutside': 'Edited since the change — left alone.',
+  'changes.blockedBinary': 'Not a text file — it cannot be saved, so there is no undo.',
+  'changes.truncated': 'Diff shortened.',
+  'changes.close': 'Close',
+
+  // The terminal. A command cannot be previewed — the line *is* the description — so
+  // everything needed to judge it is on the card.
+  'command.title': 'Run command',
+  'command.dir': 'Runs in the project folder {{folder}}',
+  'command.timeout': 'stopped after {{seconds}} s',
+  // The line is a field rather than a quotation: a typo is cheapest to fix at the moment of
+  // the question, and declining-and-retyping costs the whole sentence. The hint below says
+  // the elevation check applies to the edited line too.
+  'command.editLabel': 'The line — editable before it runs',
+  'command.edited':
+    'Your version is what runs — the check for administrator rights applies to it as well.',
+  'command.reset': 'Reset the line',
+
+  // The hand-off after a refused administrator line: the command goes to the user's clipboard
+  // and terminal, not into the conversation. The sentence names the second step, because the
+  // first one alone does not get the answer anywhere.
+  'handoff.title': 'Run it yourself',
+  'handoff.hint':
+    'This command needs administrator rights. Open a terminal in the project folder, run it there, then paste the output back here — the model reads it next.',
+  'handoff.openTerminal': 'Open terminal',
+  'handoff.terminalOpened': 'Terminal opened in the project folder.',
+
+  // The two switches that turn off exactly the questions above. They live here rather than
+  // among the sampler values because they belong to the cards they replace.
+  'settings.autoApprove': 'Run without asking',
+  'settings.autoApproveHint':
+    'Project tools otherwise stop for every change and every command. These two switches allow them permanently — in every project and every chat, including the ones you create later.',
+  'settings.autoApproveFiles': 'Write and edit files',
+  'settings.autoApproveFilesHint':
+    'write_file and edit_file write immediately instead of showing you the change first. You read the diff afterwards, on the card in the transcript. The safety net here is version control, not the question.',
+  'settings.autoApproveCommands': 'Run commands',
+  'settings.autoApproveCommandsHint':
+    'run_command runs immediately. Commands run with your own rights, are not inspected, and can leave the project folder — there is no preview, only the output afterwards.',
+  'settings.autoApproveAsk': 'asks',
+  'settings.autoApproveSkip': 'no question',
 
   'common.cancel': 'Cancel',
   'common.close': 'Close',
@@ -2042,6 +2428,7 @@ const en: Record<keyof typeof de, string> = {
   'err.chat.summaryBackendUnknown':
     'the summary model {{1}} belongs to backend {{2}}, which is not configured',
   'err.chat.turnRunning': 'this chat is already generating',
+  'err.chat.gone': 'this chat no longer exists',
   'err.chat.malformedToolCall':
     'the model produced a tool call with a name the request did not declare, so the provider rejected the request. Send the message again; if it happens again, choose a different model for this chat.',
   'err.chat.noModelInChat': 'No model selected. Choose one at the top of the chat.',
@@ -2123,6 +2510,48 @@ const en: Record<keyof typeof de, string> = {
   'err.tools.queryMissing': 'query is missing',
   'err.tools.noSearch': 'web search is not configured',
   'err.tools.urlMissing': 'url is missing',
+  'err.tools.pathMissing': 'path is missing',
+  'err.tools.noWorkspace': 'this chat has no project folder, so there is nothing in it to read',
+  'err.tools.workspaceGone': 'the project folder {{1}} cannot be opened — is it still there?',
+  'err.tools.outsideWorkspace':
+    '{{1}} is outside the project folder. Paths have to be inside the project.',
+  'err.tools.fileUnreadable': '{{1}} cannot be read',
+  'err.project.badFolder': '{{1}} is not a folder a project can use.',
+  'err.project.alreadyOpen':
+    'The project "{{1}}" already works in this folder. Open it in the sidebar — or use /clear there to start over.',
+  'err.project.noTerminal':
+    'no terminal was found that KiChat could open. Open one yourself and change into the project folder.',
+  'err.project.terminalFailed': 'the terminal could not be started: {{1}}',
+  // The changed-file list and its undo. The conflict is the sentence that matters most: it
+  // says somebody edited the file afterwards, and that is why it is not overwritten.
+  'err.project.changesFailed': 'the changes could not be read: {{1}}',
+  'err.project.folderGone': 'the project folder {{1}} cannot be opened — is it still there?',
+  'err.project.pathMissing': 'no path was given — pick a file from the list.',
+  'err.project.revertWhileRunning':
+    'The answer is still running. Wait for it to finish, then undo the change.',
+  'err.project.revertConflict':
+    '{{1}} was edited after KiChat changed it — the file is left as it is.',
+  'err.project.revertFailed': '{{1}} could not be restored: {{2}}',
+  'err.tools.editNoMatch':
+    '{{1}} does not contain that text — read the file again and copy the line exactly.',
+  'err.tools.editAmbiguous':
+    'That text appears {{2}} times in {{1}} (first at line {{3}}). Include the lines around it.',
+  'err.tools.changeFailed': '{{1}} could not be changed: {{2}}',
+  'err.tools.denied':
+    'The change was not confirmed, so it was not made. Do not repeat it on your own.',
+  'err.tools.commandMissing': 'command is missing — name one command line.',
+  'err.tools.patternMissing': 'pattern is missing — name a pattern such as **/*.go.',
+  'err.tools.badPattern': 'the pattern {{1}} could not be used — check the brackets.',
+  'err.tools.commandFailed': 'The command could not be started: {{1}}',
+  'err.tools.commandStopped': 'The turn was stopped, so the command was killed.',
+  // Refused before the confirmation, not after: KiChat has no terminal to type a password
+  // into. The line stays on the card, ready to copy — that is the way out the sentence names.
+  'err.tools.needsElevation':
+    'KiChat cannot grant administrator rights — there is no terminal to ask for the password. Run the command yourself; the line is on the card, ready to copy.',
+  // Refused before the confirmation because it would destroy work with no way back: the undo
+  // record belongs to a file, not to a command. The sentence names the way out.
+  'err.tools.destructiveGit':
+    'This command would discard {{1}} uncommitted change(s) ({{2}}). Commit or stash them first, or run it yourself.',
   'err.tools.noScrape': 'web scraping is not configured',
   'err.tools.noDocsSearch': 'document search is not available',
   'err.tools.noFts': 'full-text search is not available in this build',
@@ -2191,6 +2620,10 @@ const zh: Record<keyof typeof de, string> = {
   'settings.db.passphraseSaved': '密码备份已保存。',
 
   'nav.newChat': '新建对话',
+  'nav.newProject': '新建项目',
+  'nav.newProjectHint': '选择一个用于工作的文件夹 —— 模型会读取其中的代码。',
+  // 侧栏的两个列表：项目在文件夹中工作，对话只是一次谈话。
+  'nav.projects': '项目',
   'nav.chats': '对话',
   'nav.settings': '设置',
   'nav.noChats': '暂无对话',
@@ -2200,6 +2633,26 @@ const zh: Record<keyof typeof de, string> = {
 
   'chat.empty.title': '新建对话',
   'chat.empty.hint': '在下方选择模型并提问。文件可拖放添加。',
+  'project.folder': '项目文件夹',
+  'project.pickTitle': '选择项目文件夹',
+  'project.emptyHint': '询问该文件夹中的代码。模型会自行读取文件。',
+  'project.confirmed': '模型可以读取并修改该文件夹 —— 每项更改都会先显示给你并需要你确认。',
+  'project.confirmedBadge': '需确认',
+  // 项目对话标题栏对文件夹权限的说明。关闭询问后必须改为说明这一点，否则“需确认”会成为
+  // 窗口中唯一对模型可以对该文件夹做什么撒谎的地方。
+  'project.autoFilesBadge': '写入无需确认',
+  'project.autoCommandsBadge': '命令无需确认',
+  'project.autoBothBadge': '写入与命令均无需确认',
+  // 同样的三种状态，用于侧栏行：文件夹旁只够放一小段。只改变措辞长度，
+  // 不改变断言 —— 侧栏行与项目标题栏不能给出不同的承诺。
+  'project.shortConfirmed': '会询问',
+  'project.shortFiles': '写入无需确认',
+  'project.shortCommands': '命令无需确认',
+  'project.shortBoth': '两者均无需确认',
+  'project.autoHint': '已在设置的“编码代理”标签页中关闭询问。更改之后仍会以卡片形式出现在对话中；命令则只有输出。',
+  // 唯一的斜杠命令：清空该对话的内容，但保留文件夹、提示词和模型，因此在输入框处说明。
+  'chat.clearHint': '/clear 清空对话',
+  'chat.cleared': '对话已清空，该对话的设置保持不变。',
   'chat.placeholder': '输入消息……（Enter 发送，Shift+Enter 换行）',
   'chat.transcript': '对话',
   'chat.composerLabel': '消息',
@@ -2214,6 +2667,7 @@ const zh: Record<keyof typeof de, string> = {
   'chat.regenerate': '重新生成',
   'chat.copy': '复制',
   'chat.copied': '已复制',
+  'chat.copyFailed': '剪贴板拒绝了复制 —— 请手动选中文本并复制。',
   'chat.sources': '来源',
   'chat.interrupted': '已中断',
   'chat.failed': '不完整',
@@ -2438,6 +2892,8 @@ const zh: Record<keyof typeof de, string> = {
   'settings.platform': '平台',
   'settings.runtime': '运行时',
   'settings.copyVersion': '复制版本信息',
+  'settings.terminal': '终端',
+  'settings.terminalNone': '未找到',
   'settings.trace': '诊断日志',
   'settings.traceNote': '记录流程、耗时和故障类型，不记录内容。',
   'settings.copyTrace': '复制日志路径',
@@ -2579,6 +3035,7 @@ const zh: Record<keyof typeof de, string> = {
   'preset.small-local': '小型本地模型',
   'preset.assistant': '中性助手',
   'preset.coding': '代码与工程',
+  'preset.coding-agent': '编码代理（项目）',
   'preset.blank': '空白',
   'settings.promptReset': '恢复默认',
   'settings.promptReload': '重新加载已保存的提示词预设',
@@ -2604,20 +3061,22 @@ const zh: Record<keyof typeof de, string> = {
   'settings.maxTokens': '回答最大令牌数（0 = 不限）',
   'settings.compaction': '压缩',
   'settings.payload': '工具结果',
-  'settings.payloadHint': '较大的工具结果会先由另一个模型压缩，再交给对话模型阅读。完整文本仍显示在工具调用上。',
+  // 在项目文件夹中工作的模式。该标签页存放决定哪些操作无需询问即可执行的开关。
+  'settings.coding': '编码代理',
+  'settings.payloadHint': '较大的工具结果——网页以及项目文件夹中的大文件——会先由另一个模型压缩，再交给对话模型阅读。完整文本仍显示在工具调用上。',
   'settings.digestModel': '压缩模型',
   'settings.digestModelDefault': '关闭（未选择模型）',
   'settings.digestModelUnavailable': '（不可用）',
   'settings.digestModelHint':
-    '选择一个小而快的模型——最好不要与对话在同一个后端。同一后端会用同一份每分钟额度支付压缩开销；若压缩模型在云端，它会读到这些网页内容。',
+    '选择一个小而快的模型——最好不要与对话在同一个后端。同一后端会用同一份每分钟额度支付压缩开销；若压缩模型在云端，它会读到这些网页和文件的内容。模型用 offset/limit 定向读取的片段绝不会被压缩——它需要原样的文本来修改。',
   'settings.digestThreshold': '超过此大小则压缩（tokens）',
-  'settings.digestThresholdHint': '低于此值时结果原样使用——额外请求花费的时间会多于节省的令牌。',
+  'settings.digestThresholdHint': '低于此值时结果原样使用——额外请求花费的时间会多于节省的令牌。代码同理：很短的文件会完整交付。',
   'settings.digestMaxTokens': '压缩结果的最大长度（tokens）',
   'settings.digestMaxTokensHint':
-    '摘要最多写多长。请保持简短——它将在上下文中取代原网页；对于很长的网页，可以合理地超过上面的阈值。',
+    '摘要最多写多长。请保持简短——它将在上下文中取代原网页或文件；对于很长的网页，可以合理地超过上面的阈值。',
   'settings.backendDigest': '压缩工具结果',
   'settings.backendDigestHint':
-    '仅对该后端的回答生效。较大的网页会在发送前被概括；再次请求同一网页会得到完整文本。',
+    '仅对该后端的回答生效。较大的网页和大文件会在发送前被概括；再次请求同一网页会得到完整文本。',
   'settings.payloadActive': '已启用：',
   'settings.payloadInactive': '未对任何后端启用——请在“后端”标签页中开启。',
 
@@ -2912,14 +3371,52 @@ const zh: Record<keyof typeof de, string> = {
 
   'tool.search_web': '网络搜索',
   'tool.scrape_url': '读取网页',
+  // 项目工具。显示 read_file 的工具卡片给出的是代码里的名字，而不是实际动作。
+  'tool.read_file': '读取文件',
+  'tool.list_dir': '列出文件夹',
+  'tool.search_files': '在项目中搜索',
+  'tool.write_file': '写入文件',
+  'tool.edit_file': '替换文本',
+  'tool.run_command': '运行命令',
   'tool.search_documents': '搜索文档',
   'tool.read_pages': '读取文档片段',
   'tool.running': '运行中',
   'tool.ok': '完成',
   'tool.error': '错误',
   'tool.cancelled': '已取消',
+  'tool.denied': '已拒绝',
   'tool.arguments': '参数',
   'tool.result': '结果',
+  'tool.liveOutput': '输出',
+  // 工具结果上方的摘要。下方文本仍是模型读到的原文；这些句子是窗口用自身语言给出的说法。
+  'tool.sum.read': '{{1}}：第 {{2}}–{{3}} 行，共 {{4}} 行',
+  'tool.sum.readPart': '{{1}}：第 {{2}}–{{3}} 行（文件未结束）',
+  'tool.sum.readEnd': '{{1}} 共 {{2}} 行，第 {{3}} 行之后没有内容',
+  'tool.sum.readEmpty': '{{1}} 为空',
+  'tool.sum.readLineTooLong': '{{1}}：第 {{2}} 行超过读取窗口长度',
+  'tool.sum.readBinary': '{{1}} 不是文本文件',
+  'tool.sum.readOutline': '{{1}}：大纲，{{2}} 行，{{3}} 个声明',
+  'tool.sum.readOutlineNone': '{{1}}：未识别到声明',
+  'tool.sum.list': '{{1}}：{{2}} 个条目',
+  'tool.sum.listSome': '{{1}}：{{2}} 个条目，{{3}} 个未显示',
+  'tool.sum.listEmpty': '{{1}}：空',
+  'tool.sum.search': '在 {{3}} 个文件中找到 {{2}} 处“{{1}}”',
+  'tool.sum.searchNone': '在 {{2}} 个文件中未找到“{{1}}”',
+  'tool.sum.searchStopped': '找到 {{2}} 处“{{1}}”，搜索在 {{3}} 个文件后中止',
+  'tool.sum.find': '{{1}} 个文件匹配“{{2}}”',
+  'tool.sum.write': '已写入 {{1}}：{{2}} 行（原 {{3}} 行）',
+  'tool.sum.writeNew': '已创建 {{1}}：{{2}} 行',
+  'tool.sum.edit': '{{1}}：替换 {{2}} 处（第 {{3}} 行）',
+  'tool.sum.readSame': '{{1}}：本轮读取后未发生变化',
+  'tool.sum.command': '退出码 {{1}} · {{2}}',
+  'tool.sum.commandStopped': '你在 {{1}} 后中止了它',
+  'tool.sum.commandTimeout': '{{1}} 后中止',
+  'tool.sum.commandUnknown': '结束但无退出码 · {{1}}',
+  'tool.find_files': '查找文件',
+  'tool.copyCommand': '复制命令',
+  // 与整轮停止并列的第二个停止：只结束这条命令，回答继续运行 —— 因此提示说明之后会怎样。
+  'tool.stopCommand': '中止命令',
+  'tool.stopCommandHint': '只结束这条命令，不停止回答。模型会读取已产生的输出并继续。',
   'tool.tokensOne': '{{tokens}} 个令牌',
   'tool.tokensCut': '{{source}} → {{context}} 个令牌',
   'tool.tokensBudgetTag': '预算',
@@ -2931,6 +3428,78 @@ const zh: Record<keyof typeof de, string> = {
     '工具返回了 {{source}} 个令牌；第二个模型将其压缩为 {{context}} 个，并以此进入上下文。',
   'tool.tokensBudgetHint':
     '工具返回了 {{source}} 个令牌；本回答的工具预算只让其中 {{context}} 个进入上下文。',
+
+  // 写入工具。它会暂停对话直到得到答复，因此这里说明的是正在发生什么，而不只是被问什么。
+  'confirm.title': '项目确认',
+  'change.title': '项目文件夹的更改',
+  'change.create': '新文件',
+  'change.overwrite': '替换文件',
+  'change.edit': '替换文本',
+  'change.waiting': '该对话正在等待你的决定。',
+  'change.noLines': '没有任何一行不同 —— 无可比较的内容。',
+  'change.newlineOnly': '只有文件末尾的换行符改变 —— 内容保持不变。',
+  'change.truncated': '差异在更改结束前就结束了。',
+  'change.createsDirs': '将创建文件夹：{{folders}}',
+  'change.occurrences': '将替换 {{count}} 处 —— 仅显示第一处，预览不是全部更改。',
+  'change.once': '允许一次',
+  'change.always': '在此对话中始终允许',
+  'change.alwaysHint': '在此对话打开期间，该文件夹内的更改和命令都将不再询问。重启后失效。',
+  'change.decline': '拒绝',
+  'change.declineHint': '拒绝即不做任何更改。模型会得知此事，不会重复同一更改。',
+
+  // 一次点击永久关闭该询问：效果与“编码代理”标签页中的开关相同，只是出现在提问处。
+  'confirm.stopAskingFiles': '不再询问文件更改',
+  'confirm.stopAskingCommands': '不再询问命令',
+  'confirm.stopAskingHint':
+    '允许本次更改，并从现在起不再询问 —— 对所有项目有效，重启后仍然有效。可在“设置 → 编码代理”中撤销。',
+  'confirm.stoppedAskingFiles': '从现在起写入文件不再询问。设置 → 编码代理。',
+  'confirm.stoppedAskingCommands': '从现在起运行命令不再询问。设置 → 编码代理。',
+
+  // 对话旁的更改列表：这个对话对文件夹做了什么，以及唯一的撤销按钮。
+  // 它回答了对话记录只能以上百张工具卡片来回答的问题 —— 而且从不说清哪个文件被写过、写了几次。
+  'changes.button': '更改',
+  'changes.hint': '显示这个对话更改了哪些文件 —— 含差异与撤销。',
+  'changes.title': '此项目中的更改',
+  'changes.empty': '这个对话还没有更改任何文件。',
+  'changes.created': '新建',
+  'changes.changed': '更改',
+  'changes.revisions': '已写入 {{count}} 次',
+  'changes.revert': '还原',
+  'changes.revertHint': '把这个对话找到它时的内容写回文件。此后被编辑过的文件保持原样。',
+  'changes.blockedOutside': '更改后被编辑过 —— 保持原样。',
+  'changes.blockedBinary': '不是文本文件 —— 无法保存，因此不能还原。',
+  'changes.truncated': '差异已截短。',
+  'changes.close': '关闭',
+
+  // 终端调用。命令无法预览 —— 命令本身就是描述 —— 因此卡片上给出了判断所需的全部信息。
+  'command.title': '运行命令',
+  'command.dir': '在项目文件夹 {{folder}} 中运行',
+  'command.timeout': '{{seconds}} 秒后中止',
+  // 这行是输入框而不是引用：提问时改错字最省事，先拒绝再重打要付出整句的代价。
+  // 下方的提示说明管理员权限检查同样适用于修改后的命令。
+  'command.editLabel': '命令行 —— 运行前可修改',
+  'command.edited': '将运行你修改后的命令行 —— 管理员权限检查同样适用。',
+  'command.reset': '还原命令行',
+
+  // 被拒绝的管理员命令的交接：命令进入用户的剪贴板与终端，而不是对话。
+  // 提示语说明第二步，因为只做第一步无法让回答继续。
+  'handoff.title': '请自行运行',
+  'handoff.hint': '该命令需要管理员权限。请在项目文件夹中打开终端运行它，之后把输出粘贴回这里 —— 模型会接着读取它。',
+  'handoff.openTerminal': '打开终端',
+  'handoff.terminalOpened': '已在项目文件夹中打开终端。',
+
+  // 这两个开关关闭的正是上面的询问，因此放在这里，而不是采样器设置旁。
+  'settings.autoApprove': '无需询问即执行',
+  'settings.autoApproveHint':
+    '项目工具通常会在每次更改和每条命令前暂停询问。这两个开关将永久允许，适用于所有项目与所有对话，包括你之后新建的对话。',
+  'settings.autoApproveFiles': '写入和编辑文件',
+  'settings.autoApproveFilesHint':
+    'write_file 与 edit_file 会直接写入，而不先向你展示更改内容。之后你可以在对话中的卡片上查看差异。此处的保障是版本控制，而不是这次询问。',
+  'settings.autoApproveCommands': '运行命令',
+  'settings.autoApproveCommandsHint':
+    'run_command 会直接运行。命令以你的权限执行，不会被检查，也可以离开项目文件夹 —— 没有预览，只有执行后的输出。',
+  'settings.autoApproveAsk': '会询问',
+  'settings.autoApproveSkip': '不再询问',
 
   'common.cancel': '取消',
   'common.close': '关闭',
@@ -3019,6 +3588,7 @@ const zh: Record<keyof typeof de, string> = {
   'err.chat.contextUnknown': '模型的上下文窗口未知',
   'err.chat.summaryBackendUnknown': '摘要模型 {{1}} 属于尚未配置的后端 {{2}}',
   'err.chat.turnRunning': '该对话正在生成中',
+  'err.chat.gone': '该对话已不存在',
   'err.chat.malformedToolCall': '模型生成的工具调用使用了请求中未声明的名称，提供方因此拒绝了该请求。请重新发送消息；若再次出现，请为该对话选择其他模型。',
   'err.chat.noModelInChat': '未选择模型。请在对话顶部选择一个模型。',
   'err.chat.noTools': '没有可用的工具',
@@ -3094,6 +3664,38 @@ const zh: Record<keyof typeof de, string> = {
   'err.tools.queryMissing': '缺少 query',
   'err.tools.noSearch': '未配置网页搜索',
   'err.tools.urlMissing': '缺少 url',
+  'err.tools.pathMissing': '缺少 path',
+  'err.tools.noWorkspace': '该对话没有项目文件夹，因此没有可读取的内容。',
+  'err.tools.workspaceGone': '无法打开项目文件夹 {{1}} —— 它还存在吗？',
+  'err.tools.outsideWorkspace': '{{1}} 位于项目文件夹之外。路径必须位于项目内部。',
+  'err.tools.fileUnreadable': '无法读取 {{1}}',
+  'err.project.badFolder': '{{1}} 不是项目可以使用的文件夹。',
+  'err.project.alreadyOpen': '这个文件夹中已有项目“{{1}}”。请在侧边栏中打开它 —— 或在那里用 /clear 清空上下文重新开始。',
+  'err.project.noTerminal': '找不到 KiChat 可以打开的终端。请自行打开一个并进入项目文件夹。',
+  'err.project.terminalFailed': '无法启动终端：{{1}}',
+  // 更改列表与撤销。冲突这句最重要：它说明有人在之后编辑了该文件，因此不会覆盖它。
+  'err.project.changesFailed': '无法读取更改：{{1}}',
+  'err.project.folderGone': '无法打开项目文件夹 {{1}} —— 它还存在吗？',
+  'err.project.pathMissing': '未给出路径 —— 请从列表中选择一个文件。',
+  'err.project.revertWhileRunning': '回答仍在运行。请等它结束后再撤销该更改。',
+  'err.project.revertConflict': '{{1}} 在 KiChat 修改后被编辑过 —— 文件保持原样。',
+  'err.project.revertFailed': '无法还原 {{1}}：{{2}}',
+  'err.tools.editNoMatch': '{{1}} 中没有这段文本 —— 请重新读取文件并原样复制该行。',
+  'err.tools.editAmbiguous': '这段文本在 {{1}} 中出现 {{2}} 次（第一次在第 {{3}} 行）。请包含周围的几行。',
+  'err.tools.changeFailed': '无法修改 {{1}}：{{2}}',
+  'err.tools.denied': '该更改未获确认，因此没有执行。请不要自行重试。',
+  'err.tools.commandMissing': '缺少 command —— 请给出一条命令行。',
+  'err.tools.patternMissing': '缺少 pattern —— 请给出形如 **/*.go 的模式。',
+  'err.tools.badPattern': '无法使用模式 {{1}} —— 请检查括号。',
+  'err.tools.commandFailed': '无法启动该命令：{{1}}',
+  'err.tools.commandStopped': '该轮回答已停止，因此命令已被终止。',
+  // 在确认之前就拒绝，而不是之后：KiChat 没有可以输入密码的终端。命令仍保留在卡片上，
+  // 可直接复制 —— 这就是提示语所说的办法。
+  'err.tools.needsElevation':
+    'KiChat 无法授予管理员权限 —— 这里没有可输入密码的终端。请自行运行该命令；命令保留在卡片上，可直接复制。',
+  // 在确认之前就拒绝，因为它会毁掉无法恢复的改动：撤销记录属于文件，而不是命令。
+  'err.tools.destructiveGit':
+    '该命令会丢弃 {{1}} 处未提交的更改（{{2}}）。请先提交或暂存，或自行运行该命令。',
   'err.tools.noScrape': '未配置网页抓取',
   'err.tools.noDocsSearch': '文档搜索不可用',
   'err.tools.noFts': '此构建中没有全文搜索',
@@ -3144,14 +3746,31 @@ const ERROR_PREFIX = 'i18n:'
  * unchanged, which is what keeps those readable, and why an argument can be passed
  * to this function without asking what it is.
  */
-export function translateError(lang: Lang, raw: string): string {
-  if (!raw.startsWith(ERROR_PREFIX)) return raw
-  let payload: { code?: string; args?: string[] }
+/**
+ * The payload a message carries, or null for plain text.
+ *
+ * One parse behind both readers: the translator below, and `errorCode` — which a caller uses
+ * when *which* refusal matters rather than what it says (a refused command has a hand-off
+ * attached to it, and that decision must not be made by comparing translated sentences).
+ */
+function errorPayload(raw: string): { code?: string; args?: string[] } | null {
+  if (!raw.startsWith(ERROR_PREFIX)) return null
   try {
-    payload = JSON.parse(raw.slice(ERROR_PREFIX.length))
+    const payload = JSON.parse(raw.slice(ERROR_PREFIX.length))
+    return payload && typeof payload === 'object' ? payload : null
   } catch {
-    return raw
+    return null
   }
+}
+
+/** The code a message carries, empty for plain text or an unreadable payload. */
+export function errorCode(raw: string): string {
+  const payload = errorPayload(raw)
+  return payload && typeof payload.code === 'string' ? payload.code : ''
+}
+
+export function translateError(lang: Lang, raw: string): string {
+  const payload = errorPayload(raw)
   if (!payload || typeof payload.code !== 'string' || payload.code === '') return raw
 
   // An argument can itself be a message: one package wraps another's refusal

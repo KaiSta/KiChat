@@ -5,8 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"kichat/internal/config"
 	"kichat/internal/events"
@@ -16,7 +15,7 @@ import (
 )
 
 // newID returns a fresh identifier.
-func newID() string { return uuid.NewString() }
+func newID() string { return uuid.New().String() }
 
 // CompactOptions controls a compaction run.
 type CompactOptions struct {

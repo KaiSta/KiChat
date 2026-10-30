@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,8 @@ import (
 	"kichat/internal/research"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/trace"
+	"kichat/internal/workspace"
 )
 
 // digestSettings is a chat on backend "fake" that has asked for its tool results to be
@@ -717,17 +721,24 @@ func TestADocumentLargerThanTheSummariserSaysItIsPartial(t *testing.T) {
 // vendors reselling the same weights — and their condensations are not
 // interchangeable, so the cache must not serve one for the other. The content hash is
 // the other half of the key, and it is what makes a changed page a different page.
+//
+// The job is the third: the same words can be a page and a file, and a file summary keeps
+// the line numbers a page summary is allowed to drop, so one must never answer for the
+// other.
 func TestACondensationIsKeyedByTheWholeModelReference(t *testing.T) {
-	a := digestKey(llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite")
-	b := digestKey(llm.Ref{Backend: "nvidia", Model: "same-id"}, 600, "die Seite")
+	a := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite")
+	b := digestKey(digestJobPage, llm.Ref{Backend: "nvidia", Model: "same-id"}, 600, "die Seite")
 	if a == b {
 		t.Fatal("the same model id on two backends shares a condensation")
 	}
-	if again := digestKey(llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite"); again != a {
+	if again := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite"); again != a {
 		t.Error("the same page and model produced a different key")
 	}
-	if changed := digestKey(llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite, geändert"); changed == a {
+	if changed := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite, geändert"); changed == a {
 		t.Error("a changed page inherited the old condensation")
+	}
+	if asFile := digestKey(digestJobFile, llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite"); asFile == a {
+		t.Error("a file condensation is served out of a page's cache entry")
 	}
 }
 
@@ -892,4 +903,487 @@ func truncateForTest(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// ---------------------------------------------------------------------------
+// Reading a file out of the project folder
+// ---------------------------------------------------------------------------
+
+// sourceFile writes n Go-looking lines into dir/name and returns the path to read, which is
+// relative to the folder the way the tool wants it.
+func sourceFile(t *testing.T, dir, name string, lines int) string {
+	t.Helper()
+	var sb strings.Builder
+	for i := 0; i < lines; i++ {
+		fmt.Fprintf(&sb, "func handler%d() { return aufruf%d() }\n", i, i)
+	}
+	abs := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+// codingDigestEngine builds a coding chat on folder, the provider whose replies drive the
+// turn, and the digester that condenses what it reads.
+func codingDigestEngine(t *testing.T, folder string, settings config.Settings,
+	provider, digester *fakeProvider) (*Engine, *eventLog) {
+
+	t.Helper()
+	st := newTestStore(t)
+	project := store.Chat{
+		ID: "project-1", Title: "Projekt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.\nVerfügbare Tools: {{tool_list}}",
+		Temperature:  0.7, TopP: 0.9, AutoCompact: false,
+		Mode: store.ModeCoding, Workspace: folder,
+	}
+	if err := st.CreateChat(project); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+	registry.Register(digester)
+	log := &eventLog{}
+	engine := NewEngine(st, registry, tools.New(st, nil, nil),
+		func() config.Settings { return settings }, log.emit)
+	// A real trace logger, because the turn's number is what the tools key their memory of a
+	// read on: a nil logger numbers no turn, so the memory would be switched off and the test
+	// of the interaction with it would pass for the wrong reason. The app always has one
+	// (App.start calls trace.New unconditionally).
+	engine.Trace = trace.New(t.TempDir())
+	return engine, log
+}
+
+// readFileCall is the text protocol's form of a read_file call, with any extra arguments
+// (an offset, a limit) appended verbatim.
+func readFileCall(path, extra string) string {
+	return fmt.Sprintf("```tool_call\n{\"name\": \"read_file\", \"arguments\": {\"path\": %q%s}}\n```",
+		path, extra)
+}
+
+// numberedRead is what tools.readFile returns for a file of n lines: the tool's own header,
+// then the line-numbered block. It exists so a test can hand `condenseToolOutput` the exact
+// shape the tool produces without going through a folder.
+func numberedRead(path string, lines int) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s — Zeilen 1–%d von %d\n\n", path, lines, lines)
+	for i := 0; i < lines; i++ {
+		fmt.Fprintf(&sb, "%6d| func handler%d() { return aufruf%d() }\n", i+1, i, i)
+	}
+	return sb.String()
+}
+
+// runTurn sends a message and waits for the turn to end.
+func runTurn(t *testing.T, e *Engine, chatID, text string) {
+	t.Helper()
+	if err := e.Send(TurnRequest{ChatID: chatID, Text: text}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return !e.IsRunning(chatID) }) {
+		t.Fatal("the turn did not finish")
+	}
+}
+
+// carriedToolText is everything the model read out of tool results by request n.
+func carriedToolText(p *fakeProvider, request int) string {
+	carried := ""
+	for _, m := range p.requestAt(request).Messages {
+		if m.Role == llm.RoleTool {
+			carried += m.Content
+		}
+	}
+	return carried
+}
+
+// lastToolCard is the record the card ends up showing: the emission after the
+// condensation, not the one drawn while the tool was still running.
+func lastToolCard(t *testing.T, log *eventLog) store.ToolCallRecord {
+	t.Helper()
+	var record store.ToolCallRecord
+	for _, ev := range log.snapshot() {
+		if ev.name != "chat:tool" {
+			continue
+		}
+		if r, ok := ev.payload["toolCall"].(store.ToolCallRecord); ok && r.Status == store.ToolOK {
+			record = r
+		}
+	}
+	if record.Name == "" {
+		t.Fatal("no successful tool card was emitted")
+	}
+	return record
+}
+
+// TestALargeReadIsCondensedBeforeTheModelSeesIt pins the read half of the feature end to
+// end: the model asks for a file it did not bound, and what lands in its context is a
+// summary that names the file and says how to get the text back.
+//
+// The size is the point. Three hundred numbered lines are ~3k tokens on this request and on
+// every later one in a chat that keeps the result — the read is stored as a message like any
+// other — and the summary replaces all of it. The last line is asserted absent, because it is
+// the one thing the summary cannot carry.
+func TestALargeReadIsCondensedBeforeTheModelSeesIt(t *testing.T) {
+	folder := t.TempDir()
+	name := sourceFile(t, folder, "big.go", 300)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: readFileCall(name, "")}},
+			{{Type: llm.EventDelta, Text: "Fertig."}, {Type: llm.EventDone}},
+		},
+	}
+	digester := newDigester([]llm.StreamEvent{
+		{Type: llm.EventDelta, Text: "- `handler0` steht in Zeile 1; die Datei definiert 300 Handler."},
+		{Type: llm.EventDone},
+	})
+	engine, log := codingDigestEngine(t, folder, digestSettings(), provider, digester)
+	runTurn(t, engine, "project-1", "Was macht big.go?")
+
+	if got := digester.requestCount(); got != 1 {
+		t.Fatalf("digester calls = %d, want one condensation", got)
+	}
+	// The file is asked about with its own prompt, not the page's: what may not be lost is
+	// different, and a page prompt here would invite the summary to drop the line numbers
+	// the next call needs.
+	asked := ""
+	for _, m := range digester.requestAt(0).Messages {
+		asked += m.Content
+	}
+	if !strings.Contains(asked, `<file path="big.go">`) {
+		t.Errorf("the digester was not told which file it was reading: %q", truncateForTest(asked, 200))
+	}
+	if !strings.Contains(asked, "Textdatei") {
+		t.Error("the digester was given the page prompt for a source file")
+	}
+
+	carried := carriedToolText(provider, 1)
+	if !strings.Contains(carried, "handler0") {
+		t.Errorf("the summary did not reach the model: %q", truncateForTest(carried, 300))
+	}
+	if !strings.Contains(carried, "Zusammenfassung von big.go") {
+		t.Errorf("the notice does not name the file: %q", truncateForTest(carried, 300))
+	}
+	if !strings.Contains(carried, "offset/limit") {
+		t.Errorf("the notice does not say how to get the text back: %q", truncateForTest(carried, 300))
+	}
+	if strings.Contains(carried, "func handler299") {
+		t.Error("the whole file reached the model, so nothing was condensed")
+	}
+
+	card := lastToolCard(t, log)
+	if !card.Condensed {
+		t.Error("the card does not say a second model cut the result")
+	}
+	if card.SourceTokens <= card.ContextTokens || card.ContextTokens == 0 {
+		t.Errorf("the card reports %d → %d tokens, want the read's size then the summary's",
+			card.SourceTokens, card.ContextTokens)
+	}
+}
+
+// TestAnOutlineIsNeverCondensed is the rule the outline joins: the list is this app's own
+// deterministic answer, so a second model asked to summarise it could only lose the line numbers
+// the next read cites. The fixture is 300 declarations — well past the threshold — so what keeps
+// the digester away is the guard rather than the size.
+func TestAnOutlineIsNeverCondensed(t *testing.T) {
+	folder := t.TempDir()
+	name := sourceFile(t, folder, "big.go", 300)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: readFileCall(name, `, "outline": true`)}},
+			{{Type: llm.EventDelta, Text: "Fertig."}, {Type: llm.EventDone}},
+		},
+	}
+	digester := newDigester([]llm.StreamEvent{{Type: llm.EventDelta, Text: "sollte nicht laufen"}})
+	engine, log := codingDigestEngine(t, folder, digestSettings(), provider, digester)
+	runTurn(t, engine, "project-1", "Gib mir den Umriss von big.go")
+
+	if got := digester.requestCount(); got != 0 {
+		t.Fatalf("digester calls = %d, want none for an outline", got)
+	}
+	carried := carriedToolText(provider, 1)
+	// The fixture has to be big enough that the guard is what kept the digester away, rather
+	// than the outline happening to fall under the threshold.
+	if tokens, limit := llm.EstimateTokens(carried), digestSettings().Digest.DigestThreshold(); tokens <= limit {
+		t.Fatalf("the outline is %d tokens, not above the %d-token threshold", tokens, limit)
+	}
+	if !strings.Contains(carried, "func handler299") {
+		t.Error("the outline did not deliver the declaration list")
+	}
+	if card := lastToolCard(t, log); card.Condensed {
+		t.Error("the card claims a cut that did not happen")
+	}
+}
+
+// TestATargetedReadIsNeverCondensed keeps the edit path working. A read that names an offset
+// is one the model has already decided about — it is what a coding chat does immediately
+// before `edit_file` — so its lines have to arrive as they are, however large the file is.
+// Condensing it would leave the model summarising the text it must copy into `old_string`.
+func TestATargetedReadIsNeverCondensed(t *testing.T) {
+	folder := t.TempDir()
+	name := sourceFile(t, folder, "big.go", 300)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			// Far past the threshold and still bounded: offset alone reads the whole file
+			// here, which is exactly the shape that must not be summarised.
+			{{Type: llm.EventDelta, Text: readFileCall(name, `, "offset": 1`)}},
+			{{Type: llm.EventDelta, Text: "Fertig."}, {Type: llm.EventDone}},
+		},
+	}
+	digester := newDigester([]llm.StreamEvent{{Type: llm.EventDelta, Text: "sollte nicht laufen"}})
+	engine, log := codingDigestEngine(t, folder, digestSettings(), provider, digester)
+	runTurn(t, engine, "project-1", "Lies big.go")
+
+	if got := digester.requestCount(); got != 0 {
+		t.Fatalf("digester calls = %d, want none for a bounded read", got)
+	}
+	if !strings.Contains(carriedToolText(provider, 1), "func handler299") {
+		t.Error("the bounded read did not deliver the file")
+	}
+	if card := lastToolCard(t, log); card.Condensed {
+		t.Error("the card claims a cut that did not happen")
+	}
+}
+
+// TestAReadBelowTheThresholdIsHandedOverWhole pins the cost side of the trade: a second
+// request for five lines costs more in time than it saves in tokens, so the result is
+// delivered as it came.
+func TestAReadBelowTheThresholdIsHandedOverWhole(t *testing.T) {
+	folder := t.TempDir()
+	name := sourceFile(t, folder, "small.go", 5)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: readFileCall(name, "")}},
+			{{Type: llm.EventDelta, Text: "Fertig."}, {Type: llm.EventDone}},
+		},
+	}
+	digester := newDigester([]llm.StreamEvent{{Type: llm.EventDelta, Text: "sollte nicht laufen"}})
+	engine, log := codingDigestEngine(t, folder, digestSettings(), provider, digester)
+	runTurn(t, engine, "project-1", "Lies small.go")
+
+	if got := digester.requestCount(); got != 0 {
+		t.Fatalf("digester calls = %d, want none below the threshold", got)
+	}
+	if !strings.Contains(carriedToolText(provider, 1), "func handler4") {
+		t.Error("the small file did not reach the model")
+	}
+	if card := lastToolCard(t, log); card.Condensed {
+		t.Error("the card claims a cut that did not happen")
+	}
+}
+
+// TestARepeatedReadIsCondensedAgainFromTheCache is the counterpart of the page rule, and it
+// is a cost rule rather than a tidy one. A page's escape hatch is a second scrape, so the
+// chat remembers what it condensed and hands the text over next time. A file's escape hatch
+// is a bounded read, which is never condensed at all — so the ledger must not exempt files:
+// a coding model re-reads a file as a matter of routine, once per turn, and a repeat that
+// handed over 20k tokens would undo this feature for the rest of the chat.
+//
+// The repeat costs one lookup and no request, because the cache is keyed on the text.
+func TestARepeatedReadIsCondensedAgainFromTheCache(t *testing.T) {
+	st := newTestStore(t)
+	digester := newDigester([]llm.StreamEvent{
+		{Type: llm.EventDelta, Text: "- `handler0` steht in Zeile 1."},
+		{Type: llm.EventDone},
+	})
+	engine, _ := newDigestEngine(t, st, digestSettings(), digester)
+	call := llm.ToolCall{ID: "call-read", Name: tools.ToolReadFile, Arguments: `{"path":"big.go"}`}
+	output := numberedRead("big.go", 300)
+	turn := tools.TurnRef{BackendID: "fake"}
+
+	first, firstCondensed := engine.condenseToolOutput(context.Background(), "chat-1", call, output, turn)
+	if !firstCondensed {
+		t.Fatal("the first read was not condensed")
+	}
+	second, secondCondensed := engine.condenseToolOutput(context.Background(), "chat-1", call, output, turn)
+	if !secondCondensed {
+		t.Fatal("a repeated read was handed over whole: a file is not exempt after one condensation")
+	}
+	if second != first {
+		t.Errorf("the repeat was not served from the cache:\nfirst  %q\nsecond %q",
+			truncateForTest(first, 200), truncateForTest(second, 200))
+	}
+	if got := digester.requestCount(); got != 1 {
+		t.Errorf("digester calls = %d, want one: the repeat is a cache hit, not a request", got)
+	}
+	if strings.Contains(second, "func handler299") {
+		t.Error("the whole file reached the model on the repeat")
+	}
+}
+
+// TestTheFoldersRulesSurviveACondensation keeps the nearest AGENTS.md out of the summary.
+// The block is appended by read_file because the model needs it beside the file, and it is
+// instructions rather than content: a summariser that compressed "run make check before
+// claiming a change works" into "the folder has guidance" would drop the rule and keep the
+// shape of it. So the guidance travels through verbatim while the lines above it are cut.
+func TestTheFoldersRulesSurviveACondensation(t *testing.T) {
+	folder := t.TempDir()
+	name := sourceFile(t, folder, filepath.Join("sub", "big.go"), 300)
+	rule := "Regel: vor jedem Commit `make check` laufen lassen.\n"
+	if err := os.WriteFile(filepath.Join(folder, "sub", workspace.AgentsFileName), []byte(rule), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The guidance file is cached by path, size and modification time, and this folder is
+	// new each run; clearing it keeps a previous test's entry from answering for this one.
+	workspace.ForgetAgentDocs()
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: readFileCall(name, "")}},
+			{{Type: llm.EventDelta, Text: "Fertig."}, {Type: llm.EventDone}},
+		},
+	}
+	digester := newDigester([]llm.StreamEvent{
+		{Type: llm.EventDelta, Text: "- `handler0` steht in Zeile 1."},
+		{Type: llm.EventDone},
+	})
+	engine, _ := codingDigestEngine(t, folder, digestSettings(), provider, digester)
+	runTurn(t, engine, "project-1", "Was steht in sub/big.go?")
+
+	carried := carriedToolText(provider, 1)
+	if !strings.Contains(carried, "Zusammenfassung von sub/big.go") {
+		t.Fatalf("the read was not condensed: %q", truncateForTest(carried, 300))
+	}
+	if strings.Contains(carried, "func handler299") {
+		t.Error("the file's lines reached the model, so nothing was condensed")
+	}
+	if !strings.Contains(carried, "<project_agents_md") {
+		t.Errorf("the guidance block was lost: %q", truncateForTest(carried, 400))
+	}
+	if !strings.Contains(carried, "vor jedem Commit `make check` laufen lassen") {
+		t.Errorf("the folder's rule was summarised instead of carried through: %q",
+			truncateForTest(carried, 400))
+	}
+}
+
+// TestAReadsFramingIsNotCondensed pins the splitter directly, over both trailers a read can
+// carry. The continuation line is the only thing that tells a model a summary of 500 lines
+// came out of a file of 3000 — without it the summary reads as the whole file and the model
+// stops. The guidance block is instructions rather than content, so it is carried rather
+// than compressed.
+func TestAReadsFramingIsNotCondensed(t *testing.T) {
+	out := "big.go — Zeilen 1–500 von 3000\n\n     1| package chat\n     2| \n" +
+		"\nDie Datei geht weiter. Lies den nächsten Abschnitt mit offset=501.\n" +
+		"\n<project_agents_md path=\"sub/AGENTS.md\">\nRegel: make check.\n</project_agents_md>\n" +
+		"Diese Anweisungen gelten für den Ordner dieser Datei."
+
+	framing, body, trailer, ok := splitReadBody(out)
+	if !ok {
+		t.Fatalf("a read result was not recognised: %q", truncateForTest(out, 120))
+	}
+	if framing != "big.go — Zeilen 1–500 von 3000\n\n" {
+		t.Errorf("framing = %q", framing)
+	}
+	if !strings.Contains(body, "package chat") || strings.Contains(body, "offset=501") {
+		t.Errorf("the body is not just the lines: %q", body)
+	}
+	if !strings.Contains(trailer, "offset=501") {
+		t.Errorf("the continuation line was left out of the trailer: %q", trailer)
+	}
+	if !strings.Contains(trailer, `<project_agents_md path="sub/AGENTS.md">`) {
+		t.Errorf("the guidance block was left out of the trailer: %q", trailer)
+	}
+	// A result that is not a read at all — a refusal, an empty file, the turn's "already
+	// read" sentence — is handed back unsplit so the caller delivers it unchanged.
+	if _, _, _, ok := splitReadBody("Die Datei ist leer."); ok {
+		t.Error("a result with no line block was split")
+	}
+}
+
+// TestAFileThatQuotesTheMarkersIsNotCutAtThem is the regression for the first version of the
+// splitter, which cut at the *first* occurrence of either marker. This app's own
+// `tools/project.go` writes both of these sentences, so reading it took the last 157 lines for
+// framing and handed them over uncondensed — the opposite of what a condensation is for.
+//
+// What tells framing from content is the numbering: every line of the body starts with the
+// line number and a pipe, so a quoted marker always sits after it, and only real framing
+// starts a line.
+func TestAFileThatQuotesTheMarkersIsNotCutAtThem(t *testing.T) {
+	body := "     1| fmt.Fprintf(&sb, \"\\n\"+" + tools.ReadContinueNotice + "\"%d.\", n)\n" +
+		"     2| fmt.Fprintf(&sb, \"" + tools.ReadGuidanceTag + " path=%q>\\n\", doc.Path)\n" +
+		"     3| return nil\n"
+	out := "project.go — Zeilen 1–3 von 3\n\n" + body
+
+	framing, got, trailer, ok := splitReadBody(out)
+	if !ok {
+		t.Fatalf("a read result was not recognised: %q", truncateForTest(out, 120))
+	}
+	if trailer != "" {
+		t.Errorf("a quoted marker was taken for framing: %q", truncateForTest(trailer, 200))
+	}
+	if got != body {
+		t.Errorf("the body was cut:\n got %q\nwant %q", truncateForTest(got, 200), truncateForTest(body, 200))
+	}
+	if framing != "project.go — Zeilen 1–3 von 3\n\n" {
+		t.Errorf("framing = %q", framing)
+	}
+}
+
+// TestAnOutlineIsRecognised is the same question for the other exemption, and it has one case the
+// bounded read does not: `false` has to stay false. A read treats a bounded oddity as untouched
+// either way, while a misread here would answer a request for the text with a map.
+func TestAnOutlineIsRecognised(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args string
+		want bool
+	}{
+		{"true", `{"path":"a.go","outline":true}`, true},
+		{"true as a string", `{"path":"a.go","outline":"true"}`, true},
+		{"true as a number", `{"path":"a.go","outline":1}`, true},
+		{"false", `{"path":"a.go","outline":false}`, false},
+		{"false as a string", `{"path":"a.go","outline":"false"}`, false},
+		{"zero", `{"path":"a.go","outline":0}`, false},
+		{"an empty string", `{"path":"a.go","outline":""}`, false},
+		{"absent", `{"path":"a.go"}`, false},
+		{"an unreadable argument object", `not json`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := outlineRequested(tc.args); got != tc.want {
+				t.Errorf("outlineRequested(%s) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestABoundedReadIsRecognised pins the loose reading of the two range arguments. The tool
+// service accepts a number, a string or nothing at all (tools.decodeLoose), so the rule that
+// decides "the model already knows what it wants" has to accept the same shapes — and an
+// empty string or a null is the model saying nothing, not naming a range.
+func TestABoundedReadIsRecognised(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args string
+		want bool
+	}{
+		{"whole file", `{"path":"a.go"}`, false},
+		{"offset", `{"path":"a.go","offset":1}`, true},
+		{"limit", `{"path":"a.go","limit":200}`, true},
+		{"a number written as a string", `{"path":"a.go","offset":"1"}`, true},
+		{"an emptied field", `{"path":"a.go","offset":""}`, false},
+		{"an explicit null", `{"path":"a.go","offset":null}`, false},
+		// Zero is what the tool resolves to "from the top, default window": `looseInt(x, 0)`
+		// then the default, so these are the same call as the first case and are classified
+		// the same way. Treating them as bounded would leave whole files uncondensed for a
+		// model that writes its arguments out in full.
+		{"an explicit zero offset", `{"path":"a.go","offset":0}`, false},
+		{"an explicit zero limit", `{"path":"a.go","limit":0}`, false},
+		{"a zero written as a string", `{"path":"a.go","limit":"0"}`, false},
+		{"two zeroes", `{"path":"a.go","offset":0,"limit":0}`, false},
+		{"an unreadable argument object", `not json`, false},
+		{"no arguments at all", ``, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := targetedRead(tc.args); got != tc.want {
+				t.Errorf("targetedRead(%s) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
 }

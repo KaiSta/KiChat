@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { App, formatDuration, formatNumber, formatSpeed } from '../lib/api'
 import type { store as storeTypes, tools as toolTypes } from '../lib/api'
+import { copyText } from '../lib/clipboard'
 import type { MessageKey } from '../lib/i18n'
 import { useThrottled } from '../lib/stream'
 import { errText, useStore } from '../store'
@@ -106,19 +107,36 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
   // what turns a tool call that means "minutes of GPU" into something the user can watch and
   // stop — the two things a tool card could not do for a picture until now.
   const draw = useStore((s) => s.draws[call.messageId])
+  // A command's output while it runs. The store drops it when the call's record arrives, so
+  // its presence means "this is happening now" — a build that prints nothing for two minutes
+  // is otherwise indistinguishable from a card that stopped working.
+  const liveOutput = useStore((s) => s.toolOutput[call.id])
   const [stopping, setStopping] = useState(false)
 
+  // A declined change is not a fault, so it is not shown as one: the app worked, the
+  // person decided, and a red "Error" at the moment they took control would read as the
+  // app breaking. It is toned like a cancellation because it is the same kind of fact —
+  // the call was not executed.
   const tone =
     call.status === 'ok'
       ? 'badge-ok'
       : call.status === 'error'
         ? 'badge-danger'
-        : call.status === 'cancelled'
+        : call.status === 'cancelled' || call.status === 'denied'
           ? 'badge-warn'
           : 'badge-accent'
 
   const parsedArgs = prettyJSON(call.argsJson)
   const result = parseResult(call.resultJson)
+  // The window's own sentence about the result, when the tool reported one. The text under
+  // the expand toggle stays exactly what the model was given — that is the record — while
+  // this line is the same fact in the reader's language.
+  const summary = parseSummary(call.resultJson)
+  // The line a command ran — or, when the app refused it, the line the user has to run
+  // themselves. Offered on every terminal call rather than only on a refusal: a command worth
+  // refusing is a command worth copying, and a button that appears only once something broke
+  // is one nobody knows is there.
+  const command = call.name === 'run_command' ? commandArgument(call.argsJson) : ''
 
   return (
     <div
@@ -130,21 +148,27 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
         className="flex w-full items-center gap-2 text-left"
         onClick={() => setOpen((v) => !v)}
       >
-        <span className={`badge ${tone}`}>
+        <span className={`badge shrink-0 ${tone}`}>
           {call.status === 'ok'
             ? t('tool.ok')
             : call.status === 'error'
               ? t('tool.error')
               : call.status === 'cancelled'
                 ? t('tool.cancelled')
-                : t('tool.running')}
+                : call.status === 'denied'
+                  ? t('tool.denied')
+                  : t('tool.running')}
         </span>
-        <strong style={{ color: 'var(--text)' }}>
+        <strong className="shrink-0 whitespace-nowrap" style={{ color: 'var(--text)' }}>
           {tDynamic(`tool.${call.name}`) !== `tool.${call.name}`
             ? tDynamic(`tool.${call.name}`)
             : call.name}
         </strong>
-        <span className="faint mono truncate" style={{ maxWidth: 360 }}>
+        {/* The arguments take whatever room is left and ellipsise into it. They used to be an
+            empty span for most tools, so nothing here needed to shrink; now that every call
+            shows its arguments, a fixed width made the tool's own name wrap in a narrow
+            window — the one part of the row that must never move. */}
+        <span className="faint mono min-w-0 flex-1 truncate">
           {summariseArgs(call.argsJson)}
         </span>
         {/* What the result cost and what of it the model reads. One number when they
@@ -168,9 +192,53 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
                 : t('tool.tokensOne', { tokens: formatNumber(call.sourceTokens) })}
             </span>
           ))}
-        <span className="ml-auto faint">{formatDuration(call.durationMs)}</span>
+        <span className="ml-auto faint shrink-0 whitespace-nowrap">
+          {formatDuration(call.durationMs)}
+        </span>
       </button>
 
+      {/* What the call produced, in the window's language. It sits outside the toggle
+          because it is the part worth reading without opening anything, and it is a project
+          tool's own summary rather than a translation of the model's text — the two halves
+          are written separately so neither can drift into describing the other. */}
+      {summary && (
+        <div className="faint mt-1 truncate text-[11px]" title={result}>
+          {tDynamic(summary.code, summaryVars(summary.args))}
+        </div>
+      )}
+
+      {/* Why a call failed, and the line to take away, without opening anything: an error is
+          the one part of a tool's detail a person has to read to act on it. A refusal that sat
+          behind the expand toggle — as every tool error did — is a sentence nobody reads, and
+          this one is the app telling them which command to run themselves. */}
+      {(call.error || command) && (
+        <div className="mt-1 flex items-start gap-2 text-[11px]">
+          {call.error && (
+            <div className="min-w-0 flex-1" style={{ color: 'var(--danger)' }}>
+              {errText(call.error)}
+            </div>
+          )}
+          {command && <CopyLine text={command} label={t('tool.copyCommand')} />}
+        </div>
+      )}
+
+      {liveOutput && (
+        <div className="mt-2">
+          <div className="faint mb-1">{t('tool.liveOutput')}</div>
+          {/* Fixed height, scrolled to the newest line: the text is a bounded tail of the
+              output, and a card that grew with it would push the reply off the screen for
+              the whole length of a build. */}
+          <pre
+            className="mono max-h-40 overflow-auto whitespace-pre-wrap rounded p-2 text-[11px]"
+            style={{ background: 'var(--code-bg)', border: '1px solid var(--border)' }}
+            ref={(el) => {
+              if (el) el.scrollTop = el.scrollHeight
+            }}
+          >
+            {liveOutput}
+          </pre>
+        </div>
+      )}
       {draw && (
         <LiveDraw
           preview={draw.preview}
@@ -205,6 +273,35 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
         </div>
       )}
 
+      {/* The turn's Stop and this button are different promises: Stop abandons the answer, so
+          a command started with the wrong flags would cost the whole turn. This ends the
+          command alone, and the tool reports it to the model as a result — the output so far
+          and "the person stopped this" — so the turn carries on with something to work from.
+          Offered only while the call is still pending, because that is the only time there is
+          something to end. */}
+      {call.name === 'run_command' && call.status === 'pending' && (
+        <div className="mt-1 flex items-center gap-2">
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={stopping}
+            title={t('tool.stopCommandHint')}
+            onClick={async () => {
+              setStopping(true)
+              try {
+                await App.StopToolCommand(call.chatId, call.id)
+              } catch (err) {
+                useStore.getState().toast('error', errText(err))
+              } finally {
+                setStopping(false)
+              }
+            }}
+          >
+            ⏹ {t('tool.stopCommand')}
+          </button>
+        </div>
+      )}
+
       {open && (
         <div className="mt-2 space-y-2">
           <div>
@@ -216,12 +313,6 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
               {parsedArgs}
             </pre>
           </div>
-          {call.error && (
-            <div>
-              <div className="faint mb-1">{t('tool.error')}</div>
-              <div style={{ color: 'var(--danger)' }}>{errText(call.error)}</div>
-            </div>
-          )}
           <div>
             <div className="faint mb-1">{t('tool.result')}</div>
             <pre
@@ -234,6 +325,50 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
         </div>
       )}
     </div>
+  )
+}
+
+/** The command a `run_command` call carries, empty when its arguments are not readable.
+ *
+ * A model can send arguments that are not JSON — that is what `decodeLoose` on the Go side
+ * exists for — so this is a copy convenience and never a reason to render nothing else.
+ */
+function commandArgument(argsJSON: string): string {
+  try {
+    const parsed = JSON.parse(argsJSON) as { command?: unknown }
+    return typeof parsed.command === 'string' ? parsed.command.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+/** One line, with a button that puts it on the clipboard.
+ *
+ * `text` is the line itself, not a rendering of it: what lands in the clipboard has to be
+ * runnable when it is pasted, so it is the unedited string the tool was given.
+ */
+function CopyLine({ text, label }: { text: string; label: string }) {
+  const t = useStore((s) => s.t)
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      type="button"
+      className="btn btn-sm shrink-0"
+      title={text}
+      onClick={() => {
+        // A refusal is reported rather than swallowed: this button exists for a line the app
+        // would not run, and a click that silently copies nothing is worse than no button.
+        void copyText(text).then(
+          () => {
+            setCopied(true)
+            window.setTimeout(() => setCopied(false), 1500)
+          },
+          () => useStore.getState().toast('error', t('chat.copyFailed')),
+        )
+      }}
+    >
+      {copied ? t('chat.copied') : `⧉ ${label}`}
+    </button>
   )
 }
 
@@ -362,19 +497,83 @@ function parseResult(raw: string): string {
   }
 }
 
-/** One-line hint of what a tool was called with, for the collapsed state. */
+/**
+ * The window's half of a tool result: a code into the dictionaries and its arguments.
+ *
+ * A result carries it beside the model's text (`{"content": …, "summary": {"code": …}}`),
+ * which is what lets the card say "3 hits in 12 files" in the reader's language while the
+ * expand toggle still shows the exact text the turn was handed. A result without one — every
+ * research tool — renders its text alone, which is what it did before.
+ */
+function parseSummary(raw: string): { code: string; args: string[] } | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as { summary?: { code?: unknown; args?: unknown } }
+    const summary = parsed?.summary
+    if (!summary || typeof summary.code !== 'string' || summary.code === '') return null
+    const args = Array.isArray(summary.args) ? summary.args.map((arg) => String(arg)) : []
+    return { code: summary.code, args }
+  } catch {
+    return null
+  }
+}
+
+/** `{{1}}`, `{{2}}`… in order, as the dictionary substitutes them. */
+function summaryVars(args: string[]): Record<string, string> {
+  const vars: Record<string, string> = {}
+  args.forEach((arg, index) => {
+    vars[String(index + 1)] = arg
+  })
+  return vars
+}
+
+/** How much of one argument value the collapsed line keeps. */
+const ARG_VALUE_CHARS = 48
+
+/** One-line hint of what a tool was called with, for the collapsed state.
+ *
+ * Every argument, not a list of the keys somebody thought of: the line used to name five of
+ * them, so a `read_file` card looked like a call with no arguments and a reader could not tell
+ * a whole-file read from an outline (`outline=true`) without opening the card. The keys are
+ * the tool's own and the values the model's, so nothing here needs translating — and the
+ * pretty-printed JSON in the body is still the record.
+ *
+ * A value is flattened and cut, because `write_file` carries an entire file in `content` and
+ * `run_command` in `command`: the beginning is enough to recognise the call, and a line that
+ * long is not a hint of anything. Nested objects are skipped rather than rendered — no tool
+ * takes one today, and `[object Object]` is worse than nothing.
+ */
 function summariseArgs(raw: string): string {
   if (!raw) return ''
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(raw)
-    const parts: string[] = []
-    for (const key of ['query', 'url', 'document', 'from', 'to']) {
-      if (parsed[key] !== undefined) parts.push(`${key}=${String(parsed[key])}`)
-    }
-    return parts.join(' ')
+    parsed = JSON.parse(raw)
   } catch {
-    return raw.slice(0, 80)
+    return flatten(raw, 80)
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return ''
+  const entries = Object.entries(parsed as Record<string, unknown>).filter(
+    ([, value]) => value !== null && value !== undefined && value !== '' && typeof value !== 'object',
+  )
+  // Scalars first. `outline=true`, `offset=63`, `timeout_seconds=120` are short, and they are
+  // the part a glance is for; the path or the query is the long value the line truncates, and
+  // for a project tool the sentence under the card names the file anyway. A plain sort is
+  // stable, so each group keeps the order the model wrote.
+  entries.sort((a, b) => rankArg(a[1]) - rankArg(b[1]))
+  return entries
+    .map(([key, value]) => `${key}=${flatten(String(value), ARG_VALUE_CHARS)}`)
+    .join(' ')
+}
+
+/** Where a value sits in the collapsed line: numbers and booleans before text. */
+function rankArg(value: unknown): number {
+  return typeof value === 'string' ? 1 : 0
+}
+
+/** One line, cut at a length and marked when it was cut. */
+function flatten(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat
 }
 
 /* -------------------------------------------------------------------------

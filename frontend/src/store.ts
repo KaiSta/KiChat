@@ -3,6 +3,8 @@ import {
   App,
   EV,
   on,
+  type ApprovalDecision,
+  type ApprovalPayload,
   type chat,
   type config,
   type ImageProgressPayload,
@@ -10,10 +12,12 @@ import {
   type main,
   type research,
   type store as storeTypes,
+  type ToolOutputPayload,
 } from './lib/api'
 import { WindowSetDarkTheme, WindowSetLightTheme } from '../wailsjs/runtime/runtime'
 import {
   asLang,
+  errorCode,
   translate,
   translateDynamic,
   translateError,
@@ -62,6 +66,17 @@ function makeT(lang: Lang): (key: MessageKey, vars?: Record<string, string | num
  * assembled at runtime rather than written out. */
 function makeTDynamic(lang: Lang): (key: string, vars?: Record<string, string | number>) => string {
   return (key, vars) => translateDynamic(lang, key, vars)
+}
+
+/**
+ * A command the user has to run themselves, with the line to do it.
+ *
+ * `toolCallId` names the card the refusal sits on, so the hand-off and the transcript point at
+ * the same call rather than at two descriptions of it.
+ */
+export interface Handoff {
+  command: string
+  toolCallId: string
 }
 
 /** Live text for a message that is still streaming. */
@@ -128,6 +143,37 @@ interface State {
    * moment the draw answers. A row that reads this is reading "this is happening now".
    */
   draws: Record<string, DrawProgress>
+  /**
+   * toolCallId -> the output a command has printed so far, present only while that call is
+   * running. The record the call ends with carries the whole output, so the entry is dropped
+   * then: shown beside it, the same text would appear twice, and the live view would keep a
+   * Stop-era snapshot of a command that is over.
+   */
+  toolOutput: Record<string, string>
+  /**
+   * chatId -> a command the app refused to run because it needs administrator rights, with
+   * the exact line. Present from the moment the refusal arrives until the user dismisses it:
+   * the app cannot run it, so the next move is theirs, and the line has to be where the next
+   * thing they type is. Derived from the event rather than from the chat's history, so a chat
+   * opened tomorrow does not offer a hand-off for a refusal it answered yesterday.
+   */
+  handoffs: Record<string, Handoff>
+  /**
+   * chatId -> the change to that chat's project folder waiting for an answer, present
+   * only while the question is on screen. The turn that asked is blocked on it, so an
+   * entry here means that chat is not progressing until it is answered.
+   *
+   * Keyed by chat because two chats can run turns at once, each stuck on its own
+   * question; the entry is what the card renders from, and `approvalId` is what the
+   * answer names.
+   */
+  approvals: Record<string, ApprovalPayload>
+  /**
+   * chatId -> what that chat has changed in its folder, most recent first, with the diff and
+   * whether undo would be safe. Loaded when a project chat is opened and refreshed when a
+   * change lands, so the header's count and the panel agree with the folder.
+   */
+  fileChanges: Record<string, main.FileChange[]>
   running: Record<string, boolean>
   /** chatId -> phase such as "tool" or "compacting". */
   phase: Record<string, string>
@@ -145,12 +191,63 @@ interface State {
   nextModel: { backend: string; model: string } | null
   setNextModel: (value: { backend: string; model: string } | null) => void
 
+  /** Re-read a chat's changed files after a change, a revert, or a switch to it. */
+  loadFileChanges: (chatId: string) => Promise<void>
+  /**
+   * Put one file back the way the chat found it, then reload the list.
+   *
+   * The backend refuses in the two cases a revert would be wrong — the file was edited
+   * afterwards, or a turn is still running — and its sentence is what the toast shows. A
+   * successful revert emits nothing, so the list is re-read here rather than waited for.
+   */
+  revertFile: (chatId: string, path: string) => Promise<void>
+
   /* actions */
   t: (key: MessageKey, vars?: Record<string, string | number>) => string
   /** For keys built at runtime: see `translateDynamic`. */
   tDynamic: (key: string, vars?: Record<string, string | number>) => string
   toast: (kind: Toast['kind'], message: string) => void
   dismissToast: (id: number) => void
+  /**
+   * Answer a change waiting for confirmation. `once` allows this one change, `always`
+   * allows every later one in the same chat for as long as it is open, anything else
+   * declines.
+   */
+  /**
+   * Answer the waiting question.
+   *
+   * `editedLine` is the command as it stood in the card's field when the answer was given,
+   * and only a command answer carries one. It travels as an argument rather than as a second
+   * binding for the callers that have no line to give: a change has none, and an unchanged
+   * command is the plain answer the backend already reads.
+   */
+  resolveApproval: (
+    chatId: string,
+    approvalId: string,
+    decision: ApprovalDecision,
+    editedLine?: string,
+  ) => Promise<void>
+  /** Put a hand-off away: the line is still in the transcript's card, so nothing is lost. */
+  dismissHandoff: (chatId: string) => void
+  /**
+   * Answer the waiting question *and* turn its kind of question off for good: the shortcut a
+   * card offers so the standing answer does not have to be found in Settings first.
+   *
+   * `kind` names which switch, not which tool: the two are separate permissions and granting
+   * one must not grant the other. The save happens before the answer, so a failed save leaves
+   * the card on screen rather than reporting a permission that was never stored.
+   */
+  stopAsking: (
+    chatId: string,
+    approvalId: string,
+    kind: 'change' | 'command',
+    /**
+     * The line the card held, when it was edited. The same click has to run what is on screen:
+     * a person who fixed a typo and then switched the question off meant their line, not the
+     * model's.
+     */
+    editedLine?: string,
+  ) => Promise<void>
 
   bootstrap: () => Promise<void>
   setLang: (lang: Lang) => void
@@ -172,8 +269,20 @@ interface State {
   selectChat: (id: string) => Promise<void>
   refreshChatState: () => Promise<void>
   newChat: (backend?: string, model?: string) => Promise<string | null>
+  /**
+   * A new coding project on a folder the user picked. The folder is chosen by the
+   * caller (App.PickProjectFolder), so a cancelled dialog never reaches the backend and
+   * an unusable one is answered by the backend's own refusal, translated.
+   */
+  newProject: (workspace: string) => Promise<string | null>
   deleteChat: (id: string) => Promise<void>
   renameChat: (id: string, title: string) => Promise<void>
+  /**
+   * Empty a conversation and keep the chat. It is the only way to start over in a project,
+   * because a project *is* its conversation: a second project on the same folder would be a
+   * second copy of the settings that make it that project.
+   */
+  clearChat: (id: string) => Promise<void>
 
   send: (text: string) => Promise<void>
   stop: () => Promise<void>
@@ -183,6 +292,9 @@ interface State {
 }
 
 let toastSeq = 0
+
+/** The newest request per chat for a project's changed files; see loadFileChanges. */
+const fileChangeSeq: Record<string, number> = {}
 
 export const useStore = create<State>((set, get) => {
   /** Insert or replace a message, keeping the list ordered by seq. */
@@ -232,6 +344,10 @@ export const useStore = create<State>((set, get) => {
 
     streaming: {},
     draws: {},
+    toolOutput: {},
+    handoffs: {},
+    approvals: {},
+    fileChanges: {},
     running: {},
     phase: {},
     phaseWaitMs: {},
@@ -386,10 +502,47 @@ export const useStore = create<State>((set, get) => {
         set({ chatState: state })
         const running = { ...get().running, [id]: state.running }
         set({ running })
+        // A project's changed files come with it: the header's count is part of what the
+        // chat *is*, and loading it on demand would let a count appear only after a click.
+        if (state.chat.workspace) void get().loadFileChanges(id)
       } catch (err) {
         get().toast('error', errText(err))
       } finally {
         set({ chatLoading: false })
+      }
+    },
+
+    loadFileChanges: async (chatId) => {
+      // Answers can arrive out of order: two tool calls in one round each ask for the list, and
+      // the first query is the slower one when it was the read that found more files. The
+      // counter makes the newest *request* win rather than the last reply, so a list can never
+      // go backwards — which would show a row missing while the file sits changed on disk.
+      const seq = (fileChangeSeq[chatId] = (fileChangeSeq[chatId] ?? 0) + 1)
+      try {
+        const changes = await App.ProjectFileChanges(chatId)
+        if (fileChangeSeq[chatId] !== seq) return
+        // Keyed by chat, so a reply for a chat the user has since left is still wanted: the
+        // count belongs to that chat and will be read when it is opened again.
+        set((s) => ({ fileChanges: { ...s.fileChanges, [chatId]: changes } }))
+      } catch {
+        if (fileChangeSeq[chatId] !== seq) return
+        // A chat with no folder, or one whose folder moved, has nothing to list. An empty list
+        // rather than the previous one: a row that cannot be read is not a row that is still
+        // true, and the file tools report the folder where the model asks.
+        set((s) => ({ fileChanges: { ...s.fileChanges, [chatId]: [] } }))
+      }
+    },
+
+    revertFile: async (chatId, path) => {
+      try {
+        await App.RevertFileChange(chatId, path)
+      } catch (err) {
+        get().toast('error', errText(err))
+      } finally {
+        // Reloaded either way: a refused revert has still told the user *why*, and the row's
+        // state may have moved on since the list was read.
+        await get().loadFileChanges(chatId)
+        if (get().activeChatId === chatId) await get().refreshChatState()
       }
     },
 
@@ -408,6 +561,19 @@ export const useStore = create<State>((set, get) => {
     newChat: async (backend = '', model = '') => {
       try {
         const created = await App.CreateChat(backend, model)
+        await get().loadChats()
+        await get().selectChat(created.id)
+        set({ view: 'chat' })
+        return created.id
+      } catch (err) {
+        get().toast('error', errText(err))
+        return null
+      }
+    },
+
+    newProject: async (workspace) => {
+      try {
+        const created = await App.CreateProject(workspace)
         await get().loadChats()
         await get().selectChat(created.id)
         set({ view: 'chat' })
@@ -442,6 +608,30 @@ export const useStore = create<State>((set, get) => {
               ? { ...get().chatState!, chat: { ...get().chatState!.chat, title } }
               : get().chatState,
         })
+      } catch (err) {
+        get().toast('error', errText(err))
+      }
+    },
+
+    clearChat: async (id) => {
+      try {
+        await App.ClearChat(id)
+        // The whole state is re-read rather than patched: messages, compactions and
+        // attachments all go, and a cleared chat still showing the conversation it was
+        // cleared of is the one outcome this must not produce. A clear while a turn runs
+        // never gets here — the backend refuses it, and its sentence is what the toast
+        // shows.
+        if (get().activeChatId === id) await get().refreshChatState()
+        clearStreaming(id)
+        // A command whose output was on screen belongs to the conversation that was just
+        // dropped, so its text goes with it — and so does a hand-off, which is about a turn
+        // that no longer exists.
+        set({ toolOutput: {}, handoffs: {} })
+        // The undo records go with the conversation too (`Store.ClearChat`), so the changes
+        // panel's list is re-read rather than left as it was: a stale row would keep the
+        // header's count and offer a revert that silently does nothing.
+        await get().loadFileChanges(id)
+        get().toast('info', get().t('chat.cleared'))
       } catch (err) {
         get().toast('error', errText(err))
       }
@@ -484,6 +674,72 @@ export const useStore = create<State>((set, get) => {
       } catch (err) {
         get().toast('error', errText(err))
       }
+    },
+
+    resolveApproval: async (chatId, approvalId, decision, editedLine) => {
+      // Taken off screen before the call, not after it: the backend resumes the turn the
+      // moment it hears the answer, and a card still sitting there invites a second click
+      // on a question that has already been decided. The turn's own end (done, error, or
+      // stop) drops the entry for the case where nothing was ever clicked.
+      const asked = get().approvals[chatId]
+      set((s) => {
+        const approvals = { ...s.approvals }
+        delete approvals[chatId]
+        return { approvals }
+      })
+      try {
+        // The edited form answers through its own binding: an empty third argument would be
+        // indistinguishable from "the field was cleared", which is not an answer at all.
+        if (editedLine !== undefined) {
+          await App.ResolveToolApprovalWith(approvalId, decision, editedLine)
+        } else {
+          await App.ResolveToolApproval(approvalId, decision)
+        }
+      } catch (err) {
+        // The answer never reached Go, so the turn is still blocked on this question — and the
+        // card is the only way to answer it. A failed call therefore puts it back rather than
+        // leaving a chat waiting on buttons that are no longer on screen. Only if it is still
+        // *this* question: a newer one that arrived meanwhile belongs where it is.
+        if (asked && asked.approvalId === approvalId && !get().approvals[chatId]) {
+          set((s) => ({ approvals: { ...s.approvals, [chatId]: asked } }))
+        }
+        get().toast('error', errText(err))
+      }
+    },
+
+    dismissHandoff: (chatId) => {
+      set((s) => {
+        const handoffs = { ...s.handoffs }
+        delete handoffs[chatId]
+        return { handoffs }
+      })
+    },
+
+    stopAsking: async (chatId, approvalId, kind, editedLine) => {
+      const state = get()
+      if (!state.settings) return
+      // Set, not toggle: the other kind keeps whatever it was, because a save that turned a
+      // permission off as a side effect would be the opposite of what was clicked.
+      const auto = state.settings.autoApprove ?? { files: false, commands: false }
+      const next = {
+        ...state.settings,
+        autoApprove: kind === 'command' ? { ...auto, commands: true } : { ...auto, files: true },
+      }
+      try {
+        set({ settings: await App.SaveSettings(next) })
+      } catch (err) {
+        // Nothing is half-granted: the card stays on screen, so the change can still be
+        // answered by hand and the window never claims a switch is on when it is not.
+        get().toast('error', errText(err))
+        return
+      }
+      // This change was asked about before the switch existed, so it still needs its answer —
+      // and with the line the card was showing, not the model's original.
+      await get().resolveApproval(chatId, approvalId, 'once', editedLine)
+      get().toast(
+        'info',
+        get().t(kind === 'command' ? 'confirm.stoppedAskingCommands' : 'confirm.stoppedAskingFiles'),
+      )
     },
 
     regenerate: async (backend = '', model = '') => {
@@ -576,6 +832,48 @@ function wireEvents(
     upsertMessage(p.message)
   })
 
+  /*
+   * A change to the project folder is waiting for an answer here, and the turn is blocked
+   * on it. Nothing is filtered by the open chat: a question asked in a chat the user has
+   * since clicked away from has to still be answerable when they come back, and dropping it
+   * would leave that turn waiting on a card nobody can see. The card is only *rendered* for
+   * the open chat; the entry is what survives the switch.
+   */
+  on<ApprovalPayload>(EV.approval, (p) => {
+    set((s) => ({ approvals: { ...s.approvals, [p.chatId]: p } }))
+    // Its chatter is rendered on a tool call, and the call is on a message of that chat.
+    if (p.chatId === active()) void get().refreshChatState()
+  })
+
+  /*
+   * A running command's output, while it runs. Keyed by the call rather than the chat: the
+   * card that shows it is the one rendering that call, and a chat can run two commands in
+   * sequence without the second inheriting the first's text.
+   */
+  /*
+   * A refusal the user has to act on: the app cannot answer an administrator prompt, so the
+   * line is handed over rather than left in the transcript. Recognised by its code, not by its
+   * sentence — the sentence is translated, and which refusal this is has to survive a language
+   * switch.
+   */
+  on<{ chatId: string; toolCall: storeTypes.ToolCallRecord }>(EV.tool, (p) => {
+    // Not filtered by the open chat, for the reason the question above is not: a refused command
+    // in a project the user has since clicked away from is still theirs to run, and dropping the
+    // entry would lose the only place the line is offered where they type. It is keyed by chat
+    // and rendered for the open one, so coming back finds it.
+    if (p.toolCall.status !== 'error' || errorCode(p.toolCall.error) !== 'tools.needsElevation') return
+    const command = handoffCommand(p.toolCall.argsJson)
+    if (!command) return
+    set((s) => ({
+      handoffs: { ...s.handoffs, [p.chatId]: { command, toolCallId: p.toolCall.id } },
+    }))
+  })
+
+  on<ToolOutputPayload>(EV.toolOutput, (p) => {
+    if (p.chatId !== active()) return
+    set((s) => ({ toolOutput: { ...s.toolOutput, [p.toolCallId]: p.text } }))
+  })
+
   on<{ chatId: string; toolCall: storeTypes.ToolCallRecord }>(EV.tool, (p) => {
     if (p.chatId !== active()) return
     const state = get()
@@ -588,7 +886,25 @@ function wireEvents(
           }
         : m,
     )
-    set({ chatState: { ...state.chatState, messages } })
+    // The finished record carries the output, so the live one is dropped with it. A call
+    // still waiting for its answer (`pending`) keeps its text: the command may be running
+    // under an auto-approval or a remembered yes, and the card is the only place it shows.
+    const toolOutput = { ...get().toolOutput }
+    if (p.toolCall.status !== 'pending') delete toolOutput[p.toolCall.id]
+    set({ chatState: { ...state.chatState, messages }, toolOutput })
+    // A change that landed is a change the panel has to show, and the list is one query. The
+    // terminal belongs here as much as the two writers: a command is the tool that can rewrite
+    // every file in the folder (`gofmt -w .`), and the panel promises a diff against the file as
+    // it is now — leaving it stale after one would make that promise false until the chat is
+    // reopened. A read or a search does not move the folder, and neither does a declined call.
+    if (
+      (p.toolCall.status === 'ok' || p.toolCall.status === 'error') &&
+      (p.toolCall.name === 'write_file' ||
+        p.toolCall.name === 'edit_file' ||
+        p.toolCall.name === 'run_command')
+    ) {
+      void get().loadFileChanges(p.chatId)
+    }
   })
 
   on<{ chatId: string; phase: string; waitMs?: number }>(EV.status, (p) => {
@@ -611,7 +927,14 @@ function wireEvents(
   on<{ chatId: string; status: string }>(EV.done, (p) => {
     // Always clear the running flag, even for a chat that is no longer open,
     // otherwise the Stop button would stay stuck.
-    set((s) => ({ running: { ...s.running, [p.chatId]: false } }))
+    set((s) => {
+      const approvals = { ...s.approvals }
+      // A question that was never answered ends with its turn: the change it was asking
+      // about was refused by the cancellation, so the card must not outlive the turn
+      // offering to make it.
+      delete approvals[p.chatId]
+      return { running: { ...s.running, [p.chatId]: false }, approvals }
+    })
     if (p.chatId !== active()) return
     // Read the finished messages before dropping the stream buffers. A buffer is
     // keyed by message id and only cleared for ids the chat already holds, so
@@ -625,9 +948,11 @@ function wireEvents(
   })
 
   on<{ chatId: string; messageId?: string; error: string }>(EV.error, (p) => {
-    set((s) => ({
-      running: { ...s.running, [p.chatId]: false },
-    }))
+    set((s) => {
+      const approvals = { ...s.approvals }
+      delete approvals[p.chatId]
+      return { running: { ...s.running, [p.chatId]: false }, approvals }
+    })
     if (p.chatId === active()) {
       // Same order as the done handler: the stored row is authoritative, so it is
       // read before the buffer that renders on top of it is dropped.
@@ -730,6 +1055,21 @@ function wireEvents(
  */
 export function errText(err: unknown): string {
   return translateError(useStore.getState().lang, String(err))
+}
+
+/**
+ * The command a `run_command` call carried, empty when the arguments are not readable.
+ *
+ * A model may send arguments that are not JSON; `decodeLoose` on the Go side is the one that
+ * accepts them, and this is only a copy convenience.
+ */
+function handoffCommand(argsJSON: string): string {
+  try {
+    const parsed = JSON.parse(argsJSON) as { command?: unknown }
+    return typeof parsed.command === 'string' ? parsed.command.trim() : ''
+  } catch {
+    return ''
+  }
 }
 
 /** Convenience selector for the active chat's pending (unsent) attachments. */

@@ -26,6 +26,16 @@ unlabelled one* (they get different classes and a different colour), a `markdown
 fence for the one heading token the dark theme overrides, and a second chat with a
 seeded search message and a compaction.
 
+The fixture list holds both kinds of conversation — three chats and one **project**, so
+the sidebar's two groups and a project's card (folder name, permission note, and
+**four** `read_file` calls — an outline, an outline of a data file that has nothing
+to list, the window the first points at, each with its translated summary sentence,
+and a read that **failed**: `error` badge, the same arguments a successful call
+would show, and the translated refusal `tools.fileUnreadable` where a summary would
+be — a refused call carries none, which is why that card must not look like a blank
+one) are rendered without a flag. The markdown chat stays first in
+the array and therefore stays the one that opens.
+
 Query flags, each of which exists because the state is otherwise unreachable:
 
 | Flag | Renders |
@@ -45,6 +55,10 @@ Query flags, each of which exists because the state is otherwise unreachable:
 | `?upscaler=install` | the Real-ESRGAN download row with its button and its size; pressing it runs a four‑step fake download and ends with the switch on (see `documentation/UPSCALING.md` §6) |
 | `?upscaler=noarchive` | a platform with nothing published: the row says so where the button would be |
 | `?startwithapp=1` | the start-with-app switch |
+| `?approval=create\|edit\|overwrite\|two\|dirs\|occurrences\|truncated\|newline\|command` | a project chat whose turn stops at a change (or, with `command`, at a command line): the confirmation card, what it shows, and the pending tool call behind it. The change is a **hunk diff** — changed lines with three either side, numbered on both sides — so `two` shows the dots between two hunks, `occurrences` one hunk of twelve with the note that the other eleven are not shown, `newline` the diff with no rows at all (a change that is only the final newline), `dirs` adds the folders that would be created, `truncated` the shorter-than-the-change note, `command` the line, its folder, its shell and its limit. Press Allow, Always or Decline and the turn finishes — the tool card then reads `done` or `declined`. Allow on `command` first streams two `chat:tool-output` reports, so the card's live output is visible before its record replaces it. The command's line is a **field**: typing into it and then pressing Allow answers through `ResolveToolApprovalWith`, and the console logs `answered with an edited line: …` — a caller that quietly used the plain binding shows up as a missing line. The link under the buttons (*stop asking about file changes* / *about commands*) saves the matching auto-approval switch and answers the question: the card goes, the turn finishes, and the project header's note changes to what now runs unread |
+| `?refusal=elevation` | the terminal's refusal that never reaches a question: a `run_command` call that asked for administrator rights, with the sentence and the copyable line on the card, plus the *run it yourself* hand-off above the composer (emit on opening the project, so it is the event and not just the fixture). *Open terminal* on that card calls `OpenProjectTerminal`, which the mock answers without starting anything — the toast is what proves the call landed; a chat with no folder rejects with the code, so the refusal line renders translated |
+| `?autoapprove=files\|commands\|both` | the standing answer in effect: the coding tab's switches on, and a project header that says what runs unasked instead of "with confirmation". The switch row itself is rendered with the flags off |
+| the project fixture, no flag | the changes panel: open the project and press *Changes* in its header. Three rows — a changed file with a hunk diff against the disk, a created one, and a binary that cannot be undone (no diff box, since there is nothing to read) — and *put back* removes a row and drops the header's count (`ProjectFileChanges`, `RevertFileChange`). Every project chat carries the same three rows, so the count is 3 on first load |
 | `?missingmodel=1` | a chat pinned to a model the catalogue does not list: the notice above the composer and the switch it offers |
 | `?locked=1` | the unlock screen instead of the shell (the mock bridge always opens, so this state has no other way in) |
 | `?locked=setup` | the first launch with no keyring: the screen that creates the key, its length rule and the mismatch line |

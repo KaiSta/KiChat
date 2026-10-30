@@ -23,12 +23,12 @@ func (s *Store) CreateChat(c Chat) error {
 	_, err := s.db.Exec(`
 INSERT INTO chats (id,title,created_at,updated_at,backend,model,system_prompt,
   system_prompt_preset,temperature,top_p,num_ctx,archived,auto_compact,
-  compact_threshold,keep_recent_turns,search_first)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  compact_threshold,keep_recent_turns,search_first,mode,workspace)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		c.ID, c.Title, millis(c.CreatedAt), millis(c.UpdatedAt), c.Backend, c.Model,
 		c.SystemPrompt, c.SystemPromptPreset, c.Temperature, c.TopP, c.NumCtx,
 		boolToInt(c.Archived), boolToInt(c.AutoCompact), c.CompactThreshold,
-		c.KeepRecentTurns, boolToInt(c.SearchFirst))
+		c.KeepRecentTurns, boolToInt(c.SearchFirst), NormaliseMode(c.Mode), c.Workspace)
 	return err
 }
 
@@ -38,11 +38,11 @@ func (s *Store) UpdateChat(c Chat) error {
 	res, err := s.db.Exec(`
 UPDATE chats SET title=?,updated_at=?,backend=?,model=?,system_prompt=?,
   system_prompt_preset=?,temperature=?,top_p=?,num_ctx=?,archived=?,auto_compact=?,
-  compact_threshold=?,keep_recent_turns=?,search_first=? WHERE id=?`,
+  compact_threshold=?,keep_recent_turns=?,search_first=?,mode=?,workspace=? WHERE id=?`,
 		c.Title, millis(c.UpdatedAt), c.Backend, c.Model, c.SystemPrompt,
 		c.SystemPromptPreset, c.Temperature, c.TopP, c.NumCtx, boolToInt(c.Archived),
 		boolToInt(c.AutoCompact), c.CompactThreshold, c.KeepRecentTurns,
-		boolToInt(c.SearchFirst), c.ID)
+		boolToInt(c.SearchFirst), NormaliseMode(c.Mode), c.Workspace, c.ID)
 	if err != nil {
 		return err
 	}
@@ -85,7 +85,74 @@ func (s *Store) DeleteChat(id string) error {
 	if _, err := tx.Exec(`DELETE FROM documents WHERE chat_id = ?`, id); err != nil {
 		return err
 	}
+	// file_snapshots holds no foreign key to chats either, so the undo records of a deleted
+	// chat are deleted by hand here for the same reason documents are.
+	if _, err := tx.Exec(`DELETE FROM file_snapshots WHERE chat_id = ?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM chats WHERE id=?`, id); err != nil {
+		return err
+	}
+	return s.commitAndCheckpoint(tx)
+}
+
+// ClearChat empties a chat's conversation and keeps the chat: the folder, the prompt, the
+// model, the sampler values and the title all stay, and the next turn begins the way the
+// first one did.
+//
+// It exists because a **project is one conversation**. A chat can be answered by creating
+// another one, but a second project on the same folder would be a second copy of the same
+// settings that then drifts from the first, so starting over has to happen *here*.
+//
+// Everything the conversation accumulated goes, in one transaction, and each table is
+// named for a reason:
+//
+//   - `messages` and their `tool_calls`. The call table holds no foreign key to messages
+//     (a call outlives the message row while a turn is in flight), so a row left behind
+//     would be an orphan nothing in the window could show.
+//   - `compactions`. They are summaries *of* the messages being deleted; kept, they would
+//     be sent as the conversation's memory on the next turn, describing a history that no
+//     longer exists — the same double-rendering DeleteCompactionsFrom exists to prevent.
+//   - `attachments`, with their `documents` and `chunks`. This is the one that would
+//     otherwise be forgotten, and the symptom would be quiet rather than visible: an
+//     attachment's extracted text is retrievable through `search_documents`, so a chat
+//     that had "cleared" its context could still answer a question from the file it was
+//     cleared of. The document and chunk tables hold no foreign key to chats and are
+//     deleted by hand here, for the reason DeleteChat does it.
+//
+// The chat's `updated_at` is touched because the conversation is what the list orders on,
+// and a chat that was just emptied is the one the user last worked in.
+func (s *Store) ClearChat(chatID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// The index first, and by hand: chunks_fts is a virtual table, so the cascade from
+	// documents does not reach its rows.
+	if s.FTS {
+		if _, err := tx.Exec(`DELETE FROM chunks_fts WHERE chat_id = ?`, chatID); err != nil {
+			return err
+		}
+	}
+	for _, statement := range []string{
+		`DELETE FROM chunks WHERE chat_id = ?`,
+		`DELETE FROM documents WHERE chat_id = ?`,
+		`DELETE FROM attachments WHERE chat_id = ?`,
+		`DELETE FROM tool_calls WHERE chat_id = ?`,
+		// The undo records go with the history they describe: a chat that was emptied can no
+		// longer say which change the record belongs to, and a revert offered from it would be
+		// a button whose label nobody could check.
+		`DELETE FROM file_snapshots WHERE chat_id = ?`,
+		`DELETE FROM compactions WHERE chat_id = ?`,
+		`DELETE FROM messages WHERE chat_id = ?`,
+	} {
+		if _, err := tx.Exec(statement, chatID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE chats SET updated_at=? WHERE id=?`, millis(time.Now()), chatID); err != nil {
 		return err
 	}
 	return s.commitAndCheckpoint(tx)
@@ -93,7 +160,7 @@ func (s *Store) DeleteChat(id string) error {
 
 const chatColumns = `id,title,created_at,updated_at,backend,model,system_prompt,
   system_prompt_preset,temperature,top_p,num_ctx,archived,auto_compact,
-  compact_threshold,keep_recent_turns,search_first`
+  compact_threshold,keep_recent_turns,search_first,mode,workspace`
 
 func scanChat(row interface{ Scan(...any) error }) (Chat, error) {
 	var c Chat
@@ -101,7 +168,8 @@ func scanChat(row interface{ Scan(...any) error }) (Chat, error) {
 	var archived, autoCompact, searchFirst int
 	err := row.Scan(&c.ID, &c.Title, &created, &updated, &c.Backend, &c.Model,
 		&c.SystemPrompt, &c.SystemPromptPreset, &c.Temperature, &c.TopP, &c.NumCtx,
-		&archived, &autoCompact, &c.CompactThreshold, &c.KeepRecentTurns, &searchFirst)
+		&archived, &autoCompact, &c.CompactThreshold, &c.KeepRecentTurns, &searchFirst,
+		&c.Mode, &c.Workspace)
 	if err != nil {
 		return Chat{}, err
 	}
@@ -110,6 +178,9 @@ func scanChat(row interface{ Scan(...any) error }) (Chat, error) {
 	c.Archived = archived != 0
 	c.AutoCompact = autoCompact != 0
 	c.SearchFirst = searchFirst != 0
+	// A row from a newer build, or one edited by hand, is read as the mode this build
+	// knows rather than left as a value that would reach a switch with no case for it.
+	c.Mode = NormaliseMode(c.Mode)
 	return c, nil
 }
 
@@ -998,6 +1069,147 @@ FROM tool_calls WHERE chat_id=? ORDER BY created_at`, chatID)
 		out = append(out, tc)
 	}
 	return out, rows.Err()
+}
+
+// --- file snapshots --------------------------------------------------------
+
+// PutFileSnapshot records one change to one file, keeping the first pre-image.
+//
+// The insert carries the file as this chat found it, and a later change to the same file only
+// replaces what the app last wrote and counts itself. That is what makes "put this file back"
+// one button however many rounds the model took, and it keeps the row small: a turn that edits
+// the same file ten times stores one copy of the text it replaced, not ten.
+func (s *Store) PutFileSnapshot(snap FileSnapshot) error {
+	if snap.CreatedAt.IsZero() {
+		snap.CreatedAt = time.Now()
+	}
+	if snap.UpdatedAt.IsZero() {
+		snap.UpdatedAt = snap.CreatedAt
+	}
+	if snap.Revisions < 1 {
+		snap.Revisions = 1
+	}
+	// A change after a revert clears the marker: the file is the model's work again, so
+	// there is nothing to warn its next turn about. The pre-image is not touched — the text
+	// to put back stays the text from before this chat first touched the file.
+	//
+	// The outside-change marker is cleared here for the same reason: the digest it named is
+	// no longer the file, and a note already delivered about some older text must not stop
+	// the next one. Otherwise a file edited, announced, written by the model, and then
+	// hand-edited back to the announced version would match the stale marker and be silent.
+	_, err := s.db.Exec(`
+INSERT INTO file_snapshots (chat_id,path,before_text,existed,after_sha,revisions,created_at,updated_at,reverted_at,noted_sha)
+VALUES (?,?,?,?,?,?,?,?,0,'')
+ON CONFLICT(chat_id,path) DO UPDATE SET after_sha=excluded.after_sha,
+  revisions=file_snapshots.revisions+1, updated_at=excluded.updated_at,
+  reverted_at=0, noted_sha=''`,
+		snap.ChatID, snap.Path, snap.BeforeText, boolToInt(snap.Existed), snap.AfterSHA,
+		snap.Revisions, millis(snap.CreatedAt), millis(snap.UpdatedAt))
+	return err
+}
+
+// GetFileSnapshot loads one file's undo record.
+func (s *Store) GetFileSnapshot(chatID, path string) (FileSnapshot, bool, error) {
+	row := s.db.QueryRow(`SELECT chat_id,path,before_text,existed,after_sha,revisions,
+  reverted_at,noted_sha,created_at,updated_at FROM file_snapshots WHERE chat_id=? AND path=?`, chatID, path)
+	snap, err := scanFileSnapshot(row)
+	if err == sql.ErrNoRows {
+		return FileSnapshot{}, false, nil
+	}
+	if err != nil {
+		return FileSnapshot{}, false, err
+	}
+	return snap, true, nil
+}
+
+// ListFileSnapshots returns a chat's changed files, most recently changed first — the order a
+// panel wants, because the file a turn just wrote is the one the person is looking at.
+//
+// A file the user put back is not one of them: the change it describes is no longer in the
+// folder, so listing it would offer an undo for something that already happened. Its row lives
+// on until the marker is cleared, because the model still has to be told (see PendingReverts).
+func (s *Store) ListFileSnapshots(chatID string) ([]FileSnapshot, error) {
+	return s.fileSnapshots(`SELECT chat_id,path,before_text,existed,after_sha,revisions,
+  reverted_at,noted_sha,created_at,updated_at FROM file_snapshots
+WHERE chat_id=? AND reverted_at=0 ORDER BY updated_at DESC, path`, chatID)
+}
+
+// MarkFileSnapshotNoted records that a turn has told the model this outside version of a file.
+//
+// Only the digest, because only the question "is this the same outside text I already announced"
+// needs answering. A file the model then writes resets it (PutFileSnapshot), and a version edited
+// again afterwards has a different digest and is news in its own right.
+//
+// after is the digest the note was built against, and the update is conditional on it. The model
+// may rewrite the file during the very turn that carried the note: by then the row holds the new
+// text and a cleared marker, and stamping the old outside version over it would make a later edit
+// that happens to restore that same text look like one already announced.
+func (s *Store) MarkFileSnapshotNoted(chatID, path, sha, after string) error {
+	_, err := s.db.Exec(`UPDATE file_snapshots SET noted_sha=?
+WHERE chat_id=? AND path=? AND reverted_at=0 AND after_sha=?`, sha, chatID, path, after)
+	return err
+}
+
+// PendingReverts returns the files this chat's user put back, oldest first, whose marker has not
+// been cleared yet.
+//
+// It exists because of what the history says. A tool result in the transcript is a claim about a
+// file — "written, 40 lines" — and after a revert that claim is false; the model would reason
+// from text that is no longer in the folder, quote it, or edit around a line that moved. So the
+// next turn is told, and ClearReverts forgets the marker once that turn has had the note.
+func (s *Store) PendingReverts(chatID string) ([]FileSnapshot, error) {
+	return s.fileSnapshots(`SELECT chat_id,path,before_text,existed,after_sha,revisions,
+  reverted_at,noted_sha,created_at,updated_at FROM file_snapshots
+WHERE chat_id=? AND reverted_at>0 ORDER BY reverted_at, path`, chatID)
+}
+
+// MarkFileSnapshotReverted records that a file was put back. The row stays — the fact that the
+// model's own results are now wrong is worth keeping — and the marker is what makes it a note
+// for the next turn rather than an entry in the panel.
+func (s *Store) MarkFileSnapshotReverted(chatID, path string) error {
+	_, err := s.db.Exec(`UPDATE file_snapshots SET reverted_at=?
+WHERE chat_id=? AND path=? AND reverted_at=0`, millis(time.Now()), chatID, path)
+	return err
+}
+
+// ClearReverts drops the markers a turn has already told the model about.
+func (s *Store) ClearReverts(chatID string) error {
+	_, err := s.db.Exec(`DELETE FROM file_snapshots WHERE chat_id=? AND reverted_at>0`, chatID)
+	return err
+}
+
+func (s *Store) fileSnapshots(query string, chatID string) ([]FileSnapshot, error) {
+	rows, err := s.db.Query(query, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []FileSnapshot{}
+	for rows.Next() {
+		snap, scanErr := scanFileSnapshot(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, snap)
+	}
+	return out, rows.Err()
+}
+
+func scanFileSnapshot(row interface{ Scan(...any) error }) (FileSnapshot, error) {
+	var snap FileSnapshot
+	var existed int
+	var reverted, created, updated int64
+	if err := row.Scan(&snap.ChatID, &snap.Path, &snap.BeforeText, &existed, &snap.AfterSHA,
+		&snap.Revisions, &reverted, &snap.NotedSHA, &created, &updated); err != nil {
+		return FileSnapshot{}, err
+	}
+	snap.Existed = existed != 0
+	if reverted > 0 {
+		snap.RevertedAt = fromMillis(reverted)
+	}
+	snap.CreatedAt = fromMillis(created)
+	snap.UpdatedAt = fromMillis(updated)
+	return snap, nil
 }
 
 // --- caches ----------------------------------------------------------------

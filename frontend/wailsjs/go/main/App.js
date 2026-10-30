@@ -14,6 +14,10 @@ export function CheckLlamaRuntimeUpdate() {
   return window['go']['main']['App']['CheckLlamaRuntimeUpdate']();
 }
 
+export function ClearChat(arg1) {
+  return window['go']['main']['App']['ClearChat'](arg1);
+}
+
 export function ClearHiddenModels(arg1) {
   return window['go']['main']['App']['ClearHiddenModels'](arg1);
 }
@@ -30,12 +34,20 @@ export function CreateChat(arg1, arg2) {
   return window['go']['main']['App']['CreateChat'](arg1, arg2);
 }
 
+export function CreateProject(arg1) {
+  return window['go']['main']['App']['CreateProject'](arg1);
+}
+
 export function DeleteChat(arg1) {
   return window['go']['main']['App']['DeleteChat'](arg1);
 }
 
 export function DeleteCompaction(arg1, arg2) {
   return window['go']['main']['App']['DeleteCompaction'](arg1, arg2);
+}
+
+export function DetectTerminal() {
+  return window['go']['main']['App']['DetectTerminal']();
 }
 
 export function ExportBackup(arg1) {
@@ -162,6 +174,10 @@ export function OpenExternal(arg1) {
   return window['go']['main']['App']['OpenExternal'](arg1);
 }
 
+export function OpenProjectTerminal(arg1) {
+  return window['go']['main']['App']['OpenProjectTerminal'](arg1);
+}
+
 export function PickFiles() {
   return window['go']['main']['App']['PickFiles']();
 }
@@ -182,6 +198,10 @@ export function PickModelFolder(arg1) {
   return window['go']['main']['App']['PickModelFolder'](arg1);
 }
 
+export function PickProjectFolder(arg1) {
+  return window['go']['main']['App']['PickProjectFolder'](arg1);
+}
+
 export function PickSaveFolder() {
   return window['go']['main']['App']['PickSaveFolder']();
 }
@@ -192,6 +212,10 @@ export function PickUpscalerBinary(arg1) {
 
 export function PreviewSystemPrompt(arg1) {
   return window['go']['main']['App']['PreviewSystemPrompt'](arg1);
+}
+
+export function ProjectFileChanges(arg1) {
+  return window['go']['main']['App']['ProjectFileChanges'](arg1);
 }
 
 export function RedactSecrets(arg1) {
@@ -228,6 +252,18 @@ export function RemoveOldLlamaBuilds() {
 
 export function RenameChat(arg1, arg2) {
   return window['go']['main']['App']['RenameChat'](arg1, arg2);
+}
+
+export function ResolveToolApproval(arg1, arg2) {
+  return window['go']['main']['App']['ResolveToolApproval'](arg1, arg2);
+}
+
+export function ResolveToolApprovalWith(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ResolveToolApprovalWith'](arg1, arg2, arg3);
+}
+
+export function RevertFileChange(arg1, arg2) {
+  return window['go']['main']['App']['RevertFileChange'](arg1, arg2);
 }
 
 export function SaveAttachmentAs(arg1) {
@@ -320,6 +356,10 @@ export function StopImageServer() {
 
 export function StopManagedModel(arg1) {
   return window['go']['main']['App']['StopManagedModel'](arg1);
+}
+
+export function StopToolCommand(arg1, arg2) {
+  return window['go']['main']['App']['StopToolCommand'](arg1, arg2);
 }
 
 export function TestBraveKey(arg1) {

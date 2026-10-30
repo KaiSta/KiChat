@@ -8,8 +8,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"kichat/internal/config"
 	"kichat/internal/images"
@@ -405,7 +404,7 @@ func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img im
 	// meter prices a generated picture exactly as it prices an attached one.
 	tokens := llm.EstimateImageTokens(1)
 	attachment := store.Attachment{
-		ID:            uuid.NewString(),
+		ID:            uuid.New().String(),
 		ChatID:        chatID,
 		MessageID:     messageID,
 		Kind:          string(ingest.KindImage),
@@ -423,7 +422,7 @@ func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img im
 		Derivation: derivation,
 	}
 	document := store.Document{
-		ID:           uuid.NewString(),
+		ID:           uuid.New().String(),
 		AttachmentID: attachment.ID,
 		ChatID:       chatID,
 		Title:        filename,

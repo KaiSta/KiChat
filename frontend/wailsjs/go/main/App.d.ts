@@ -16,6 +16,8 @@ export function AddAttachment(arg1:main.AttachmentInput):Promise<store.Attachmen
 
 export function CheckLlamaRuntimeUpdate():Promise<main.RuntimeUpdate>;
 
+export function ClearChat(arg1:string):Promise<void>;
+
 export function ClearHiddenModels(arg1:string):Promise<main.ModelCheckStatus>;
 
 export function ClearImageCache():Promise<main.ImageCacheClear>;
@@ -24,9 +26,13 @@ export function CompactNow(arg1:main.CompactRequest):Promise<chat.CompactResult>
 
 export function CreateChat(arg1:string,arg2:string):Promise<store.Chat>;
 
+export function CreateProject(arg1:string):Promise<store.Chat>;
+
 export function DeleteChat(arg1:string):Promise<void>;
 
 export function DeleteCompaction(arg1:string,arg2:string):Promise<void>;
+
+export function DetectTerminal():Promise<main.TerminalStatus>;
 
 export function ExportBackup(arg1:main.BackupExportRequest):Promise<main.BackupExportResult>;
 
@@ -90,6 +96,8 @@ export function OpenBackup(arg1:string,arg2:string):Promise<main.BackupPreview>;
 
 export function OpenExternal(arg1:string):Promise<void>;
 
+export function OpenProjectTerminal(arg1:string):Promise<void>;
+
 export function PickFiles():Promise<Array<string>>;
 
 export function PickImageFile(arg1:string,arg2:Array<string>):Promise<string>;
@@ -100,11 +108,15 @@ export function PickManagedModelFile(arg1:string):Promise<string>;
 
 export function PickModelFolder(arg1:string):Promise<string>;
 
+export function PickProjectFolder(arg1:string):Promise<string>;
+
 export function PickSaveFolder():Promise<string>;
 
 export function PickUpscalerBinary(arg1:string):Promise<string>;
 
 export function PreviewSystemPrompt(arg1:string):Promise<string>;
+
+export function ProjectFileChanges(arg1:string):Promise<Array<main.FileChange>>;
 
 export function RedactSecrets(arg1:string):Promise<string>;
 
@@ -123,6 +135,12 @@ export function RemoveLlamaBuild(arg1:string):Promise<void>;
 export function RemoveOldLlamaBuilds():Promise<number>;
 
 export function RenameChat(arg1:string,arg2:string):Promise<void>;
+
+export function ResolveToolApproval(arg1:string,arg2:string):Promise<boolean>;
+
+export function ResolveToolApprovalWith(arg1:string,arg2:string,arg3:string):Promise<boolean>;
+
+export function RevertFileChange(arg1:string,arg2:string):Promise<void>;
 
 export function SaveAttachmentAs(arg1:string):Promise<string>;
 
@@ -169,6 +187,8 @@ export function StopImageDraw(arg1:string):Promise<main.StopDrawResult>;
 export function StopImageServer():Promise<void>;
 
 export function StopManagedModel(arg1:string):Promise<void>;
+
+export function StopToolCommand(arg1:string,arg2:string):Promise<boolean>;
 
 export function TestBraveKey(arg1:string):Promise<research.SearchOutcome>;
 

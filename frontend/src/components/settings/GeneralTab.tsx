@@ -146,7 +146,7 @@ export function GeneralTab({
               className="input"
               type="number"
               min="1"
-              max="20"
+              max="100"
               value={draft.toolIterations}
               onChange={(e) => patch({ toolIterations: Number(e.target.value) })}
             />
@@ -183,10 +183,18 @@ function AboutSection({ info }: { info: main.AppInfo | null }) {
   const [copied, setCopied] = useState(false)
   const [copiedTrace, setCopiedTrace] = useState(false)
   const [tracePath, setTracePath] = useState('')
+  // The terminal the coding hand-off would open. Asked for here because this is the one
+  // screen a person opens to check that their platform's launcher resolves to something:
+  // the list that picks it can only be exercised on the operating system it belongs to.
+  const [term, setTerm] = useState<main.TerminalStatus | null>(null)
+  const [termFailed, setTermFailed] = useState(false)
   // The trace belongs to the start rather than to a chat, so it is asked for once
   // and shown even when no model is configured yet.
   useEffect(() => {
     void App.GetTracePath().then(setTracePath).catch(() => undefined)
+    void App.DetectTerminal()
+      .then(setTerm)
+      .catch(() => setTermFailed(true))
   }, [])
   // The row only appears once the backend has answered, so a failed bridge
   // shows nothing rather than a row of blanks.
@@ -201,6 +209,11 @@ function AboutSection({ info }: { info: main.AppInfo | null }) {
     { label: t('settings.buildDate'), value: built },
     { label: t('settings.platform'), value: info.platform },
     { label: t('settings.runtime'), value: info.goVersion },
+    // Only once the backend has answered: a row of blanks is worse than no row, and an
+    // older Go side has no such binding at all — which is what `termFailed` covers.
+    ...(term && !termFailed
+      ? [{ label: t('settings.terminal'), value: term.program || t('settings.terminalNone') }]
+      : []),
   ]
 
   return (

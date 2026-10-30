@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { Virtuoso } from 'react-virtuoso'
 import { OnFileDrop, OnFileDropOff } from '../../wailsjs/runtime/runtime'
-import { App, formatNumber, modelLabel, type store as storeTypes } from '../lib/api'
+import { App, folderName, formatNumber, modelLabel, type config, type store as storeTypes } from '../lib/api'
+import { type MessageKey } from '../lib/i18n'
 import { messageText, pendingAttachments, useStore } from '../store'
 import {
   ContextInspector,
@@ -20,10 +21,16 @@ import {
   ToolCallCard,
 } from './MessageParts'
 import { Markdown } from './Markdown'
+import { Confirmation } from './Confirmation'
+import { Handoff } from './Handoff'
+import { ProjectChanges } from './ProjectChanges'
 
 type Item =
   | { kind: 'message'; key: string; message: storeTypes.Message }
   | { kind: 'compaction'; key: string; compaction: storeTypes.Compaction }
+
+/** The one slash command the composer answers itself: empty this conversation, keep the chat. */
+const CLEAR_COMMAND = '/clear'
 
 export function ChatView() {
   const t = useStore((s) => s.t)
@@ -56,6 +63,9 @@ export function ChatView() {
   //    React spins in an infinite update loop (#185), which blanks the window
   //    the same way.
   const pending = useStore(useShallow(pendingAttachments))
+  // What the composer's permission note has to say. Read from the stored settings rather
+  // than from the chat, because the answer is the same for every chat in the window.
+  const autoApprove = useStore((s) => s.settings?.autoApprove)
 
   /* What a screen reader hears when a turn ends.
    *
@@ -232,7 +242,20 @@ export function ChatView() {
 
   const submit = async () => {
     const text = input.trim()
-    if (!text || running) return
+    if (!text) return
+    // A slash command is answered by the window rather than sent to the model: it names
+    // something the app does to the conversation, and there is no "clear this chat" a model
+    // could be told to do. The match is exact, so a message that merely begins with a slash
+    // — a path, a fragment of Markdown — still travels as a message. It is handled before
+    // the running guard on purpose: a clear during a turn is refused by the backend with a
+    // sentence, and swallowing the command instead would look like the app ignoring it.
+    if (text.toLowerCase() === CLEAR_COMMAND) {
+      if (!activeChatId) return
+      setInput('')
+      await useStore.getState().clearChat(activeChatId)
+      return
+    }
+    if (running) return
     setInput('')
     // Sending is a deliberate move to the newest content, so the list follows again even
     // if the user had scrolled up to read: their own message and the reply to it belong
@@ -272,6 +295,8 @@ export function ChatView() {
     return <div className="flex flex-1 items-center justify-center faint">{t('common.loading')}</div>
   }
 
+  const permission = permissionBadge(t, autoApprove)
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Title bar for the chat */}
@@ -287,6 +312,33 @@ export function ChatView() {
           }
           onBlur={(e) => void useStore.getState().renameChat(activeChatId, e.target.value)}
         />
+        {/*
+          A project says where it works and, while the file tools can only read, that
+          they can only read. Both belong in the header rather than in a settings
+          screen: which folder an agent is looking at is the one fact that decides
+          whether its answer is about your code or about code in general, and "it can
+          read this" is the difference between a tool you hand your project to and one
+          you would not.
+        */}
+        {chatState?.chat.workspace && (
+          <div className="flex shrink-0 items-center gap-2 text-[11px]">
+            <span className="badge" title={chatState.chat.workspace}>
+              📁 {folderName(chatState.chat.workspace)}
+            </span>
+            {/* What the folder's permission is, in one word. It used to read "Read-only"
+                because there was no write tool, and a badge that still said that now would be
+                the one place in the window that lies about what the model can do. The same
+                argument applies to the other direction: with the confirmation switched off in
+                the settings, "with confirmation" would be that lie. */}
+            <span className="faint" title={permission.hint}>
+              {permission.badge}
+            </span>
+          </div>
+        )}
+        {/* A project's changes are part of what the chat *is*, not a tool: the transcript says
+            what happened one card at a time, and nothing there answers "which files are
+            different now". Beside the folder and the permission, where the folder is. */}
+        {chatState?.chat.workspace && <ProjectChanges chatId={activeChatId} />}
         <SearchFirstToggle />
       </div>
 
@@ -302,8 +354,12 @@ export function ChatView() {
         {items.length === 0 ? (
           <div className="flex h-full items-center justify-center p-8">
             <div className="max-w-md text-center">
-              <div className="mb-2 text-lg font-medium">{t('chat.empty.title')}</div>
-              <p className="muted text-[13px]">{t('chat.empty.hint')}</p>
+              <div className="mb-2 text-lg font-medium">
+                {chatState?.chat.workspace ? folderName(chatState.chat.workspace) : t('chat.empty.title')}
+              </div>
+              <p className="muted text-[13px]">
+                {chatState?.chat.workspace ? t('project.emptyHint') : t('chat.empty.hint')}
+              </p>
             </div>
           </div>
         ) : (
@@ -343,7 +399,14 @@ export function ChatView() {
 
       {/* Composer */}
       <div className="border-t px-4 py-3" style={{ borderColor: 'var(--border)' }}>
-        {/* First, because it is about the next request: a chat whose model has gone
+        {/* Before everything else, because the turn is stopped behind it: this chat cannot
+            make progress until it is answered, so it is the only thing here that is about
+            right now rather than about the next request. */}
+        <Confirmation />
+        {/* A question the app answered itself, by refusing: the line is the user's to run, so
+            it sits where they type rather than only on the card it was recorded on. */}
+        <Handoff />
+        {/* Next, because it is about the next request: a chat whose model has gone
             keeps working only after this switch, and everything below is the row that
             would otherwise fail. */}
         <MissingModelNotice />
@@ -451,7 +514,9 @@ export function ChatView() {
             {inspectorOpen && <ContextInspector onClose={() => setInspectorOpen(false)} />}
           </div>
           <ContextRecheck />
-          <span className="faint ml-auto text-[11px]">{t('files.dropHint')}</span>
+          <span className="faint ml-auto text-[11px]">
+            {t('chat.clearHint')} · {t('files.dropHint')}
+          </span>
         </div>
       </div>
 
@@ -640,6 +705,38 @@ function CopyButton({ text }: { text: string }) {
       {copied ? t('chat.copied') : t('chat.copy')}
     </button>
   )
+}
+
+/** What a project chat's header says about what the model may do to its folder.
+ *
+ * Three labels rather than one, because the two permissions are independent and rounding
+ * them up would be wrong in the case people care about: somebody who trusts the model with
+ * their files has not thereby said anything about their machine.
+ *
+ * Exported because the sidebar's project row says the same thing, and the two have to say it
+ * in the same words: a row that called it *asks* while the header said *no question* would be
+ * the disagreement this whole gate exists to avoid, one click apart.
+ */
+export function permissionBadge(
+  t: (key: MessageKey) => string,
+  auto?: config.AutoApproveSettings,
+  // The sidebar row's wording: the same three states, in the words that fit beside a folder
+  // path. Which state is claimed is decided here, once — a row and a header that disagreed
+  // about *whether* the model asks would be the one lie this badge exists to prevent.
+  short = false,
+): { badge: string; hint: string } {
+  const asked = {
+    badge: t(short ? 'project.shortConfirmed' : 'project.confirmedBadge'),
+    hint: t('project.confirmed'),
+  }
+  if (!auto?.files && !auto?.commands) return asked
+  const hint = t('project.autoHint')
+  if (auto.files && auto.commands) {
+    return { badge: t(short ? 'project.shortBoth' : 'project.autoBothBadge'), hint }
+  }
+  return auto.files
+    ? { badge: t(short ? 'project.shortFiles' : 'project.autoFilesBadge'), hint }
+    : { badge: t(short ? 'project.shortCommands' : 'project.autoCommandsBadge'), hint }
 }
 
 function SearchFirstToggle() {

@@ -19,7 +19,7 @@ No KiChat account, no service of its own, no telemetry. Nothing leaves the machi
 you picked a hosted model or asked for a web search.
 
 <p>
-  <img alt="Go 1.26" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.27" src="https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white">
   <img alt="Wails v2" src="https://img.shields.io/badge/Wails-v2-E83524">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white">
   <img alt="Linux, macOS and Windows" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-4c8dff">
@@ -63,9 +63,9 @@ you picked a hosted model or asked for a web search.
   tier](#making-the-most-of-a-free-tier).
 - **Long conversations that stay coherent.** Automatic and manual context compaction,
   with the originals never deleted, a summariser you can point at a different model,
-  and a scraped page condensed once instead of replayed at full length on every later
-  turn — plus a context meter built from the **measured** `prompt_tokens` the backend
-  reports rather than a guess.
+  and a scraped page or a large source file condensed once instead of replayed at full
+  length on every later turn — plus a context meter built from the **measured**
+  `prompt_tokens` the backend reports rather than a guess.
 - **Honest numbers.** Everything the model costs — prompt tokens, completion tokens,
   tokens/s, first-token time, the effective per-request limit and where that limit
   came from — is on screen. Estimates are badged as estimates.
@@ -117,7 +117,8 @@ A research-first chat is what KiChat was built for:
   chat model reads it, so a page read once is not paid for again at full length on every
   later turn. The tool card keeps the page, asking for the same page a second time hands
   back the full text, and the feature is off until you pick a model for it in
-  Settings → Tool results (the switch is per backend).
+  Settings → Tool results (the switch is per backend). Large files read out of a project
+  folder are condensed by the same model and the same switch — see [Code](#code).
 - **Every tool card says what it cost.** The card reads `12,345 → 640 tokens` when a
   result was cut and a single number when it was not, measured by the app rather than
   estimated in the window. The cut names its cause — `(budget)` for the answer's own token
@@ -183,6 +184,13 @@ pre-set to that target.
   can search it with the `search_documents` tool instead of you pasting chunks.
 - Native tool calling for agent-shaped work, with the same tools exposed to local
   models through the text protocol.
+- **Large reads are summarised before they reach the model.** In a coding chat, a file
+  above the condensation threshold is read by a second model you pick in Settings → Tool
+  results, and the chat model gets a summary written to keep paths, line numbers and names
+  verbatim instead of a few thousand lines of text. A read the model bounded with
+  `offset`/`limit` is never summarised — that is the text an edit is copied from — and
+  the file's "continues at line N" note and the nearest `AGENTS.md` travel through
+  untouched.
 - One model per chat: a planning chat on the cheap fast one and a review chat on the
   big one sit side by side, each with its own context.
 
@@ -256,6 +264,18 @@ not assumed:
 - **A page is condensed instead of being paid for twice.** The message that is stored,
   and therefore replayed on every later turn, holds the summary while the tool card keeps
   the page (see [Research](#research)).
+- **A file is condensed instead of being paid for whole.** Source files are the largest
+  thing a coding chat reads: one call can return 2,000 numbered lines, which fills most of
+  an answer's 25,000-token tool budget — and the stored result is replayed on every later
+  turn until the conversation is folded. Condensed, the chat model reads a few hundred
+  tokens and the tool card still keeps the whole file. This is Spotify's
+  [`shunt`](https://engineering.atspotify.com/2026/09/portal-by-spotify-cut-my-claude-code-token-usage-by-90/)
+  idea — send the I/O to a cheaper model and keep the expensive one for the thinking:
+  their measured saving on a 162k-line Java monorepo was 82–94 % per large read. KiChat
+  prints its own number on the tool card instead of promising one, in the same
+  `12,345 → 640 tokens` form the research path uses. The plugin's other half — a cheap
+  model writing boilerplate straight to disk — is deliberately absent: code that has to
+  compile inside an existing project belongs to the model doing the editing.
 - **A local model gets the same check between tool rounds.** A local server publishes no
   per-request ceiling, so a round that grew past the threshold went unpriced until your
   next message — and llama.cpp truncates such a prompt from the front, losing the system
@@ -558,7 +578,7 @@ viewable, and a compaction is a separate row you can inspect or delete.
 
 ### Requirements
 
-- **Go** 1.26+ (see `go.mod`)
+- **Go** 1.27+ (see `go.mod`)
 - **Wails CLI v2** — `go install github.com/wailsapp/wails/v2/cmd/wails@latest`
 - **Node 20.19+ or 22.12+** (so npm 10+)
 - **Linux**: GTK3 and WebKit2GTK, plus the build tag described below
@@ -787,7 +807,7 @@ document, and each one distinguishes what was observed from what is expected.
 | Document | What it covers |
 | --- | --- |
 | [`PLAN.md`](documentation/PLAN.md) | the architecture and the reasoning behind it |
-| [`COMPACT.md`](documentation/COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
+| [`COMPACT.md`](documentation/COMPACT.md) | context compaction and tool-result condensation: strategy, arithmetic, failure modes |
 | [`RESEARCH.md`](documentation/RESEARCH.md) | web search and scraping: providers, refusals, SSRF and robots guards, budgets |
 | [`IMAGES.md`](documentation/IMAGES.md) | picture generation: the three server kinds and the hosted one, parameters, profiles, verification |
 | [`IMAGES-CLOUD.md`](documentation/IMAGES-CLOUD.md) | hosted picture backends: what each free tier really is, and why NVIDIA NIM was the one built |

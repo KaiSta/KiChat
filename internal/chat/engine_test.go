@@ -851,18 +851,18 @@ func TestToolOutputBudgetCapsPerAnswer(t *testing.T) {
 // TestToolOutputBudgetDefaultsWhenUnset keeps an unset setting from silently
 // disabling the bound.
 func TestToolOutputBudgetDefaultsWhenUnset(t *testing.T) {
-	if b := newToolOutputBudget(config.Settings{}); b.remaining != 25000 {
-		t.Errorf("remaining = %d, want the 25000 default", b.remaining)
+	if b := newToolOutputBudget(config.Settings{}); b.remaining != config.DefaultToolTokenBudget {
+		t.Errorf("remaining = %d, want the %d default", b.remaining, config.DefaultToolTokenBudget)
 	}
 }
 
 // TestToolOutputBudgetFollowsTheRoomARequestHasLeft pins the half of the bound the
-// user's own figure cannot do. 25000 tokens of tool results is a reasonable answer on
+// user's own figure cannot do. 60000 tokens of tool results is a reasonable answer on
 // a 131k-window model and impossible on a backend whose per-request ceiling is a few
 // thousand, which is Groq's shape exactly — so the room left in the next request, and
 // not the setting, is what decides how much of a result may be carried.
 func TestToolOutputBudgetFollowsTheRoomARequestHasLeft(t *testing.T) {
-	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: 25000})
+	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: config.DefaultToolTokenBudget})
 	budget.capTo(400)
 
 	got, _ := budget.take(strings.Repeat("wort ", 5000))

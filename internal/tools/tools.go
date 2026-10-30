@@ -11,9 +11,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"kichat/internal/config"
 	"kichat/internal/images"
@@ -38,6 +38,25 @@ type Service struct {
 	Chain   *research.Chain
 	Scraper *research.Scraper
 	Store   *store.Store
+
+	// running holds the commands in flight, so the window can stop one without stopping the
+	// turn. Guarded because the click arrives on another goroutine than the command's own.
+	runningMu sync.Mutex
+	running   map[commandKey]*commandHandle
+
+	// readsSeen remembers what this turn has already read, so the second identical read of an
+	// untouched file can be answered with a sentence instead of the file. Written by the read
+	// tools and *dropped* by every tool that changes the folder, so that a read after an edit
+	// always returns the file rather than a claim about this map
+	// (internal/tools/reads.go). Guarded because two chats' turns run at once and both may
+	// read the same folder.
+	readsMu   sync.Mutex
+	readsSeen map[readKey]readStamp
+	// readOffers remembers the offset this turn last told the model to continue from, per
+	// file, so the trace can tell a read the model chose from one it was handed
+	// (internal/tools/reads.go). Guarded by the same mutex and dropped with the same
+	// events: after a write or a command an offer names lines that may have moved.
+	readOffers map[readKey]int
 
 	// Images is the picture backend a generate_image call draws through. It is
 	// nil when the feature is switched off or no server is configured, which is
@@ -69,6 +88,16 @@ type Service struct {
 	// the slot and the service asks for it. Nil means nothing is coordinating, which is what
 	// a service built without an app (the tests) gets. The release is called once.
 	TryDraw func() (release func(), ok bool)
+	// Confirm asks the user before a tool changes the project folder, and returns nil
+	// when the change may be made. It is a callback for the same reason Draws is one:
+	// this package must not know what Wails is, and the app is what owns the person
+	// being asked.
+	//
+	// Nil means nobody can be asked, and that fails closed — the change is refused,
+	// and the engine does not even advertise the tools that would need it (see
+	// chat.toolDefinitions). It is not a state this app reaches: a service built
+	// without it is a service a test built, and a read-only chat never has one.
+	Confirm func(ctx context.Context, req *ApprovalRequest) error
 	// Settings reads the current configuration. It is a function rather than a
 	// copy so a settings save takes effect on the next tool call, the same way the
 	// engine's own Settings does — a Service outlives one settings blob.
@@ -96,11 +125,16 @@ func New(st *store.Store, chain *research.Chain, scraper *research.Scraper) *Ser
 }
 
 // newID names a document this package indexes itself.
-func newID() string { return uuid.NewString() }
+func newID() string { return uuid.New().String() }
 
 // Definitions returns the tool schemas advertised to the model.
+//
+// This is every tool the service can execute, not every tool a given request offers:
+// the engine filters this list per chat (see chat.toolDefinitions), which is what keeps
+// a research chat from being shown the project tools and a coding chat from spending a
+// round on a web search it has no provider for.
 func (s *Service) Definitions() []llm.ToolDefinition {
-	return []llm.ToolDefinition{
+	return append([]llm.ToolDefinition{
 		{
 			Name: ToolSearchWeb,
 			Description: "Durchsucht das Web über die konfigurierte Suchmaschine und liefert Titel, " +
@@ -256,11 +290,80 @@ func (s *Service) Definitions() []llm.ToolDefinition {
 				"required": []string{"prompt"},
 			},
 		},
-	}
+	}, projectDefinitions()...)
+}
+
+// Summary is the part of a result written for the window rather than for the model.
+//
+// The result text itself is the model's, and it has to stay exactly what the model read: it
+// is the record of what a call returned, and a card that showed a translated paraphrase
+// instead would be the one place a person cannot check what the turn was given. But the same
+// text is also what a person sees in the transcript, and it is written in one language at a
+// time — this app has three. So a project tool reports both: the text it hands the model, and
+// a code plus its arguments that the window translates. A tool with no summary shows its text
+// alone, which is what the research tools do.
+type Summary struct {
+	// Code is a key in frontend/src/lib/i18n.ts, under `tool.sum.`.
+	Code string `json:"code"`
+	// Args fill {{1}}, {{2}}… in order, as strings because they travel through JSON to a
+	// dictionary that substitutes text.
+	Args []string `json:"args,omitempty"`
+}
+
+// Result is what one tool call produced.
+type Result struct {
+	Text    string
+	Summary *Summary
+	// Shape is how a `read_file` call was shaped — bare, bounded, outline, or one that
+	// followed this app's own continuation offer. Only that tool sets it; the engine copies
+	// it into the trace's phase, which is what makes "does a model reach for the outline?"
+	// countable across a week of real chats instead of an opinion. It is a word from a
+	// closed set, so it carries nothing the model or the user wrote.
+	Shape string
+}
+
+// textResult is a result with nothing for the window to translate.
+func textResult(text string) Result { return Result{Text: text} }
+
+// summarized is a result the window can also describe in its own language.
+func summarized(text, code string, args ...string) Result {
+	return Result{Text: text, Summary: &Summary{Code: code, Args: args}}
 }
 
 // Execute runs one tool call and returns a Markdown result for the model.
+//
+// It is ExecuteWithSummary with the window's half dropped, which is what a test or a caller
+// that only needs the text wants; the engine calls the fuller one so the card can translate.
 func (s *Service) Execute(ctx context.Context, chatID, name, argsJSON string) (string, error) {
+	result, err := s.ExecuteWithSummary(ctx, chatID, name, argsJSON)
+	return result.Text, err
+}
+
+// ExecuteWithSummary runs one tool call and reports both halves of what it produced.
+func (s *Service) ExecuteWithSummary(ctx context.Context, chatID, name, argsJSON string) (Result, error) {
+	switch name {
+	case ToolReadFile:
+		return s.readFile(ctx, chatID, argsJSON)
+	case ToolListDir:
+		return s.listDir(chatID, argsJSON)
+	case ToolSearchFiles:
+		return s.searchFiles(chatID, argsJSON)
+	case ToolFindFiles:
+		return s.findFiles(chatID, argsJSON)
+	case ToolWriteFile:
+		return s.writeFile(ctx, chatID, argsJSON)
+	case ToolEditFile:
+		return s.editFile(ctx, chatID, argsJSON)
+	case ToolRunCommand:
+		return s.runCommand(ctx, chatID, argsJSON)
+	}
+	text, err := s.executeText(ctx, chatID, name, argsJSON)
+	return textResult(text), err
+}
+
+// executeText runs the tools whose result needs no translation: their output is either the
+// model's own material (a search hit, a page) or a picture with a caption.
+func (s *Service) executeText(ctx context.Context, chatID, name, argsJSON string) (string, error) {
 	switch name {
 	case ToolSearchWeb:
 		return s.searchWeb(ctx, argsJSON)
@@ -658,6 +761,30 @@ func looseInt(value any, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// looseTruth reads a boolean the way looseInt reads a number, because a model writes
+// `"outline": true` and also `"outline": "true"` and, occasionally, `"outline": 1`. The two
+// falsy spellings are the point: a tool that treated `false` as "set" would answer a request
+// for the text with a map, which is the one wrong direction.
+func looseTruth(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if parsed, err := strconv.ParseBool(trimmed); err == nil {
+			return parsed
+		}
+		return trimmed == "1"
+	}
+	return false
 }
 
 // looseFloat is looseInt for the one fractional value a tool takes — the image tool's
