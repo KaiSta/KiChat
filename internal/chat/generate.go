@@ -397,7 +397,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// that request has left rather than only against the user's figure for an answer.
 		// On a backend whose per-request ceiling is a fraction of its window those are
 		// different numbers, and the difference is a refused turn: Groq's allowance is a
-		// few thousand tokens while the tool budget defaults to 25000, so one scraped page
+		// few thousand tokens while the tool budget defaults to 60000, so one scraped page
 		// was enough to make the round that reads it unsendable — and no fold can take it
 		// back, because the result belongs to the turn being answered.
 		//
@@ -699,7 +699,7 @@ type toolOutputBudget struct{ remaining int }
 func newToolOutputBudget(settings config.Settings) *toolOutputBudget {
 	remaining := settings.ToolTokenBudget
 	if remaining <= 0 {
-		remaining = 25000
+		remaining = config.DefaultToolTokenBudget
 	}
 	return &toolOutputBudget{remaining: remaining}
 }
@@ -711,7 +711,7 @@ func newToolOutputBudget(settings config.Settings) *toolOutputBudget {
 // because the cost of ignoring it is not a shorter answer but a refused turn: on
 // Groq the per-minute token allowance is also the largest single request the
 // account may send, and it is a few thousand tokens against a setting that defaults
-// to 25000. A result is not something a history fold can take back either — it
+// to 60000. A result is not something a history fold can take back either — it
 // belongs to the turn being answered, which the fold keeps verbatim — so the cut has
 // to happen where the result is handed to the model.
 //

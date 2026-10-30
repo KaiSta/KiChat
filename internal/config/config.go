@@ -1170,6 +1170,27 @@ const (
 	LangChinese = "zh"
 )
 
+// The tool loop's bounds: how many model/tool rounds one reply may take, and how many
+// tokens of tool results it may carry into the next request.
+//
+// The default is sized for a coding project rather than for a question, because that is
+// the case that runs out first. Reading four files, editing two and running `make check`
+// is already past the six rounds this used to ship, and a first `make check` failure plus
+// three reads spends a 25 000-token budget on its own — so a refactor was being cut in
+// half at a number that suited a research chat. A research turn does not get longer by
+// the change: the loop ends when the model stops calling tools, and the budget below is
+// still capped by the room the next request actually has (`chat.roomForToolResults`), so
+// a small local window keeps cutting results where it always did.
+//
+// MaxToolIterations is the ceiling the Settings field offers and the load repair enforces.
+// It is a bound rather than the default because a long autonomous run is a choice — and
+// because each round is a request the user pays for in time and tokens.
+const (
+	DefaultToolIterations  = 24
+	MaxToolIterations      = 100
+	DefaultToolTokenBudget = 60000
+)
+
 // Default returns the shipped configuration.
 func Default() Settings {
 	return Settings{
@@ -1231,8 +1252,8 @@ func Default() Settings {
 		DefaultSystemPrompt: PromptBody(PresetResearch, LangEnglish),
 		PromptPresets:       DefaultPresets(LangEnglish),
 		AutoTitle:           true,
-		ToolIterations:      6,
-		ToolTokenBudget:     25000,
+		ToolIterations:      DefaultToolIterations,
+		ToolTokenBudget:     DefaultToolTokenBudget,
 		NativeTools:         true,
 		// Image generation ships switched off. It is a second server the user has
 		// to be running — a WebUI is a several-gigabyte install of its own — so
@@ -1620,11 +1641,19 @@ func (s *Settings) normalise() {
 	if s.Sampler.TopP <= 0 {
 		s.Sampler.TopP = 0.9
 	}
+	// A zero is "nobody chose yet" and takes the default; a number above the ceiling is
+	// clamped rather than rejected, the same way every other bounded field is repaired —
+	// a hand-edited blob should still open. The stored value is what the user chose, so a
+	// settings row carrying the old default of 6 keeps it: guessing that 6 meant "not
+	// chosen" would silently override the person who deliberately picked it.
 	if s.ToolIterations <= 0 {
-		s.ToolIterations = 6
+		s.ToolIterations = DefaultToolIterations
+	}
+	if s.ToolIterations > MaxToolIterations {
+		s.ToolIterations = MaxToolIterations
 	}
 	if s.ToolTokenBudget <= 0 {
-		s.ToolTokenBudget = 25000
+		s.ToolTokenBudget = DefaultToolTokenBudget
 	}
 	if len(s.PromptPresets) == 0 {
 		s.PromptPresets = DefaultPresets(s.Language)

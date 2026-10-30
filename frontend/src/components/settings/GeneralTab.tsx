@@ -146,7 +146,7 @@ export function GeneralTab({
               className="input"
               type="number"
               min="1"
-              max="20"
+              max="100"
               value={draft.toolIterations}
               onChange={(e) => patch({ toolIterations: Number(e.target.value) })}
             />

@@ -66,6 +66,57 @@ func TestLoadKeepsDefaultsForFieldsAddedLater(t *testing.T) {
 	}
 }
 
+// TestToolLoopDefaultsSuitACodingProject pins the two figures the coding path is
+// measured against: a reply gets enough rounds to read, edit and run a check more than
+// once, and enough tool-result tokens for a failing check plus several reads. Both were
+// sized for a research turn — 6 rounds and 25 000 tokens — which a two-file change
+// exhausts before it has read the failure.
+func TestToolLoopDefaultsSuitACodingProject(t *testing.T) {
+	def := Default()
+	if def.ToolIterations != 24 {
+		t.Errorf("ToolIterations = %d, want 24", def.ToolIterations)
+	}
+	if def.ToolTokenBudget != 60000 {
+		t.Errorf("ToolTokenBudget = %d, want 60000", def.ToolTokenBudget)
+	}
+	// The ceiling has to leave room above the default, or the default is the ceiling: a
+	// refactor with a few more files than usual is a choice the user can make.
+	if MaxToolIterations <= DefaultToolIterations {
+		t.Errorf("MaxToolIterations = %d, want more than the default %d",
+			MaxToolIterations, DefaultToolIterations)
+	}
+}
+
+// TestToolLoopRepairKeepsAChoiceAndBoundsAHandEditedBlob pins the three readings of
+// the stored number: zero is "nobody chose" and takes the default, a value above the
+// ceiling is clamped like every other bounded field, and a value the user picked — the
+// old default of 6 included — is left alone. Guessing that 6 meant "not chosen" would
+// silently override somebody who deliberately set it.
+func TestToolLoopRepairKeepsAChoiceAndBoundsAHandEditedBlob(t *testing.T) {
+	unset := Settings{}
+	unset.normalise()
+	if unset.ToolIterations != DefaultToolIterations {
+		t.Errorf("an unset ToolIterations became %d, want the default %d",
+			unset.ToolIterations, DefaultToolIterations)
+	}
+	if unset.ToolTokenBudget != DefaultToolTokenBudget {
+		t.Errorf("an unset ToolTokenBudget became %d, want the default %d",
+			unset.ToolTokenBudget, DefaultToolTokenBudget)
+	}
+
+	huge := Settings{ToolIterations: 5000}
+	huge.normalise()
+	if huge.ToolIterations != MaxToolIterations {
+		t.Errorf("a stored 5000 became %d, want the %d ceiling", huge.ToolIterations, MaxToolIterations)
+	}
+
+	chosen := Settings{ToolIterations: 6}
+	chosen.normalise()
+	if chosen.ToolIterations != 6 {
+		t.Errorf("a stored 6 became %d, want it kept", chosen.ToolIterations)
+	}
+}
+
 // TestMidTurnCheckShipsOffAndSurvivesARestart pins both halves of the switch: the
 // shipped default (off, because it spends a request inside an answer somebody is waiting
 // for) and the round trip through the one JSON row the settings blob is.
