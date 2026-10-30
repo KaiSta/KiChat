@@ -300,6 +300,87 @@ func TestSearchFilesSaysWhenItFoundNothing(t *testing.T) {
 	}
 }
 
+// TestReadFileOutlinesTheDeclarationsInsteadOfTheFile is the trade the outline makes: the
+// declaration list arrives with the same line numbers a read prints — so the next call can cite
+// one — and none of the code.
+func TestReadFileOutlinesTheDeclarationsInsteadOfTheFile(t *testing.T) {
+	service, chatID, _ := projectService(t, map[string]string{
+		"pkg/a.go": "package pkg\n\nfunc A() {\n\tprintln(\"nur im Code\")\n}\n\ntype B struct{}\n",
+	})
+	result, err := service.ExecuteWithSummary(context.Background(), chatID, ToolReadFile,
+		`{"path": "pkg/a.go", "outline": true}`)
+	if err != nil {
+		t.Fatalf("read_file with outline: %v", err)
+	}
+	for _, want := range []string{"Umriss", "     3| func A() {", "     7| type B struct{}", "offset"} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("the outline is missing %q:\n%s", want, result.Text)
+		}
+	}
+	if strings.Contains(result.Text, "nur im Code") {
+		t.Errorf("the outline carried the body of the function:\n%s", result.Text)
+	}
+	if result.Summary == nil || result.Summary.Code != "tool.sum.readOutline" || len(result.Summary.Args) != 3 {
+		t.Errorf("an outline is summarised as %+v, want tool.sum.readOutline with three fields", result.Summary)
+	}
+}
+
+// TestOutlineIsOnlyWhenItIsAskedFor pins the spellings a model actually writes, and the one that
+// must not count: `false` is a request for the text, and answering it with a map would be the
+// one wrong direction.
+func TestOutlineIsOnlyWhenItIsAskedFor(t *testing.T) {
+	service, chatID, _ := projectService(t, map[string]string{
+		"pkg/a.go": "package pkg\n\nfunc A() {}\n",
+	})
+	for _, call := range []string{
+		`{"path":"pkg/a.go","outline":true}`,
+		`{"path":"pkg/a.go","outline":"true"}`,
+	} {
+		out, err := service.Execute(context.Background(), chatID, ToolReadFile, call)
+		if err != nil {
+			t.Fatalf("read_file %s: %v", call, err)
+		}
+		if !strings.Contains(out, "Umriss") {
+			t.Errorf("read_file %s did not outline:\n%s", call, out)
+		}
+	}
+
+	whole, err := service.Execute(context.Background(), chatID, ToolReadFile,
+		`{"path":"pkg/a.go","outline":false}`)
+	if err != nil {
+		t.Fatalf("read_file with outline false: %v", err)
+	}
+	if strings.Contains(whole, "Umriss") {
+		t.Errorf("outline false was answered with a map:\n%s", whole)
+	}
+	if !strings.Contains(whole, "     1| package pkg") {
+		t.Errorf("outline false did not return the file:\n%s", whole)
+	}
+}
+
+// TestAnOutlineOfADataFileSaysThereIsNone is the half an empty list owes the model: a JSON file
+// has no declarations to list, and the answer has to point at the window rather than leave a
+// model concluding that the file is empty.
+func TestAnOutlineOfADataFileSaysThereIsNone(t *testing.T) {
+	service, chatID, _ := projectService(t, map[string]string{
+		"data.json": "{\n  \"type\": \"thing\"\n}\n",
+	})
+	result, err := service.ExecuteWithSummary(context.Background(), chatID, ToolReadFile,
+		`{"path":"data.json","outline":true}`)
+	if err != nil {
+		t.Fatalf("read_file with outline: %v", err)
+	}
+	if !strings.Contains(result.Text, "keine Deklarationen erkannt") || !strings.Contains(result.Text, "search_files") {
+		t.Errorf("an empty outline does not say what to do instead:\n%s", result.Text)
+	}
+	if result.Summary == nil || result.Summary.Code != "tool.sum.readOutlineNone" {
+		t.Errorf("an empty outline is summarised as %+v, want tool.sum.readOutlineNone", result.Summary)
+	}
+	if strings.Contains(result.Text, "Die Datei ist leer") {
+		t.Errorf("a non-empty file was reported as empty:\n%s", result.Text)
+	}
+}
+
 // TestAGoneProjectFolderIsReported covers the folder moving or being deleted between
 // messages: the tools have to say the folder is unusable rather than read somewhere else.
 func TestAGoneProjectFolderIsReported(t *testing.T) {

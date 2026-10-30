@@ -52,6 +52,11 @@ type Service struct {
 	// read the same folder.
 	readsMu   sync.Mutex
 	readsSeen map[readKey]readStamp
+	// readOffers remembers the offset this turn last told the model to continue from, per
+	// file, so the trace can tell a read the model chose from one it was handed
+	// (internal/tools/reads.go). Guarded by the same mutex and dropped with the same
+	// events: after a write or a command an offer names lines that may have moved.
+	readOffers map[readKey]int
 
 	// Images is the picture backend a generate_image call draws through. It is
 	// nil when the feature is switched off or no server is configured, which is
@@ -309,6 +314,12 @@ type Summary struct {
 type Result struct {
 	Text    string
 	Summary *Summary
+	// Shape is how a `read_file` call was shaped — bare, bounded, outline, or one that
+	// followed this app's own continuation offer. Only that tool sets it; the engine copies
+	// it into the trace's phase, which is what makes "does a model reach for the outline?"
+	// countable across a week of real chats instead of an opinion. It is a word from a
+	// closed set, so it carries nothing the model or the user wrote.
+	Shape string
 }
 
 // textResult is a result with nothing for the window to translate.
@@ -750,6 +761,30 @@ func looseInt(value any, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// looseTruth reads a boolean the way looseInt reads a number, because a model writes
+// `"outline": true` and also `"outline": "true"` and, occasionally, `"outline": 1`. The two
+// falsy spellings are the point: a tool that treated `false` as "set" would answer a request
+// for the text with a map, which is the one wrong direction.
+func looseTruth(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if parsed, err := strconv.ParseBool(trimmed); err == nil {
+			return parsed
+		}
+		return trimmed == "1"
+	}
+	return false
 }
 
 // looseFloat is looseInt for the one fractional value a tool takes — the image tool's

@@ -1204,6 +1204,15 @@ already decided about — it is what a coding chat does immediately before `edit
 reason: the delegation is for *understanding*, and the edit needs the text.
 Pinned by `TestATargetedReadIsNeverCondensed`.
 
+**An outline is exempt too.** `"outline": true` asks for the declaration list rather than the
+text (`workspace.Root.Outline`), and `outlineRequested` refuses it: the list is this app's own
+deterministic answer, so a second model asked to summarise it could only lose the line numbers
+the next read cites. Its own size does not decide this — a 300-declaration outline is well over
+the threshold, and `TestAnOutlineIsNeverCondensed` asserts the fixture is above the threshold so
+the test fails for the right reason. Note the classifier is stricter about `false` than
+`targetedRead` is about an emptied field: a misread there leaves a read uncondensed, while one
+here would answer a request for the text with a map.
+
 **The framing is carried, not summarised.** `splitReadBody` cuts the result at the header
 and at either of the two trailers, and both trailers travel verbatim: the
 `Die Datei geht weiter … offset=N` line is the only way the model knows where a truncated

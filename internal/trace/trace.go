@@ -96,7 +96,12 @@ type Event struct {
 	Tool     string `json:"tool,omitempty"`
 	Provider string `json:"provider,omitempty"`
 
-	// Phase is a short internal state word such as "locked" or "stream".
+	// Phase is a short internal state word such as "locked" or "stream" — and, on a
+	// `tool.call` for `read_file`, how that call was shaped: `bare` (a whole-file read),
+	// `bounded` (a window the model chose), `outline` (the declaration list) or
+	// `continuation` (a window taken from this app's own `offset=N` offer). Four words from
+	// a closed set, which is why the field can carry them at all; counting them is how the
+	// outline feature is measured rather than guessed at.
 	Phase string `json:"phase,omitempty"`
 	// Kind is the classified failure, one of the Kind* constants, never an error's text.
 	Kind string `json:"kind,omitempty"`

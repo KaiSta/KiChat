@@ -531,6 +531,13 @@ func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Messag
 		Event: trace.EvToolCall, Turn: turn.Turn, Chat: chatID, Message: row.ID,
 		Tool: call.Name, MS: record.DurationMs, Bytes: int64(len(output)), OK: &ok,
 	}
+	// How a read was shaped, when the tool said: the phase field is the only place this can go
+	// without adding one, and it is what makes "did the model reach for the outline, or read
+	// everything anyway?" countable after real use rather than an opinion. A word from a
+	// closed set, so nothing the model wrote travels with it.
+	if out.result.Shape != "" {
+		toolEvent.Phase = out.result.Shape
+	}
 	if execErr != nil {
 		toolEvent.Level = trace.LevelError
 		toolEvent.Kind = trace.KindOf(execErr)

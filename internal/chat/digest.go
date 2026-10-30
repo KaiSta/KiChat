@@ -262,6 +262,33 @@ func targetedRead(argsJSON string) bool {
 	return false
 }
 
+// outlineRequested reports whether the call asked for the declaration list rather than the
+// text.
+//
+// It is deliberately looser than targetedRead about what counts as "set": there the answer to
+// a truthy oddity is a read that arrives verbatim either way, while here a misread `false`
+// would replace the file with a map. So the spellings a model actually writes for the two
+// booleans are all named, and anything else is not an outline.
+func outlineRequested(argsJSON string) bool {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return false
+	}
+	switch value := args["outline"].(type) {
+	case bool:
+		return value
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "1", "yes":
+			return true
+		}
+		return false
+	case float64:
+		return value != 0
+	}
+	return false
+}
+
 // readArgSet reports whether one loose argument names a value rather than nothing.
 func readArgSet(v any) bool {
 	switch value := v.(type) {
@@ -526,6 +553,14 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 		// is the text an edit cannot be built from — the notice names the way back, but
 		// the cheaper answer is not to make the model take it.
 		if targetedRead(call.Arguments) {
+			return output, false
+		}
+		// An outline is the cheap form of the file already: a deterministic list of
+		// declarations this app produced, which a second model could only re-describe and
+		// lose. It also arrives well under the threshold, so this is a rule about the
+		// shape rather than about the size — the same rule targetedRead states, for the
+		// same reason: a summary of a map is not a better map.
+		if outlineRequested(call.Arguments) {
 			return output, false
 		}
 		path = callArgument(call.Arguments, "path")

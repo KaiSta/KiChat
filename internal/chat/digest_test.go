@@ -1084,6 +1084,41 @@ func TestALargeReadIsCondensedBeforeTheModelSeesIt(t *testing.T) {
 	}
 }
 
+// TestAnOutlineIsNeverCondensed is the rule the outline joins: the list is this app's own
+// deterministic answer, so a second model asked to summarise it could only lose the line numbers
+// the next read cites. The fixture is 300 declarations — well past the threshold — so what keeps
+// the digester away is the guard rather than the size.
+func TestAnOutlineIsNeverCondensed(t *testing.T) {
+	folder := t.TempDir()
+	name := sourceFile(t, folder, "big.go", 300)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: readFileCall(name, `, "outline": true`)}},
+			{{Type: llm.EventDelta, Text: "Fertig."}, {Type: llm.EventDone}},
+		},
+	}
+	digester := newDigester([]llm.StreamEvent{{Type: llm.EventDelta, Text: "sollte nicht laufen"}})
+	engine, log := codingDigestEngine(t, folder, digestSettings(), provider, digester)
+	runTurn(t, engine, "project-1", "Gib mir den Umriss von big.go")
+
+	if got := digester.requestCount(); got != 0 {
+		t.Fatalf("digester calls = %d, want none for an outline", got)
+	}
+	carried := carriedToolText(provider, 1)
+	// The fixture has to be big enough that the guard is what kept the digester away, rather
+	// than the outline happening to fall under the threshold.
+	if tokens, limit := llm.EstimateTokens(carried), digestSettings().Digest.DigestThreshold(); tokens <= limit {
+		t.Fatalf("the outline is %d tokens, not above the %d-token threshold", tokens, limit)
+	}
+	if !strings.Contains(carried, "func handler299") {
+		t.Error("the outline did not deliver the declaration list")
+	}
+	if card := lastToolCard(t, log); card.Condensed {
+		t.Error("the card claims a cut that did not happen")
+	}
+}
+
 // TestATargetedReadIsNeverCondensed keeps the edit path working. A read that names an offset
 // is one the model has already decided about — it is what a coding chat does immediately
 // before `edit_file` — so its lines have to arrive as they are, however large the file is.
@@ -1288,6 +1323,33 @@ func TestAFileThatQuotesTheMarkersIsNotCutAtThem(t *testing.T) {
 	}
 	if framing != "project.go — Zeilen 1–3 von 3\n\n" {
 		t.Errorf("framing = %q", framing)
+	}
+}
+
+// TestAnOutlineIsRecognised is the same question for the other exemption, and it has one case the
+// bounded read does not: `false` has to stay false. A read treats a bounded oddity as untouched
+// either way, while a misread here would answer a request for the text with a map.
+func TestAnOutlineIsRecognised(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args string
+		want bool
+	}{
+		{"true", `{"path":"a.go","outline":true}`, true},
+		{"true as a string", `{"path":"a.go","outline":"true"}`, true},
+		{"true as a number", `{"path":"a.go","outline":1}`, true},
+		{"false", `{"path":"a.go","outline":false}`, false},
+		{"false as a string", `{"path":"a.go","outline":"false"}`, false},
+		{"zero", `{"path":"a.go","outline":0}`, false},
+		{"an empty string", `{"path":"a.go","outline":""}`, false},
+		{"absent", `{"path":"a.go"}`, false},
+		{"an unreadable argument object", `not json`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := outlineRequested(tc.args); got != tc.want {
+				t.Errorf("outlineRequested(%s) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
 	}
 }
 

@@ -72,6 +72,35 @@ func (s *Service) rememberRead(key readKey, stamp readStamp) {
 	s.readsSeen[key] = stamp
 }
 
+// rememberOffer records the offset this turn told the model to continue from.
+//
+// It is the only way to answer a question the arguments cannot: a bounded read is either the
+// model's own idea of where to look or this app's, taken from the `offset=N` line a truncated
+// read ends with. The first is a model navigating a file it does not know; the second is a
+// model doing what it was told. Nothing else in the trace can tell them apart, and the
+// difference is exactly what a week of real use would be read for.
+func (s *Service) rememberOffer(key readKey, offset int) {
+	if key.path == "" || offset <= 0 {
+		return
+	}
+	s.readsMu.Lock()
+	defer s.readsMu.Unlock()
+	if s.readOffers == nil || len(s.readOffers) >= maxReadStamps {
+		s.readOffers = make(map[readKey]int, maxReadStamps)
+	}
+	s.readOffers[key] = offset
+}
+
+// offeredOffset is the offset this turn last offered for this file, 0 when none was.
+func (s *Service) offeredOffset(key readKey) int {
+	if key.path == "" {
+		return 0
+	}
+	s.readsMu.Lock()
+	defer s.readsMu.Unlock()
+	return s.readOffers[key]
+}
+
 // ForgetReads is forgetReads for the app, which reverts a file outside the tools that wrote
 // it: the text on disk is no longer what this chat's last read saw.
 func (s *Service) ForgetReads(chatID, abs string) { s.forgetReads(chatID, abs) }
@@ -88,6 +117,12 @@ func (s *Service) forgetReads(chatID, abs string) {
 			delete(s.readsSeen, key)
 		}
 	}
+	// The offer goes too: line numbers are what a write can move.
+	for key := range s.readOffers {
+		if key.chatID == chatID && key.path == abs {
+			delete(s.readOffers, key)
+		}
+	}
 }
 
 // forgetAllReads drops everything this chat remembers, after a command ran.
@@ -101,6 +136,11 @@ func (s *Service) forgetAllReads(chatID string) {
 	for key := range s.readsSeen {
 		if key.chatID == chatID {
 			delete(s.readsSeen, key)
+		}
+	}
+	for key := range s.readOffers {
+		if key.chatID == chatID {
+			delete(s.readOffers, key)
 		}
 	}
 }

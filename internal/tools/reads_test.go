@@ -115,6 +115,94 @@ func TestAReadAfterAnEditReturnsTheFile(t *testing.T) {
 	}
 }
 
+// TestAnOutlineNeitherCountsAsAReadNorIsAnsweredByOne pins both directions of the same
+// distinction: an outline is a map, not a reading of the section. A model that outlines a file
+// and then reads it must get the file, and a model that read the file and then asks for the map
+// has not "already read" the map — telling it so would be a lie about what it received.
+func TestAnOutlineNeitherCountsAsAReadNorIsAnsweredByOne(t *testing.T) {
+	service, chatID, _ := projectService(t, map[string]string{"main.go": "package main\n\nfunc A() {}\n"})
+	ctx := turnContext(t, chatID)
+
+	outline, err := service.Execute(ctx, chatID, ToolReadFile, `{"path":"main.go","outline":true}`)
+	if err != nil {
+		t.Fatalf("read_file with outline: %v", err)
+	}
+	if !strings.Contains(outline, "func A()") {
+		t.Fatalf("the outline did not list the declaration:\n%s", outline)
+	}
+	if strings.Contains(outline, "bereits gelesen") {
+		t.Errorf("the first call was answered from a memory it never wrote:\n%s", outline)
+	}
+
+	whole, err := service.Execute(ctx, chatID, ToolReadFile, `{"path":"main.go"}`)
+	if err != nil {
+		t.Fatalf("read_file after the outline: %v", err)
+	}
+	if !strings.Contains(whole, "package main") {
+		t.Errorf("the read after an outline was answered as a repeat:\n%s", whole)
+	}
+
+	again, err := service.Execute(ctx, chatID, ToolReadFile, `{"path":"main.go","outline":true}`)
+	if err != nil {
+		t.Fatalf("read_file with outline after a read: %v", err)
+	}
+	if strings.Contains(again, "bereits gelesen") {
+		t.Errorf("the map was refused because the text had been read:\n%s", again)
+	}
+}
+
+// TestTheShapeOfAReadIsClassifiedForTheTrace pins the four words the trace counts, including
+// the one no argument can tell on its own: a bounded read that takes the offset this app just
+// offered is a continuation, and the same offset typed from a model's own guess is not.
+func TestTheShapeOfAReadIsClassifiedForTheTrace(t *testing.T) {
+	var body strings.Builder
+	for i := 1; i <= 40; i++ {
+		body.WriteString("line\n")
+	}
+	service, chatID, folder := projectService(t, map[string]string{
+		"long.txt": body.String(),
+		"pkg/a.go": "package pkg\n\nfunc A() {}\n",
+	})
+	ctx := turnContext(t, chatID)
+	shape := func(call string) string {
+		t.Helper()
+		result, err := service.ExecuteWithSummary(ctx, chatID, ToolReadFile, call)
+		if err != nil {
+			t.Fatalf("read_file %s: %v", call, err)
+		}
+		return result.Shape
+	}
+
+	if got := shape(`{"path":"pkg/a.go"}`); got != ReadShapeBare {
+		t.Errorf("a whole-file read is %q, want %q", got, ReadShapeBare)
+	}
+	if got := shape(`{"path":"pkg/a.go","offset":1,"limit":2}`); got != ReadShapeBounded {
+		t.Errorf("a chosen window is %q, want %q", got, ReadShapeBounded)
+	}
+	if got := shape(`{"path":"pkg/a.go","outline":true}`); got != ReadShapeOutline {
+		t.Errorf("an outline is %q, want %q", got, ReadShapeOutline)
+	}
+
+	// A truncated read ends by naming the line it continues at; a call that takes it is the
+	// app's own suggestion followed, and a call that picks another line is not.
+	first := shape(`{"path":"long.txt","limit":10}`)
+	if first != ReadShapeBounded {
+		t.Fatalf("the first window is %q, want %q", first, ReadShapeBounded)
+	}
+	if got := shape(`{"path":"long.txt","offset":11,"limit":5}`); got != ReadShapeContinuation {
+		t.Errorf("the offered offset is %q, want %q", got, ReadShapeContinuation)
+	}
+	if got := shape(`{"path":"long.txt","offset":31,"limit":5}`); got != ReadShapeBounded {
+		t.Errorf("an offset of the model's own is %q, want %q", got, ReadShapeBounded)
+	}
+
+	// An offer names lines, and a write can move them, so the memory of it goes with the rest.
+	service.ForgetReads(chatID, filepath.Join(folder, "long.txt"))
+	if got := shape(`{"path":"long.txt","offset":11,"limit":5}`); got != ReadShapeBounded {
+		t.Errorf("an offer that outlived a write is %q, want %q", got, ReadShapeBounded)
+	}
+}
+
 // TestACommandDropsTheChatsMemory is the third way the folder changes. A command's effect
 // cannot be enumerated — `gofmt -w .` rewrites every file under a folder — so the honest rule
 // is that after one the app knows nothing, and the next read costs a disk read.

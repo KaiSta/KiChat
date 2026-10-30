@@ -76,7 +76,10 @@ func reads() []llm.ToolDefinition {
 			Description: "Liest eine Textdatei aus dem Projektordner und gibt sie mit Zeilennummern zurück. " +
 				"Nutze dieses Tool, wenn du den genauen Inhalt einer Datei kennen musst, statt ihn aus dem " +
 				"Namen oder aus dem Gedächtnis zu vermuten. Eine große Datei liest du abschnittsweise: der " +
-				"letzte Aufruf nennt die Zeile, ab der es weitergeht (offset). Binärdateien werden abgelehnt.",
+				"letzte Aufruf nennt die Zeile, ab der es weitergeht (offset). Mit \"outline\": true " +
+				"bekommst du nur die Liste der Deklarationen (Funktionen, Typen, Klassen, Überschriften) " +
+				"mit ihren Zeilennummern — bei einer langen Datei ein Bruchteil der Tokens, und du " +
+				"siehst, welchen Abschnitt du danach genau lesen musst. Binärdateien werden abgelehnt.",
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -91,6 +94,10 @@ func reads() []llm.ToolDefinition {
 					"limit": map[string]any{
 						"type":        "integer",
 						"description": "Anzahl der Zeilen (Standard 500, höchstens 2000).",
+					},
+					"outline": map[string]any{
+						"type":        "boolean",
+						"description": "true: nur die Deklarationen mit Zeilennummern, ohne Code. Der erste Blick in eine lange Datei; den Abschnitt, den du ändern willst, liest du danach mit offset/limit.",
 					},
 				},
 				"required": []string{"path"},
@@ -193,12 +200,50 @@ func projectError(path string, err error) error {
 }
 
 type readFileArgs struct {
-	Path   string `json:"path"`
-	Offset any    `json:"offset"`
-	Limit  any    `json:"limit"`
+	Path    string `json:"path"`
+	Offset  any    `json:"offset"`
+	Limit   any    `json:"limit"`
+	Outline any    `json:"outline"`
 }
 
-func (s *Service) readFile(ctx context.Context, chatID, argsJSON string) (Result, error) {
+// The shapes a read_file call can have, for the trace.
+//
+// They are the four the feature is watched with: `bare` is the whole-file read a model reaches
+// for by default, `bounded` is a window it chose itself, `outline` is the declaration list, and
+// `continuation` is a window taken from this app's own `offset=N` offer. Counting them over a
+// week of real chats is how the question "does a model use the outline, or does it still read
+// everything?" gets an answer instead of a guess (documentation/CODING.md §5).
+const (
+	ReadShapeBare         = "bare"
+	ReadShapeBounded      = "bounded"
+	ReadShapeOutline      = "outline"
+	ReadShapeContinuation = "continuation"
+)
+
+// readShape classifies one call. The offer is read before the read itself runs, because a
+// truncated read records a new offer and a call must not be classified against its own.
+func (s *Service) readShape(args readFileArgs, key readKey) string {
+	if looseTruth(args.Outline) {
+		return ReadShapeOutline
+	}
+	offset, limit := looseInt(args.Offset, 0), looseInt(args.Limit, 0)
+	switch {
+	case offset == 0 && limit == 0:
+		// Zero is what the tool resolves to "from the top, default window" — the same call as
+		// naming neither, so it is classified the same way (the rule targetedRead states).
+		return ReadShapeBare
+	case offset > 0 && s.offeredOffset(key) == offset:
+		return ReadShapeContinuation
+	}
+	return ReadShapeBounded
+}
+
+// readFile answers one read, and carries the call's shape for the trace.
+//
+// The shape is assigned in a defer because every exit has to carry it — the outline, the
+// already-read sentence, the binary refusal, the file itself — and eight copies of one
+// assignment is how one of them ends up missing.
+func (s *Service) readFile(ctx context.Context, chatID, argsJSON string) (result Result, err error) {
 	var args readFileArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
 		return Result{}, badArguments(err)
@@ -226,15 +271,24 @@ func (s *Service) readFile(ctx context.Context, chatID, argsJSON string) (Result
 			if info, statErr := os.Stat(abs); statErr == nil {
 				if k, ok := readKeyFor(chatID, turn.Turn, abs); ok {
 					key, stamp, watch = k, statStamp(info, offset, limit), true
-					if s.readSeen(key, stamp) {
-						return summarized(fmt.Sprintf("%s: dieser Abschnitt wurde in diesem Turn bereits "+
-							"gelesen und ist seither unverändert. Wenn du den Inhalt brauchst, lies "+
-							"einen anderen Abschnitt (offset), sonst arbeite mit dem, was du hast.", args.Path),
-							"tool.sum.readSame", args.Path), nil
-					}
 				}
 			}
 		}
+	}
+	shape := s.readShape(args, key)
+	defer func() {
+		if err == nil {
+			result.Shape = shape
+		}
+	}()
+	if looseTruth(args.Outline) {
+		return s.outlineFile(root, args.Path)
+	}
+	if watch && s.readSeen(key, stamp) {
+		return summarized(fmt.Sprintf("%s: dieser Abschnitt wurde in diesem Turn bereits "+
+			"gelesen und ist seither unverändert. Wenn du den Inhalt brauchst, lies "+
+			"einen anderen Abschnitt (offset), sonst arbeite mit dem, was du hast.", args.Path),
+			"tool.sum.readSame", args.Path), nil
 	}
 	file, err := root.Read(args.Path, offset, limit)
 	if err != nil {
@@ -294,6 +348,11 @@ func (s *Service) readFile(ctx context.Context, chatID, argsJSON string) (Result
 	if watch {
 		s.rememberRead(key, stamp)
 	}
+	if file.Truncated && watch {
+		// The line this result ends with is the offer a later call can follow, and recording it
+		// here is what makes `continuation` distinguishable from a window the model picked.
+		s.rememberOffer(key, file.From+file.Returned)
+	}
 	// The summary is the window's sentence rather than a translation of this one: a range and
 	// a total, which is what a person scanning a long turn wants to see. A window of a longer
 	// file has no total to name — the read stopped counting when it stopped reading — and the
@@ -304,6 +363,64 @@ func (s *Service) readFile(ctx context.Context, chatID, argsJSON string) (Result
 	}
 	return summarized(sb.String(), "tool.sum.read",
 		file.Path, fmt.Sprint(file.From), fmt.Sprint(file.From+file.Returned-1), fmt.Sprint(file.Total)), nil
+}
+
+// outlineFile answers a read that asked for the map rather than the text.
+//
+// It deliberately runs before the turn's read memory and never touches it. An outline is not a
+// reading of the section, so a model that has just read the file still needs the map (being told
+// "you already read this" to a request for the declaration list would be a lie about what it
+// got), and recording it as a read would make the file itself look like a repeat afterwards
+// (that is, a model that outlines a file and then reads it must get the file).
+func (s *Service) outlineFile(root workspace.Root, path string) (Result, error) {
+	outline, err := root.Outline(path)
+	if err != nil {
+		return Result{}, projectError(path, err)
+	}
+	if outline.Binary {
+		return summarized(fmt.Sprintf("%s ist keine Textdatei (sie enthält Null-Bytes) und wird nicht als "+
+			"Text ausgegeben. Suche mit search_files nach dem, was du daraus brauchst.", outline.Path),
+			"tool.sum.readBinary", outline.Path), nil
+	}
+	var sb strings.Builder
+	switch {
+	case len(outline.Decls) == 0 && outline.Total == 0 && outline.Complete:
+		sb.WriteString("Die Datei ist leer.")
+		return summarized(sb.String(), "tool.sum.readEmpty", outline.Path), nil
+	case len(outline.Decls) == 0:
+		// An empty map has to say that the map is empty rather than let a model conclude the
+		// file is: a JSON document, a CSV and a log all get here, since a record per line has
+		// no structure to list. Config-shaped files do not, unless they have no keys at all.
+		fmt.Fprintf(&sb, "%s — keine Deklarationen erkannt.\n\n", outline.Path)
+		sb.WriteString("Diese Datei hat nichts, was ein Umriss als Deklaration auflisten könnte (Daten, " +
+			"Text, oder eine Datei ohne Schlüsselzeilen). Lies sie mit read_file " +
+			"ohne outline, oder suche mit search_files nach der Stelle, die du brauchst.")
+		return summarized(sb.String(), "tool.sum.readOutlineNone", outline.Path), nil
+	}
+	if outline.Complete {
+		fmt.Fprintf(&sb, "%s — Umriss, nicht der Code: %d Zeilen, %d Deklarationen\n\n",
+			outline.Path, outline.Total, len(outline.Decls))
+	} else {
+		fmt.Fprintf(&sb, "%s — Umriss, nicht der Code: Anfang der Datei, %d Deklarationen\n\n",
+			outline.Path, len(outline.Decls))
+	}
+	for _, decl := range outline.Decls {
+		fmt.Fprintf(&sb, "%6d| %s\n", decl.Line, decl.Text)
+	}
+	if outline.Omitted > 0 {
+		fmt.Fprintf(&sb, "\n… und %d weitere Deklarationen, die nicht aufgelistet sind.", outline.Omitted)
+	}
+	if !outline.Complete {
+		fmt.Fprintf(&sb, "\nDie Datei ist größer als %d MB; der Umriss deckt nur ihren Anfang ab.",
+			workspace.MaxOutlineBytes>>20)
+	}
+	// The one sentence this feature cannot omit. The numbers above are the same numbers a read
+	// prints, so the model can take one and ask for the lines around it — but only if it knows
+	// that is what it has in front of it.
+	sb.WriteString("\nDas ist die Liste der Deklarationen, nicht ihr Code: lies den Abschnitt, " +
+		"den du brauchst, mit offset und limit.")
+	return summarized(sb.String(), "tool.sum.readOutline",
+		outline.Path, fmt.Sprint(outline.Total), fmt.Sprint(len(outline.Decls))), nil
 }
 
 type listDirArgs struct {
