@@ -1262,8 +1262,8 @@ Available tools: {{tool_list}}`,
       { id: 'blank', name: 'Empty', prompt: PROMPT_BODIES.blank.en, builtIn: true },
     ],
     autoTitle: true,
-    toolIterations: 6,
-    toolTokenBudget: 25000,
+    toolIterations: 24,
+    toolTokenBudget: 60000,
     nativeTools: true,
     // Both off, like the shipped default: a fixture that granted a permission would hide
     // the very state the coding tab's switches are about.
@@ -2084,9 +2084,54 @@ Available tools: {{tool_list}}`,
     )
   }
 
-  // The project chat answers about the folder it is pointed at, and its tool call is a
-  // project read — so the coding tools' labels and the line about what a result cost are
+  // The project chat answers about the folder it is pointed at, and its tool calls are
+  // project reads — so the coding tools' labels and the line about what a result cost are
   // both renderable in the default state rather than only under a flag.
+  //
+  // The first of the two is an **outline** and the second is the window it points at, which
+  // is the pair the feature exists to produce: `read_file` with `outline: true` lists the
+  // declarations with the lines a read prints, and the model then asks for the forty lines
+  // it means. The list below is that file's real declarations at their real lines (21 of
+  // them, 408 lines of file), not a plausible-looking invention, so the two cards agree
+  // with each other — the outline names line 63 and the window starts there.
+  const modelsOutline = [
+    'internal/store/models.go — Umriss, nicht der Code: 408 Zeilen, 21 Deklarationen',
+    '',
+    '    10| const (',
+    '    19| type Chat struct {',
+    '    51| const (',
+    '    63| func (c Chat) IsProject() bool {',
+    '    69| func NormaliseMode(mode string) string {',
+    '    77| type Message struct {',
+    '   115| type Source struct {',
+    '   122| type Attachment struct {',
+    '   163| type Derivation struct {',
+    '   192| type GenerationRecipe struct {',
+    '   236| const (',
+    '   242| type Document struct {',
+    '   256| type Chunk struct {',
+    '   268| type ChunkHit struct {',
+    '   277| type Compaction struct {',
+    '   293| const (',
+    '   306| type ToolCallRecord struct {',
+    '   351| type FileSnapshot struct {',
+    '   374| type SearchCacheEntry struct {',
+    '   384| type ScrapeCacheEntry struct {',
+    '   400| type DigestCacheEntry struct {',
+    '',
+    'Das ist die Liste der Deklarationen, nicht ihr Code: lies den Abschnitt, den du brauchst, ' +
+      'mit offset und limit.',
+  ].join('\n')
+  // The other half of the outline, and the state a card has to render without looking
+  // broken: a file with nothing to list. A JSON document is the honest example — a record per
+  // line has no declarations to invent, and the scanner refuses to guess — so the card carries
+  // the sentence that says so and points at the window instead, and its summary is
+  // `tool.sum.readOutlineNone`. The words are the backend's (`internal/tools/project.go`).
+  const dataOutline =
+    'frontend/package.json — keine Deklarationen erkannt.\n\n' +
+    'Diese Datei hat nichts, was ein Umriss als Deklaration auflisten könnte (Daten, Text, ' +
+    'oder eine Datei ohne Schlüsselzeilen). Lies sie mit read_file ohne ' +
+    'outline, oder suche mit search_files nach der Stelle, die du brauchst.'
   messages.set('chat-project', [
     message('chat-project', 'user', 'Wo wird entschieden, ob ein Chat ein Projekt ist?'),
     message('chat-project', 'assistant',
@@ -2095,6 +2140,48 @@ Available tools: {{tool_list}}`,
       seq: 1,
       toolCalls: [
         {
+          id: 'call-project-outline',
+          messageId: 'msg-project-1',
+          chatId: 'chat-project',
+          name: 'read_file',
+          argsJson: JSON.stringify({ path: 'internal/store/models.go', outline: true }),
+          resultJson: JSON.stringify({
+            content: modelsOutline,
+            // The sentence under the card travels the way the bridge carries it — a code
+            // and its arguments, translated by the window rather than in Go — so the
+            // outline's own summary is renderable here in all three languages.
+            summary: { code: 'tool.sum.readOutline', args: ['internal/store/models.go', '408', '21'] },
+          }),
+          status: 'ok',
+          durationMs: 4,
+          error: '',
+          sourceTokens: 412,
+          contextTokens: 412,
+          condensed: false,
+          createdAt: now(),
+        },
+        {
+          // The empty outline: a data file, which has no declaration list to show. Its card
+          // is the one that must not look like a failure — the call succeeded, and what it
+          // found was nothing to map.
+          id: 'call-project-nodata',
+          messageId: 'msg-project-1',
+          chatId: 'chat-project',
+          name: 'read_file',
+          argsJson: JSON.stringify({ path: 'frontend/package.json', outline: true }),
+          resultJson: JSON.stringify({
+            content: dataOutline,
+            summary: { code: 'tool.sum.readOutlineNone', args: ['frontend/package.json'] },
+          }),
+          status: 'ok',
+          durationMs: 2,
+          error: '',
+          sourceTokens: 96,
+          contextTokens: 96,
+          condensed: false,
+          createdAt: now(),
+        },
+        {
           id: 'call-project-1',
           messageId: 'msg-project-1',
           chatId: 'chat-project',
@@ -2102,7 +2189,7 @@ Available tools: {{tool_list}}`,
           argsJson: JSON.stringify({ path: 'internal/store/models.go', offset: 63, limit: 40 }),
           resultJson: JSON.stringify({
             content:
-              'internal/store/models.go — Zeilen 63–102 von 534\n\n' +
+              'internal/store/models.go — Zeilen 63–102 von 408\n\n' +
               'func (c Chat) IsProject() bool {\n\treturn c.Mode == ModeCoding && c.Workspace != ""\n}',
           }),
           status: 'ok',
@@ -2110,6 +2197,40 @@ Available tools: {{tool_list}}`,
           error: '',
           sourceTokens: 640,
           contextTokens: 640,
+          condensed: false,
+          createdAt: now(),
+        },
+        {
+          // The fourth state beside the other three: a read that never happened. An
+          // outline of a file that is not there is the cheapest honest example — the
+          // arguments are the same shape as the first card's, so the difference a person
+          // sees is the badge, the red sentence and the summary, not the call.
+          //
+          // What travels here is the bridge's own shape (`internal/chat/generate.go`):
+          // `error` is the whole `i18n:{…}` payload — code, the path as an argument and
+          // the sentence written for the model — so the card is only correct if it
+          // translates the code. `resultJson` carries what the model got instead, with no
+          // summary, because a refused call has nothing to caption.
+          id: 'call-project-missing',
+          messageId: 'msg-project-1',
+          chatId: 'chat-project',
+          name: 'read_file',
+          argsJson: JSON.stringify({ path: 'internal/store/missing.go', outline: true }),
+          resultJson: JSON.stringify({
+            content:
+              'Tool error: "internal/store/missing.go" does not exist in the project folder',
+          }),
+          status: 'error',
+          durationMs: 1,
+          error:
+            'i18n:' +
+            JSON.stringify({
+              code: 'tools.fileUnreadable',
+              args: ['internal/store/missing.go'],
+              detail: '"internal/store/missing.go" does not exist in the project folder',
+            }),
+          sourceTokens: 0,
+          contextTokens: 0,
           condensed: false,
           createdAt: now(),
         },

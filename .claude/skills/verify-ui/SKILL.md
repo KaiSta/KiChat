@@ -27,8 +27,13 @@ fence for the one heading token the dark theme overrides, and a second chat with
 seeded search message and a compaction.
 
 The fixture list holds both kinds of conversation — three chats and one **project**, so
-the sidebar's two groups and a project's card (folder name, permission note, a
-`read_file` tool call) are rendered without a flag. The markdown chat stays first in
+the sidebar's two groups and a project's card (folder name, permission note, and
+**four** `read_file` calls — an outline, an outline of a data file that has nothing
+to list, the window the first points at, each with its translated summary sentence,
+and a read that **failed**: `error` badge, the same arguments a successful call
+would show, and the translated refusal `tools.fileUnreadable` where a summary would
+be — a refused call carries none, which is why that card must not look like a blank
+one) are rendered without a flag. The markdown chat stays first in
 the array and therefore stays the one that opens.
 
 Query flags, each of which exists because the state is otherwise unreachable:

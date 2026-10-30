@@ -148,7 +148,7 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
         className="flex w-full items-center gap-2 text-left"
         onClick={() => setOpen((v) => !v)}
       >
-        <span className={`badge ${tone}`}>
+        <span className={`badge shrink-0 ${tone}`}>
           {call.status === 'ok'
             ? t('tool.ok')
             : call.status === 'error'
@@ -159,12 +159,16 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
                   ? t('tool.denied')
                   : t('tool.running')}
         </span>
-        <strong style={{ color: 'var(--text)' }}>
+        <strong className="shrink-0 whitespace-nowrap" style={{ color: 'var(--text)' }}>
           {tDynamic(`tool.${call.name}`) !== `tool.${call.name}`
             ? tDynamic(`tool.${call.name}`)
             : call.name}
         </strong>
-        <span className="faint mono truncate" style={{ maxWidth: 360 }}>
+        {/* The arguments take whatever room is left and ellipsise into it. They used to be an
+            empty span for most tools, so nothing here needed to shrink; now that every call
+            shows its arguments, a fixed width made the tool's own name wrap in a narrow
+            window — the one part of the row that must never move. */}
+        <span className="faint mono min-w-0 flex-1 truncate">
           {summariseArgs(call.argsJson)}
         </span>
         {/* What the result cost and what of it the model reads. One number when they
@@ -188,7 +192,9 @@ export function ToolCallCard({ call }: { call: storeTypes.ToolCallRecord }) {
                 : t('tool.tokensOne', { tokens: formatNumber(call.sourceTokens) })}
             </span>
           ))}
-        <span className="ml-auto faint">{formatDuration(call.durationMs)}</span>
+        <span className="ml-auto faint shrink-0 whitespace-nowrap">
+          {formatDuration(call.durationMs)}
+        </span>
       </button>
 
       {/* What the call produced, in the window's language. It sits outside the toggle
@@ -521,19 +527,53 @@ function summaryVars(args: string[]): Record<string, string> {
   return vars
 }
 
-/** One-line hint of what a tool was called with, for the collapsed state. */
+/** How much of one argument value the collapsed line keeps. */
+const ARG_VALUE_CHARS = 48
+
+/** One-line hint of what a tool was called with, for the collapsed state.
+ *
+ * Every argument, not a list of the keys somebody thought of: the line used to name five of
+ * them, so a `read_file` card looked like a call with no arguments and a reader could not tell
+ * a whole-file read from an outline (`outline=true`) without opening the card. The keys are
+ * the tool's own and the values the model's, so nothing here needs translating — and the
+ * pretty-printed JSON in the body is still the record.
+ *
+ * A value is flattened and cut, because `write_file` carries an entire file in `content` and
+ * `run_command` in `command`: the beginning is enough to recognise the call, and a line that
+ * long is not a hint of anything. Nested objects are skipped rather than rendered — no tool
+ * takes one today, and `[object Object]` is worse than nothing.
+ */
 function summariseArgs(raw: string): string {
   if (!raw) return ''
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(raw)
-    const parts: string[] = []
-    for (const key of ['query', 'url', 'document', 'from', 'to']) {
-      if (parsed[key] !== undefined) parts.push(`${key}=${String(parsed[key])}`)
-    }
-    return parts.join(' ')
+    parsed = JSON.parse(raw)
   } catch {
-    return raw.slice(0, 80)
+    return flatten(raw, 80)
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return ''
+  const entries = Object.entries(parsed as Record<string, unknown>).filter(
+    ([, value]) => value !== null && value !== undefined && value !== '' && typeof value !== 'object',
+  )
+  // Scalars first. `outline=true`, `offset=63`, `timeout_seconds=120` are short, and they are
+  // the part a glance is for; the path or the query is the long value the line truncates, and
+  // for a project tool the sentence under the card names the file anyway. A plain sort is
+  // stable, so each group keeps the order the model wrote.
+  entries.sort((a, b) => rankArg(a[1]) - rankArg(b[1]))
+  return entries
+    .map(([key, value]) => `${key}=${flatten(String(value), ARG_VALUE_CHARS)}`)
+    .join(' ')
+}
+
+/** Where a value sits in the collapsed line: numbers and booleans before text. */
+function rankArg(value: unknown): number {
+  return typeof value === 'string' ? 1 : 0
+}
+
+/** One line, cut at a length and marked when it was cut. */
+function flatten(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat
 }
 
 /* -------------------------------------------------------------------------
