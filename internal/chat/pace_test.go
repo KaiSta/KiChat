@@ -57,6 +57,13 @@ func TestATurnThatFitsIsNotSpaced(t *testing.T) {
 			t.Errorf("a %d-round turn that fits its minute was planned: %v", rounds, plan.at)
 		}
 	}
+	// A cap above the allowance is a ceiling rather than a forecast, and it must not turn
+	// every turn into a paced one: coding mode's 60 rounds against a whole minute of thirty is
+	// still a turn that fits, and spacing it would put two seconds in front of every round of
+	// a three-round answer.
+	if plan := planTurnRequests(room, "m", 60); len(plan.at) != 0 {
+		t.Errorf("a cap above the allowance was planned against a whole minute: %v", plan.at)
+	}
 
 	// One round past what the minute has left, and the turn is planned.
 	const limit = 30
@@ -77,6 +84,13 @@ func TestATurnThatFitsIsNotSpaced(t *testing.T) {
 	}
 	if gap := plan.at[1].Sub(plan.at[0]); gap < 2*time.Second {
 		t.Errorf("the second round follows the first by %s, want the allowance's own period", gap)
+	}
+
+	// And a cap past the allowance is planned for one window, not for the ceiling: past that
+	// the schedule is the window's own refill, and the per-request guard holds the rest.
+	if plan := planTurnRequests(tight, "m", 60); len(plan.at) != limit {
+		t.Errorf("a 60-round cap against a spent minute planned %d requests, want the %d of one window",
+			len(plan.at), limit)
 	}
 }
 

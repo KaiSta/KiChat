@@ -32,9 +32,10 @@ import (
 //     minute's room the earliest request is the best one — the window rolls continuously, so
 //     taking a slot now cannot cost a later one — and a turn that fits therefore behaves
 //     exactly as it did before this file existed.
-//   - The plan is a schedule for the requests a turn *may* make (the tool-round cap), not a
-//     reservation: a turn that uses fewer rounds leaves the later slots unspent, and one that
-//     needs none of them pays nothing for their having been planned.
+//   - The plan is a schedule for the requests a turn *may* make (the tool-round cap, bounded by
+//     one window — planTurnRequests has the reason), not a reservation: a turn that uses fewer
+//     rounds leaves the later slots unspent, and one that needs none of them pays nothing for
+//     their having been planned.
 //   - The plan is read once, at the start, and it is a reading rather than a promise. A
 //     request made outside the turn, or a retry the shared client performs, changes the count
 //     under it — so internal/llm's per-request pacing stays as it is, behind the plan, and
@@ -55,6 +56,15 @@ type turnPacing struct {
 // A provider that cannot state an allowance is not planned for, and neither is one that has
 // never been answered by or refused for this model: nothing is invented from a window or a
 // guess, so the plan exists only where the vendor's own numbers do.
+//
+// The plan covers **at most one window's worth** of requests, and that bound is what keeps a
+// cap from becoming a schedule of its own. A cap above the allowance is a ceiling, not a
+// forecast: coding mode's 60 rounds against Groq's 30 a minute would otherwise space every
+// project turn at one request per slot — including the rounds the minute can pay for right
+// now — and tell the user that "this answer needs more requests than the minute allows" about
+// a three-round turn. Past one window the schedule is the window's own refill, and the
+// per-request guard behind the plan is what holds a request that outruns it (internal/llm's
+// pacing stays where it is, and a paced request is never a refused one).
 func planTurnRequests(provider llm.Provider, model string, rounds int) turnPacing {
 	if rounds < 1 {
 		return turnPacing{}
@@ -63,7 +73,11 @@ func planTurnRequests(provider llm.Provider, model string, rounds int) turnPacin
 	if !ok {
 		return turnPacing{}
 	}
-	waits := allowance.RequestAllowance(model).Spread(rounds)
+	a := allowance.RequestAllowance(model)
+	if a.Known() && rounds > a.Limit {
+		rounds = a.Limit
+	}
+	waits := a.Spread(rounds)
 	if len(waits) == 0 {
 		return turnPacing{}
 	}
