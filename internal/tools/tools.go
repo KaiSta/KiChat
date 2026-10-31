@@ -419,6 +419,10 @@ func (s *Service) Execute(ctx context.Context, chatID, name, argsJSON string) (s
 
 // ExecuteWithSummary runs one tool call and reports both halves of what it produced.
 func (s *Service) ExecuteWithSummary(ctx context.Context, chatID, name, argsJSON string) (Result, error) {
+	// A name borrowed from another convention arrives with that convention's field names too
+	// (argumentAliases), so the arguments are resolved before the switch rather than inside each
+	// tool: one table, one place, and no tool that can forget it.
+	argsJSON = withAliasedArguments(name, argsJSON)
 	switch name {
 	case ToolReadFile:
 		return s.readFile(ctx, chatID, argsJSON)
@@ -863,6 +867,67 @@ func decodeLoose(raw string, out any) error {
 		raw = "{}"
 	}
 	return json.Unmarshal([]byte(raw), out)
+}
+
+// argumentAliases are the *field* names other tool conventions use for the arguments this app's
+// tools take, per tool.
+//
+// They exist for the same reason the borrowed *names* do (internal/chat's toolAliases): a model
+// trained on another harness writes `read` with `{"file_path": "main.go"}` where this app's
+// `read_file` takes `path`. Accepting the name and then refusing the call with "the path
+// argument is empty" is the worst of both — the user is told the call ran and the model is told
+// it named nothing, so it either retries the same shape or gives up. A name is half of a
+// translation; the fields are the other half.
+//
+// A borrowed field is read only when this app's own field is absent, so a call carrying both
+// keeps the one the schema named. Nothing outside this table is guessed at: `decodeLoose`
+// ignores unknown keys, and a table that grew a synonym per observed failure would stop being
+// checkable.
+var argumentAliases = map[string]map[string]string{
+	ToolReadFile:    {"file_path": "path", "file": "path", "filename": "path"},
+	ToolWriteFile:   {"file_path": "path", "file": "path", "filename": "path"},
+	ToolEditFile:    {"file_path": "path", "file": "path", "old_str": "old_string", "new_str": "new_string"},
+	ToolListDir:     {"dir": "path", "directory": "path", "folder": "path"},
+	ToolSearchFiles: {"pattern": "query", "q": "query"},
+	ToolFindFiles:   {"glob": "pattern", "name": "pattern"},
+	ToolRunCommand:  {"cmd": "command", "cmdline": "command"},
+}
+
+// withAliasedArguments renames the borrowed fields a call may carry onto the ones this app's
+// tool reads, and answers its input unchanged whenever it cannot improve it: a tool with no
+// table, an empty argument object, a body that is not a JSON object. That leaves the tool's own
+// decoder as the single reporter of a malformed argument object, with the sentence it already
+// has for it (badArguments).
+func withAliasedArguments(name, argsJSON string) string {
+	aliases := argumentAliases[name]
+	if len(aliases) == 0 {
+		return argsJSON
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(strings.TrimSpace(argsJSON)), &fields); err != nil {
+		return argsJSON
+	}
+	moved := false
+	for borrowed, own := range aliases {
+		value, carried := fields[borrowed]
+		if !carried {
+			continue
+		}
+		if _, taken := fields[own]; taken {
+			continue
+		}
+		fields[own] = value
+		delete(fields, borrowed)
+		moved = true
+	}
+	if !moved {
+		return argsJSON
+	}
+	normalised, err := json.Marshal(fields)
+	if err != nil {
+		return argsJSON
+	}
+	return string(normalised)
 }
 
 func looseInt(value any, fallback int) int {
