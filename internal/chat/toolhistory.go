@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"kichat/internal/llm"
+	"kichat/internal/tools"
 )
 
 // A tool call has to name a tool. Two things can break that: a model that mangles
@@ -26,6 +27,10 @@ const (
 	// renamedToolNote is the warning a repaired name produces, so a call that ran
 	// under a name the model invented is explained rather than silently corrected.
 	renamedToolNote = "Der Tool-Aufruf „%s“ wurde als „%s“ ausgeführt — das Modell hatte den Namen verfälscht."
+	// aliasedToolNote is the same for a name that is not mangled but borrowed: `bash`
+	// where this app says `run_command`. It says which convention the name came from,
+	// because "verfälscht" would be wrong about a name the model wrote exactly right.
+	aliasedToolNote = "Der Tool-Aufruf „%s“ wurde als „%s“ ausgeführt — „%s“ ist der Name, den andere Assistenten dafür verwenden."
 	// droppedToolNote is the warning for a name nothing matches.
 	droppedToolNote = "Der Tool-Aufruf „%s“ wurde verworfen: diesen Namen kennt die App nicht."
 	// droppedToolText is what the transcript says when no call survived, so a turn
@@ -54,27 +59,65 @@ func definitionNames(defs []llm.ToolDefinition) []string {
 	return names
 }
 
-// repairToolName answers the name a model's mangled one probably meant, or "" when
-// nothing can be said with confidence.
+// toolAliases are the names *other* tool conventions use for tools this app ships.
+//
+// They exist because a model that has been trained or prompted on another harness writes
+// `bash` where this app's request declares `run_command` — a name it got exactly right, in
+// a vocabulary this app never taught it. The repair below is about a name the model mangled
+// (`scr scrape_url`); this table is about a name it borrowed, and the two arrive through
+// the same door, so they are resolved in one place.
+//
+// Two rules keep it from becoming a way around the tool list. A target resolves only when
+// this request actually offers it, so an alias can never hand a model a tool the turn
+// withheld — `bash` in a research chat, where `run_command` is not offered, stays an
+// unknown name. And a name with more than one plausible target is not listed at all: `find`
+// could mean find_files or search_files, and a wrong tool with the right arguments is the
+// expensive shape of that mistake.
+var toolAliases = map[string][]string{
+	"bash":       {tools.ToolRunCommand},
+	"shell":      {tools.ToolRunCommand},
+	"sh":         {tools.ToolRunCommand},
+	"terminal":   {tools.ToolRunCommand},
+	"command":    {tools.ToolRunCommand},
+	"run":        {tools.ToolRunCommand},
+	"read":       {tools.ToolReadFile},
+	"cat":        {tools.ToolReadFile},
+	"write":      {tools.ToolWriteFile},
+	"edit":       {tools.ToolEditFile},
+	"patch":      {tools.ToolEditFile},
+	"ls":         {tools.ToolListDir},
+	"list":       {tools.ToolListDir},
+	"grep":       {tools.ToolSearchFiles},
+	"rg":         {tools.ToolSearchFiles},
+	"glob":       {tools.ToolFindFiles},
+	"fetch":      {tools.ToolScrapeURL},
+	"browse":     {tools.ToolScrapeURL},
+	"web_search": {tools.ToolSearchWeb},
+}
+
+// repairToolName answers the name a model's mangled (or borrowed) one probably meant, or
+// "" when nothing can be said with confidence. The second value says the name was an alias,
+// which only changes the sentence the user is shown.
 //
 // The rule is deliberately conservative. An exact name wins; a name that differs only
-// in case or surrounding whitespace resolves; and a name whose word-tokens contain
-// exactly one known tool name resolves to it. Two candidates mean the model meant
+// in case or surrounding whitespace resolves; a name whose word-tokens contain
+// exactly one known tool name resolves to it; and a name from another convention's
+// vocabulary resolves through toolAliases. Two candidates mean the model meant
 // something this function cannot know, and a wrong tool with the right arguments is
 // worse than a refused call — `generate_image` handed a scrape's URL as its prompt is
 // the expensive shape of that mistake.
-func repairToolName(name string, known map[string]bool) string {
+func repairToolName(name string, known map[string]bool) (string, bool) {
 	trimmed := strings.TrimSpace(strings.Trim(name, "`\"'"))
 	if trimmed == "" {
-		return ""
+		return "", false
 	}
 	if known[trimmed] {
-		return trimmed
+		return trimmed, false
 	}
 	lower := strings.ToLower(trimmed)
 	for candidate := range known {
 		if strings.ToLower(candidate) == lower {
-			return candidate
+			return candidate, false
 		}
 	}
 	words := strings.FieldsFunc(lower, func(r rune) bool {
@@ -86,11 +129,19 @@ func repairToolName(name string, known map[string]bool) string {
 			continue
 		}
 		if match != "" && match != word {
-			return ""
+			return "", false
 		}
 		match = word
 	}
-	return match
+	if match != "" {
+		return match, false
+	}
+	for _, target := range toolAliases[lower] {
+		if known[target] {
+			return target, true
+		}
+	}
+	return "", false
 }
 
 // resolveToolCalls repairs a mangled name where the intent is unambiguous, and decides
@@ -116,8 +167,12 @@ func resolveToolCalls(calls []llm.ToolCall, known []string, dropUnknown bool) (k
 			kept = append(kept, call)
 			continue
 		}
-		if repaired := repairToolName(call.Name, names); repaired != "" {
-			notes = append(notes, fmt.Sprintf(renamedToolNote, call.Name, repaired))
+		if repaired, aliased := repairToolName(call.Name, names); repaired != "" {
+			if aliased {
+				notes = append(notes, fmt.Sprintf(aliasedToolNote, call.Name, repaired, call.Name))
+			} else {
+				notes = append(notes, fmt.Sprintf(renamedToolNote, call.Name, repaired))
+			}
 			call.Name = repaired
 			kept = append(kept, call)
 			continue
@@ -190,7 +245,7 @@ func sanitiseToolHistory(msgs []llm.Message, known map[string]bool) ([]llm.Messa
 		for _, call := range m.ToolCalls {
 			name := call.Name
 			if !known[name] {
-				name = repairToolName(name, known)
+				name, _ = repairToolName(name, known)
 			}
 			if name == "" {
 				m.Content = joinText(m.Content, fmt.Sprintf(droppedToolText, call.Name))

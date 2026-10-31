@@ -33,9 +33,49 @@ func TestRepairToolName(t *testing.T) {
 		{"scrape", ""},
 		{"", ""},
 	} {
-		if got := repairToolName(tc.in, known); got != tc.want {
+		if got, _ := repairToolName(tc.in, known); got != tc.want {
 			t.Errorf("repairToolName(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestANameFromAnotherConventionResolves pins the borrowed vocabulary — the report that
+// started it: a local model wrote `bash` where the request declared `run_command` and the
+// turn answered "diesen Namen kennt die App nicht". The table is the fix, and the second
+// half is its limit: an alias resolves only to a tool this request offers, so it can never
+// hand a turn a tool that was withheld from it.
+func TestANameFromAnotherConventionResolves(t *testing.T) {
+	project := toolNameSet([]string{"read_file", "run_command", "edit_file"})
+	if got, aliased := repairToolName("bash", project); got != "run_command" || !aliased {
+		t.Errorf("bash resolved to %q (aliased=%v), want run_command through the alias table", got, aliased)
+	}
+	for _, name := range []string{"read", "cat"} {
+		if got, _ := repairToolName(name, project); got != "read_file" {
+			t.Errorf("%s resolved to %q, want read_file", name, got)
+		}
+	}
+	research := toolNameSet([]string{"search_web", "scrape_url"})
+	if got, _ := repairToolName("bash", research); got != "" {
+		t.Errorf("bash resolved to %q in a request that does not offer run_command", got)
+	}
+	// A mangled name is still reported as mangled: `verfälscht` would be the wrong sentence
+	// for a name the model wrote exactly as it learned it.
+	if _, aliased := repairToolName("scr scrape_url", toolNameSet([]string{"scrape_url"})); aliased {
+		t.Error("a repaired name was reported as an alias")
+	}
+
+	// And through the resolver a native call goes through, with the note the user sees.
+	kept, notes, dropped := resolveToolCalls([]llm.ToolCall{
+		{ID: "call-1", Name: "bash", Arguments: `{"command":"echo hi"}`},
+	}, []string{"run_command"}, true)
+	if len(kept) != 1 || kept[0].Name != "run_command" || len(dropped) != 0 {
+		t.Fatalf("a bash call was not resolved onto run_command: kept=%v dropped=%v", kept, dropped)
+	}
+	if kept[0].Arguments != `{"command":"echo hi"}` {
+		t.Errorf("the arguments were rewritten: %q", kept[0].Arguments)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "„bash“") || !strings.Contains(notes[0], "„run_command“") {
+		t.Errorf("the note does not say what was renamed to what: %v", notes)
 	}
 }
 
