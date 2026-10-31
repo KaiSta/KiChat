@@ -321,6 +321,55 @@ func TestATimedOutCommandWithNoOutputSaysWhy(t *testing.T) {
 	}
 }
 
+// TestASilentTimeoutWithoutAPipeDoesNotBlameAPipe is the other half of that sentence, and it
+// is the one a plausible fix gets wrong: a command that simply had not printed anything yet —
+// a compile before the first line of a test run — is not a buffering pipe, and telling the
+// model to drop a pipe it never wrote sends it to fix the wrong thing.
+func TestASilentTimeoutWithoutAPipeDoesNotBlameAPipe(t *testing.T) {
+	service, chatID, _ := commandService(t)
+	out, err := service.Execute(context.Background(), chatID, ToolRunCommand,
+		`{"command":`+jsonString(sleepCommand(30))+`,"timeout_seconds":1}`)
+	if err != nil {
+		t.Fatalf("run_command: %v", err)
+	}
+	if !strings.Contains(out, "nichts ausgegeben") {
+		t.Errorf("a silent timeout without a pipe does not say it printed nothing:\n%s", out)
+	}
+	for _, blames := range []string{"keine Ausgabe aufgefangen", "`| tail`"} {
+		if strings.Contains(out, blames) {
+			t.Errorf("the result blames a pipe the line does not have (%q):\n%s", blames, out)
+		}
+	}
+	if !strings.Contains(out, "-timeout 60s") {
+		t.Errorf("the result does not say how to get output before the cut:\n%s", out)
+	}
+}
+
+// TestBuffersOutputPinsWhatCountsAsHoldingOutputBack: the note's cause has to follow the line,
+// and these are the shapes the distinction was written for. `2>&1` is deliberately not one of
+// them — it points stderr at the stream the app already captures.
+func TestBuffersOutputPinsWhatCountsAsHoldingOutputBack(t *testing.T) {
+	for _, line := range []string{
+		"go test ./... 2>&1 | tail -40",
+		"make check | grep -i fail",
+		"go build ./... > build.log",
+		"go vet ./... 2>> errors.log",
+	} {
+		if !buffersOutput(line) {
+			t.Errorf("%q was not recognised as handing its output elsewhere", line)
+		}
+	}
+	for _, line := range []string{
+		"go test ./...",
+		"go test ./... 2>&1",
+		"go vet ./... || echo failed",
+	} {
+		if buffersOutput(line) {
+			t.Errorf("%q was treated as buffering, and it captures everything", line)
+		}
+	}
+}
+
 // TestAStoppedTurnKillsTheCommand is the other end of the same mechanism: the user presses
 // Stop, and the command has to die with the turn rather than outlive the chat that asked for
 // it. The error is what the record needs — nobody is waiting for the result.

@@ -542,7 +542,7 @@ func (s *Service) execCommand(ctx context.Context, chatID string, root workspace
 			"der Turn wurde gestoppt, deshalb wurde der Befehl beendet",
 			"the turn was stopped, so the command was killed"), ctx.Err())
 	case wasTimedOut:
-		return summarized(commandResult(lang, line, out, timeoutNote(lang, out, elapsed, timeout)),
+		return summarized(commandResult(lang, line, out, timeoutNote(lang, line, out, elapsed, timeout)),
 			"tool.sum.commandTimeout", humanDuration(elapsed)), nil
 	case waitErr != nil:
 		// A non-zero exit, which is a result: the code is what the model reasons about,
@@ -567,23 +567,23 @@ func (s *Service) execCommand(ctx context.Context, chatID string, root workspace
 	}
 }
 
-// commandResult is what the model reads: what ran, what it printed, and how it ended.
+// timeoutNote is what the model reads when the call's own limit stopped the command.
 //
-// The line is repeated because the result is replayed into later turns on its own — by the
-// time a model reads this it may be several rounds past the call, and "Exit-Code 1" without
-// the command above it says nothing.
-// timeoutNote is what the model reads when the call's own limit stopped the command, and
-// it is written as two cases because "no output" beside "the output above is incomplete"
-// reads as a silent success — the worst of the available readings.
+// It is written as three cases rather than one, because "(keine Ausgabe)" beside "the output
+// above is incomplete" reads as a silent success — the worst of the readings available to a
+// model — and because an empty result has more than one cause.
 //
-// The silent case is not rare and it is not the command's fault: `… | tail -40` keeps the
-// last lines in memory and writes them when the *input* ends, so a pipeline through any
-// buffering filter produces nothing at all while it runs. Since the app kills the tree, the
-// filter never gets to flush, and the model is handed an empty result for a build that may
-// have printed thousands of lines. Neither that nor a real silence is a fact the model can
-// act on, so the note names the cause and the way out (drop the pipe, narrow the scope, let
-// the program report its own limit first) rather than only saying it was stopped.
-func timeoutNote(lang string, out *headTailWriter, elapsed, limit time.Duration) string {
+// A line that hands its output to something else produces nothing here while it runs: `… | tail
+// -40` keeps the last lines in memory until its *input* ends, and the kill means it never does,
+// so a build that printed thousands of lines arrives empty. A redirect (`… > build.log`) writes
+// into that file instead of into this result. Neither is the command being quiet, and the way
+// out differs from the third case, which is a line with neither: a compile that had not reached
+// its first line yet. Telling *that* model to "drop the pipe" sends it to fix something it never
+// wrote, so the sentence has to follow what the line actually does.
+//
+// The detection is a hint, not a boundary (buffersOutput): the shell is the parser and this is
+// not it.
+func timeoutNote(lang, line string, out *headTailWriter, elapsed, limit time.Duration) string {
 	when := fmt.Sprintf(text(lang,
 		"Nach %s abgebrochen: das Zeitlimit dieses Aufrufs (%s) war erreicht.",
 		"Stopped after %s: this call's time limit (%s) was reached."),
@@ -598,18 +598,52 @@ func timeoutNote(lang string, out *headTailWriter, elapsed, limit time.Duration)
 				"— narrow the scope (one package, one test, `-run`) and let the program set its own "+
 				"limit (for `go test`, e.g. `-timeout 60s`), so it prints where it hangs before the cut.")
 	}
+	if buffersOutput(line) {
+		return when + text(lang,
+			" Es wurde keine Ausgabe aufgefangen — das heißt nicht, dass der Befehl still war: eine "+
+				"Pipe wie `| tail`, `| head` oder `| sort` schreibt erst, wenn der Befehl endet, und "+
+				"dieser endete nicht; eine Umleitung wie `> datei` schreibt in die Datei statt in "+
+				"dieses Ergebnis. Führe die Zeile ohne Pipe und ohne Umleitung aus, grenze den "+
+				"Umfang ein, und lass das Programm sein eigenes Limit setzen (bei `go test` z. B. "+
+				"`-timeout 60s`), damit es vorher ausgibt, wo es hängt.",
+			" No output was captured — which does not mean the command was silent: a pipe like "+
+				"`| tail`, `| head` or `| sort` only writes when the command ends, and this one did "+
+				"not; a redirect like `> file` writes into that file instead of into this result. Run "+
+				"the line without the pipe and without the redirect, narrow the scope, and let the "+
+				"program set its own limit (for `go test`, e.g. `-timeout 60s`), so it prints where it "+
+				"hangs before the cut.")
+	}
 	return when + text(lang,
-		" Es wurde keine Ausgabe aufgefangen — das heißt nicht, dass der Befehl still war: eine "+
-			"Pipe wie `| tail`, `| head` oder `| sort` schreibt erst, wenn der Befehl endet, und "+
-			"dieser endete nicht. Führe ihn ohne Pipe aus, grenze den Umfang ein, und lass das "+
-			"Programm sein eigenes Limit setzen (bei `go test` z. B. `-timeout 60s`), damit es vorher "+
-			"ausgibt, wo es hängt.",
-		" No output was captured — which does not mean the command was silent: a pipe like "+
-			"`| tail`, `| head` or `| sort` only writes when the command ends, and this one did not. "+
-			"Run it without the pipe, narrow the scope, and let the program set its own limit (for "+
-			"`go test`, e.g. `-timeout 60s`), so it prints where it hangs before the cut.")
+		" Es wurde bis zum Abbruch nichts ausgegeben, und die Zeile hat weder eine Pipe noch eine "+
+			"Umleitung — die Ausgabe kann also nicht unterwegs hängen geblieben sein: der Befehl "+
+			"rechnete noch, bevor er etwas sagen konnte. Grenze den Umfang ein (ein Paket, ein "+
+			"Test, `-run`) und lass das Programm sein eigenes Limit setzen (bei `go test` z. B. "+
+			"`-timeout 60s`), damit es vorher ausgibt, wo es hängt.",
+		" Nothing was printed before the cut, and the line has neither a pipe nor a redirect — so "+
+			"the output cannot have been held back on the way here: the command was still working "+
+			"before it could say anything. Narrow the scope (one package, one test, `-run`) and let "+
+			"the program set its own limit (for `go test`, e.g. `-timeout 60s`), so it prints where "+
+			"it hangs before the cut.")
 }
 
+// outputHandoff strips the two shell spellings that look like a handoff but are not one.
+var outputHandoff = strings.NewReplacer("||", " ", "2>&1", " ", ">&1", " ")
+
+// buffersOutput reports whether a line hands its output to something that decides when it
+// arrives: a pipe, or a redirect into a file.
+//
+// A hint for one sentence rather than a parse of the shell. `||` is the shell's "or", and
+// `2>&1` points stderr at the stream this app already captures — a line that carries only that
+// prints into the result like any other.
+func buffersOutput(line string) bool {
+	return strings.ContainsAny(outputHandoff.Replace(line), "|>")
+}
+
+// commandResult is what the model reads: what ran, what it printed, and how it ended.
+//
+// The line is repeated because the result is replayed into later turns on its own — by the
+// time a model reads this it may be several rounds past the call, and "Exit-Code 1" without
+// the command above it says nothing.
 func commandResult(lang, line string, out *headTailWriter, status string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "$ %s\n", line)
