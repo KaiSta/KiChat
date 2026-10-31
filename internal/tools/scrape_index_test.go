@@ -63,7 +63,7 @@ func TestAScrapedDocumentAboveTheThresholdIsIndexed(t *testing.T) {
 	}, func(data []byte, filename string) (string, int, error) {
 		return text, 20, nil
 	})
-	service := New(st, nil, scraper)
+	service := inGerman(New(st, nil, scraper))
 
 	result, err := service.Execute(context.Background(), chatID, ToolScrapeURL,
 		fmt.Sprintf(`{"url":%q,"max_tokens":800}`, server.URL+"/Manual.pdf"))
@@ -124,9 +124,9 @@ func TestASmallPageStaysInline(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	service := New(st, nil, research.NewScraper(st, research.ScrapeOptions{
+	service := inGerman(New(st, nil, research.NewScraper(st, research.ScrapeOptions{
 		AllowPrivateHosts: true,
-	}, nil))
+	}, nil)))
 
 	result, err := service.Execute(context.Background(), chatID, ToolScrapeURL,
 		fmt.Sprintf(`{"url":%q}`, server.URL))

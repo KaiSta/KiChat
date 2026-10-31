@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"kichat/internal/config"
 	"kichat/internal/store"
 	"kichat/internal/uimsg"
 )
@@ -46,7 +47,54 @@ func projectService(t *testing.T, files map[string]string) (*Service, string, st
 			t.Fatalf("create chat %s: %v", c.ID, err)
 		}
 	}
-	return &Service{Store: st}, "project-1", folder
+	return inGerman(&Service{Store: st}), "project-1", folder
+}
+
+// inGerman makes a test's service speak German.
+//
+// The app's default interface language is English (`config.Default()`), so a service built
+// without settings answers in English — which is the rule this package follows and the case
+// `TestTheLanguageFollowsTheInterface` pins on the other side. These tests pin the German
+// sentences, most of them written before the text followed the interface at all, so they ask
+// for German explicitly rather than assert a translation they were never about.
+// TestTheLanguageFollowsTheInterface pins the rule every description, refusal and notice in
+// this package follows: the text the model reads is written in the window's language
+// (`config.ModelLanguage`), and a service without settings — a test's service, or one built
+// before the app has read its config — speaks the app's default, English.
+func TestTheLanguageFollowsTheInterface(t *testing.T) {
+	service, chatID, _ := projectService(t, map[string]string{"a.txt": "hallo\n"})
+	if got := service.Language(); got != config.LangGerman {
+		t.Fatalf("the German service speaks %q", got)
+	}
+	if got := (&Service{}).Language(); got != config.LangEnglish {
+		t.Fatalf("a service without settings speaks %q, want the app's default", got)
+	}
+
+	german, _ := service.Execute(context.Background(), chatID, ToolReadFile, `{"path":"a.txt"}`)
+	service.Settings = func() config.Settings { return config.Default() }
+	english, _ := service.Execute(context.Background(), chatID, ToolReadFile, `{"path":"a.txt"}`)
+
+	if !strings.Contains(german, "Zeilen 1–1 von 1") {
+		t.Errorf("a German window did not get a German read header: %q", german)
+	}
+	if !strings.Contains(english, "lines 1–1 of 1") || strings.Contains(english, "Zeilen") {
+		t.Errorf("the English default did not get an English read: %q", english)
+	}
+
+	// A refusal is the other reader of the same rule, and the one the model has to act on.
+	_, err := service.Execute(context.Background(), chatID, ToolReadFile, `{"path":"fehlt.txt"}`)
+	if err == nil || !strings.Contains(uimsg.Sentence(err), "does not exist in the project folder") {
+		t.Errorf("the refusal is not in the English the default asks for: %v", err)
+	}
+}
+
+func inGerman(s *Service) *Service {
+	s.Settings = func() config.Settings {
+		c := config.Default()
+		c.Language = config.LangGerman
+		return c
+	}
+	return s
 }
 
 // refusalCode is the uimsg code a failed call produced, which is what the window
@@ -407,7 +455,7 @@ func TestAGoneProjectFolderIsReported(t *testing.T) {
 // filters by from drifting from the tools themselves.
 func TestTheProjectToolNamesAreTheOnesThisFileDefines(t *testing.T) {
 	defined := map[string]bool{}
-	for _, def := range projectDefinitions() {
+	for _, def := range projectDefinitions(config.LangEnglish) {
 		defined[def.Name] = true
 	}
 	names := ProjectToolNames()

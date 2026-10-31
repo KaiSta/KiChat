@@ -105,13 +105,15 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	}
 	var args generateImageArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return "", badArguments(err)
+		return "", s.badArguments(err)
 	}
 	prompt := strings.TrimSpace(args.Prompt)
 	if prompt == "" {
 		// A picture with no prompt is not a degenerate case, it is a blank canvas:
 		// the server would draw something arbitrary and charge for it.
-		return "", uimsg.Detailf("tools.promptMissing", "the prompt argument is empty; a picture needs a description")
+		return "", uimsg.Detailf("tools.promptMissing", text(s.Language(),
+			"das Argument prompt ist leer; ein Bild braucht eine Beschreibung",
+			"the prompt argument is empty; a picture needs a description"))
 	}
 
 	cfg := s.imageSettings()
@@ -221,7 +223,7 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 		used[name] = true
 	}
 
-	return summarizeGeneration(req, result, caption, captionErr, pipeline, adjusted), nil
+	return summarizeGeneration(s.Language(), req, result, caption, captionErr, pipeline, adjusted), nil
 }
 
 // caption asks the loaded model for the caption the backend will draw from, when the
@@ -255,15 +257,18 @@ func (s *Service) caption(ctx context.Context, chatID, mode string, req images.R
 // above all: stopping the model from describing what it drew. The chat model that
 // called this tool has not seen the picture, and a reply that invents its contents
 // reads as a broken feature rather than as an absent capability.
-func summarizeGeneration(req images.Request, result images.Result, caption images.CaptionResult, captionErr error, pipeline images.Pipeline, adjusted images.Adjustments) string {
+func summarizeGeneration(lang string, req images.Request, result images.Result, caption images.CaptionResult, captionErr error, pipeline images.Pipeline, adjusted images.Adjustments) string {
 	var sb strings.Builder
 	kept := len(result.Kept())
-	fmt.Fprintf(&sb, "%d Bild(er) wurden erzeugt und im Chat angezeigt.\n", kept)
+	fmt.Fprintf(&sb, text(lang, "%d Bild(er) wurden erzeugt und im Chat angezeigt.\n",
+		"%d image(s) were created and shown in the chat.\n"), kept)
 	if dropped := len(result.Images) - kept; dropped > 0 {
 		// Said out loud rather than dropped in silence: the server drew them, the chat does
 		// not show them, and a model that was told only about the kept ones would answer a
 		// question about a batch it cannot see.
-		fmt.Fprintf(&sb, "Der Server hat %d Bild(er) mehr geliefert; sie wurden nicht übernommen.\n", dropped)
+		fmt.Fprintf(&sb, text(lang,
+			"Der Server hat %d Bild(er) mehr geliefert; sie wurden nicht übernommen.\n",
+			"The server returned %d more image(s); they were not kept.\n"), dropped)
 	}
 	fmt.Fprintf(&sb, "Prompt: %s\n", req.Prompt)
 	// Named by model and length rather than quoted: a 350-word caption is not something the
@@ -271,10 +276,16 @@ func summarizeGeneration(req images.Request, result images.Result, caption image
 	// turn. What the model does need is to know that the picture was drawn from words
 	// somebody else wrote, so it does not promise the user that it drew their sentence.
 	if req.Caption != "" {
-		fmt.Fprintf(&sb, "Bildbeschreibung: von %s, %d Wörter — gezeichnet wurde die Beschreibung, nicht der Prompt\n",
-			firstNonEmptyString(caption.Model, "dem geladenen Modell"), images.WordCount(req.Caption))
+		fmt.Fprintf(&sb, text(lang,
+			"Bildbeschreibung: von %s, %d Wörter — gezeichnet wurde die Beschreibung, nicht der "+
+				"Prompt\n",
+			"Caption: by %s, %d words — the caption was drawn, not the prompt\n"),
+			firstNonEmptyString(caption.Model, text(lang, "dem geladenen Modell", "the loaded model")),
+			images.WordCount(req.Caption))
 	} else if captionErr != nil {
-		fmt.Fprintf(&sb, "Bildbeschreibung fehlgeschlagen (%s) — gezeichnet wurde der Prompt wie eingegeben\n", captionErr)
+		fmt.Fprintf(&sb, text(lang,
+			"Bildbeschreibung fehlgeschlagen (%s) — gezeichnet wurde der Prompt wie eingegeben\n",
+			"Caption failed (%s) — the prompt was drawn as typed\n"), captionErr)
 	}
 	// What the profile removed is said out loud: a negative prompt that is sent and then
 	// ignored looks like a broken setting, and a second pass that quietly did not run
@@ -282,18 +293,20 @@ func summarizeGeneration(req images.Request, result images.Result, caption image
 	// really carried the field, because "this model has no negative prompt" is noise on a
 	// draw that never asked for one.
 	if adjusted.DroppedNegative {
-		fmt.Fprintf(&sb, "Negativ-Prompt: von %s nicht unterstützt — nicht gesendet\n", pipeline.Name)
+		fmt.Fprintf(&sb, text(lang, "Negativ-Prompt: von %s nicht unterstützt — nicht gesendet\n",
+			"Negative prompt: not supported by %s — not sent\n"), pipeline.Name)
 	}
 	if adjusted.DroppedHires {
-		fmt.Fprintf(&sb, "Zweite Stufe: für %s nicht freigegeben — nicht gezeichnet\n", pipeline.Name)
+		fmt.Fprintf(&sb, text(lang, "Zweite Stufe: für %s nicht freigegeben — nicht gezeichnet\n",
+			"Second pass: not enabled for %s — not drawn\n"), pipeline.Name)
 	}
 	if req.NegativePrompt != "" {
-		fmt.Fprintf(&sb, "Negativ-Prompt: %s\n", req.NegativePrompt)
+		fmt.Fprintf(&sb, text(lang, "Negativ-Prompt: %s\n", "Negative prompt: %s\n"), req.NegativePrompt)
 	}
 	if req.Width > 0 && req.Height > 0 {
-		fmt.Fprintf(&sb, "Größe: %dx%d", req.Width, req.Height)
+		fmt.Fprintf(&sb, text(lang, "Größe: %dx%d", "Size: %dx%d"), req.Width, req.Height)
 		if req.Steps > 0 {
-			fmt.Fprintf(&sb, ", %d Schritte", req.Steps)
+			fmt.Fprintf(&sb, text(lang, ", %d Schritte", ", %d steps"), req.Steps)
 		}
 		sb.WriteString("\n")
 	}
@@ -302,7 +315,7 @@ func summarizeGeneration(req images.Request, result images.Result, caption image
 	// picture than the one in the transcript.
 	if req.Hires.Enabled {
 		outputWidth, outputHeight := req.OutputSize()
-		fmt.Fprintf(&sb, "Zweite Stufe: ×%s, Denoise %s",
+		fmt.Fprintf(&sb, text(lang, "Zweite Stufe: ×%s, Denoise %s", "Second pass: ×%s, denoise %s"),
 			strconv.FormatFloat(req.Hires.Scale, 'f', -1, 64),
 			strconv.FormatFloat(req.Hires.Denoise, 'f', -1, 64))
 		if outputWidth > 0 && outputHeight > 0 {
@@ -320,7 +333,8 @@ func summarizeGeneration(req images.Request, result images.Result, caption image
 	// prompt that look different are most often a different scale, so a model asked to redraw
 	// something has to be able to see the one that was used.
 	if req.CfgScale > 0 {
-		fmt.Fprintf(&sb, "CFG-Scale: %s\n", strconv.FormatFloat(req.CfgScale, 'f', -1, 64))
+		fmt.Fprintf(&sb, text(lang, "CFG-Scale: %s\n", "CFG scale: %s\n"),
+			strconv.FormatFloat(req.CfgScale, 'f', -1, 64))
 	}
 	// The seed is the one number worth reporting even when the request left it
 	// open: the server chose one, and quoting it is what lets the user ask for the
@@ -329,12 +343,15 @@ func summarizeGeneration(req images.Request, result images.Result, caption image
 		fmt.Fprintf(&sb, "Seed: %d\n", result.Seed)
 	}
 	if result.Model != "" {
-		fmt.Fprintf(&sb, "Modell: %s\n", result.Model)
+		fmt.Fprintf(&sb, text(lang, "Modell: %s\n", "Model: %s\n"), result.Model)
 	}
-	sb.WriteString("\nDu siehst das Bild selbst NICHT und darfst seinen Inhalt nicht beschreiben. " +
-		"Sage kurz, dass es erzeugt wurde, und nenne bei Bedarf den Prompt oder den Seed. " +
-		"Wenn der Nutzer das Bild ändern will, rufe generate_image mit einem angepassten " +
-		"Prompt erneut auf.")
+	sb.WriteString(text(lang,
+		"\nDu siehst das Bild selbst NICHT und darfst seinen Inhalt nicht beschreiben. Sage kurz, "+
+			"dass es erzeugt wurde, und nenne bei Bedarf den Prompt oder den Seed. Wenn der Nutzer "+
+			"das Bild ändern will, rufe generate_image mit einem angepassten Prompt erneut auf.",
+		"\nYou do NOT see the image yourself and must not describe its contents. Say briefly that "+
+			"it was created, and name the prompt or the seed if needed. If the user wants to change "+
+			"the image, call generate_image again with an adjusted prompt."))
 	return sb.String()
 }
 

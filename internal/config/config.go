@@ -1185,6 +1185,18 @@ const (
 	LangChinese = "zh"
 )
 
+// ModelLanguage resolves the language model-facing text is written in — tool descriptions,
+// refusals, notices. It is the interface's language where a translation exists, which today
+// means German for a German window and English for everything else, including a Chinese one:
+// the same fallback PromptBody uses, because a sentence nobody wrote is worse than one in the
+// wrong language. What a model is *told* therefore follows the person reading the window.
+func ModelLanguage(lang string) string {
+	if lang == LangGerman {
+		return LangGerman
+	}
+	return LangEnglish
+}
+
 // The tool loop's bounds: how many model/tool rounds one reply may take, and how many
 // tokens of tool results it may carry into the next request.
 //

@@ -811,7 +811,7 @@ func TestToolProtocolFollowsAdvertisedCapabilities(t *testing.T) {
 				t.Fatal("no request recorded")
 			}
 			system := string(req.Messages[0].Content)
-			if got := strings.Contains(system, tools.TextProtocolHint); got != tc.wantHint {
+			if got := strings.Contains(system, tools.TextProtocolHint(config.LangEnglish)); got != tc.wantHint {
 				t.Errorf("text-protocol hint present = %v, want %v", got, tc.wantHint)
 			}
 		})

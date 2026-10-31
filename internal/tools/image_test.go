@@ -65,7 +65,7 @@ func newImageService(t *testing.T, provider images.Provider, cfg config.ImageSet
 	if err := st.CreateChat(store.Chat{ID: chatID, Title: "Bilder", CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("create chat: %v", err)
 	}
-	settings := config.Settings{Images: cfg}
+	settings := config.Settings{Images: cfg, Language: config.LangGerman}
 	service := &Service{
 		Store:    st,
 		Images:   provider,
@@ -434,7 +434,7 @@ func TestGenerateImageIsAdvertised(t *testing.T) {
 // other two.
 func TestTheImageToolAsksForAnExplicitRequest(t *testing.T) {
 	var description string
-	for _, def := range (&Service{}).Definitions() {
+	for _, def := range inGerman(&Service{}).Definitions() {
 		if def.Name == ToolGenerateImage {
 			description = def.Description
 		}
@@ -450,8 +450,8 @@ func TestTheImageToolAsksForAnExplicitRequest(t *testing.T) {
 		text string
 	}{
 		{name: "native description", text: description},
-		{name: "text protocol hint", text: ImageProtocolHint},
-		{name: "native system rule", text: ImageUseHint},
+		{name: "text protocol hint", text: ImageProtocolHint(config.LangGerman)},
+		{name: "native system rule", text: ImageUseHint(config.LangGerman)},
 	}
 	for _, tc := range texts {
 		if !strings.Contains(tc.text, "ausdrücklich") {

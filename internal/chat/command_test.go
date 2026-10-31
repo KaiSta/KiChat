@@ -157,7 +157,7 @@ func TestAProjectTurnRunsACommandAfterAsking(t *testing.T) {
 	if !strings.Contains(result, writeFileCommand()) {
 		t.Errorf("the model's tool result does not say what ran:\n%s", result)
 	}
-	if !strings.Contains(result, "Exit-Code 0") {
+	if !strings.Contains(result, "Exit code 0") {
 		t.Errorf("the model's tool result does not report the exit code:\n%s", result)
 	}
 }

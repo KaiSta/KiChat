@@ -141,36 +141,50 @@ type editFileArgs struct {
 // whole-file rewrite of a 400-line file costs a round's worth of tokens, loses anything the
 // model did not think to repeat, and is the shape in which a model "fixes" a file by
 // re-emitting its memory of it.
-func changeToolDefinitions() []llm.ToolDefinition {
+func changeToolDefinitions(lang string) []llm.ToolDefinition {
 	return []llm.ToolDefinition{
 		{
 			Name: ToolEditFile,
-			Description: "Ersetzt eine Textstelle in einer Datei des Projektordners. Bevorzuge dieses Tool " +
-				"gegenüber write_file: es ändert nur die Stelle, die du nennst, und lässt den Rest der Datei " +
-				"unverändert. Lies die Datei vorher mit read_file und übernimm den Text aus old_string " +
-				"Zeichen für Zeichen, samt Einrückung — die Suche ist exakt. Kommt die Stelle mehrfach vor, " +
-				"sind die umgebenden Zeilen mit aufzunehmen oder replace_all zu setzen. Der Nutzer sieht die " +
-				"Änderung und muss sie bestätigen.",
+			Description: text(lang,
+				"Ersetzt eine Textstelle in einer Datei des Projektordners. Bevorzuge dieses Tool "+
+					"gegenüber write_file: es ändert nur die Stelle, die du nennst, und lässt den Rest der Datei "+
+					"unverändert. Lies die Datei vorher mit read_file und übernimm den Text aus old_string "+
+					"Zeichen für Zeichen, samt Einrückung — die Suche ist exakt. Kommt die Stelle mehrfach vor, "+
+					"sind die umgebenden Zeilen mit aufzunehmen oder replace_all zu setzen. Der Nutzer sieht die "+
+					"Änderung und muss sie bestätigen.",
+				"Replaces a passage in a file of the project folder. Prefer this over write_file: it "+
+					"changes only the passage you name and leaves the rest of the file untouched. Read the "+
+					"file with read_file first and copy the text for old_string character by character, "+
+					"indentation included — the search is exact. If the passage occurs more than once, include "+
+					"the lines around it or set replace_all. The user sees the change and has to confirm it."),
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Pfad relativ zum Projektordner.",
+						"description": text(lang, "Pfad relativ zum Projektordner.", "Path relative to the project folder."),
 					},
 					"old_string": map[string]any{
 						"type": "string",
-						"description": "Der zu ersetzende Text, exakt wie in der Datei (Einrückung inbegriffen). " +
-							"Muss eindeutig sein, solange replace_all nicht gesetzt ist.",
+						"description": text(lang,
+							"Der zu ersetzende Text, exakt wie in der Datei (Einrückung inbegriffen). Muss eindeutig "+
+								"sein, solange replace_all nicht gesetzt ist.",
+							"The text to replace, exactly as it stands in the file (indentation included). Must be "+
+								"unique unless replace_all is set."),
 					},
 					"new_string": map[string]any{
-						"type":        "string",
-						"description": "Der Text, der stattdessen dort steht. Leer bedeutet: die Stelle entfernen.",
+						"type": "string",
+						"description": text(lang,
+							"Der Text, der stattdessen dort steht. Leer bedeutet: die Stelle entfernen.",
+							"The text that stands there instead. Empty means: remove the passage."),
 					},
 					"replace_all": map[string]any{
 						"type": "boolean",
-						"description": "true ersetzt jedes Vorkommen. Nur setzen, wenn wirklich alle gemeint " +
-							"sind — sonst bleibt die Suche auf eine eindeutige Stelle beschränkt.",
+						"description": text(lang,
+							"true ersetzt jedes Vorkommen. Nur setzen, wenn wirklich alle gemeint sind — sonst "+
+								"bleibt die Suche auf eine eindeutige Stelle beschränkt.",
+							"true replaces every occurrence. Only set it when every one is meant — otherwise the "+
+								"search stays limited to a unique passage."),
 					},
 				},
 				"required": []string{"path", "old_string", "new_string"},
@@ -178,22 +192,29 @@ func changeToolDefinitions() []llm.ToolDefinition {
 		},
 		{
 			Name: ToolWriteFile,
-			Description: "Schreibt eine Datei im Projektordner vollständig neu — neue Datei oder Ersatz des " +
-				"ganzen Inhalts. Nutze es zum Anlegen einer Datei und für eine Datei, die du vollständig " +
-				"kennst; für eine einzelne Änderung an einer bestehenden Datei ist edit_file richtig, sonst " +
-				"geht alles verloren, was du nicht wiederholst. Der Inhalt wird genau so geschrieben, wie du " +
-				"ihn sendest — ohne abschließenden Zeilenumbruch, wenn du keinen sendest. Fehlende Ordner im " +
-				"Pfad werden angelegt. Der Nutzer sieht die Änderung und muss sie bestätigen.",
+			Description: text(lang,
+				"Schreibt eine Datei im Projektordner vollständig neu — neue Datei oder Ersatz des "+
+					"ganzen Inhalts. Nutze es zum Anlegen einer Datei und für eine Datei, die du vollständig "+
+					"kennst; für eine einzelne Änderung an einer bestehenden Datei ist edit_file richtig, sonst "+
+					"geht alles verloren, was du nicht wiederholst. Der Inhalt wird genau so geschrieben, wie du "+
+					"ihn sendest — ohne abschließenden Zeilenumbruch, wenn du keinen sendest. Fehlende Ordner im "+
+					"Pfad werden angelegt. Der Nutzer sieht die Änderung und muss sie bestätigen.",
+				"Writes a file in the project folder completely — a new file or a replacement of the whole "+
+					"content. Use it to create a file and for a file you know in full; for a single change to "+
+					"an existing file edit_file is right, otherwise everything you do not repeat is lost. The "+
+					"content is written exactly as you send it — without a trailing newline if you send none. "+
+					"Missing folders in the path are created. The user sees the change and has to confirm it."),
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{
-						"type":        "string",
-						"description": "Pfad relativ zum Projektordner, z. B. \"internal/store/store.go\".",
+						"type": "string",
+						"description": text(lang, "Pfad relativ zum Projektordner, z. B. \"internal/store/store.go\".",
+							"Path relative to the project folder, e.g. \"internal/store/store.go\"."),
 					},
 					"content": map[string]any{
 						"type":        "string",
-						"description": "Der vollständige Inhalt der Datei.",
+						"description": text(lang, "Der vollständige Inhalt der Datei.", "The complete content of the file."),
 					},
 				},
 				"required": []string{"path", "content"},
@@ -230,11 +251,14 @@ func toolCallFrom(ctx context.Context) string {
 func (s *Service) writeFile(ctx context.Context, chatID, argsJSON string) (Result, error) {
 	var args writeFileArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return Result{}, badArguments(err)
+		return Result{}, s.badArguments(err)
 	}
+	lang := s.Language()
 	args.Path = strings.TrimSpace(args.Path)
 	if args.Path == "" {
-		return Result{}, uimsg.Detailf("tools.pathMissing", "the path argument is empty; name a file in the project folder")
+		return Result{}, uimsg.Detailf("tools.pathMissing", text(lang,
+			"das Argument path ist leer; nenne eine Datei im Projektordner",
+			"the path argument is empty; name a file in the project folder"))
 	}
 	root, err := s.workspaceFor(chatID)
 	if err != nil {
@@ -245,7 +269,7 @@ func (s *Service) writeFile(ctx context.Context, chatID, argsJSON string) (Resul
 	// project).
 	change, err := root.DescribeWrite(args.Path, args.Content)
 	if err != nil {
-		return Result{}, changeError(args.Path, err)
+		return Result{}, s.changeError(args.Path, err)
 	}
 	if err := s.approveChange(ctx, chatID, ToolWriteFile, change); err != nil {
 		return Result{}, err
@@ -254,30 +278,34 @@ func (s *Service) writeFile(ctx context.Context, chatID, argsJSON string) (Resul
 	pre := s.preImageOf(root, args.Path)
 	result, err := root.Write(args.Path, args.Content)
 	if err != nil {
-		return Result{}, changeError(args.Path, err)
+		return Result{}, s.changeError(args.Path, err)
 	}
 	// The read cache is told rather than left to notice: a model that re-reads this file to
 	// check what it wrote must get the file, not a sentence about what the app remembers.
 	s.forgetReads(chatID, root.Absolute(result.Path))
 	note := s.remember(chatID, pre, workspace.Digest(args.Content))
 	if result.Created {
-		return summarized(fmt.Sprintf("%s neu geschrieben (%s).%s",
-			result.Path, lines(result.Lines), note),
+		return summarized(fmt.Sprintf(text(lang, "%s neu geschrieben (%s).%s", "%s created (%s).%s"),
+			result.Path, lines(lang, result.Lines), note),
 			"tool.sum.writeNew", result.Path, fmt.Sprint(result.Lines)), nil
 	}
-	return summarized(fmt.Sprintf("%s geschrieben (%s; vorher %s).%s",
-		result.Path, lines(result.Lines), lines(result.PreviousLines), note),
+	return summarized(fmt.Sprintf(text(lang, "%s geschrieben (%s; vorher %s).%s",
+		"%s written (%s; was %s).%s"),
+		result.Path, lines(lang, result.Lines), lines(lang, result.PreviousLines), note),
 		"tool.sum.write", result.Path, fmt.Sprint(result.Lines), fmt.Sprint(result.PreviousLines)), nil
 }
 
 func (s *Service) editFile(ctx context.Context, chatID, argsJSON string) (Result, error) {
 	var args editFileArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return Result{}, badArguments(err)
+		return Result{}, s.badArguments(err)
 	}
+	lang := s.Language()
 	args.Path = strings.TrimSpace(args.Path)
 	if args.Path == "" {
-		return Result{}, uimsg.Detailf("tools.pathMissing", "the path argument is empty; name a file in the project folder")
+		return Result{}, uimsg.Detailf("tools.pathMissing", text(lang,
+			"das Argument path ist leer; nenne eine Datei im Projektordner",
+			"the path argument is empty; name a file in the project folder"))
 	}
 	root, err := s.workspaceFor(chatID)
 	if err != nil {
@@ -286,7 +314,7 @@ func (s *Service) editFile(ctx context.Context, chatID, argsJSON string) (Result
 	replaceAll := looseBool(args.ReplaceAll, false)
 	change, err := root.DescribeEdit(args.Path, args.OldString, args.NewString, replaceAll)
 	if err != nil {
-		return Result{}, changeError(args.Path, err)
+		return Result{}, s.changeError(args.Path, err)
 	}
 	if err := s.approveChange(ctx, chatID, ToolEditFile, change); err != nil {
 		return Result{}, err
@@ -296,7 +324,7 @@ func (s *Service) editFile(ctx context.Context, chatID, argsJSON string) (Result
 	pre := s.preImageOf(root, args.Path)
 	result, err := root.Edit(args.Path, args.OldString, args.NewString, replaceAll)
 	if err != nil {
-		return Result{}, changeError(args.Path, err)
+		return Result{}, s.changeError(args.Path, err)
 	}
 	// Same as a write: the next read of this file is a question about the disk.
 	s.forgetReads(chatID, root.Absolute(result.Path))
@@ -304,14 +332,20 @@ func (s *Service) editFile(ctx context.Context, chatID, argsJSON string) (Result
 	// to know it was, or it learns that guessing indentation works.
 	note := s.remember(chatID, pre, result.Digest)
 	if result.Approximate {
-		note += " Der Einzug wich ab: ersetzt wurde die Zeile so, wie sie in der Datei steht."
+		note += text(lang,
+			" Der Einzug wich ab: ersetzt wurde die Zeile so, wie sie in der Datei steht.",
+			" The indentation differed: the line was replaced as it stands in the file.")
 	}
 	if result.Occurrences == 1 {
-		return summarized(fmt.Sprintf("%s bearbeitet: 1 Vorkommen ersetzt (Zeile %d).%s",
+		return summarized(fmt.Sprintf(text(lang,
+			"%s bearbeitet: 1 Vorkommen ersetzt (Zeile %d).%s",
+			"%s edited: 1 occurrence replaced (line %d).%s"),
 			result.Path, result.Line, note),
 			"tool.sum.edit", result.Path, "1", fmt.Sprint(result.Line)), nil
 	}
-	return summarized(fmt.Sprintf("%s bearbeitet: %d Vorkommen ersetzt (erstes in Zeile %d).%s",
+	return summarized(fmt.Sprintf(text(lang,
+		"%s bearbeitet: %d Vorkommen ersetzt (erstes in Zeile %d).%s",
+		"%s edited: %d occurrences replaced (first at line %d).%s"),
 		result.Path, result.Occurrences, result.Line, note),
 		"tool.sum.edit", result.Path, fmt.Sprint(result.Occurrences), fmt.Sprint(result.Line)), nil
 }
@@ -365,37 +399,49 @@ func (s *Service) approve(ctx context.Context, req *ApprovalRequest) error {
 // it needs to include the lines around it. Both are one round of the model's own work, and
 // answering them with a generic failure would leave it to invent a different approach —
 // which for an editing agent is usually rewriting the whole file.
-func changeError(path string, err error) error {
+func (s *Service) changeError(path string, err error) error {
+	lang := s.Language()
 	var ambiguous *workspace.AmbiguousMatch
 	switch {
 	case errors.Is(err, workspace.ErrOutside):
 		return uimsg.Detailf("tools.outsideWorkspace",
-			fmt.Sprintf("%q is outside the project folder, which is the only place these tools "+
-				"may write; use a path relative to the project root", path), path)
+			fmt.Sprintf(text(lang,
+				"%q liegt außerhalb des Projektordners, in den diese Tools allein schreiben dürfen; "+
+					"nutze einen Pfad relativ zum Projektordner",
+				"%q is outside the project folder, which is the only place these tools "+
+					"may write; use a path relative to the project root"), path), path)
 	case errors.Is(err, workspace.ErrNoMatch):
 		return uimsg.Detailf("tools.editNoMatch",
-			fmt.Sprintf("%q does not contain that text. Read the file again with read_file and copy the "+
-				"line you want to change exactly, including its indentation", path), path)
+			fmt.Sprintf(text(lang,
+				"%q enthält diesen Text nicht. Lies die Datei mit read_file erneut und übernimm die "+
+					"Zeile, die du ändern willst, exakt — samt Einrückung",
+				"%q does not contain that text. Read the file again with read_file and copy the "+
+					"line you want to change exactly, including its indentation"), path), path)
 	case errors.As(err, &ambiguous):
 		return uimsg.Detailf("tools.editAmbiguous",
-			fmt.Sprintf("that text appears %d times in %s (first at line %d). Include the lines around "+
-				"the one you mean so the match is unique, or set replace_all", ambiguous.Count, path,
+			fmt.Sprintf(text(lang,
+				"dieser Text kommt %d-mal in %s vor (zuerst in Zeile %d). Nimm die umgebenden Zeilen "+
+					"der gemeinten Stelle mit auf, damit der Treffer eindeutig ist, oder setze replace_all",
+				"that text appears %d times in %s (first at line %d). Include the lines around "+
+					"the one you mean so the match is unique, or set replace_all"), ambiguous.Count, path,
 				ambiguous.FirstLine), path, ambiguous.Count, ambiguous.FirstLine)
 	case errors.Is(err, fs.ErrNotExist):
 		return uimsg.Detailf("tools.fileUnreadable",
-			fmt.Sprintf("%q does not exist in the project folder", path), path)
+			fmt.Sprintf(text(lang, "%q gibt es im Projektordner nicht",
+				"%q does not exist in the project folder"), path), path)
 	default:
 		return uimsg.Detailf("tools.changeFailed",
-			fmt.Sprintf("%q could not be changed: %v", path, err), path)
+			fmt.Sprintf(text(lang, "%q ließ sich nicht ändern: %v",
+				"%q could not be changed: %v"), path, err), path)
 	}
 }
 
 // lines renders a line count for a tool result.
-func lines(count int) string {
+func lines(lang string, count int) string {
 	if count == 1 {
-		return "1 Zeile"
+		return text(lang, "1 Zeile", "1 line")
 	}
-	return fmt.Sprintf("%d Zeilen", count)
+	return fmt.Sprintf(text(lang, "%d Zeilen", "%d lines"), count)
 }
 
 // looseBool tolerates the ways a model writes a truth value: a real boolean, a word, or a

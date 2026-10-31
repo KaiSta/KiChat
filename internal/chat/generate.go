@@ -161,6 +161,10 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		}
 
 		extraSystem := ""
+		// The model-facing text follows the interface language, like the tool descriptions it
+		// explains (config.ModelLanguage). One value for the whole block, so the protocol hint
+		// and the rules under it cannot end up in two languages.
+		modelLang := config.ModelLanguage(in.Settings.Language)
 		imageToolOffered := e.Tools != nil && e.Tools.Images != nil
 		// In `model` mode the chat model writes the caption itself, so the contract has
 		// to be in force where it decides the argument. In `auto` mode it must not be: the
@@ -174,23 +178,23 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			imageSettings := in.Settings.Images
 			pipeline := images.PipelineFor(imageSettings.Pipeline, imageSettings.CLIDiffusionModel)
 			if pipeline.CaptioningMode(imageSettings.Captioning) == images.CaptioningModel {
-				captionRule = tools.ImageCaptionHint
+				captionRule = tools.ImageCaptionHint(modelLang)
 			}
 		}
 		if !in.UseNative {
-			extraSystem = tools.TextProtocolHint
+			extraSystem = tools.TextProtocolHint(modelLang)
 			// Only the tools this request actually declares. The definitions are what the
 			// engine filtered for this turn — no search provider, no index, no picture
 			// server each remove a tool — and a hint that names one of those is a call
 			// that can only come back as an error.
-			if list := tools.TextProtocolTools(e.toolDefinitions(ctx, &in.Chat, in.Model, in.Settings)); list != "" {
+			if list := tools.TextProtocolTools(modelLang, e.toolDefinitions(ctx, &in.Chat, in.Model, in.Settings)); list != "" {
 				extraSystem += "\n\n" + list
 			}
 			// The image tool is only listed when a picture server is configured, so
 			// the hint that describes it travels with it rather than always being
 			// part of the text protocol.
 			if imageToolOffered {
-				extraSystem += "\n\n" + tools.ImageProtocolHint
+				extraSystem += "\n\n" + tools.ImageProtocolHint(modelLang)
 				if captionRule != "" {
 					extraSystem += "\n\n" + captionRule
 				}
@@ -205,7 +209,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			if extraSystem != "" {
 				extraSystem += "\n\n"
 			}
-			extraSystem += tools.ImageUseHint
+			extraSystem += tools.ImageUseHint(modelLang)
 			if captionRule != "" {
 				extraSystem += "\n\n" + captionRule
 			}

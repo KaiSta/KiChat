@@ -140,13 +140,15 @@ func TestACondensationReplacesThePageTheModelReads(t *testing.T) {
 	// The tool's own framing comes first and is not condensed: the title, the source
 	// line, and — because this page is large enough to be indexed — the document id
 	// and the chunk range that reads the rest of it.
-	if !strings.HasPrefix(carried, "# Bericht") || !strings.Contains(carried, "Quelle [1]: "+srv.URL) {
+	if !strings.HasPrefix(carried, "# Bericht") || !strings.Contains(carried, "Source [1]: "+srv.URL) {
 		t.Fatalf("the tool's header did not survive the condensation: %q", truncateForTest(carried, 200))
 	}
-	if !strings.Contains(carried, "liegt indiziert als") || !strings.Contains(carried, "read_pages") {
+	if !strings.Contains(carried, "is indexed as") || !strings.Contains(carried, "read_pages") {
 		t.Fatalf("the indexed document became unreachable: %q", truncateForTest(carried, 300))
 	}
-	if !strings.Contains(carried, "[Zusammenfassung der Seite "+srv.URL) {
+	// The interface language, on the rule the shipped prompts follow: these settings are
+	// the English default, so the notice is English.
+	if !strings.Contains(carried, "[Summary of the page "+srv.URL) {
 		t.Fatalf("the tool result does not say what the text is: %q", truncateForTest(carried, 300))
 	}
 	if !strings.Contains(carried, "Der Bericht besteht aus einem langen Absatz.") {
@@ -694,10 +696,10 @@ func TestADocumentLargerThanTheSummariserSaysItIsPartial(t *testing.T) {
 	if !condensed {
 		t.Fatal("the document was not condensed")
 	}
-	if !strings.Contains(out, "Teilzusammenfassung") {
+	if !strings.Contains(out, "Partial summary") {
 		t.Errorf("a summary of part of the document did not say so: %q", truncateForTest(out, 300))
 	}
-	if strings.Contains(out, "vollständige Text ist länger") {
+	if strings.Contains(out, "the full text is longer") {
 		t.Error("a partial summary claims the full text is available")
 	}
 	if !strings.Contains(out, "doc-1") || !strings.Contains(out, "read_pages") {
@@ -713,6 +715,51 @@ func TestADocumentLargerThanTheSummariserSaysItIsPartial(t *testing.T) {
 	}
 	if strings.Contains(asked, "MAG-Fülldruck") {
 		t.Error("the tail was in the request, so the text was not cut to the window")
+	}
+}
+
+// TestTheNoticeSpeaksTheInterfaceLanguage pins the language of the one sentence that says
+// a file read is a summary and names the call that returns the real text. It was German in
+// every window, which put an English chat in the position the shipped prompts were
+// introduced to end: an English system prompt, English tool descriptions, and then a German
+// instruction where obedience matters most. The third case is the fallback — a language with
+// no translation of its own gets English, which is what `config.PromptBody` does too — and it
+// is asserted so a later change cannot quietly decide that an unknown language means German.
+func TestTheNoticeSpeaksTheInterfaceLanguage(t *testing.T) {
+	read := func(t *testing.T, lang string) string {
+		t.Helper()
+		settings := digestSettings()
+		settings.Language = lang
+		digester := newDigester([]llm.StreamEvent{
+			{Type: llm.EventDelta, Text: "- `handler0` steht in Zeile 1."}, {Type: llm.EventDone},
+		})
+		engine, _ := newDigestEngine(t, newTestStore(t), settings, digester)
+		call := llm.ToolCall{ID: "call-read", Name: tools.ToolReadFile, Arguments: `{"path":"gross.go"}`}
+
+		out, condensed := engine.condenseToolOutput(context.Background(), "chat-1", call,
+			numberedRead("gross.go", 300), tools.TurnRef{BackendID: "fake"})
+		if !condensed {
+			t.Fatalf("the read was not condensed: %q", truncateForTest(out, 200))
+		}
+		return out
+	}
+
+	english := read(t, config.LangEnglish)
+	if !strings.Contains(english, "[Summary of gross.go") || !strings.Contains(english, "offset/limit") {
+		t.Errorf("an English chat was not told in English what it received: %q", truncateForTest(english, 300))
+	}
+	if strings.Contains(english, "Zusammenfassung") {
+		t.Errorf("German wording survived into an English chat: %q", truncateForTest(english, 300))
+	}
+
+	german := read(t, config.LangGerman)
+	if !strings.Contains(german, "[Zusammenfassung von gross.go") || !strings.Contains(german, "offset/limit") {
+		t.Errorf("a German chat lost its German notice: %q", truncateForTest(german, 300))
+	}
+
+	unknown := read(t, config.LangChinese)
+	if !strings.Contains(unknown, "[Summary of gross.go") {
+		t.Errorf("a language without a translation did not fall back to English: %q", truncateForTest(unknown, 300))
 	}
 }
 
@@ -1064,7 +1111,7 @@ func TestALargeReadIsCondensedBeforeTheModelSeesIt(t *testing.T) {
 	if !strings.Contains(carried, "handler0") {
 		t.Errorf("the summary did not reach the model: %q", truncateForTest(carried, 300))
 	}
-	if !strings.Contains(carried, "Zusammenfassung von big.go") {
+	if !strings.Contains(carried, "Summary of big.go") {
 		t.Errorf("the notice does not name the file: %q", truncateForTest(carried, 300))
 	}
 	if !strings.Contains(carried, "offset/limit") {
@@ -1248,7 +1295,7 @@ func TestTheFoldersRulesSurviveACondensation(t *testing.T) {
 	runTurn(t, engine, "project-1", "Was steht in sub/big.go?")
 
 	carried := carriedToolText(provider, 1)
-	if !strings.Contains(carried, "Zusammenfassung von sub/big.go") {
+	if !strings.Contains(carried, "Summary of sub/big.go") {
 		t.Fatalf("the read was not condensed: %q", truncateForTest(carried, 300))
 	}
 	if strings.Contains(carried, "func handler299") {
@@ -1306,7 +1353,7 @@ func TestAReadsFramingIsNotCondensed(t *testing.T) {
 // line number and a pipe, so a quoted marker always sits after it, and only real framing
 // starts a line.
 func TestAFileThatQuotesTheMarkersIsNotCutAtThem(t *testing.T) {
-	body := "     1| fmt.Fprintf(&sb, \"\\n\"+" + tools.ReadContinueNotice + "\"%d.\", n)\n" +
+	body := "     1| fmt.Fprintf(&sb, \"\\n\"+" + tools.ContinueNotice(config.LangGerman) + "\"%d.\", n)\n" +
 		"     2| fmt.Fprintf(&sb, \"" + tools.ReadGuidanceTag + " path=%q>\\n\", doc.Path)\n" +
 		"     3| return nil\n"
 	out := "project.go — Zeilen 1–3 von 3\n\n" + body

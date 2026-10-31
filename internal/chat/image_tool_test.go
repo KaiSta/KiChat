@@ -175,7 +175,7 @@ func TestTheImageToolIsInvisibleUntilAServerIsConfigured(t *testing.T) {
 
 				// The hint is the text path's own copy of the tool list: it is what tells
 				// a model without native tool calling that the tool exists at all.
-				if got := strings.Contains(system, tools.ImageProtocolHint); got != (state.wantVisible && !path.native) {
+				if got := strings.Contains(system, tools.ImageProtocolHint(config.LangEnglish)); got != (state.wantVisible && !path.native) {
 					t.Errorf("the image hint is in the system prompt = %v, want %v:\n%s",
 						got, state.wantVisible && !path.native, system)
 				}
@@ -184,7 +184,7 @@ func TestTheImageToolIsInvisibleUntilAServerIsConfigured(t *testing.T) {
 				// consulted while it is already choosing a tool. Off, and on the text
 				// path (where the hint carries the same rule), the line must be absent
 				// rather than merely redundant.
-				if got := strings.Contains(system, tools.ImageUseHint); got != (state.wantVisible && path.native) {
+				if got := strings.Contains(system, tools.ImageUseHint(config.LangEnglish)); got != (state.wantVisible && path.native) {
 					t.Errorf("the image use rule is in the system prompt = %v, want %v:\n%s",
 						got, state.wantVisible && path.native, system)
 				}
@@ -265,7 +265,7 @@ func TestTheCaptionRuleTravelsOnlyInModelMode(t *testing.T) {
 
 				system := string(provider.lastRequest().Messages[0].Content)
 				want := mode.want
-				if got := strings.Contains(system, tools.ImageCaptionHint); got != want {
+				if got := strings.Contains(system, tools.ImageCaptionHint(config.LangEnglish)); got != want {
 					t.Errorf("the caption rule is in the system prompt = %v, want %v:\n%s", got, want, system)
 				}
 			})

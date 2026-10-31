@@ -154,7 +154,7 @@ func TestADestructiveGitCommandIsRefusedBeforeItIsAsked(t *testing.T) {
 	}
 	// The sentence the model gets has to name a way forward, not just a failure.
 	sentence := uimsg.Sentence(err)
-	for _, want := range []string{"tracked.go", "commit or stash"} {
+	for _, want := range []string{"tracked.go", "committe oder stashe"} {
 		if !strings.Contains(sentence, want) {
 			t.Errorf("the refusal does not mention %q: %s", want, sentence)
 		}

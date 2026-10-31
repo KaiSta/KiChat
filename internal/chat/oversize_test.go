@@ -1336,7 +1336,7 @@ func TestAToolRoundFoldsBeforeItsNextRequestCrossesTheCeiling(t *testing.T) {
 	engine, captured := newTestEngine(t, st, provider)
 
 	before, _, err := engine.buildAssembly(context.Background(), &chat, "fake", "fake-model",
-		engine.Settings(), provider.model, tools.TextProtocolHint)
+		engine.Settings(), provider.model, tools.TextProtocolHint(config.LangEnglish))
 	if err != nil {
 		t.Fatalf("buildAssembly: %v", err)
 	}
@@ -1670,7 +1670,7 @@ func TestTheMidTurnCheckFoldsALocalToolTurnWhenTheUserAsks(t *testing.T) {
 		// The check before the turn has to stay quiet, or the fold would be the one that
 		// already existed and this test would prove nothing about the mid-turn path.
 		before, _, err := engine.buildAssembly(context.Background(), &chat, "fake", "fake-model",
-			engine.Settings(), provider.model, tools.TextProtocolHint)
+			engine.Settings(), provider.model, tools.TextProtocolHint(config.LangEnglish))
 		if err != nil {
 			t.Fatalf("buildAssembly: %v", err)
 		}

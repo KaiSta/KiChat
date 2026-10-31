@@ -104,7 +104,7 @@ func (d destructiveGit) samples(scope workspace.GitScope) []string {
 // when it would not — including when there is no git, no repository, or the folder has gone: a
 // command tool that failed because git is not installed would be a worse trade than the guard is
 // worth.
-func refuseDestructiveGit(root workspace.Root, line string) error {
+func refuseDestructiveGit(lang string, root workspace.Root, line string) error {
 	discard, ok := parseDestructiveGit(line)
 	if !ok {
 		return nil
@@ -118,11 +118,15 @@ func refuseDestructiveGit(root workspace.Root, line string) error {
 		return nil
 	}
 	examples := strings.Join(discard.samples(scope), ", ")
-	detail := fmt.Sprintf("this command would discard %d uncommitted change(s)", count)
+	detail := fmt.Sprintf(text(lang,
+		"dieser Befehl würde %d nicht committete Änderung(en) verwerfen",
+		"this command would discard %d uncommitted change(s)"), count)
 	if examples != "" {
 		detail += " (" + examples + ")"
 	}
-	detail += "; commit or stash them first, or ask the user to run the line themselves"
+	detail += text(lang,
+		"; committe oder stashe sie zuerst, oder bitte den Nutzer, die Zeile selbst auszuführen",
+		"; commit or stash them first, or ask the user to run the line themselves")
 	return uimsg.Detailf("tools.destructiveGit", detail, count, examples)
 }
 

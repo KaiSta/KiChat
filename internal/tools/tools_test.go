@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"kichat/internal/config"
 	"kichat/internal/llm"
 )
 
@@ -207,11 +208,11 @@ func TestDefinitionsAreValidJSONSchemaShaped(t *testing.T) {
 // the constant carries the block syntax and nothing about which tools exist, because
 // that is a property of the request (`TextProtocolTools`).
 func TestTextProtocolHintIsSyntaxOnly(t *testing.T) {
-	if !strings.Contains(TextProtocolHint, "```tool_call") {
+	if !strings.Contains(TextProtocolHint(config.LangEnglish), "```tool_call") {
 		t.Error("the hint must show the exact block syntax the parser expects")
 	}
 	for _, name := range []string{ToolSearchWeb, ToolScrapeURL, ToolSearchDocs, ToolReadPages} {
-		if strings.Contains(TextProtocolHint, name) {
+		if strings.Contains(TextProtocolHint(config.LangEnglish), name) {
 			t.Errorf("the syntax hint names %q; which tools exist is the request's answer", name)
 		}
 	}
@@ -223,7 +224,7 @@ func TestTextProtocolHintIsSyntaxOnly(t *testing.T) {
 // was filtered out cannot appear.
 func TestTextProtocolToolsListsOnlyWhatIsOffered(t *testing.T) {
 	service := &Service{}
-	all := TextProtocolTools(service.Definitions())
+	all := TextProtocolTools(config.LangEnglish, service.Definitions())
 	for _, name := range []string{ToolSearchWeb, ToolScrapeURL, ToolSearchDocs, ToolReadPages} {
 		if !strings.Contains(all, name) {
 			t.Errorf("the rendered hint does not mention %q:\n%s", name, all)
@@ -244,7 +245,7 @@ func TestTextProtocolToolsListsOnlyWhatIsOffered(t *testing.T) {
 			filtered = append(filtered, def)
 		}
 	}
-	without := TextProtocolTools(filtered)
+	without := TextProtocolTools(config.LangEnglish, filtered)
 	if strings.Contains(without, ToolSearchDocs) {
 		t.Errorf("a tool that is not offered is still promised:\n%s", without)
 	}
@@ -253,7 +254,7 @@ func TestTextProtocolToolsListsOnlyWhatIsOffered(t *testing.T) {
 	}
 
 	// No tools at all: no line, so the prompt does not promise a capability it lacks.
-	if got := TextProtocolTools(nil); got != "" {
+	if got := TextProtocolTools(config.LangEnglish, nil); got != "" {
 		t.Errorf("an empty tool set rendered %q, want no line at all", got)
 	}
 }

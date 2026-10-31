@@ -130,7 +130,7 @@ func TestTheTextProtocolListsOnlyOfferedTools(t *testing.T) {
 	}
 
 	system := provider.lastRequest().Messages[0].Content
-	if !strings.Contains(system, tools.TextProtocolHint) {
+	if !strings.Contains(system, tools.TextProtocolHint(config.LangEnglish)) {
 		t.Fatalf("the text protocol hint is missing, so this test proves nothing:\n%s", system)
 	}
 	if strings.Contains(system, tools.ToolSearchWeb) {
@@ -138,7 +138,7 @@ func TestTheTextProtocolListsOnlyOfferedTools(t *testing.T) {
 			tools.ToolSearchWeb, system)
 	}
 	offered := engine.toolDefinitions(t.Context(), &chat, provider.model, settings)
-	list := tools.TextProtocolTools(offered)
+	list := tools.TextProtocolTools(config.LangEnglish, offered)
 	if list == "" {
 		t.Skip("no tools are offered in this configuration, so there is no list to compare")
 	}

@@ -43,15 +43,22 @@ type preImage struct {
 // has to be stored for it. A file that is too large or is not text has no undo — this app will
 // not put back something it never read — and a file that cannot be read at all is reported.
 func (s *Service) preImageOf(root workspace.Root, rel string) preImage {
-	text, err := root.Text(rel)
+	lang := s.Language()
+	// Named `file` rather than `text`: `text` is this package's "pick the wording" helper, and a
+	// local of that name would shadow it inside the one function that needs both.
+	file, err := root.Text(rel)
 	if err != nil {
-		return preImage{why: " Die Änderung konnte nicht zum Rückgängigmachen gesichert werden: " + err.Error() + "."}
+		return preImage{why: text(lang,
+			" Die Änderung konnte nicht zum Rückgängigmachen gesichert werden: ",
+			" The change could not be saved so it can be undone: ") + err.Error() + "."}
 	}
-	if text.Existed && !text.Writable {
-		return preImage{why: " Die Änderung kann nicht rückgängig gemacht werden: die Datei ist keine " +
-			"Textdatei oder zu groß, um sie zu sichern."}
+	if file.Existed && !file.Writable {
+		return preImage{why: text(lang,
+			" Die Änderung kann nicht rückgängig gemacht werden: die Datei ist keine Textdatei oder "+
+				"zu groß, um sie zu sichern.",
+			" The change cannot be undone: the file is not a text file or is too large to be saved.")}
 	}
-	return preImage{text: text, ok: true}
+	return preImage{text: file, ok: true}
 }
 
 // remember records a change, and returns the sentence the model should see if it could not be.
@@ -80,6 +87,7 @@ func (s *Service) remember(chatID string, pre preImage, afterSHA string) string 
 	if s.Trace != nil {
 		s.Trace.Record(trace.Event{Event: "tool.snapshot", Level: trace.LevelError, Kind: trace.KindOf(err)})
 	}
-	return " Die Änderung ist geschrieben, konnte aber nicht zum Rückgängigmachen gesichert werden: " +
-		err.Error() + "."
+	return text(s.Language(),
+		" Die Änderung ist geschrieben, konnte aber nicht zum Rückgängigmachen gesichert werden: ",
+		" The change was written, but could not be saved so it can be undone: ") + err.Error() + "."
 }

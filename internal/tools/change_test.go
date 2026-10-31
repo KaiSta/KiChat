@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"kichat/internal/config"
 	"kichat/internal/uimsg"
 	"kichat/internal/workspace"
 )
@@ -218,7 +219,7 @@ func TestAnEditRefusalNamesTheProblemAndNotTheParser(t *testing.T) {
 // *without* asking anybody.
 func TestTheWriteToolsAreTheOnesTheEngineAsksAbout(t *testing.T) {
 	advertised := map[string]bool{}
-	for _, def := range changeToolDefinitions() {
+	for _, def := range changeToolDefinitions(config.LangEnglish) {
 		advertised[def.Name] = true
 	}
 	names := WriteToolNames()

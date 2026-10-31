@@ -96,30 +96,57 @@ const digestCacheDays = 30
 // is never condensed (targetedRead), so the sentence is true when the model acts on it.
 // Note that the same notice is not shown to a model that re-reads the file unchanged: the
 // turn's read memory answers that one. It points at the offset too.
-func digestNotice(call llm.ToolCall, partial bool) string {
+//
+// It speaks the interface's language, on the rule the shipped prompts already follow
+// (`config.PromptBody`): an English window whose model is handed "den genauen Text liefert
+// read_file" is the mismatch those presets were introduced to remove, and it reads worst
+// exactly where this line has to be obeyed — the one sentence that says the text above is a
+// summary and names the call that returns the real one. Anything other than German gets
+// English rather than a third translation, which is the same fallback `PromptBody` uses; the
+// summary itself stays in the language of the text it summarises, so a German page still
+// arrives in German. Pinned by `TestTheNoticeSpeaksTheInterfaceLanguage`.
+func digestNotice(call llm.ToolCall, partial bool, lang string) string {
+	// Through the one rule the tool layer uses too (config.ModelLanguage), so the notice and the
+	// tool descriptions around it cannot disagree about which language the model is being
+	// spoken to in.
+	german := config.ModelLanguage(lang) == config.LangGerman
 	if call.Name == tools.ToolReadFile {
 		path := callArgument(call.Arguments, "path")
 		switch {
-		case partial:
+		case partial && german:
 			return fmt.Sprintf("[Teilzusammenfassung von %s — der Rest wurde nicht zusammengefasst; "+
 				"lies den Abschnitt, den du brauchst, mit read_file und offset/limit]", path)
-		default:
+		case partial:
+			return fmt.Sprintf("[Partial summary of %s — the rest was not summarised; read the part "+
+				"you need with read_file and offset/limit]", path)
+		case german:
 			return fmt.Sprintf("[Zusammenfassung von %s — den genauen Text liefert read_file mit "+
 				"offset/limit für den Abschnitt, den du brauchst]", path)
+		default:
+			return fmt.Sprintf("[Summary of %s — read_file with offset/limit returns the exact text "+
+				"for the part you need]", path)
 		}
 	}
 	url := callArgument(call.Arguments, "url")
 	switch {
-	case partial && url != "":
+	case partial && url != "" && german:
 		// A document larger than the summariser's window: the tail was not read by
 		// anyone, so the notice must not let the model think it was covered.
 		return fmt.Sprintf("[Teilzusammenfassung von %s — der Rest wurde nicht zusammengefasst]", url)
-	case partial:
+	case partial && url != "":
+		return fmt.Sprintf("[Partial summary of %s — the rest was not summarised]", url)
+	case partial && german:
 		return "[Teilzusammenfassung des gelesenen Inhalts — der Rest wurde nicht zusammengefasst]"
-	case url != "":
+	case partial:
+		return "[Partial summary of the content read — the rest was not summarised]"
+	case url != "" && german:
 		return fmt.Sprintf("[Zusammenfassung der Seite %s — der vollständige Text ist länger und wird auf erneute Anfrage geliefert]", url)
-	default:
+	case url != "":
+		return fmt.Sprintf("[Summary of the page %s — the full text is longer and is delivered when asked for again]", url)
+	case german:
 		return "[Zusammenfassung des gelesenen Inhalts — der vollständige Text ist länger und wird auf erneute Anfrage geliefert]"
+	default:
+		return "[Summary of the content read — the full text is longer and is delivered when asked for again]"
 	}
 }
 
@@ -220,8 +247,18 @@ func continuationStart(body string) (int, bool) {
 }
 
 // lineIsOffset reports whether a line is the continuation notice and nothing else.
+//
+// Every wording is tried, because the sentence follows the interface language of the window
+// that produced it and a stored result outlives that setting: a chat switched to English must
+// still recognise the German notice in its own transcript.
 func lineIsOffset(line string) bool {
-	tail, ok := strings.CutPrefix(line, tools.ReadContinueNotice)
+	tail, ok := "", false
+	for _, notice := range tools.ContinueNotices() {
+		if rest, cut := strings.CutPrefix(line, notice); cut {
+			tail, ok = rest, true
+			break
+		}
+	}
 	if !ok {
 		return false
 	}
@@ -657,7 +694,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// markers around its content — the header, the continuation line and the AGENTS.md
 	// block are plain text — so it is put back as framing + summary + trailer.
 	assemble := func(summary string) string {
-		condensed := digestNotice(call, partial) + "\n\n" + summary
+		condensed := digestNotice(call, partial, settings.Language) + "\n\n" + summary
 		if !framed {
 			return condensed
 		}

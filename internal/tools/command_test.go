@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"kichat/internal/config"
 	"kichat/internal/uimsg"
 )
 
@@ -478,7 +479,9 @@ func TestAnElevationCommandIsRefusedBeforeTheQuestion(t *testing.T) {
 	if !strings.Contains(detail, "sudo") {
 		t.Errorf("the model is not told which program asked for the rights: %q", detail)
 	}
-	if !strings.Contains(detail, "administrator") {
+	// The German service this file builds spells it "Administratorrechte"; the point is that
+	// the sentence says *why*, in a word the model can act on.
+	if !strings.Contains(detail, "Administratorrechte") && !strings.Contains(detail, "administrator") {
 		t.Errorf("the model is not told why the command cannot run: %q", detail)
 	}
 	// Nothing ran, so nothing in the folder changed — the refusal is before any execution.
@@ -538,7 +541,7 @@ func TestElevationIsDetectedWhereItIsAskedAndNowhereElse(t *testing.T) {
 // it before the call rather than only after a refusal: a description that promised nothing
 // about elevation is how a small model keeps proposing `sudo apt install` in a loop.
 func TestTheTerminalSaysItHasNoAdministratorRights(t *testing.T) {
-	description := commandDefinitions()[0].Description
+	description := commandDefinitions(config.LangGerman)[0].Description
 	for _, want := range []string{"sudo", "Administratorrechte"} {
 		if !strings.Contains(description, want) {
 			t.Errorf("the tool description does not mention %q:\n%s", want, description)
@@ -613,7 +616,7 @@ func TestTheExitCodeIsTheLastThingTheModelReads(t *testing.T) {
 	if _, err := w.Write([]byte("viele Zeilen\n")); err != nil {
 		t.Fatal(err)
 	}
-	out := commandResult("go build ./...", w, "Exit-Code 1 (2.0 s)")
+	out := commandResult(config.LangEnglish, "go build ./...", w, "Exit-Code 1 (2.0 s)")
 	if !strings.HasSuffix(out, "Exit-Code 1 (2.0 s)\n") {
 		t.Errorf("the result does not end with its status:\n%q", out)
 	}
@@ -634,7 +637,7 @@ func TestTheTerminalIsGatedAndOffered(t *testing.T) {
 		t.Error("run_command is missing from the project tools, so no project would be offered it")
 	}
 	advertised := false
-	for _, def := range commandDefinitions() {
+	for _, def := range commandDefinitions(config.LangEnglish) {
 		if def.Name == ToolRunCommand {
 			advertised = true
 		}
@@ -644,7 +647,7 @@ func TestTheTerminalIsGatedAndOffered(t *testing.T) {
 	}
 	// And the schema has to declare the one argument that matters, or a model sending it
 	// gets a call that is silently ignored.
-	def := commandDefinitions()[0]
+	def := commandDefinitions(config.LangEnglish)[0]
 	props, _ := def.Schema["properties"].(map[string]any)
 	if _, ok := props["command"]; !ok {
 		t.Error("the schema does not declare the command argument")

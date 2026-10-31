@@ -196,39 +196,59 @@ type runCommandArgs struct {
 // reading it; without the second it writes an interactive command and loses two minutes;
 // without the third it starts a development server; and the fourth is what keeps it from
 // asking for a command it should have run after explaining.
-func commandDefinitions() []llm.ToolDefinition {
+func commandDefinitions(lang string) []llm.ToolDefinition {
 	return []llm.ToolDefinition{
 		{
 			Name: ToolRunCommand,
-			Description: "Führt eine Kommandozeile im Projektordner aus und gibt die Ausgabe samt Exit-Code " +
-				"zurück. Nutze es, um den eigenen Code zu prüfen: Build, Tests, Linter, Formatierung, " +
-				"oder ein Programm, das du gerade geschrieben hast — der Befehl läuft im Projektordner, " +
-				"also mit denselben relativen Pfaden wie deine Datei-Tools. Ein Exit-Code ungleich 0 ist " +
-				"ein Ergebnis, kein Fehler: lies die Ausgabe und arbeite damit. Es gibt keine Eingabe " +
-				"(die Standardeingabe ist geschlossen) und keine Administratorrechte — Befehle mit sudo, " +
-				"doas oder pkexec werden abgelehnt; schlage sie dem Nutzer vor, statt sie zu wiederholen. " +
-				"Befehle, die nicht committete Arbeit verwerfen (git reset --hard, git checkout --, git " +
-				"restore, git clean -f), werden ebenso abgelehnt — committe oder stashe die Änderungen " +
-				"zuerst. " +
-				"Schreibe keine Befehle, die eine Frage stellen, und starte keinen Server oder Beobachter, " +
-				"der weiterläuft: er wird nach dem Timeout abgebrochen. Eine Pipe wie `| tail` gibt erst " +
-				"am Ende aus, und bei einem Abbruch ist ihre Ausgabe verloren — prüfe lieber enger " +
-				"(`-run`, ein Paket) und lass das Programm sein eigenes Timeout setzen. Dateien, die du ändern willst, " +
-				"änderst du mit edit_file/write_file, nicht über die Shell. Der Nutzer sieht den Befehl " +
-				"und muss ihn bestätigen.",
+			Description: text(lang,
+				"Führt eine Kommandozeile im Projektordner aus und gibt die Ausgabe samt Exit-Code "+
+					"zurück. Nutze es, um den eigenen Code zu prüfen: Build, Tests, Linter, Formatierung, "+
+					"oder ein Programm, das du gerade geschrieben hast — der Befehl läuft im Projektordner, "+
+					"also mit denselben relativen Pfaden wie deine Datei-Tools. Ein Exit-Code ungleich 0 ist "+
+					"ein Ergebnis, kein Fehler: lies die Ausgabe und arbeite damit. Es gibt keine Eingabe "+
+					"(die Standardeingabe ist geschlossen) und keine Administratorrechte — Befehle mit sudo, "+
+					"doas oder pkexec werden abgelehnt; schlage sie dem Nutzer vor, statt sie zu wiederholen. "+
+					"Befehle, die nicht committete Arbeit verwerfen (git reset --hard, git checkout --, git "+
+					"restore, git clean -f), werden ebenso abgelehnt — committe oder stashe die Änderungen "+
+					"zuerst. "+
+					"Schreibe keine Befehle, die eine Frage stellen, und starte keinen Server oder Beobachter, "+
+					"der weiterläuft: er wird nach dem Timeout abgebrochen. Eine Pipe wie `| tail` gibt erst "+
+					"am Ende aus, und bei einem Abbruch ist ihre Ausgabe verloren — prüfe lieber enger "+
+					"(`-run`, ein Paket) und lass das Programm sein eigenes Timeout setzen. Dateien, die du ändern willst, "+
+					"änderst du mit edit_file/write_file, nicht über die Shell. Der Nutzer sieht den Befehl "+
+					"und muss ihn bestätigen.",
+				"Runs a command line in the project folder and returns its output and exit code. Use it "+
+					"to check your own code: build, tests, linter, formatting, or a program you just wrote — "+
+					"the command runs in the project folder, so with the same relative paths as your file "+
+					"tools. An exit code other than 0 is a result, not a failure: read the output and work "+
+					"with it. There is no input (stdin is closed) and no administrator rights — commands "+
+					"with sudo, doas or pkexec are refused; suggest them to the user instead of repeating "+
+					"them. Commands that discard uncommitted work (git reset --hard, git checkout --, git "+
+					"restore, git clean -f) are refused as well — commit or stash the changes first. Do not "+
+					"write commands that ask a question, and do not start a server or watcher that keeps "+
+					"running: it is stopped at the timeout. A pipe like `| tail` only writes when the "+
+					"command ends, and after a stop its output is lost — narrow the scope instead (`-run`, "+
+					"one package) and let the program set its own timeout. Files you want to change you "+
+					"change with edit_file/write_file, not through the shell. The user sees the command "+
+					"and has to confirm it."),
 			Schema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"command": map[string]any{
 						"type": "string",
-						"description": "Eine Kommandozeile, z. B. \\\"go test ./...\\\" oder \\\"npm run build\\\". " +
-							"Sie wird von einer Shell ausgeführt, also sind Pipes und && erlaubt.",
+						"description": text(lang,
+							"Eine Kommandozeile, z. B. \\\"go test ./...\\\" oder \\\"npm run build\\\". Sie wird von "+
+								"einer Shell ausgeführt, also sind Pipes und && erlaubt.",
+							"One command line, e.g. \\\"go test ./...\\\" or \\\"npm run build\\\". It is run by a "+
+								"shell, so pipes and && are allowed."),
 					},
 					"timeout_seconds": map[string]any{
 						"type": "integer",
-						"description": fmt.Sprintf("Höchstdauer in Sekunden (1-%d, Standard %d). Setze einen "+
-							"höheren Wert für einen vollständigen Build, einen niedrigeren, wenn du einen "+
-							"Verdacht schnell prüfen willst.", MaxCommandTimeout, DefaultCommandTimeout),
+						"description": fmt.Sprintf(text(lang,
+							"Höchstdauer in Sekunden (1-%d, Standard %d). Setze einen höheren Wert für einen "+
+								"vollständigen Build, einen niedrigeren, wenn du einen Verdacht schnell prüfen willst.",
+							"Maximum duration in seconds (1-%d, default %d). Set a higher value for a full build, "+
+								"a lower one to check a suspicion quickly."), MaxCommandTimeout, DefaultCommandTimeout),
 					},
 				},
 				"required": []string{"command"},
@@ -240,22 +260,30 @@ func commandDefinitions() []llm.ToolDefinition {
 func (s *Service) runCommand(ctx context.Context, chatID, argsJSON string) (Result, error) {
 	var args runCommandArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return Result{}, badArguments(err)
+		return Result{}, s.badArguments(err)
 	}
+	lang := s.Language()
 	line := strings.TrimSpace(args.Command)
 	if line == "" {
-		return Result{}, uimsg.Detailf("tools.commandMissing",
-			"the command argument is empty; name one command line to run")
+		return Result{}, uimsg.Detailf("tools.commandMissing", text(lang,
+			"das Argument command ist leer; nenne eine Kommandozeile",
+			"the command argument is empty; name one command line to run"))
 	}
 	// Before the folder is even looked at: whether this machine can run the line at all does
 	// not depend on the project, and a question the app cannot act on should not be asked.
 	// The line stays on the card either way, which is where the person copies it from.
 	if program, ok := elevationRequest(line); ok {
 		return Result{}, uimsg.Detailf("tools.needsElevation",
-			fmt.Sprintf("this command asks for administrator rights (%s), which this app cannot supply: "+
-				"it runs commands with the user's own rights and has no terminal to answer a password "+
-				"prompt. Do not retry it — tell the user the exact line so they can run it themselves, "+
-				"or suggest a way that needs no elevation", program))
+			fmt.Sprintf(text(lang,
+				"dieser Befehl verlangt Administratorrechte (%s), die diese App nicht geben kann: sie "+
+					"führt Befehle mit den Rechten des Nutzers aus und hat kein Terminal, um eine "+
+					"Passwortabfrage zu beantworten. Wiederhole ihn nicht — nenne dem Nutzer die genaue "+
+					"Zeile, damit er sie selbst ausführen kann, oder schlage einen Weg ohne "+
+					"Rechteerweiterung vor",
+				"this command asks for administrator rights (%s), which this app cannot supply: it "+
+					"runs commands with the user's own rights and has no terminal to answer a password "+
+					"prompt. Do not retry it — tell the user the exact line so they can run it themselves, "+
+					"or suggest a way that needs no elevation"), program))
 	}
 	root, err := s.workspaceFor(chatID)
 	if err != nil {
@@ -267,7 +295,7 @@ func (s *Service) runCommand(ctx context.Context, chatID, argsJSON string) (Resu
 	// record is per file and keeps the chat's first pre-image, so it cannot represent "the
 	// working tree just before this command" (gitguard.go has the argument) — which makes the
 	// promise the narrow one: the work is not lost, or the line does not run.
-	if err := refuseDestructiveGit(root, line); err != nil {
+	if err := refuseDestructiveGit(lang, root, line); err != nil {
 		return Result{}, err
 	}
 	// The line can come back from the card edited: a person who spots a typo in an approval
@@ -293,15 +321,21 @@ func (s *Service) runCommand(ctx context.Context, chatID, argsJSON string) (Resu
 	if request.EditedLine != "" && request.EditedLine != line {
 		if program, ok := elevationRequest(request.EditedLine); ok {
 			return Result{}, uimsg.Detailf("tools.needsElevation",
-				fmt.Sprintf("the command you approved asks for administrator rights (%s), which this app "+
-					"cannot supply: it runs commands with the user's own rights and has no terminal to "+
-					"answer a password prompt. Do not retry it — tell the user the exact line so they can "+
-					"run it themselves, or suggest a way that needs no elevation", program))
+				fmt.Sprintf(text(lang,
+					"der Befehl, den du bestätigt hast, verlangt Administratorrechte (%s), die diese App "+
+						"nicht geben kann: sie führt Befehle mit den Rechten des Nutzers aus und hat kein "+
+						"Terminal, um eine Passwortabfrage zu beantworten. Wiederhole ihn nicht — nenne dem "+
+						"Nutzer die genaue Zeile, damit er sie selbst ausführen kann, oder schlage einen Weg "+
+						"ohne Rechteerweiterung vor",
+					"the command you approved asks for administrator rights (%s), which this app "+
+						"cannot supply: it runs commands with the user's own rights and has no terminal to "+
+						"answer a password prompt. Do not retry it — tell the user the exact line so they can "+
+						"run it themselves, or suggest a way that needs no elevation"), program))
 		}
 		line = request.EditedLine
 		// The edited line is a new line, so it is checked like one: the card is a text field,
 		// and the one thing an edit must not do is turn a harmless command into a destructive one.
-		if err := refuseDestructiveGit(root, line); err != nil {
+		if err := refuseDestructiveGit(lang, root, line); err != nil {
 			return Result{}, err
 		}
 	}
@@ -403,6 +437,7 @@ func (s *Service) execCommand(ctx context.Context, chatID string, root workspace
 	defer s.endCommand(key)
 
 	program, argv := shellCommand(line)
+	lang := s.Language()
 	cmd := exec.Command(program, argv...)
 	cmd.Dir = root.Path()
 	// No stdin. A command that stops to ask a question would otherwise wait for the
@@ -435,7 +470,8 @@ func (s *Service) execCommand(ctx context.Context, chatID string, root workspace
 	started := time.Now()
 	if err := cmd.Start(); err != nil {
 		return Result{}, uimsg.Detailf("tools.commandFailed",
-			fmt.Sprintf("the command could not be started: %v", err))
+			fmt.Sprintf(text(lang, "der Befehl ließ sich nicht starten: %v",
+				"the command could not be started: %v"), err))
 	}
 
 	// The timeout and the turn's own cancellation both end the *tree*: killing the shell
@@ -493,17 +529,20 @@ func (s *Service) execCommand(ctx context.Context, chatID string, root workspace
 	case ctx.Err() != nil && handle.stoppedByUser():
 		// The person stopped this command, not the turn: the output so far is the result,
 		// and the model is told what happened so it can decide rather than retry blindly.
-		return summarized(commandResult(line, out, fmt.Sprintf(
+		return summarized(commandResult(lang, line, out, fmt.Sprintf(text(lang,
 			"Vom Nutzer nach %s gestoppt. Die Ausgabe oben ist unvollständig — frage nach, was als "+
-				"Nächstes passieren soll, statt denselben Befehl erneut zu starten.", humanDuration(elapsed))),
+				"Nächstes passieren soll, statt denselben Befehl erneut zu starten.",
+			"Stopped by the user after %s. The output above is incomplete — ask what should happen "+
+				"next instead of starting the same command again."), humanDuration(elapsed))),
 			"tool.sum.commandStopped", humanDuration(elapsed)), nil
 	case ctx.Err() != nil:
 		// The turn is over, so nobody is waiting for this result; the error is what the
 		// record needs to say why there is no output above it.
-		return Result{}, uimsg.Wrapf("tools.commandStopped",
-			"the turn was stopped, so the command was killed", ctx.Err())
+		return Result{}, uimsg.Wrapf("tools.commandStopped", text(lang,
+			"der Turn wurde gestoppt, deshalb wurde der Befehl beendet",
+			"the turn was stopped, so the command was killed"), ctx.Err())
 	case wasTimedOut:
-		return summarized(commandResult(line, out, timeoutNote(out, elapsed, timeout)),
+		return summarized(commandResult(lang, line, out, timeoutNote(lang, out, elapsed, timeout)),
 			"tool.sum.commandTimeout", humanDuration(elapsed)), nil
 	case waitErr != nil:
 		// A non-zero exit, which is a result: the code is what the model reasons about,
@@ -513,14 +552,17 @@ func (s *Service) execCommand(ctx context.Context, chatID string, root workspace
 			code = cmd.ProcessState.ExitCode()
 		}
 		if code < 0 {
-			return summarized(commandResult(line, out, fmt.Sprintf(
-				"Der Befehl wurde beendet, ohne einen Exit-Code zu hinterlassen (%s).", humanDuration(elapsed))),
+			return summarized(commandResult(lang, line, out, fmt.Sprintf(text(lang,
+				"Der Befehl wurde beendet, ohne einen Exit-Code zu hinterlassen (%s).",
+				"The command ended without leaving an exit code (%s)."), humanDuration(elapsed))),
 				"tool.sum.commandUnknown", humanDuration(elapsed)), nil
 		}
-		return summarized(commandResult(line, out, fmt.Sprintf("Exit-Code %d (%s)", code, humanDuration(elapsed))),
+		return summarized(commandResult(lang, line, out, fmt.Sprintf(text(lang,
+			"Exit-Code %d (%s)", "Exit code %d (%s)"), code, humanDuration(elapsed))),
 			"tool.sum.command", fmt.Sprint(code), humanDuration(elapsed)), nil
 	default:
-		return summarized(commandResult(line, out, fmt.Sprintf("Exit-Code 0 (%s)", humanDuration(elapsed))),
+		return summarized(commandResult(lang, line, out, fmt.Sprintf(text(lang,
+			"Exit-Code 0 (%s)", "Exit code 0 (%s)"), humanDuration(elapsed))),
 			"tool.sum.command", "0", humanDuration(elapsed)), nil
 	}
 }
@@ -541,28 +583,39 @@ func (s *Service) execCommand(ctx context.Context, chatID string, root workspace
 // have printed thousands of lines. Neither that nor a real silence is a fact the model can
 // act on, so the note names the cause and the way out (drop the pipe, narrow the scope, let
 // the program report its own limit first) rather than only saying it was stopped.
-func timeoutNote(out *headTailWriter, elapsed, limit time.Duration) string {
-	when := fmt.Sprintf("Nach %s abgebrochen: das Zeitlimit dieses Aufrufs (%s) war erreicht.",
+func timeoutNote(lang string, out *headTailWriter, elapsed, limit time.Duration) string {
+	when := fmt.Sprintf(text(lang,
+		"Nach %s abgebrochen: das Zeitlimit dieses Aufrufs (%s) war erreicht.",
+		"Stopped after %s: this call's time limit (%s) was reached."),
 		humanDuration(elapsed), humanDuration(limit))
 	if strings.TrimSpace(out.String()) != "" {
-		return when + " Die Ausgabe oben ist unvollständig. Ein erneuter Lauf mit derselben Zeile " +
-			"kostet nur wieder die volle Zeit — grenze den Umfang ein (ein Paket, ein Test, `-run`) " +
-			"und lass das Programm sein eigenes Limit setzen (bei `go test` z. B. `-timeout 60s`), " +
-			"damit es vorher ausgibt, wo es hängt."
+		return when + text(lang,
+			" Die Ausgabe oben ist unvollständig. Ein erneuter Lauf mit derselben Zeile kostet nur "+
+				"wieder die volle Zeit — grenze den Umfang ein (ein Paket, ein Test, `-run`) und lass "+
+				"das Programm sein eigenes Limit setzen (bei `go test` z. B. `-timeout 60s`), damit es "+
+				"vorher ausgibt, wo es hängt.",
+			" The output above is incomplete. Repeating the same line only costs the full time again "+
+				"— narrow the scope (one package, one test, `-run`) and let the program set its own "+
+				"limit (for `go test`, e.g. `-timeout 60s`), so it prints where it hangs before the cut.")
 	}
-	return when + " Es wurde keine Ausgabe aufgefangen — das heißt nicht, dass der Befehl still " +
-		"war: eine Pipe wie `| tail`, `| head` oder `| sort` schreibt erst, wenn der Befehl endet, " +
-		"und dieser endete nicht. Führe ihn ohne Pipe aus, grenze den Umfang ein, und lass das " +
-		"Programm sein eigenes Limit setzen (bei `go test` z. B. `-timeout 60s`), damit es vorher " +
-		"ausgibt, wo es hängt."
+	return when + text(lang,
+		" Es wurde keine Ausgabe aufgefangen — das heißt nicht, dass der Befehl still war: eine "+
+			"Pipe wie `| tail`, `| head` oder `| sort` schreibt erst, wenn der Befehl endet, und "+
+			"dieser endete nicht. Führe ihn ohne Pipe aus, grenze den Umfang ein, und lass das "+
+			"Programm sein eigenes Limit setzen (bei `go test` z. B. `-timeout 60s`), damit es vorher "+
+			"ausgibt, wo es hängt.",
+		" No output was captured — which does not mean the command was silent: a pipe like "+
+			"`| tail`, `| head` or `| sort` only writes when the command ends, and this one did not. "+
+			"Run it without the pipe, narrow the scope, and let the program set its own limit (for "+
+			"`go test`, e.g. `-timeout 60s`), so it prints where it hangs before the cut.")
 }
 
-func commandResult(line string, out *headTailWriter, status string) string {
+func commandResult(lang, line string, out *headTailWriter, status string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "$ %s\n", line)
 	body := out.String()
 	if strings.TrimSpace(body) == "" {
-		sb.WriteString("(keine Ausgabe)\n")
+		sb.WriteString(text(lang, "(keine Ausgabe)\n", "(no output)\n"))
 	} else {
 		sb.WriteString(body)
 		if !strings.HasSuffix(body, "\n") {

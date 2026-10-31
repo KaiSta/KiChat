@@ -80,7 +80,7 @@ func TestTheAnswerKeepsTheSourcesItCited(t *testing.T) {
 			answer = m
 		}
 	}
-	if !strings.Contains(toolText, "Quelle [1]: "+srv.URL) {
+	if !strings.Contains(toolText, "Source [1]: "+srv.URL) {
 		t.Fatalf("the scraped page was not numbered in the result the model read:\n%s",
 			truncateForTest(toolText, 300))
 	}

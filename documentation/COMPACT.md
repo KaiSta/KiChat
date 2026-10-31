@@ -1036,8 +1036,9 @@ entirely — and the summary covers all of it.
 **A document larger than the summariser reads is said to be partial.** The text is cut to
 what the window leaves beside the summary (`limit − maxTokens − digestPromptReserve`, a
 reserve derived from the prompts rather than typed), and the notice opens with
-`Teilzusammenfassung von … — der Rest wurde nicht zusammengefasst` instead of claiming a
-full summary. The rest is still reachable through the chunk range in the framing. A
+`Partial summary of … — the rest was not summarised` (`Teilzusammenfassung von … — der Rest
+wurde nicht zusammengefasst` in a German window — the notice follows the interface language,
+§17.6) instead of claiming a full summary. The rest is still reachable through the chunk range in the framing. A
 56-page manual is ~98k tokens against a 32k window, so this is the normal case for a
 manual, not an edge case.
 
@@ -1208,6 +1209,22 @@ a summary is not a lost detail — `edit_file` takes `old_string`, `read_file` c
 an `offset`, and a summary that invented either makes the next call wrong.
 Pinned by `TestALargeReadIsCondensedBeforeTheModelSeesIt` (which asserts the file prompt and
 `<file path="…">` reached the digester, not the page prompt).
+
+**The notice speaks the interface language.** The one sentence that says a file read is a
+summary, and names `read_file` with `offset`/`limit` as the way to the text, is the sentence
+the model has to obey — and it was German in every window, so an English chat with an English
+system prompt and English tool descriptions was handed `den genauen Text liefert read_file mit
+offset/limit`. It now follows `Settings.Language` like the shipped prompts do
+(`config.PromptBody`), with English as the fallback for anything else, the same fallback those
+presets use. Not "always English": a German window whose model is told in English that the text
+above is a summary has the same mismatch in the other direction, and the summary itself is
+written in the language of the text, not of the interface. The summariser's own prompt stays
+German for a different reason — its output language is dictated by the page or file it is given,
+so translating it would change nothing a reader sees while retiring every cached condensation
+through `digestPromptVersion`. Pinned by `TestTheNoticeSpeaksTheInterfaceLanguage`, which reads
+the same file in a German, an English and a Chinese window and asserts the third falls back to
+English. The notice is one of many such sentences, so the rule itself — and what stays a format
+rather than a sentence — is stated once, in [`CODING.md`](CODING.md) §2.
 
 **A bounded read is never condensed.** A call with `offset` or `limit` is one the model has
 already decided about — it is what a coding chat does immediately before `edit_file` — so

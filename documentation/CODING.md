@@ -50,6 +50,23 @@ each is a refusal with a code the window translates, never a read from wherever 
 happens to be running. `workspaceFor` in `internal/tools` is where that is enforced for every
 tool at once.
 
+**The text the model reads follows the interface's language.** A tool description, a refusal,
+a notice about what it was handed — all of it is written in the language the window is in, by
+`config.ModelLanguage`: German for a German window, English for everything else (including a
+Chinese window, the same fallback `config.PromptBody` uses for an untranslated prompt). The
+rule lives in one place per file: `text(lang, german, english)` at the call site, chosen from
+`Service.Language()`, which reads the settings per call so a save reaches the next tool call.
+Both halves sit next to each other so a change to one rule changes both copies. A service
+without settings — a test's — speaks English, which is `config.Default()`'s language; the tests
+that pin German wording say so (`inGerman`), and `TestTheLanguageFollowsTheInterface` pins the
+switch itself.
+
+What is *not* translated is anything another piece of code parses rather than reads blindly:
+the `<scraped_content>` and `<project_agents_md>` markers and the `%6d| ` line numbering are a
+format. The one sentence that is both is the continuation notice: it has two wordings, and
+`tools.ContinueNotices` is what `splitReadBody` in `internal/chat` matches, so a stored result
+stays readable after the window's language has changed.
+
 ## 3. The confirmation gate
 
 Every tool that changes something goes through `Service.Confirm`, which the app wires to

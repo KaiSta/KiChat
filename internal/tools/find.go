@@ -21,25 +21,34 @@ import (
 // The description names the two shapes that matter — a bare name matches at any depth, a path
 // with a slash is anchored — because a model that misreads that either gets nothing or gets
 // the whole tree.
-func findFilesDefinition() llm.ToolDefinition {
+func findFilesDefinition(lang string) llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name: ToolFindFiles,
-		Description: "Sucht Dateien im Projektordner über ein Pfadmuster und liefert ihre Pfade, alphabetisch. " +
-			"Ein Muster ohne Schrägstrich passt auf den Dateinamen in jeder Tiefe (\"*.go\", \"Makefile\"); " +
-			"eines mit Schrägstrich gilt ab dem Projektordner (\"internal/**/*_test.go\"). `*` bleibt " +
-			"innerhalb eines Ordners, `**` geht über Ordner hinweg. Nutze dieses Tool, um eine Datei zu " +
-			"finden, statt Ordner einzeln aufzulisten; Build-Ausgaben, Abhängigkeiten und .gitignore " +
-			"bleiben außen vor.",
+		Description: text(lang,
+			"Sucht Dateien im Projektordner über ein Pfadmuster und liefert ihre Pfade, alphabetisch. "+
+				"Ein Muster ohne Schrägstrich passt auf den Dateinamen in jeder Tiefe (\"*.go\", \"Makefile\"); "+
+				"eines mit Schrägstrich gilt ab dem Projektordner (\"internal/**/*_test.go\"). `*` bleibt "+
+				"innerhalb eines Ordners, `**` geht über Ordner hinweg. Nutze dieses Tool, um eine Datei zu "+
+				"finden, statt Ordner einzeln aufzulisten; Build-Ausgaben, Abhängigkeiten und .gitignore "+
+				"bleiben außen vor.",
+			"Searches the project folder for files by a path pattern and returns their paths, "+
+				"alphabetically. A pattern without a slash matches the file name at any depth (\"*.go\", "+
+				"\"Makefile\"); one with a slash is anchored at the project folder "+
+				"(\"internal/**/*_test.go\"). `*` stays inside one folder, `**` crosses folders. Use it to "+
+				"find a file instead of listing folders one by one; build output, dependencies and "+
+				".gitignore stay out."),
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"pattern": map[string]any{
-					"type":        "string",
-					"description": "Pfadmuster, z. B. \"**/*.go\" oder \"internal/tools/*.go\".",
+					"type": "string",
+					"description": text(lang, "Pfadmuster, z. B. \"**/*.go\" oder \"internal/tools/*.go\".",
+						"Path pattern, e.g. \"**/*.go\" or \"internal/tools/*.go\"."),
 				},
 				"limit": map[string]any{
-					"type":        "integer",
-					"description": "Höchstzahl der Pfade (1-500, Standard 200).",
+					"type": "integer",
+					"description": text(lang, "Höchstzahl der Pfade (1-500, Standard 200).",
+						"Maximum number of paths (1-500, default 200)."),
 				},
 			},
 			"required": []string{"pattern"},
@@ -55,12 +64,14 @@ type findFilesArgs struct {
 func (s *Service) findFiles(chatID, argsJSON string) (Result, error) {
 	var args findFilesArgs
 	if err := decodeLoose(argsJSON, &args); err != nil {
-		return Result{}, badArguments(err)
+		return Result{}, s.badArguments(err)
 	}
+	lang := s.Language()
 	pattern := strings.TrimSpace(args.Pattern)
 	if pattern == "" {
-		return Result{}, uimsg.Detailf("tools.patternMissing",
-			"the pattern argument is empty; name a pattern such as **/*.go")
+		return Result{}, uimsg.Detailf("tools.patternMissing", text(lang,
+			"das Argument pattern ist leer; nenne ein Muster wie **/*.go",
+			"the pattern argument is empty; name a pattern such as **/*.go"))
 	}
 	root, err := s.workspaceFor(chatID)
 	if err != nil {
@@ -73,24 +84,30 @@ func (s *Service) findFiles(chatID, argsJSON string) (Result, error) {
 	found, err := root.Find(pattern, limit)
 	if err != nil {
 		return Result{}, uimsg.Detailf("tools.badPattern",
-			fmt.Sprintf("the pattern %q could not be used: %v", pattern, err), pattern)
+			fmt.Sprintf(text(lang, "das Muster %q ließ sich nicht verwenden: %v",
+				"the pattern %q could not be used: %v"), pattern, err), pattern)
 	}
 	var sb strings.Builder
 	switch {
 	case len(found.Paths) == 0:
-		fmt.Fprintf(&sb, "Keine Datei passt auf %q (%d Dateien geprüft).", found.Pattern, found.Scanned)
+		fmt.Fprintf(&sb, text(lang, "Keine Datei passt auf %q (%d Dateien geprüft).",
+			"No file matches %q (%d files checked)."), found.Pattern, found.Scanned)
 		if found.Ignored > 0 {
-			fmt.Fprintf(&sb, " %d Einträge wurden nach .gitignore ausgelassen.", found.Ignored)
+			fmt.Fprintf(&sb, text(lang, " %d Einträge wurden nach .gitignore ausgelassen.",
+				" %d entries were skipped per .gitignore."), found.Ignored)
 		}
 		return summarized(sb.String(), "tool.sum.find", "0", found.Pattern), nil
 	}
-	fmt.Fprintf(&sb, "%d Dateien für %q:\n\n", len(found.Paths), found.Pattern)
+	fmt.Fprintf(&sb, text(lang, "%d Dateien für %q:\n\n", "%d files for %q:\n\n"),
+		len(found.Paths), found.Pattern)
 	for _, path := range found.Paths {
 		sb.WriteString(path)
 		sb.WriteString("\n")
 	}
 	if found.Truncated {
-		sb.WriteString("\nEs gibt weitere Treffer; ein engeres Muster liefert eine vollständige Liste.\n")
+		sb.WriteString(text(lang,
+			"\nEs gibt weitere Treffer; ein engeres Muster liefert eine vollständige Liste.\n",
+			"\nThere are more matches; a narrower pattern returns a complete list.\n"))
 	}
 	return summarized(sb.String(), "tool.sum.find",
 		fmt.Sprint(len(found.Paths)), found.Pattern), nil
