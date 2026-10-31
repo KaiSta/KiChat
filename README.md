@@ -72,6 +72,10 @@ you picked a hosted model or asked for a web search.
 - **One place for chat and pictures.** The model can call `generate_image`; the result
   is an ordinary attachment you can save, **enlarge** to FHD or 4K in about a second, or
   redraw from its stored recipe — and an uploaded photograph can be enlarged too.
+- **Code you can say no to.** Point a project at a folder and the model reads, searches and
+  edits inside it: every change arrives as a diff you approve, every command as the exact
+  line it will run, and a **Changes** panel puts a file back. Nothing outside that folder is
+  reachable, and nothing is written before you press yes.
 - **Nothing is locked in.** Three local runtimes, four hosted APIs, keys in the OS
   keychain — and a chat history that is an encrypted SQLite database, with an encrypted
   export when it has to move between machines.
@@ -94,9 +98,13 @@ without native calling is shown exactly the tools the request declares, never on
 app withheld (no search provider, no document index, no picture server). A name the
 model mangled — `scr scrape_url` for `scrape_url`, which local servers accept without
 complaint — is repaired when exactly one known tool fits it and refused rather than
-guessed at when none does. And a hosted backend that rejects the call outright is
-explained in the app's own words instead of quoting a validation sentence that names a
-tool the app never sent.
+guessed at when none does. A model that uses another assistant's vocabulary instead —
+`bash`, `shell`, `terminal`, `read`, `cat`, `grep`, `ls`, `glob`, `edit`, `write` — is
+understood too, arguments included: `read` with `{"file_path": …}` reads the file, because
+a name translated without its field names would only move the refusal one step later. A
+borrowed name resolves only onto a tool that request actually offers. And a hosted backend
+that rejects the call outright is explained in the app's own words instead of quoting a
+validation sentence that names a tool the app never sent.
 
 ### Research
 
@@ -176,21 +184,54 @@ pre-set to that target.
 
 ### Code
 
-- A **Code & engineering** system prompt preset beside the research, small-local,
-  neutral and empty ones — and you can edit or add your own.
-- Syntax-highlighted diffs, shell snippets and whole files, with a copy button on
-  every block.
+**New project** in the sidebar asks for one folder, and the chat that opens is a coding
+agent that works inside it and nowhere else:
+
+- **The folder is the boundary.** Every path is resolved against that root, and one that
+  leaves it — including through a symlink — is refused with the reason rather than followed.
+  There is no fallback to your home directory or to wherever the app happens to run.
+- **It reads the folder instead of guessing.** `list_dir`, `find_files` (a glob over the tree,
+  `**` crossing folders), `search_files` (a literal, case-insensitive grep) and `read_file` with
+  line numbers. A read the model bounded with `offset`/`limit` comes back verbatim — that is the
+  text an edit is copied from — and a long file can be asked for as an **outline**: the
+  declarations and their line numbers with no bodies, which measured **1,597 tokens for `app.go`
+  against 24,429** for the whole file.
+- **Every change is shown before it is made.** `edit_file` and `write_file` arrive as a card
+  carrying the diff, and nothing is written until you answer it. The **Changes** panel beside the
+  chat lists every file the chat touched, with its diff and a **Revert** — and a revert refuses a
+  file you edited yourself in the meantime instead of overwriting your work. If a card per change
+  is too slow, **Settings → Coding agent → Run without asking → Write and edit files** switches it
+  off, and the chat's own badge then says so.
+- **A terminal, one command at a time, behind the same gate.** `run_command` shows the exact line
+  before it runs it in the project folder — you can fix a typo on the card — with no stdin, a
+  120 s limit (600 s if the model asks), the whole process tree killed at the limit, and output
+  capped at 32 KiB per end with the dropped middle counted. A line that would throw away
+  uncommitted work (`git reset --hard`, `checkout --`, `restore`, `clean -f`) is refused before
+  you are asked, and so is one that wants administrator rights, because there is no terminal to
+  answer a password prompt in.
+- **It sees the working tree.** A folder that is a git repository gets its branch, ahead/behind
+  and up to 40 pending paths — with the staged half, the kind of change and the line counts — in
+  the prompt on every turn, so the model stops assuming its own earlier edits are the only thing
+  that moved.
+- **A project's reply gets its own limits**: 60 tool rounds and 120,000 tokens of tool results,
+  against a chat's 24 and 60,000. A refactor is read, edit, run the tests, read the failure, edit
+  again, and a figure tuned for answering a question cut that short. Both are settings, and both
+  are still cut to the room the next request actually has.
+- **Large reads are summarised before they reach the model.** A file above the condensation
+  threshold is read by a second model you pick in Settings → Tool results, and the chat model gets
+  a summary written to keep paths, line numbers and names verbatim instead of a few thousand lines
+  of text. A bounded read is never summarised, and the file's "continues at line N" note and the
+  nearest `AGENTS.md` travel through untouched.
+- **The folder's own instructions count.** A root `AGENTS.md` is part of the system prompt and a
+  nearer one arrives when a file below it is read — as project knowledge, never as permission to
+  read outside the folder.
 - Files as context: drop in a source file, a PDF spec or a spreadsheet and the model
   can search it with the `search_documents` tool instead of you pasting chunks.
-- Native tool calling for agent-shaped work, with the same tools exposed to local
-  models through the text protocol.
-- **Large reads are summarised before they reach the model.** In a coding chat, a file
-  above the condensation threshold is read by a second model you pick in Settings → Tool
-  results, and the chat model gets a summary written to keep paths, line numbers and names
-  verbatim instead of a few thousand lines of text. A read the model bounded with
-  `offset`/`limit` is never summarised — that is the text an edit is copied from — and
-  the file's "continues at line N" note and the nearest `AGENTS.md` travel through
-  untouched.
+- Syntax-highlighted diffs, shell snippets and whole files, with a copy button on
+  every block.
+- A **Code & engineering** prompt preset for asking *about* code, and a **Coding agent
+  (project)** one that a new project starts with — beside the research, small-local, neutral and
+  empty presets, all editable or replaceable.
 - One model per chat: a planning chat on the cheap fast one and a review chat on the
   big one sit side by side, each with its own context.
 
@@ -251,7 +292,9 @@ not assumed:
 - **The minute is paced, not discovered.** An allowance is requests per minute as well
   as tokens per minute. A turn that needs more rounds than the rate allows is spread
   over the minute before its first request instead of hitting the wall, and the wait is
-  shown as its own phase — nothing was refused and nothing is spent.
+  shown as its own phase — nothing was refused and nothing is spent. A project's larger
+  round budget does not change that: the plan covers at most one minute's worth of requests,
+  which is what keeps a turn that fits from being delayed.
 - **A refusal that means "too big" is told apart from a throttle.** Both arrive as the
   same `rate_limit_exceeded` envelope, so the words of the refusal decide: an oversized
   *request* is folded and retried once, a *throttle* waits out the retry the provider
@@ -265,10 +308,10 @@ not assumed:
   and therefore replayed on every later turn, holds the summary while the tool card keeps
   the page (see [Research](#research)).
 - **A file is condensed instead of being paid for whole.** Source files are the largest
-  thing a coding chat reads: one call can return 2,000 numbered lines, which fills most of
-  an answer's 25,000-token tool budget — and the stored result is replayed on every later
-  turn until the conversation is folded. Condensed, the chat model reads a few hundred
-  tokens and the tool card still keeps the whole file. This is Spotify's
+  thing a project chat reads: one call can return 2,000 numbered lines — `app.go` measures
+  24,429 tokens — and five of those reads spend a project's whole 120,000-token tool budget,
+  after which the answer reads notices instead of code. Condensed, the chat model reads a few
+  hundred tokens and the tool card still keeps the whole file. This is Spotify's
   [`shunt`](https://engineering.atspotify.com/2026/09/portal-by-spotify-cut-my-claude-code-token-usage-by-90/)
   idea — send the I/O to a cheaper model and keep the expensive one for the thinking:
   their measured saving on a 162k-line Java monorepo was 82–94 % per large read. KiChat
@@ -281,7 +324,9 @@ not assumed:
   next message — and llama.cpp truncates such a prompt from the front, losing the system
   prompt without saying so. Settings → Compaction has a mid-turn check against your own
   threshold; it ships off, because it spends a summarisation inside an answer you are
-  waiting for.
+  waiting for. A project asks it regardless — its reply is one piece of work with no fold
+  point between two messages, so an over-full request costs the work rather than delaying it
+  — and the master switch still governs both.
 
 The same discipline applies offline: one draw at a time on one GPU, a step counter and
 a preview rather than an indefinite spinner, and a Stop button that reaches every
@@ -320,9 +365,23 @@ and configuration is [on the roadmap](#roadmap).
 
 ## Install
 
-KiChat is a native desktop app built with [Wails v2](https://wails.io): a Go backend,
-a React 19 frontend, SQLite on disk. There is no hosted service and no app store — the
-`Makefile` produces the package for each platform, and each target resolves its own
+**Download a package.** Every release is built by CI from its tag and attached to a
+[GitHub Release](https://github.com/KaiSta/KiChat/releases) as five files — a `.deb` and a
+Windows `Setup.exe` for `amd64` and for `arm64`, and one universal macOS `.dmg`:
+
+| Platform | File | Install |
+| --- | --- | --- |
+| Debian, Ubuntu, Mint | `kichat_<version>_amd64.deb` (or `_arm64`) | `sudo apt install ./kichat_<version>_amd64.deb` — apt resolves the webkit2gtk dependency |
+| Windows 10/11 | `kichat-amd64-installer.exe` (or `kichat-arm64-installer.exe`) | run it; it needs the WebView2 runtime, which Windows 11 and Windows 10 from 21H2 already have |
+| macOS | `kichat_<version>_universal.dmg` | drag it to Applications, then clear the quarantine flag once — it is ad-hoc signed, not notarized |
+
+```sh
+xattr -dr com.apple.quarantine /Applications/KiChat.app   # macOS only, once
+```
+
+**Or build it.** KiChat is a native desktop app built with [Wails v2](https://wails.io): a Go
+backend, a React 19 frontend, SQLite on disk. There is no hosted service and no app store —
+the `Makefile` produces the same packages locally, and each target resolves its own
 toolchain from `PATH` with fallbacks.
 
 | Platform | Command | Artifact |
@@ -343,18 +402,14 @@ cross-build from Linux or macOS like the x64 ones.
 
 `make help` lists the rest, including `make run`, `make clean` and `make check`.
 
-**Linux requires the `webkit2_41` build tag** on any distribution shipping only
+**Building on Linux needs the `webkit2_41` build tag** on any distribution shipping only
 webkit2gtk-4.1 (Ubuntu 24.04+, Linux Mint 22+). `make build` adds it for you; a raw
-`wails build` needs `wails build -tags webkit2_41`, or it fails to link.
+`wails build` needs `wails build -tags webkit2_41`, or it fails to link. A downloaded `.deb`
+needs no tag — apt installs the 4.1 library it was linked against.
 
 **macOS has to be built on a Mac** — Wails packages `.app` bundles only for the host it
 runs on, so `make darwin` and `make dmg` refuse on any other machine rather than
-producing nothing. The bundle is ad-hoc signed, not notarized, so a downloaded copy
-needs its quarantine flag cleared once:
-
-```sh
-xattr -dr com.apple.quarantine /Applications/KiChat.app
-```
+producing nothing.
 
 `make darwin DARWIN_ARCH=arm64` builds the one slice instead of the universal pair.
 
@@ -366,16 +421,20 @@ xattr -dr com.apple.quarantine /Applications/KiChat.app
    starts `llama-server` on a free port and stops it with the app.
 2. **Pick a model and a prompt.** The composer's model dropdown lists everything each
    enabled backend offers. The prompt preset row offers *Research*, *Small local
-   models*, *Code & engineering*, *Neutral assistant* and *Empty*, and every preset is
-   editable.
+   models*, *Code & engineering*, *Coding agent (project)*, *Neutral assistant* and *Empty*,
+   and every preset is editable.
 3. **Ask something.** Attach files by dropping them on the window; they are extracted,
    chunked and indexed so the model can search them.
-4. **Optional: web search.** Paste a Brave Search key for the primary route, or leave it
+4. **Optional: a project.** *New project* in the sidebar asks for a folder. From then on the
+   model reads and searches inside it and proposes changes as diffs you approve — see
+   [Code](#code). Nothing is written without an answer, so the first turn costs a click, not a
+   file.
+5. **Optional: web search.** Paste a Brave Search key for the primary route, or leave it
    empty for DuckDuckGo. Turn on **Search before every answer** for research-heavy work.
-5. **Optional: pictures.** In **Settings → Images**, point KiChat at an AUTOMATIC1111 or
+6. **Optional: pictures.** In **Settings → Images**, point KiChat at an AUTOMATIC1111 or
    Forge server (`--api`), or at the folder where you unpacked stable-diffusion.cpp and
    let KiChat run `sd-server` itself. The model then has a `generate_image` tool.
-6. **Optional: enlarging.** Nothing to set up for the fast path — *Enlarge…* under any
+7. **Optional: enlarging.** Nothing to set up for the fast path — *Enlarge…* under any
    picture resamples in about a second. For the neural pass, **Download Real-ESRGAN** in
    Settings → Images → Enlarging fetches the pinned 47 MB archive for your machine,
    verifies its digest and switches the method on.
@@ -524,8 +583,9 @@ a path you set yourself pins one file instead.
 ## Privacy and where data lives
 
 Your chats are yours: no KiChat account, no telemetry, no analytics, no crash reporting.
-The only outbound requests KiChat makes are to the backends you configured, the search
-provider you use, and GitHub when you ask it to check for a llama.cpp update.
+KiChat talks only to what you pointed it at — the backends you enabled, your search
+provider, your picture server when it is not on this machine — and to GitHub when you install
+or update a llama.cpp build or download the Real-ESRGAN archive.
 
 ### The database is encrypted
 
@@ -680,8 +740,10 @@ KICHAT_LIVE=1 KICHAT_NVIDIA_KEY=<key>   go test ./internal/llm/  -run TestLiveNv
 KICHAT_LIVE=1 go test ./internal/llm/ -run TestLiveEngineTurn -v   # needs LM Studio
 ```
 
-[`AGENTS.md`](AGENTS.md) lists every live test, what each one buys, and the environment
-variable that gates it. Never put a key in a tracked file — pass it in the environment.
+[`AGENTS.md`](AGENTS.md) is the index of that matrix, and
+[`.claude/skills/live-tests/SKILL.md`](.claude/skills/live-tests/SKILL.md) the matrix itself:
+which variable gates which test, what each one buys, and what it costs. Never put a key in a
+tracked file — pass it in the environment.
 
 Two tests are worth knowing about because they guard the numbers this app is honest
 about: the live LM Studio test asserts a streamed response reports a non-zero
@@ -702,6 +764,11 @@ readable from a live response.
 | Model answers slowly with no GPU in the panel | the build cannot resolve its runtime (CUDA/ROCm), or the driver is too old — the panel names the missing libraries |
 | A picture never appears | the WebUI was started without `--api`, or the checkpoint is not installed; `sd-server` needs its `-m` model file |
 | First picture takes minutes | a one-shot `sd-cli` draw loads the model silently before its first step; the managed `sd-server` shows a `starting` row instead |
+| A file tool answers "this chat has no project folder" | it is an ordinary chat: a folder comes from *New project*, not from a chat you created with *New chat* |
+| The model wants to run a command and nothing runs | the confirmation card is waiting for you — the turn is paused until you answer it. **Settings → Coding agent → Run without asking** skips it per kind |
+| A command was refused before it ran | it asks for administrator rights (there is no terminal to answer the prompt in), or it would discard uncommitted work — `git reset --hard`, `checkout --`, `restore`, `clean -f` |
+| Revert in the Changes panel is greyed out | the file changed since the chat wrote it — by you, or by a command — or it is not a text file; the panel names which, and refuses rather than overwriting your edit. A running turn blocks a revert too: stop it first |
+| The model asks for `bash` or `read` instead of the app's tools | that is handled: a borrowed name is translated onto this app's tool, arguments included. Seeing it in the transcript is not an error |
 | An enlarged picture is black | Real-ESRGAN ran without its `models/` folder — a build of the small archive does exactly that, exits 0 and looks fine; use the app's download button instead |
 | Real-ESRGAN is offered but fails before it starts | its build is Vulkan-only, so a missing or broken driver is the cause — resampling needs neither GPU nor program |
 | KiChat opens on a passphrase prompt instead of your chats | the OS keyring no longer holds the database key (a new machine, a reinstalled OS) — enter the passphrase that wraps `kichat.key`, or import an encrypted export if there is none |
@@ -754,6 +821,19 @@ Real-ESRGAN is the slower, sharper option and needs a Vulkan card.
 Not yet. Chat, research, images and coding are implemented; video generation is on the
 [roadmap](#roadmap).
 
+**Can it change my code?**
+Yes, and only where you pointed it. A project is bound to one folder, every edit arrives as a
+diff you approve before it is written, and the terminal shows the line it will run. The
+Changes panel puts back a file the chat wrote, and refuses one that changed since — by you or
+by a command — instead of overwriting it. Nothing outside that folder is reachable. See
+[Code](#code).
+
+**Does it work with git?**
+It reads the working tree: branch, ahead/behind and the pending paths are in the prompt on
+every turn, so the model knows what moved besides its own edits. It does not commit for you,
+and a line that would throw away uncommitted work — `git reset --hard`, `checkout --`,
+`restore`, `clean -f` — is refused before you are asked to approve it.
+
 **Which model should I download?**
 See [Which local model fits your machine](#which-local-model-fits-your-machine). Until
 the curated catalogue lands, the GGUFs in your LM Studio folders are already offered.
@@ -777,9 +857,10 @@ add or remove one.
 
 ## Roadmap
 
-Delivered: chat, research, images (local and hosted), picture enlarging, coding, the
-managed llama.cpp runtime with GPU offload, vision projectors, the free-tier budget
-machinery, an encrypted database and encrypted chat exports.
+Delivered: chat, research, images (local and hosted), picture enlarging, coding — a project
+folder with approval-gated edits, a terminal, a Changes panel with undo, and the working tree
+in the prompt — the managed llama.cpp runtime with GPU offload, vision projectors, the
+free-tier budget machinery, an encrypted database and encrypted chat exports.
 
 Next, roughly in the order they matter:
 
@@ -796,8 +877,10 @@ Next, roughly in the order they matter:
   request, built on the same panel that now enlarges.
 - **Faster first draws.** The one-shot draw's model load is silent today; the managed
   server reports it as a bounded `starting` row.
-- **Repo-aware coding.** A workspace tool that can read, search and edit a project
-  folder, on top of the tool-calling that already exists.
+- **Coding mode for a change that spans many files.** Today one file is one card and one
+  question: a twenty-file rename is twenty approvals, and a deletion or a move made through
+  the terminal has no diff and no undo. Both are next, on the same snapshot machinery the
+  Changes panel already uses.
 
 ## Documentation
 
@@ -808,6 +891,7 @@ document, and each one distinguishes what was observed from what is expected.
 | --- | --- |
 | [`PLAN.md`](documentation/PLAN.md) | the architecture and the reasoning behind it |
 | [`COMPACT.md`](documentation/COMPACT.md) | context compaction and tool-result condensation: strategy, arithmetic, failure modes |
+| [`CODING.md`](documentation/CODING.md) | coding mode: the folder boundary, the confirmation gate, the terminal's shell, caps and timeout, the undo record |
 | [`RESEARCH.md`](documentation/RESEARCH.md) | web search and scraping: providers, refusals, SSRF and robots guards, budgets |
 | [`IMAGES.md`](documentation/IMAGES.md) | picture generation: the three server kinds and the hosted one, parameters, profiles, verification |
 | [`IMAGES-CLOUD.md`](documentation/IMAGES-CLOUD.md) | hosted picture backends: what each free tier really is, and why NVIDIA NIM was the one built |
@@ -829,6 +913,11 @@ The version is authored once, in [`VERSION`](VERSION). `make build` links it int
 Windows version resource in `wails.json` in step; `make deb` uses it for the package
 name, its control file and its changelog. A release is one line in that file — and
 `VERSION=x.y.z` on the make command line overrides it for a one-off.
+
+A pushed tag is what ships: CI builds the five packages from that commit and attaches them
+to a GitHub Release whose notes are the tag's own annotation, so the download and its
+changelog cannot describe different versions. What arrives in each release is written for
+the person installing it — the changes they can observe, not the files that made them.
 
 ## License
 
