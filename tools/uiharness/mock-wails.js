@@ -1718,6 +1718,18 @@ Available tools: {{tool_list}}`,
    * at all).
    */
   const approvalKind = query.get('approval')
+  // ?always=commands (or files, or both) is the state a card leaves behind when it is answered
+  // with "always in this chat": the grant is per kind and per chat, and the header shows it.
+  // Without a flag it could only be reached by clicking through a card first.
+  const alwaysKinds = (query.get('always') || '').split(',').map((s) => s.trim())
+  const consentState = new Map()
+  function consentFor(chatId) {
+    const held = consentState.get(chatId) || {
+      files: alwaysKinds.includes('files'),
+      commands: alwaysKinds.includes('commands'),
+    }
+    return held
+  }
   // ?throttle=1 pauses a streamed reply the way a backend's rate limit does: the app emits
   // the phase and the wait while the retry sleeps, and nothing arrives on the wire until it
   // is over. It is a flag because the ordinary fixture has to keep streaming without a pause.
@@ -2068,7 +2080,7 @@ Available tools: {{tool_list}}`,
       statsSource: 'estimated',
     }),
   ])
-  if (approvalKind) {
+  if (approvalKind || alwaysKinds.some(Boolean)) {
     // The flag needs the project open, because a write tool is offered to a project and to
     // nothing else — and because the question is about that folder. The fixture's own
     // project is moved to the front of the list, which is what the store opens on boot;
@@ -2081,9 +2093,16 @@ Available tools: {{tool_list}}`,
       // Its seeded conversation stays: the question is asked on the next turn, and a
       // project with history is what the card is normally seen against.
     }
-    console.warn(
-      `[harness] approval=${approvalKind} active: a project chat whose turn stops on an unanswered change or command`,
-    )
+    if (approvalKind) {
+      console.warn(
+        `[harness] approval=${approvalKind} active: a project chat whose turn stops on an unanswered change or command`,
+      )
+    }
+    if (alwaysKinds.some(Boolean)) {
+      console.warn(
+        `[harness] always=${alwaysKinds.join(',')} active: the project chat answers that kind without a card`,
+      )
+    }
   }
 
   // The project chat answers about the folder it is pointed at, and its tool calls are
@@ -2528,6 +2547,15 @@ Available tools: {{tool_list}}`,
     const waiting = pendingApproval
     if (!waiting || waiting.approvalId !== approvalId) return Promise.resolve(false)
     pendingApproval = null
+    // "Always" is per kind and per chat, exactly as api_changes.go records it: the card's kind
+    // is the only one granted, so the header's chip and the next question agree with the app.
+    if (decision === 'always') {
+      const held = consentFor(waiting.chatId)
+      consentState.set(waiting.chatId, {
+        ...held,
+        [waiting.kind === 'command' ? 'commands' : 'files']: true,
+      })
+    }
     waiting.finish(decision)
     return Promise.resolve(true)
   }
@@ -2793,6 +2821,9 @@ Available tools: {{tool_list}}`,
       pendingApproval = {
         approvalId: call.id,
         chatId,
+        // Which kind this card is, so "always" can grant that kind and no other — the rule
+        // api_changes.go follows, and the one this fixture would otherwise hide.
+        kind: approvalKind,
         finish: (decision) => finishApproval(chatId, messageId, call, decision),
       }
       emit('chat:tool', { chatId, toolCall: call })
@@ -2968,6 +2999,10 @@ Available tools: {{tool_list}}`,
       // finished it, and reporting `false` here would drop the Stop button the moment the
       // question appeared — the one control a user needs while a change is on screen.
       running: timers.has(chatId) || pendingApproval?.chatId === chatId,
+      // What this chat answers without a card, from an "always" clicked on one of its own.
+      // Seeded for the coding fixture so the header's consent chip renders without having to
+      // answer a card first — `?always=commands` is the state the report was about.
+      consent: consentFor(chatId),
     })
   }
 
@@ -3797,6 +3832,17 @@ Available tools: {{tool_list}}`,
     ResolveToolApprovalWith: (approvalId, decision, command) => {
       console.log('[harness] answered with an edited line:', command)
       return answerApproval(approvalId, decision)
+    },
+    // Taking back the "always" this chat was given for one kind. The chip in the header calls
+    // it, and the answer is the remaining consent — the shape ChatState carries.
+    RevokeChatConsent: (chatId, kind) => {
+      if (kind !== 'files' && kind !== 'commands') {
+        return Promise.reject('i18n:{"code":"chat.consentUnknownKind","args":["' + kind + '"]}')
+      }
+      const held = consentFor(chatId)
+      const next = { ...held, [kind]: false }
+      consentState.set(chatId, next)
+      return Promise.resolve(next)
     },
     // Ending one running command. The fixture's commands finish immediately, so there is
     // never one to stop; false is the real answer for a click that arrives a moment late.

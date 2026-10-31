@@ -428,9 +428,11 @@ export type ApprovalPayload = ApprovalCommon &
 /**
  * The answers a change can be given.
  *
- * `always` allows every later change in that chat, and it lasts as long as the chat is
- * open in this process: a permission given for a task the user was watching, remembered
- * invisibly the next morning, is a permission nobody remembers giving.
+ * `always` allows every later question *of the kind on the card* in that chat, and it lasts as
+ * long as the chat is open in this process: a permission given for a task the user was
+ * watching, remembered invisibly the next morning, is a permission nobody remembers giving.
+ * The kind matters — a card about a file change grants the file tools and leaves the command
+ * question standing, which is the distinction the settings switch makes one screen away.
  */
 export type ApprovalDecision = 'once' | 'always' | 'deny'
 

@@ -71,25 +71,104 @@ func (r *approvalApp) waitQuestions(t *testing.T, want int) {
 	t.Fatalf("%d questions were asked, want %d", len(r.questions()), want)
 }
 
-// TestAChatsAlwaysCoversTheKindsItsButtonNames keeps the per-chat "always" from becoming a
-// blanket over tools nobody was shown. The button says "changes and commands", so those two
-// are answered without a card — and a guarded tool added after them must ask, exactly as the
-// settings switch refuses to grant a tool it does not know.
-func TestAChatsAlwaysCoversTheKindsItsButtonNames(t *testing.T) {
+// TestAChatsAlwaysCoversOnlyTheKindItAnswered is the scope of the per-chat answer, and it is
+// per *kind*: a card that showed a file change was not a card that showed a command, and a
+// person who trusts the model with their files has not thereby said anything about their
+// machine — the same distinction the settings switch makes (config.AutoApproveSettings). One
+// flag for both was the first version and it granted a permission nobody was asked for.
+//
+// A guarded tool added after these two must still ask, exactly as the settings switch refuses
+// to grant a tool it does not know.
+func TestAChatsAlwaysCoversOnlyTheKindItAnswered(t *testing.T) {
 	recorder := newApprovalApp(t)
-	recorder.app.allowChanges("chat-1")
+	recorder.app.allowKind("chat-1", consentKindFiles)
 
-	for _, tool := range []string{tools.ToolWriteFile, tools.ToolEditFile, tools.ToolRunCommand} {
+	for _, tool := range []string{tools.ToolWriteFile, tools.ToolEditFile} {
 		if !recorder.app.standingConsent("chat-1", tool) {
-			t.Errorf("%s still asks after the chat was told always", tool)
+			t.Errorf("%s still asks after the chat was told always for file changes", tool)
 		}
+	}
+	if recorder.app.standingConsent("chat-1", tools.ToolRunCommand) {
+		t.Error("answering always to a file change silenced the command question too")
 	}
 	if recorder.app.standingConsent("chat-1", "delete_file") {
 		t.Error("a guarded tool the card never named was covered by the chat's always")
 	}
-	// And the blanket is per chat: another chat's permission is not this one's.
+
+	// The other direction is its own grant, and it does not reach back into the files.
+	recorder.app.allowKind("chat-2", consentKindCommands)
+	if !recorder.app.standingConsent("chat-2", tools.ToolRunCommand) {
+		t.Error("a command answered always was not remembered")
+	}
 	if recorder.app.standingConsent("chat-2", tools.ToolWriteFile) {
+		t.Error("answering always to a command silenced the file-change question too")
+	}
+	// And the grant is per chat: another chat's permission is not this one's.
+	if recorder.app.standingConsent("chat-3", tools.ToolWriteFile) {
 		t.Error("a permission given in one chat answered a question in another")
+	}
+}
+
+// TestAlwaysOnACommandCardLeavesTheFileQuestionShut drives the same rule through the path the
+// window uses, because that is where the report came from: a command card answered with
+// "always" must not let the next file write through without a question.
+func TestAlwaysOnACommandCardLeavesTheFileQuestionShut(t *testing.T) {
+	recorder := newApprovalApp(t)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- recorder.app.confirmChange(context.Background(), &tools.ApprovalRequest{
+			ChatID: "chat-1", MessageID: "msg-1", ToolCallID: "call-1",
+			Tool: tools.ToolRunCommand, Kind: tools.ApprovalKindCommand,
+			Command: tools.Command{Line: "go test ./...", Dir: "/tmp", TimeoutSec: 120, Shell: "sh"},
+		})
+	}()
+	<-recorder.arrived
+	if !recorder.app.ResolveToolApproval("call-1", approvalAlways) {
+		t.Fatal("the answer did not reach the waiting command")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("an allowed command returned %v, want nil", err)
+	}
+
+	// The next command in that chat runs with no card.
+	if err := recorder.app.confirmChange(context.Background(), &tools.ApprovalRequest{
+		ChatID: "chat-1", MessageID: "msg-1", ToolCallID: "call-2",
+		Tool: tools.ToolRunCommand, Kind: tools.ApprovalKindCommand,
+		Command: tools.Command{Line: "go vet ./...", Dir: "/tmp", TimeoutSec: 120, Shell: "sh"},
+	}); err != nil {
+		t.Fatalf("the remembered answer did not cover the next command: %v", err)
+	}
+	// A file change is a question nobody answered, so it is asked — and the answer is that it
+	// was asked, which is what a denial after a real click proves.
+	asked := make(chan error, 1)
+	go func() {
+		asked <- recorder.app.confirmChange(context.Background(),
+			changeRequest("chat-1", "call-3", workspace.Change{Path: "a.go", Operation: workspace.OperationCreate}))
+	}()
+	recorder.waitQuestions(t, 2)
+	if !recorder.app.ResolveToolApproval("call-3", "deny") {
+		t.Fatal("the file change was not asked about after a command was answered always")
+	}
+	if err := <-asked; !errors.Is(err, tools.ErrDenied) {
+		t.Fatalf("a file change returned %v, want the question that was just denied", err)
+	}
+
+	// And the grant is visible, which is what makes it checkable: it is in the chat's own state.
+	if consent := recorder.app.chatConsent("chat-1"); !consent.Commands || consent.Files {
+		t.Errorf("chat consent reads %+v, want commands only", consent)
+	}
+	// Taking it back puts the question in front of the person again.
+	consent, err := recorder.app.RevokeChatConsent("chat-1", consentKindCommands)
+	if err != nil {
+		t.Fatalf("revoking the command consent: %v", err)
+	}
+	if consent.Commands || recorder.app.standingConsent("chat-1", tools.ToolRunCommand) {
+		t.Error("the revoked consent still answers the command question")
+	}
+	// A kind the app does not know is refused rather than quietly ignored.
+	if _, err := recorder.app.RevokeChatConsent("chat-1", "everything"); err == nil {
+		t.Error("an unknown kind was accepted")
 	}
 }
 
@@ -279,7 +358,7 @@ func TestNoAnswerMeansNoChange(t *testing.T) {
 	if recorder.app.ResolveToolApproval("call-1", approvalOnce) {
 		t.Error("a stopped turn was still waiting for an answer")
 	}
-	if got := recorder.app.changesAllowed("chat-1"); got {
+	if consent := recorder.app.chatConsent("chat-1"); consent.Files || consent.Commands {
 		t.Error("a stopped turn granted a standing permission")
 	}
 }
@@ -408,8 +487,8 @@ func TestAlwaysLastsForOneChatAndOneProcess(t *testing.T) {
 
 	// And deleting the chat takes the permission with it: an answer given for a
 	// conversation must not outlive it.
-	recorder.app.forgetChanges("chat-1")
-	if recorder.app.changesAllowed("chat-1") {
+	recorder.app.forgetConsent("chat-1")
+	if consent := recorder.app.chatConsent("chat-1"); consent.Files || consent.Commands {
 		t.Error("a deleted chat kept its standing permission")
 	}
 }

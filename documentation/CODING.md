@@ -130,9 +130,17 @@ classified as a refusal whatever it says (`Service.approve`), because a call rec
 *fault* is one the model retries, and a declined change being attempted again is the loop this
 gate exists to prevent.
 
-**"Always in this chat"** is remembered per chat id, in memory, for the life of the process. A
-permission given for a task somebody was watching, remembered invisibly the next morning, is a
-permission nobody remembers giving. It is dropped when the chat is deleted.
+**"Always in this chat"** is remembered per chat id **and per kind**, in memory, for the life of
+the process: `App.allowedKinds` is keyed by `consentKey{chatID, kind}`, so a card that showed a
+file change grants the file tools and leaves the command question standing — and the other way
+round. One flag per chat was the first version and it granted both, which is a permission nobody
+was asked for: the same argument that keeps the two settings switches apart applies one click
+earlier, and a card is not a preview of the *other* kind of question. The button says which kind
+it covers ("always allow commands in this chat"), because a label that only said "always" left
+the scope in a tooltip. A permission given for a task somebody was watching, remembered invisibly
+the next morning, is a permission nobody remembers giving: it is dropped when the chat is deleted
+or emptied, and `ChatState.Consent` reports what a chat holds so the header can show it
+(`RevokeChatConsent` takes one kind back).
 
 **The standing answer** is the other kind of yes, and unlike the one above it is *set* rather
 than given. Settings → Coding agent holds two switches — `AutoApprove.Files` for `write_file`
@@ -159,7 +167,9 @@ may do to the folder.
 
 The two answers are additive rather than alternatives: a chat that was granted "always" needs
 no setting, and a setting on makes the per-chat answer irrelevant. Deleting a chat drops only
-the per-chat one.
+the per-chat one. Both are per kind, so "additive" means the same thing at both levels: a chat
+granted "always" for commands plus the files switch is the state where neither card appears,
+and it took two separate answers to get there.
 
 **The card offers the switch itself**, because the standing answer used to be discoverable
 only by someone who already knew the tab existed. Under the three buttons there is one link —

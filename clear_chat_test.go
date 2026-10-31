@@ -109,7 +109,7 @@ func TestClearingAChatForgetsEverythingItsConversationHeld(t *testing.T) {
 	if _, ok := a.currentEngine().Measurement("p1"); !ok {
 		t.Fatal("the turn recorded no measurement, so the meter assertion below would prove nothing")
 	}
-	a.allowChanges("p1")
+	a.allowKind("p1", consentKindCommands)
 
 	if err := a.ClearChat("p1"); err != nil {
 		t.Fatalf("ClearChat: %v", err)
@@ -132,7 +132,7 @@ func TestClearingAChatForgetsEverythingItsConversationHeld(t *testing.T) {
 	if _, ok := a.currentEngine().Measurement("p1"); ok {
 		t.Error("the cleared chat kept a measured prompt size for messages that are gone")
 	}
-	if a.changesAllowed("p1") {
+	if a.kindAllowed("p1", consentKindCommands) {
 		t.Error("the cleared chat kept a permission granted to the conversation that just ended")
 	}
 }

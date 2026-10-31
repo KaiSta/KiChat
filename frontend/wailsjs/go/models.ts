@@ -889,6 +889,20 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class ChatConsent {
+	    files: boolean;
+	    commands: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ChatConsent(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.files = source["files"];
+	        this.commands = source["commands"];
+	    }
+	}
 	export class ChatState {
 	    chat: store.Chat;
 	    messages: store.Message[];
@@ -897,6 +911,7 @@ export namespace main {
 	    documents: store.Document[];
 	    budget: chat.ContextBudget;
 	    running: boolean;
+	    consent: ChatConsent;
 	
 	    static createFrom(source: any = {}) {
 	        return new ChatState(source);
@@ -911,6 +926,7 @@ export namespace main {
 	        this.documents = this.convertValues(source["documents"], store.Document);
 	        this.budget = this.convertValues(source["budget"], chat.ContextBudget);
 	        this.running = source["running"];
+	        this.consent = this.convertValues(source["consent"], ChatConsent);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

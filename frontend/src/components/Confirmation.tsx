@@ -22,8 +22,11 @@ import { HunkDiff } from './HunkDiff'
  *
  * The blanket answer ("always in this chat") is offered beside the single one because a
  * coding turn is usually a dozen of these, and a dialog nobody reads is not a confirmation
- * either. It is scoped and worded so that what it grants — every later change *and command*
- * in this folder, until the chat is closed — is visible at the moment it is granted.
+ * either. It is scoped to the kind of question on screen and worded with that kind in it —
+ * "always allow commands in this chat" — because it grants nothing else: a file card answered
+ * that way still leaves the command question open, which is the distinction the settings
+ * switch makes and the one a person actually means. What it grants dies with the chat, and the
+ * header shows it while it lasts (ChatConsent in the chat's state, revocable there).
  *
  * The third choice is the one that outlives the chat: *stop asking about file changes* (or
  * about commands) allows this change and turns the matching switch in Settings on. It is a
@@ -132,7 +135,10 @@ export function Confirmation() {
           disabled={disabled}
           onClick={() => void answer('always')}
         >
-          {t('change.always')}
+          {/* What it stops asking about, not just that it stops asking: the earlier label said
+              "always in this chat" on a file card while the scope — changes *and commands* — was
+              only in the tooltip, so the wider permission was the invisible half. */}
+          {approval.kind === 'command' ? t('change.alwaysCommands') : t('change.alwaysFiles')}
         </button>
         <button
           type="button"

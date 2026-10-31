@@ -227,6 +227,14 @@ interface State {
     decision: ApprovalDecision,
     editedLine?: string,
   ) => Promise<void>
+  /**
+   * Take back the "always" this chat was given for one kind, so the next question of that kind
+   * is asked again. The answer is the chat's remaining consent, which is what the header shows.
+   *
+   * It exists because the grant outlives the card that made it: without this the only way to
+   * undo one is to close the chat, and nothing says so.
+   */
+  revokeConsent: (chatId: string, kind: 'files' | 'commands') => Promise<void>
   /** Put a hand-off away: the line is still in the transcript's card, so nothing is lost. */
   dismissHandoff: (chatId: string) => void
   /**
@@ -695,6 +703,19 @@ export const useStore = create<State>((set, get) => {
         } else {
           await App.ResolveToolApproval(approvalId, decision)
         }
+        // "Always" grants the kind of the card that was on screen — that kind only, which is
+        // what the backend now records. Kept in step here rather than by re-reading the whole
+        // chat state: the card names the kind, so the header can show it without a round trip.
+        if (decision === 'always' && asked && get().activeChatId === chatId) {
+          const current = get().chatState
+          if (current) {
+            const consent =
+              asked.kind === 'command'
+                ? { ...current.consent, commands: true }
+                : { ...current.consent, files: true }
+            set({ chatState: { ...current, consent } })
+          }
+        }
       } catch (err) {
         // The answer never reached Go, so the turn is still blocked on this question — and the
         // card is the only way to answer it. A failed call therefore puts it back rather than
@@ -703,6 +724,19 @@ export const useStore = create<State>((set, get) => {
         if (asked && asked.approvalId === approvalId && !get().approvals[chatId]) {
           set((s) => ({ approvals: { ...s.approvals, [chatId]: asked } }))
         }
+        get().toast('error', errText(err))
+      }
+    },
+
+    revokeConsent: async (chatId, kind) => {
+      try {
+        const consent = await App.RevokeChatConsent(chatId, kind)
+        const current = get().chatState
+        if (current && get().activeChatId === chatId) {
+          set({ chatState: { ...current, consent } })
+        }
+        get().toast('info', get().t('consent.revoked'))
+      } catch (err) {
         get().toast('error', errText(err))
       }
     },

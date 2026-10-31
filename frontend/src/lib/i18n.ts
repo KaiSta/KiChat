@@ -1006,12 +1006,24 @@ const de = {
   'change.occurrences':
     'Ersetzt {{count}} Vorkommen — gezeigt wird das erste. Die Vorschau ist damit nicht die ganze Änderung.',
   'change.once': 'Einmal erlauben',
-  'change.always': 'Immer in diesem Chat',
+  // Zwei Beschriftungen statt einer: der Knopf sagt jetzt, *was* er ohne Nachfrage stellt. Die
+  // frühere Fassung („Immer in diesem Chat") stand auf einer Dateikarte und schwieg darüber,
+  // dass sie auch die Befehle erlaubte — der Umfang war nur im Tooltip zu lesen.
+  'change.alwaysFiles': 'Dateiänderungen in diesem Chat immer erlauben',
+  'change.alwaysCommands': 'Befehle in diesem Chat immer erlauben',
   'change.alwaysHint':
-    'Solange dieser Chat offen ist, werden Änderungen *und Befehle* in diesem Ordner ohne Nachfrage ausgeführt. Nach einem Neustart gilt das nicht mehr.',
+    'Gilt nur für diese Art von Frage, nur in diesem Chat und nur bis er geschlossen wird — die andere Art fragt weiter nach. Nach einem Neustart gilt es nicht mehr.',
   'change.decline': 'Ablehnen',
   'change.declineHint':
     'Abgelehnt heißt: nicht geändert. Das Modell erfährt davon und versucht es nicht erneut.',
+  // Was ein Chat ohne Nachfrage ausführt, sichtbar im Kopf: eine Erlaubnis, deren einzige Spur
+  // ist, dass nichts passiert, kann man weder prüfen noch zurücknehmen.
+  'consent.chatFiles': 'Dateiänderungen ohne Nachfrage',
+  'consent.chatCommands': 'Befehle ohne Nachfrage',
+  'consent.chatHint':
+    'In diesem Chat erlaubt, bis er geschlossen wird. Die andere Art von Frage wird weiterhin gestellt.',
+  'consent.revoke': 'wieder fragen',
+  'consent.revoked': 'Wird wieder gefragt.',
 
   // Der eine Klick, der die Frage dauerhaft abstellt: dieselbe Wirkung wie der Schalter im
   // Reiter „Coding-Agent“, angeboten dort, wo die Frage gerade steht. Deshalb steht hier,
@@ -1182,6 +1194,8 @@ const de = {
     'Der Tool-Aufruf „{{1}}“ wird als „{{2}}“ ausgeführt — das ist der Name, den andere Assistenten dafür verwenden.',
   'err.chat.droppedTool':
     'Der Tool-Aufruf „{{1}}“ wurde verworfen: diesen Namen kennt die App nicht.',
+  'err.chat.consentUnknownKind':
+    'die Erlaubnis „{{1}}“ ist unbekannt — es gibt nur Dateiänderungen und Befehle',
   'err.chat.tooLargeFolded':
     'Die Anfrage ist zu groß für {{1}} — auch mit komprimiertem Verlauf passt sie nicht hinein. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
   'err.chat.tooLargeFoldedLimit':
@@ -2283,12 +2297,24 @@ const en: Record<keyof typeof de, string> = {
   'change.occurrences':
     'Replaces {{count}} occurrences — the first one is shown, so the preview is not the whole change.',
   'change.once': 'Allow once',
-  'change.always': 'Always in this chat',
+  // Two labels rather than one: the button now says *what* it stops asking about. The earlier
+  // wording ("Always in this chat") sat on a file card and said nothing about also covering
+  // commands — that scope was only in the tooltip.
+  'change.alwaysFiles': 'Always allow file changes in this chat',
+  'change.alwaysCommands': 'Always allow commands in this chat',
   'change.alwaysHint':
-    'While this chat is open, changes *and commands* in this folder are made without asking further. It does not survive a restart.',
+    'Covers only this kind of question, only in this chat, and only until it is closed — the other kind still asks. It does not survive a restart.',
   'change.decline': 'Decline',
   'change.declineHint':
     'Declining means nothing is changed. The model is told, and will not try the same change again.',
+  // What a chat answers without asking, shown in its header: a permission whose only trace is
+  // that nothing happens cannot be checked, and cannot be taken back either.
+  'consent.chatFiles': 'File changes without asking',
+  'consent.chatCommands': 'Commands without asking',
+  'consent.chatHint':
+    'Allowed in this chat until it is closed. The other kind of question is still asked.',
+  'consent.revoke': 'ask again',
+  'consent.revoked': 'Asking again.',
 
   // The one click that turns the question off for good: the same effect as the switch in the
   // Coding agent tab, offered where the question is. It says that it survives a restart and
@@ -2457,6 +2483,8 @@ const en: Record<keyof typeof de, string> = {
     'The tool call "{{1}}" runs as "{{2}}" — that is the name other assistants use for it.',
   'err.chat.droppedTool':
     'The tool call "{{1}}" was dropped: the app does not know that name.',
+  'err.chat.consentUnknownKind':
+    '"{{1}}" is not a permission this app grants — there are only file changes and commands',
   'err.chat.tooLargeFolded':
     'The request is too large for {{1}} — it does not fit even with a compacted history. Shorten the message, remove attachments, or choose a model with a higher limit.',
   'err.chat.tooLargeFoldedLimit':
@@ -3472,10 +3500,16 @@ const zh: Record<keyof typeof de, string> = {
   'change.createsDirs': '将创建文件夹：{{folders}}',
   'change.occurrences': '将替换 {{count}} 处 —— 仅显示第一处，预览不是全部更改。',
   'change.once': '允许一次',
-  'change.always': '在此对话中始终允许',
-  'change.alwaysHint': '在此对话打开期间，该文件夹内的更改和命令都将不再询问。重启后失效。',
+  'change.alwaysFiles': '在此对话中始终允许文件更改',
+  'change.alwaysCommands': '在此对话中始终允许命令',
+  'change.alwaysHint': '仅适用于这一类询问，仅限此对话，且仅在关闭前有效 —— 另一类仍会询问。重启后失效。',
   'change.decline': '拒绝',
   'change.declineHint': '拒绝即不做任何更改。模型会得知此事，不会重复同一更改。',
+  'consent.chatFiles': '文件更改无需询问',
+  'consent.chatCommands': '命令无需询问',
+  'consent.chatHint': '已在此对话中允许，直到对话关闭。另一类询问仍会提出。',
+  'consent.revoke': '恢复询问',
+  'consent.revoked': '已恢复询问。',
 
   // 一次点击永久关闭该询问：效果与“编码代理”标签页中的开关相同，只是出现在提问处。
   'confirm.stopAskingFiles': '不再询问文件更改',
@@ -3625,6 +3659,7 @@ const zh: Record<keyof typeof de, string> = {
   'err.chat.renamedTool': '工具调用 “{{1}}” 已作为 “{{2}}” 执行——模型把名称写错了。',
   'err.chat.aliasedTool': '工具调用 “{{1}}” 将作为 “{{2}}” 执行——这是其他助手对该工具的称呼。',
   'err.chat.droppedTool': '工具调用 “{{1}}” 已被丢弃：应用不认识这个名称。',
+  'err.chat.consentUnknownKind': '未知的许可 “{{1}}” —— 只有文件更改和命令两种。',
   'err.chat.tooLargeFolded': '请求对 {{1}} 来说过大——即使压缩历史后也放不下。请缩短消息、移除附件，或选择上限更高的模型。',
   'err.chat.tooLargeFoldedLimit':
     '请求对 {{1}} 来说过大（每次请求最多 {{2}} 个 token）——即使压缩历史后也放不下。请缩短消息、移除附件，或选择上限更高的模型。',

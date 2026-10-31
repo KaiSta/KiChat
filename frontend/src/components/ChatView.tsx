@@ -339,6 +339,7 @@ export function ChatView() {
             what happened one card at a time, and nothing there answers "which files are
             different now". Beside the folder and the permission, where the folder is. */}
         {chatState?.chat.workspace && <ProjectChanges chatId={activeChatId} />}
+        <ChatConsentChip />
         <SearchFirstToggle />
       </div>
 
@@ -737,6 +738,46 @@ export function permissionBadge(
   return auto.files
     ? { badge: t(short ? 'project.shortFiles' : 'project.autoFilesBadge'), hint }
     : { badge: t(short ? 'project.shortCommands' : 'project.autoCommandsBadge'), hint }
+}
+
+/** What this chat answers without a card, from the "always" clicked on one of its own.
+ *
+ * The header's permission badge describes the *settings* — one answer for every project on the
+ * machine. A grant made on a card is narrower (this chat, this kind, until it is closed), so it
+ * is a second chip rather than a third word in the badge: the two claims are about different
+ * scopes, and folding them together would make the wider one look like the narrower one.
+ *
+ * It is here because a permission whose only trace is that nothing happens cannot be checked —
+ * and, until this chip existed, could not be taken back either without closing the chat.
+ */
+function ChatConsentChip() {
+  const t = useStore((s) => s.t)
+  const consent = useStore((s) => s.chatState?.consent)
+  const activeChatId = useStore((s) => s.activeChatId)
+  const revoke = useStore((s) => s.revokeConsent)
+  if (!consent || (!consent.files && !consent.commands)) return null
+
+  const kinds: Array<{ kind: 'files' | 'commands'; label: string }> = []
+  if (consent.files) kinds.push({ kind: 'files', label: t('consent.chatFiles') })
+  if (consent.commands) kinds.push({ kind: 'commands', label: t('consent.chatCommands') })
+
+  return (
+    <>
+      {kinds.map(({ kind, label }) => (
+        <span key={kind} className="badge shrink-0" title={t('consent.chatHint')}>
+          <span>{label}</span>
+          <button
+            type="button"
+            className="faint underline decoration-dotted"
+            disabled={!activeChatId}
+            onClick={() => activeChatId && void revoke(activeChatId, kind)}
+          >
+            {t('consent.revoke')}
+          </button>
+        </span>
+      ))}
+    </>
+  )
 }
 
 function SearchFirstToggle() {

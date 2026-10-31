@@ -93,7 +93,13 @@ func (a *App) confirmChange(ctx context.Context, req *tools.ApprovalRequest) err
 		req.EditedLine = answer.line
 		switch answer.decision {
 		case approvalAlways:
-			a.allowChanges(req.ChatID)
+			// Only the kind this card was: "always" is an answer to the question in front of
+			// the person, and a file change has not been shown to be safe as a shell line. A
+			// guarded tool with no kind yet keeps asking rather than being remembered under a
+			// name nothing matches — the same fail-closed direction autoApproved takes.
+			if kind := consentKind(req.Tool); kind != "" {
+				a.allowKind(req.ChatID, kind)
+			}
 			return nil
 		case approvalOnce:
 			return nil
@@ -257,21 +263,25 @@ func (a *App) autoApproved(tool string) bool {
 }
 
 // standingConsent reports whether a permission the person already gave answers this call: the
-// settings switch for its kind, or the "always in this chat" they clicked while watching a
-// task. Both are consulted before a card is emitted.
+// settings switch for its kind, or the "always in this chat" they clicked on a card of the same
+// kind. Both are consulted before a card is emitted, so an auto-approved call behaves exactly
+// like a read tool: no card, no block.
 //
-// The per-chat answer covers the two kinds its own button names — changes *and* commands — and
-// nothing else. A guarded tool with no kind keeps asking even in a chat that was told "always":
-// the same rule autoApproved states for the setting, which the per-chat permission would
-// otherwise quietly break the day a third guarded tool is added.
+// The per-chat answer covers the kind its own button named and nothing else — a chat told
+// "always" about commands still asks about a file change, and the other way round. That is the
+// distinction the settings switch already makes, for the reason AutoApproveSettings states:
+// somebody who trusts the model with their files has not thereby said anything about their
+// machine. A guarded tool with no kind keeps asking even in a chat that was told "always",
+// which is the direction that has to be safe.
 func (a *App) standingConsent(chatID, tool string) bool {
 	if a.autoApproved(tool) {
 		return true
 	}
-	if consentKind(tool) == "" {
+	kind := consentKind(tool)
+	if kind == "" {
 		return false
 	}
-	return a.changesAllowed(chatID)
+	return a.kindAllowed(chatID, kind)
 }
 
 // --- the waiting changes ----------------------------------------------------
@@ -295,27 +305,76 @@ func (a *App) removeChangeWaiter(id string) {
 	a.changesMu.Unlock()
 }
 
-// changesAllowed reports whether the user has allowed every change in this chat.
-func (a *App) changesAllowed(chatID string) bool {
-	a.changesMu.Lock()
-	defer a.changesMu.Unlock()
-	return a.allowedChanges[chatID]
+// consentKey names one permission: which chat, and which kind of question. Both halves are
+// needed because the answer is about a kind *in one conversation* — the same kind in another
+// chat is a question nobody has answered.
+type consentKey struct {
+	chatID string
+	kind   string
 }
 
-// allowChanges remembers "always" for one chat.
-func (a *App) allowChanges(chatID string) {
-	a.changesMu.Lock()
-	defer a.changesMu.Unlock()
-	if a.allowedChanges == nil {
-		a.allowedChanges = map[string]bool{}
+// ChatConsent is which kinds of question this chat answers without a card, from the "always"
+// clicked on one of its own cards. It is reported to the window so a grant stays visible after
+// the card is gone: a permission whose only trace is that nothing happens is one nobody can
+// check, and one nobody can take back.
+type ChatConsent struct {
+	Files    bool `json:"files"`
+	Commands bool `json:"commands"`
+}
+
+// chatConsent is ChatConsent for one chat.
+func (a *App) chatConsent(chatID string) ChatConsent {
+	return ChatConsent{
+		Files:    a.kindAllowed(chatID, consentKindFiles),
+		Commands: a.kindAllowed(chatID, consentKindCommands),
 	}
-	a.allowedChanges[chatID] = true
 }
 
-// forgetChanges drops what was remembered about a chat, which is what deleting one means:
-// a permission travels with the conversation it was given for.
-func (a *App) forgetChanges(chatID string) {
+// kindAllowed reports whether this chat answers this kind without asking.
+func (a *App) kindAllowed(chatID, kind string) bool {
 	a.changesMu.Lock()
-	delete(a.allowedChanges, chatID)
+	defer a.changesMu.Unlock()
+	return a.allowedKinds[consentKey{chatID: chatID, kind: kind}]
+}
+
+// allowKind remembers "always" for one kind in one chat.
+func (a *App) allowKind(chatID, kind string) {
+	a.changesMu.Lock()
+	defer a.changesMu.Unlock()
+	if a.allowedKinds == nil {
+		a.allowedKinds = map[consentKey]bool{}
+	}
+	a.allowedKinds[consentKey{chatID: chatID, kind: kind}] = true
+}
+
+// RevokeChatConsent takes back the "always" this chat was given for one kind, so the next
+// question of that kind is asked again.
+//
+// It exists because the grant outlives its card: without it the only way to undo a permission
+// given in passing is to close the chat, and nothing tells the user that. kind is the settings
+// vocabulary ("files", "commands"); anything else is refused rather than ignored, so a window
+// that invented a word is not told it succeeded.
+func (a *App) RevokeChatConsent(chatID, kind string) (ChatConsent, error) {
+	if err := a.ensure(); err != nil {
+		return ChatConsent{}, err
+	}
+	if kind != consentKindFiles && kind != consentKindCommands {
+		return ChatConsent{}, uimsg.Errorf("chat.consentUnknownKind", kind)
+	}
+	a.changesMu.Lock()
+	delete(a.allowedKinds, consentKey{chatID: chatID, kind: kind})
 	a.changesMu.Unlock()
+	return a.chatConsent(chatID), nil
+}
+
+// forgetConsent drops everything remembered about a chat, which is what deleting or emptying
+// one means: a permission travels with the conversation it was given for.
+func (a *App) forgetConsent(chatID string) {
+	a.changesMu.Lock()
+	defer a.changesMu.Unlock()
+	for key := range a.allowedKinds {
+		if key.chatID == chatID {
+			delete(a.allowedKinds, key)
+		}
+	}
 }

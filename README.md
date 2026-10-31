@@ -199,9 +199,12 @@ agent that works inside it and nowhere else:
 - **Every change is shown before it is made.** `edit_file` and `write_file` arrive as a card
   carrying the diff, and nothing is written until you answer it. The **Changes** panel beside the
   chat lists every file the chat touched, with its diff and a **Revert** — and a revert refuses a
-  file you edited yourself in the meantime instead of overwriting your work. If a card per change
-  is too slow, **Settings → Coding agent → Run without asking → Write and edit files** switches it
-  off, and the chat's own badge then says so.
+  file you changed yourself in the meantime instead of overwriting your work. A turn with a dozen
+  changes would be a dozen cards, so each card offers **always for this kind in this chat**: that
+  answers the questions you are looking at and leaves the other kind alone — a file card answered
+  that way still lets a command ask, and the header shows what the chat answers until you take it
+  back. **Settings → Coding agent → Run without asking** is the wider switch, per kind, and
+  survives a restart.
 - **A terminal, one command at a time, behind the same gate.** `run_command` shows the exact line
   before it runs it in the project folder — you can fix a typo on the card — with no stdin, a
   120 s limit (600 s if the model asks), the whole process tree killed at the limit, and output
@@ -766,6 +769,7 @@ readable from a live response.
 | First picture takes minutes | a one-shot `sd-cli` draw loads the model silently before its first step; the managed `sd-server` shows a `starting` row instead |
 | A file tool answers "this chat has no project folder" | it is an ordinary chat: a folder comes from *New project*, not from a chat you created with *New chat* |
 | The model wants to run a command and nothing runs | the confirmation card is waiting for you — the turn is paused until you answer it. **Settings → Coding agent → Run without asking** skips it per kind |
+| I answered "always" once and now nothing asks | that answer covers one kind of question in that one chat — the header names which, with an *ask again* next to it. The settings switch is the version that survives a restart |
 | A command was refused before it ran | it asks for administrator rights (there is no terminal to answer the prompt in), or it would discard uncommitted work — `git reset --hard`, `checkout --`, `restore`, `clean -f` |
 | Revert in the Changes panel is greyed out | the file changed since the chat wrote it — by you, or by a command — or it is not a text file; the panel names which, and refuses rather than overwriting your edit. A running turn blocks a revert too: stop it first |
 | The model asks for `bash` or `read` instead of the app's tools | that is handled: a borrowed name is translated onto this app's tool, arguments included. Seeing it in the transcript is not an error |

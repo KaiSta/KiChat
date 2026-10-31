@@ -266,6 +266,10 @@ export function RevertFileChange(arg1, arg2) {
   return window['go']['main']['App']['RevertFileChange'](arg1, arg2);
 }
 
+export function RevokeChatConsent(arg1, arg2) {
+  return window['go']['main']['App']['RevokeChatConsent'](arg1, arg2);
+}
+
 export function SaveAttachmentAs(arg1) {
   return window['go']['main']['App']['SaveAttachmentAs'](arg1);
 }

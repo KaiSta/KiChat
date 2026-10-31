@@ -103,9 +103,15 @@ type App struct {
 	// api_changes.go. One mutex covers both maps because they are read and written from
 	// different goroutines than the turn that asks — the question is emitted from a
 	// turn's goroutine and answered on the one Wails reads the click on.
-	changesMu      sync.Mutex
-	changes        map[string]*pendingChange
-	allowedChanges map[string]bool
+	//
+	// allowedKinds is the "always" clicked on one of those cards, remembered per chat *and per
+	// kind* (consentKey): somebody who answered "always" to a file change has not thereby said
+	// anything about their machine, which is the same distinction the settings switch makes
+	// (config.AutoApproveSettings). A single flag per chat was the first version and it granted
+	// both — a permission nobody was asked for, one click away from the one that was.
+	changesMu    sync.Mutex
+	changes      map[string]*pendingChange
+	allowedKinds map[consentKey]bool
 
 	// openTerminal starts a terminal in a folder. Nil means runtime.OpenTerminal, which
 	// is what the window gets; a test sets it to record the folder without opening
@@ -1827,7 +1833,7 @@ func (a *App) DeleteChat(chatID string) error {
 	a.currentEngine().InvalidateMeasurement(chatID)
 	// A permission was given for this conversation, so it goes with it: leaving it behind
 	// would keep a chat id that no longer exists able to write to a folder unprompted.
-	a.forgetChanges(chatID)
+	a.forgetConsent(chatID)
 	a.emit(events.ChatsChanged, map[string]any{})
 	return nil
 }
@@ -1863,7 +1869,7 @@ func (a *App) ClearChat(chatID string) error {
 	// prompt size describes messages that are gone, and a permission granted for this
 	// conversation belonged to a conversation that has ended.
 	a.currentEngine().InvalidateMeasurement(chatID)
-	a.forgetChanges(chatID)
+	a.forgetConsent(chatID)
 	a.emit(events.ChatsChanged, map[string]any{})
 	return nil
 }
@@ -1878,6 +1884,11 @@ type ChatState struct {
 	Documents   []store.Document   `json:"documents"`
 	Budget      chat.ContextBudget `json:"budget"`
 	Running     bool               `json:"running"`
+	// Consent is what this chat answers without a card, from the "always" clicked on one of
+	// its own. It travels with the state rather than being asked for separately because the
+	// window has to show it: a grant that only shows up as a card *not* appearing is one the
+	// user cannot confirm, and cannot take back either (RevokeChatConsent).
+	Consent ChatConsent `json:"consent"`
 }
 
 // GetChatState returns the full state of a chat.
@@ -1917,6 +1928,7 @@ func (a *App) GetChatState(chatID string) (ChatState, error) {
 		Documents:   documents,
 		Budget:      budget,
 		Running:     a.currentEngine().IsRunning(chatID),
+		Consent:     a.chatConsent(chatID),
 	}, nil
 }
 

@@ -142,6 +142,8 @@ export function ResolveToolApprovalWith(arg1:string,arg2:string,arg3:string):Pro
 
 export function RevertFileChange(arg1:string,arg2:string):Promise<void>;
 
+export function RevokeChatConsent(arg1:string,arg2:string):Promise<main.ChatConsent>;
+
 export function SaveAttachmentAs(arg1:string):Promise<string>;
 
 export function SaveSettings(arg1:config.Settings):Promise<config.Settings>;
