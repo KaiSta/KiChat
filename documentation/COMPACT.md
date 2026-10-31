@@ -1245,8 +1245,13 @@ here would answer a request for the text with a map.
 and at either of the two trailers, and both trailers travel verbatim: the
 `Die Datei geht weiter … offset=N` line is the only way the model knows where a truncated
 file resumes, and `<project_agents_md …>` is the folder's rules — a summary of rules is not
-the rules. The markers live in `internal/tools` (`ReadContinueNotice`, `ReadGuidanceTag`) and
-are used by the tool that writes them, so the splitter cannot drift from the format.
+the rules. The markers live in `internal/tools` (`ContinueNotice`/`ContinueNotices`,
+`ReadGuidanceTag`) and
+are used by the tool that writes them, so the splitter cannot drift from the format. The
+continuation sentence is the one marker that is a sentence as well as a format, so it has a
+wording per language and `ContinueNotices` returns all of them: a stored result outlives the
+window's language setting, and a chat switched to English still has to recognise the German
+notice in its own transcript.
 
 Neither trailer is found by its **first** occurrence, and that was a bug: this app's own
 `tools/project.go` writes both of those sentences, so reading it cut the body at the quote and

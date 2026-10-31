@@ -64,7 +64,7 @@ In the order the friction shows up on a multi-file change.
 
 ### 1. One file per change, one question each
 
-A 20-file rename is 20 cards. `AutoApprove.Files` (`internal/config/config.go:121`, `:123`) is the
+A 20-file rename is 20 cards. `AutoApprove.Files` (`internal/config/config.go:136`, `:138`) is the
 switch to turn on first: a file change leaves a diff in the transcript and a row in the changes
 panel, a command leaves neither. Whether a project-level "apply these N edits" shape is worth
 having is a product decision, not a bug — the gate is per call by design.

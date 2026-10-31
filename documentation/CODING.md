@@ -67,6 +67,15 @@ format. The one sentence that is both is the continuation notice: it has two wor
 `tools.ContinueNotices` is what `splitReadBody` in `internal/chat` matches, so a stored result
 stays readable after the window's language has changed.
 
+**And the text the window shows about a tool call is a dictionary code, not a sentence.** A
+repaired tool name is reported as a toast, which is the window's to word: the three sentences
+live in `frontend/src/lib/i18n.ts` as `err.chat.renamedTool`, `err.chat.aliasedTool` and
+`err.chat.droppedTool`, and `internal/chat` hands over `uimsg` codes with the two names as
+arguments. They are written as literals at the call site rather than as constants because the
+root test that checks every code has three translations reads the call, not the identifier.
+`droppedToolText` is the exception and stays a German sentence: it is written into a stored
+message, so it is history rather than a label — the transcript shows it as it was recorded.
+
 ## 3. The confirmation gate
 
 Every tool that changes something goes through `Service.Confirm`, which the app wires to
@@ -339,18 +348,25 @@ and two minutes pass — so `chat:tool-output` carries the output as it arrives 
 shows it under its own heading, scrolled to the newest line.
 
 **A command that was stopped says what it managed to say.** The result keeps what arrived
-before the wall, and the note after it is worded in two cases (`timeoutNote`), because
+before the wall, and the note after it is worded in three cases (`timeoutNote`), because
 "(keine Ausgabe)" beside "the output above is incomplete" reads as a silent success — the
-worst of the readings available to a model. When nothing arrived, the note says exactly that
-and names the likely cause: `… | tail -40` holds its lines until its input ends, so a
-pipeline through a buffering filter prints nothing while it runs and loses all of it when
-the tree is killed. It then says what to do — drop the pipe, narrow the scope (one package,
-`-run`), and let the program report its own limit (`go test -timeout 60s`) — because the
-alternative is a model that guesses whether the tests passed and spends another five minutes
-on the same line. A command that printed before the cut gets the partial-output wording and
-the same advice, without the pipe explanation it does not need. Pinned by
-`TestATimedOutCommandKeepsWhatItPrinted` and `TestATimedOutCommandWithNoOutputSaysWhy`, and
-advertised in the tool's own description so the model avoids the pattern when it can.
+worst of the readings available to a model. When nothing arrived *and the line hands its output
+elsewhere*, the note names that: `… | tail -40` holds its lines until its input ends, so a
+pipeline through a buffering filter prints nothing while it runs and loses all of it when the
+tree is killed, and `… > build.log` writes into that file instead of into this result. When
+nothing arrived and the line has neither a pipe nor a redirect, the note says exactly that and
+nothing more — the command was still working before it could speak — because telling a model to
+drop a pipe it never wrote sends it to fix the wrong thing. Both cases then say what to do —
+narrow the scope (one package, `-run`), and let the program report its own limit (`go test
+-timeout 60s`) — since the alternative is a model that guesses whether the tests passed and
+spends another five minutes on the same line. A command that printed before the cut gets the
+partial-output wording and the same advice, without the cause it does not need. The detection
+is a hint (`buffersOutput`), not a shell parse: `2>&1` is deliberately not a redirect, and a
+quoted `|` is not a pipe. Pinned by `TestATimedOutCommandKeepsWhatItPrinted`,
+`TestATimedOutCommandWithNoOutputSaysWhy`,
+`TestASilentTimeoutWithoutAPipeDoesNotBlameAPipe` and
+`TestBuffersOutputPinsWhatCountsAsHoldingOutputBack`, and advertised in the tool's own
+description so the model avoids the pattern when it can.
 
 Three decisions, all of them sizing the feature against the build it exists for:
 

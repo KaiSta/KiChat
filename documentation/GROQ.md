@@ -497,6 +497,19 @@ turn. `internal/chat/oversize.go`:
    demoted to text when it is assembled, so replaying it cannot repeat the vendor's refusal
    (`internal/chat/toolhistory.go`, pinned by `toolhistory_test.go`).
 
+   A name that is *not* mangled but borrowed is the second half of the same rule: a model
+   trained on another harness writes `bash`, `read`, `grep` where this app declares
+   `run_command`, `read_file`, `search_files`. `toolAliases` maps that vocabulary onto these
+   tools, a target resolving only when the request actually offers it — an alias must never hand
+   a turn a tool the turn withheld — and a name with two plausible targets is not in the table at
+   all. The borrowed *fields* travel with the borrowed name (`argumentAliases` in
+   `internal/tools`, applied in `ExecuteWithSummary`): `read` arrives with
+   `{"file_path": …}` and `grep` with `{"pattern": …}`, and accepting the name while refusing
+   the argument would tell the user the call ran and the model that it named nothing. A call
+   that carries both keeps the field the schema named. The three sentences a repair produces are
+   `uimsg` codes (`chat.renamedTool`, `chat.aliasedTool`, `chat.droppedTool`), because the toast
+   is the window's and its language is not Go's.
+
 The fold is forced, which puts it beside the Compact button rather than beside the automatic
 threshold: `settings.Compact.Enabled` and a chat's `AutoCompact` decide whether compaction
 happens *quietly*, and a refusal has already happened. Its card says `too_large` rather than
@@ -690,8 +703,17 @@ the moments its rounds go out:
   room the earliest request is the best one — the window rolls continuously, so taking a slot now
   cannot cost a later one — and a turn that fits therefore behaves exactly as it did before.
 - **It is a schedule, not a reservation.** The plan covers as many rounds as the iteration cap
-  allows, which is the worst case; a turn that uses fewer leaves the later slots unspent, and a
-  turn that never calls a tool pays nothing for their having been planned.
+  allows, bounded by one window (below), which is the worst case; a turn that uses fewer leaves
+  the later slots unspent, and a turn that never calls a tool pays nothing for their having been
+  planned.
+- **The plan covers at most one window.** A cap *above* the allowance is a ceiling rather than a
+  forecast, and planning it in full is what turned coding mode's 60 rounds into a schedule of
+  its own: against Groq's 30 a minute every project turn was spaced at one request per slot —
+  including the rounds the minute could pay for immediately — and the phase line claimed an
+  answer "needs more requests than the minute allows" about a three-round turn. Past one window
+  the schedule is the window's own refill, and the per-request guard behind the plan holds the
+  requests that outrun it, so nothing is refused that was not refused before. `planTurnRequests`
+  carries the argument.
 
 What it costs is small and stated: the turn's *last* request can land up to one round later than a
 greedy schedule would have sent it, in exchange for the burst being gone. What it buys is that no
