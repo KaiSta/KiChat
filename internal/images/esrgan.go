@@ -71,7 +71,7 @@ func FindESRGAN(configured string) (string, error) {
 // is the same Lanczos pass the classical tier uses, so a 512² source asked to reach 4K
 // is 4× by the model and the remaining 1.875× by resampling — better than 7.5× Lanczos,
 // and honest about where the detail came from.
-func (e ESRGAN) Enlarge(ctx context.Context, src image.Image, target Target) (*image.RGBA, error) {
+func (e ESRGAN) Enlarge(ctx context.Context, src image.Image, target Target, lang string) (*image.RGBA, error) {
 	program, err := FindESRGAN(e.Binary)
 	if err != nil {
 		return nil, err
@@ -146,7 +146,9 @@ func (e ESRGAN) Enlarge(ctx context.Context, src image.Image, target Target) (*i
 		return nil, fmt.Errorf("%w: %s", ErrUpscalerNoModels, line)
 	}
 	if _, err := os.Stat(output); err != nil {
-		return nil, fmt.Errorf("Real-ESRGAN hat kein Bild geschrieben: %s", trimLog(log.String()))
+		return nil, fmt.Errorf(text(lang,
+			"Real-ESRGAN hat kein Bild geschrieben: %s",
+			"Real-ESRGAN wrote no picture: %s"), trimLog(log.String()))
 	}
 	raw, err := os.ReadFile(output)
 	if err != nil {
@@ -154,7 +156,8 @@ func (e ESRGAN) Enlarge(ctx context.Context, src image.Image, target Target) (*i
 	}
 	enlarged, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
-		return nil, fmt.Errorf("Real-ESRGAN-Ausgabe lesen: %w", err)
+		return nil, fmt.Errorf(text(lang,
+			"Real-ESRGAN-Ausgabe lesen: %w", "reading Real-ESRGAN's output: %w"), err)
 	}
 	return resampleTo(enlarged, target), nil
 }
@@ -209,14 +212,14 @@ func missingWeightsLine(log string) string {
 // ProbeESRGAN runs one tiny picture through the program. It is the only honest answer
 // to "is this set up": a path that exists proves nothing about a Vulkan driver, and the
 // released build has no CPU fallback to quietly switch to.
-func ProbeESRGAN(ctx context.Context, binary string) (string, error) {
+func ProbeESRGAN(ctx context.Context, binary string, lang string) (string, error) {
 	program, err := FindESRGAN(binary)
 	if err != nil {
 		return "", err
 	}
 	blank := image.NewRGBA(image.Rect(0, 0, 16, 16))
 	probe := ESRGAN{Binary: program, Model: ESRGANDefaultModel}
-	if _, err := probe.Enlarge(ctx, blank, Target{Width: 64, Height: 64}); err != nil {
+	if _, err := probe.Enlarge(ctx, blank, Target{Width: 64, Height: 64}, lang); err != nil {
 		return "", err
 	}
 	return program, nil

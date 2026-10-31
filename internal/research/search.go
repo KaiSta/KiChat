@@ -24,6 +24,11 @@ type SearchRequest struct {
 	SearchLang    string `json:"searchLang,omitempty"`
 	ExtraSnippets bool   `json:"extraSnippets,omitempty"`
 	Offset        int    `json:"offset,omitempty"`
+	// Lang is the resolved language a provider words its own errors and warnings in
+	// (config.ModelLanguage). The chain fills it before every call, so a provider needs no
+	// language of its own and cannot be built with a stale one: a settings save reaches the
+	// next request rather than the next restart. It is not part of the wire format.
+	Lang string `json:"-"`
 }
 
 // SearchResult is one normalised hit.

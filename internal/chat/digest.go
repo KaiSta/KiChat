@@ -17,6 +17,7 @@ import (
 	"kichat/internal/research"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/uimsg"
 )
 
 // digestSystemPrompt drives the condensation of a tool result.
@@ -464,8 +465,7 @@ func (e *Engine) indexedDocument(chatID string, call llm.ToolCall, excerpt strin
 	}
 	document, ok, err := e.Store.DocumentBySource(chatID, source)
 	if err != nil {
-		e.condenseWarning(chatID, fmt.Sprintf("der indizierte Text zu %s konnte nicht gelesen werden (%v) — "+
-			"gekürzt wird der Auszug aus dem Ergebnis", source, err))
+		e.condenseWarning(chatID, uimsg.Errorf("chat.indexedUnreadable", source, err.Error()).Error())
 		return store.Document{}, false
 	}
 	if !ok || llm.EstimateTokens(document.Text) <= llm.EstimateTokens(excerpt) {
@@ -642,8 +642,8 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 
 	provider, ok := e.Registry.Provider(ref.Backend)
 	if !ok {
-		e.condenseWarning(chatID, fmt.Sprintf("das Kürzungs-Modell %q gehört zum Backend %q, "+
-			"das nicht konfiguriert ist — das Ergebnis wird ungekürzt übernommen", ref.Model, ref.Backend))
+		e.condenseWarning(chatID,
+			uimsg.Errorf("chat.digestBackendMissing", ref.Model, ref.Backend).Error())
 		return output, false
 	}
 	// The cap the user configured, resolved: zero means the default and the range is
@@ -726,8 +726,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 		ContextLimit:    limit,
 	})
 	if err != nil {
-		e.condenseWarning(chatID, fmt.Sprintf("das Tool-Ergebnis konnte nicht gekürzt werden (%v) — "+
-			"es wird ungekürzt übernommen", err))
+		e.condenseWarning(chatID, uimsg.Errorf("chat.digestKeptWhole", err.Error()).Error())
 		return output, false
 	}
 
@@ -735,7 +734,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// A cache that cannot be written costs the next read one more request, not the
 	// answer, so it is reported rather than treated as a failure of the call — but it
 	// is reported: a database that cannot be written to is not something to swallow.
-	e.persist(chatID, "Die gekürzte Fassung", e.Store.PutDigestCache(store.DigestCacheEntry{
+	e.persist(chatID, uimsg.Errorf("chat.thingCondensed"), e.Store.PutDigestCache(store.DigestCacheEntry{
 		Key:          key,
 		Model:        ref.Model,
 		SourceTokens: source,

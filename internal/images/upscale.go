@@ -95,6 +95,10 @@ type UpscaleOptions struct {
 	// cannot run never leaves a row behind, and never for the classical pass, which is local
 	// arithmetic that a row would flicker over.
 	OnPhase func(phase string)
+	// Lang is the resolved language the refusals on this path are worded in
+	// (config.ModelLanguage). The enlarge panel is the one place a person reads them, and a
+	// German sentence under an English panel is the bug the rest of the app already fixed.
+	Lang string
 }
 
 // UpscaleResult is one enlarged picture and the facts the recipe records.
@@ -146,7 +150,7 @@ func Fit(srcW, srcH, longSide int) Target {
 }
 
 // TargetFor resolves a request against the source's own size.
-func TargetFor(kind string, longSide, srcW, srcH int) (Target, error) {
+func TargetFor(kind string, longSide, srcW, srcH int, lang string) (Target, error) {
 	var long int
 	switch strings.TrimSpace(kind) {
 	case TargetFHD:
@@ -156,14 +160,15 @@ func TargetFor(kind string, longSide, srcW, srcH int) (Target, error) {
 	case TargetCustom:
 		long = longSide
 		if long <= 0 {
-			return Target{}, errors.New("die Zielgröße fehlt")
+			return Target{}, errors.New(text(lang, "die Zielgröße fehlt", "the target size is missing"))
 		}
 	default:
-		return Target{}, fmt.Errorf("unbekanntes Ziel %q", kind)
+		return Target{}, fmt.Errorf(text(lang, "unbekanntes Ziel %q", "unknown target %q"), kind)
 	}
 	target := Fit(srcW, srcH, long)
 	if target.Width <= 0 || target.Height <= 0 {
-		return Target{}, errors.New("die Bildgröße ist unbekannt")
+		return Target{}, errors.New(text(lang,
+			"die Bildgröße ist unbekannt", "the picture's size is unknown"))
 	}
 	return target, nil
 }
@@ -177,11 +182,13 @@ func TargetFor(kind string, longSide, srcW, srcH int) (Target, error) {
 func Upscale(ctx context.Context, src []byte, req UpscaleRequest, opts UpscaleOptions) (UpscaleResult, error) {
 	img, format, err := decodeForUpscale(src)
 	if err != nil {
-		return UpscaleResult{}, fmt.Errorf("das Bild konnte nicht gelesen werden: %w", err)
+		return UpscaleResult{}, fmt.Errorf(text(opts.Lang,
+			"das Bild konnte nicht gelesen werden: %w",
+			"the picture could not be read: %w"), err)
 	}
 	bounds := img.Bounds()
 	srcW, srcH := bounds.Dx(), bounds.Dy()
-	target, err := TargetFor(req.Target, req.LongSide, srcW, srcH)
+	target, err := TargetFor(req.Target, req.LongSide, srcW, srcH, opts.Lang)
 	if err != nil {
 		return UpscaleResult{}, err
 	}
@@ -213,7 +220,7 @@ func Upscale(ctx context.Context, src []byte, req UpscaleRequest, opts UpscaleOp
 		if up.Model == "" {
 			up.Model = strings.TrimSpace(opts.Model)
 		}
-		out, err = up.Enlarge(ctx, img, target)
+		out, err = up.Enlarge(ctx, img, target, opts.Lang)
 		if err != nil {
 			return UpscaleResult{}, err
 		}

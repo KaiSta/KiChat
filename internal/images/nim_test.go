@@ -249,6 +249,7 @@ func TestNIMTimeoutSaysWhichWaitEnded(t *testing.T) {
 	defer srv.Close()
 
 	p := NewNIM("images", "NVIDIA NIM", srv.URL, "sk-test", "")
+	p.Lang = german
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	_, err := p.Generate(ctx, Request{Prompt: "a cat"})

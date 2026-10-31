@@ -197,7 +197,8 @@ func (a *App) GetImageStatus() (ImageStatus, error) {
 			resolve, program = images.ResolveServerProgram, images.ServerProgramName(goruntime.GOOS)
 		}
 		status.Program = program
-		if binary, err := resolve(settings.Images.CLIFolder, settings.Images.CLIBinary); err == nil {
+		lang := config.ModelLanguage(settings.Language)
+		if binary, err := resolve(settings.Images.CLIFolder, settings.Images.CLIBinary, lang); err == nil {
 			status.Binary = binary
 			status.Build = images.AcceleratorOf(filepath.Dir(binary))
 		}
@@ -302,6 +303,7 @@ func (a *App) TestImageBackend() (string, error) {
 	release := a.registerDraw(imageTestDrawID, "", cancel)
 	defer release()
 	result, err := provider.Generate(ctx, images.Request{
+		Lang:           config.ModelLanguage(settings.Language),
 		Prompt:         "a simple color test pattern",
 		NegativePrompt: settings.Images.NegativePrompt,
 		Width:          request.Width,

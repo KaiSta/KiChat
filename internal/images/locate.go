@@ -206,14 +206,14 @@ func libraryNames(dir string) []string {
 // *place*, and quietly running an older typed path instead would draw with a program
 // the user had stopped thinking about. An empty folder is the typed path, which is how
 // every installation that predates the folder field keeps working.
-func ResolveProgram(folder, binary string) (string, error) {
+func ResolveProgram(folder, binary string, lang string) (string, error) {
 	if strings.TrimSpace(folder) == "" {
 		if strings.TrimSpace(binary) == "" {
 			return "", ErrNotConfigured
 		}
 		return strings.TrimSpace(binary), nil
 	}
-	return FindProgram(folder)
+	return FindProgram(folder, lang)
 }
 
 // ResolveServerProgram is ResolveProgram for the other executable in the same archive: the
@@ -227,14 +227,14 @@ func ResolveProgram(folder, binary string) (string, error) {
 // `sd-cli` cannot then be run *as* a server is not this function's job: `ServerSpec` asks the
 // build's own help for the listener flag and refuses a program that does not list it, so the
 // mistake is reported by name rather than run.
-func ResolveServerProgram(folder, binary string) (string, error) {
+func ResolveServerProgram(folder, binary string, lang string) (string, error) {
 	if strings.TrimSpace(folder) == "" {
 		if strings.TrimSpace(binary) == "" {
 			return "", ErrNotConfigured
 		}
 		return strings.TrimSpace(binary), nil
 	}
-	return FindServerProgram(folder)
+	return FindServerProgram(folder, lang)
 }
 
 // ProgramName is the executable's name on a platform. It is a function rather than a
@@ -277,31 +277,34 @@ func ServerProgramName(goos string) string {
 // machine with a GPU while the panel showed nothing to explain it. So more than one
 // candidate is reported, not resolved — the one exception being a program *directly* in
 // the picked folder (or in its `bin`), which is authoritative and ends the search.
-func FindProgram(dir string) (string, error) {
-	return findProgram(dir, ProgramName(runtime.GOOS))
+func FindProgram(dir string, lang string) (string, error) {
+	return findProgram(dir, ProgramName(runtime.GOOS), lang)
 }
 
 // FindServerProgram locates the sd-server executable with the same rules as
 // FindProgram, which is the whole point: it is the other program in the same folder, so
 // "inside the archive's root", "its bin subdirectory" and "one level down" are the same
 // answers, and a folder holding several builds is the same question to the user.
-func FindServerProgram(dir string) (string, error) {
-	return findProgram(dir, ServerProgramName(runtime.GOOS))
+func FindServerProgram(dir string, lang string) (string, error) {
+	return findProgram(dir, ServerProgramName(runtime.GOOS), lang)
 }
 
 // findProgram is the search both lookups share: the folder itself and its `bin` first,
 // then one level down, one candidate resolved and several reported.
-func findProgram(dir, name string) (string, error) {
+func findProgram(dir, name string, lang string) (string, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
-		return "", errors.New("kein Programmordner angegeben")
+		return "", errors.New(text(lang, "kein Programmordner angegeben", "no program folder named"))
 	}
 	info, err := os.Stat(dir)
 	if err != nil {
-		return "", fmt.Errorf("%w: %s liegt nicht im Dateisystem", ErrUnavailable, dir)
+		return "", fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(lang,
+			"%s liegt nicht im Dateisystem", "%s is not in the file system"), dir))
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("%w: %s ist ein Ordner mit Dateien darin, keine Datei", ErrUnavailable, dir)
+		return "", fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(lang,
+			"%s ist ein Ordner mit Dateien darin, keine Datei",
+			"%s is a folder with files in it, not a file"), dir))
 	}
 
 	// The folder itself is asked first and is authoritative: a program directly in it, or in
@@ -339,13 +342,16 @@ func findProgram(dir, name string) (string, error) {
 
 	switch len(found) {
 	case 0:
-		return "", fmt.Errorf("%w: kein %s gefunden — gesucht wurde in %s",
-			ErrUnavailable, name, strings.Join(tried, ", "))
+		return "", fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(lang,
+			"kein %s gefunden — gesucht wurde in %s",
+			"no %s found — looked in %s"), name, strings.Join(tried, ", ")))
 	case 1:
 		return absolute(found[0]), nil
 	default:
-		return "", fmt.Errorf("%w: mehrere %s gefunden: %s — bitte den Ordner auswählen, in dem das Programm direkt liegt",
-			ErrUnavailable, name, strings.Join(found, ", "))
+		return "", fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(lang,
+			"mehrere %s gefunden: %s — bitte den Ordner auswählen, in dem das Programm direkt liegt",
+			"several %s found: %s — choose the folder the program sits directly in"),
+			name, strings.Join(found, ", ")))
 	}
 }
 

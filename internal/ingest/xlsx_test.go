@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"kichat/internal/config"
 	"strings"
 	"testing"
 	"time"
@@ -56,7 +57,7 @@ func TestExtractXlsxRendersEachSheetAsCSV(t *testing.T) {
 		"Notizen": {{"Thema"}, {"Kündigung"}},
 	})
 
-	text, sheets, warnings, err := extractXlsx(data)
+	text, sheets, warnings, err := extractXlsx(data, config.LangGerman)
 	if err != nil {
 		t.Fatalf("extractXlsx failed: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestExtractXlsxWarnsWhenTheRowBudgetTruncates(t *testing.T) {
 	}
 	data := makeTestXlsx(t, map[string][][]any{"Lang": rows})
 
-	text, _, warnings, err := extractXlsx(data)
+	text, _, warnings, err := extractXlsx(data, config.LangGerman)
 	if err != nil {
 		t.Fatalf("extractXlsx failed: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestExtractXlsxWarnsWhenTheRowBudgetTruncates(t *testing.T) {
 // Bytes that are not a workbook are the ordinary case for a mislabelled
 // attachment: an error the window can translate, not a crash.
 func TestExtractXlsxRejectsSomethingThatIsNotAWorkbook(t *testing.T) {
-	text, sheets, warnings, err := extractXlsx([]byte("das ist keine Tabelle"))
+	text, sheets, warnings, err := extractXlsx([]byte("das ist keine Tabelle"), config.LangGerman)
 	if err == nil {
 		t.Fatal("extractXlsx accepted bytes that are not a workbook")
 	}
@@ -154,7 +155,7 @@ func TestExtractXlsxIsNotSlowOnAnAbsurdRowNumber(t *testing.T) {
 	data := makeAbsurdRowXlsx(t, 2000000000)
 
 	start := time.Now()
-	text, sheets, warnings, err := extractXlsx(data)
+	text, sheets, warnings, err := extractXlsx(data, config.LangGerman)
 	elapsed := time.Since(start)
 
 	if err != nil {

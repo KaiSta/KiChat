@@ -145,13 +145,9 @@ func (s *Service) Language() string {
 // text picks the German or the English sentence for the model's language. Both halves sit at
 // the call site rather than in a table, so a reader changing one rule changes both copies of it
 // in one place — a refusal that contradicts itself across two languages is worse than one that
-// is merely untranslated.
-func text(lang, de, en string) string {
-	if lang == config.LangGerman {
-		return de
-	}
-	return en
-}
+// is merely untranslated. It is config.Text so that a package without a settings handle (a
+// vendor's own error, a report from research or images) picks the wording by the same rule.
+func text(lang, de, en string) string { return config.Text(lang, de, en) }
 
 // Definitions returns the tool schemas advertised to the model.
 //
@@ -597,7 +593,7 @@ func (s *Service) scrapeURL(ctx context.Context, chatID, argsJSON string) (strin
 	}
 	document, chunkCount, indexErr := s.indexScraped(chatID, result)
 	excerpt := result
-	research.TrimToTokens(&excerpt, maxTokens)
+	research.TrimToTokens(&excerpt, maxTokens, lang)
 
 	var sb strings.Builder
 	if result.Title != "" {

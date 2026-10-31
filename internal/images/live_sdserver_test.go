@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	ilang "kichat/internal/lang"
 )
 
 // TestLiveSDServer starts a real `sd-server` out of a real stable-diffusion.cpp folder and
@@ -70,7 +72,7 @@ func TestLiveSDServer(t *testing.T) {
 
 	// The folder question first, before any process: this is the file the app resolves and
 	// the one a user cannot see in a listing.
-	program, err := ResolveServerProgram(folder, "")
+	program, err := ResolveServerProgram(folder, "", ilang.German)
 	if err != nil {
 		t.Fatalf("the folder holds no %s: %v", ServerProgramName(runtime.GOOS), err)
 	}

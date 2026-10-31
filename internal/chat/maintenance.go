@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 	"uuid"
@@ -282,9 +281,8 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		limit = assembly.Budget.Limit
 		if target.Configured {
 			e.emit(events.Warning, map[string]any{
-				"chatId": chat.ID,
-				"warning": fmt.Sprintf("das Kontextfenster des Zusammenfassungs-Modells %q ist unbekannt — "+
-					"verwendet wird das Fenster des Chat-Modells", target.Model),
+				"chatId":  chat.ID,
+				"warning": uimsg.Errorf("chat.summaryWindowUnknown", target.Model).Error(),
 			})
 		}
 	}

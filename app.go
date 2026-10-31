@@ -880,6 +880,10 @@ func (a *App) rebuildServices(settings config.Settings) {
 		ExtraSnippets: settings.Search.ExtraSnippets,
 		CacheMinutes:  settings.Search.CacheMinutes,
 	}, "")
+	// The sentences this package writes into a tool result or an error follow the window's
+	// language (config.ModelLanguage), and the supplier is read per call so a save reaches
+	// the next search rather than the next restart.
+	chain.Lang = func() string { return a.Settings().Language }
 
 	scraper := research.NewScraper(a.store, research.ScrapeOptions{
 		MaxBytes:          settings.Search.ScrapeMaxBytes,
@@ -888,6 +892,10 @@ func (a *App) rebuildServices(settings config.Settings) {
 		AllowPrivateHosts: settings.Search.ScrapeAllowPrivateHosts,
 		CacheHours:        settings.Search.ScrapeCacheHours,
 	}, a.extractor.PDFExtractorFunc())
+	// Same rule as the chain above: the scraper words a refusal in the window's language.
+	scraper.Lang = func() string { return a.Settings().Language }
+	// And so does the extractor: an attachment's warnings are read in the row it is listed in.
+	a.extractor.Lang = func() string { return a.Settings().Language }
 
 	// The image backend is built from the same snapshot. Off means nil, and nil is
 	// what removes generate_image from the model's tool list rather than leaving a
@@ -970,15 +978,19 @@ func (a *App) newImageProvider(settings config.Settings, serverURL string) image
 	// The hosted kind answers with no local process at all, so its one prerequisite is a
 	// key: without one the provider is nil and the tool disappears, which is the same
 	// honest state a stopped managed server produces rather than a tool that can only fail.
+	// Every provider words its own failures, so each one is told which language to write
+	// them in. WithLang returns the provider unchanged, so this stays one expression per kind.
+	lang := func() string { return a.Settings().Language }
 	if config.IsImageNIM(settings.Images.Kind) {
 		key := a.imageAPIKey(settings)
 		if key == "" {
 			return nil
 		}
-		return images.NewNIM("images", "NVIDIA NIM", images.NIMBaseURL, key, settings.Images.NIMModel)
+		return images.WithLang(
+			images.NewNIM("images", "NVIDIA NIM", images.NIMBaseURL, key, settings.Images.NIMModel), lang)
 	}
 	if config.IsImageCLI(settings.Images.Kind) {
-		return imageCLI(settings)
+		return images.WithLang(imageCLI(settings), lang)
 	}
 	if config.IsImageSD(settings.Images.Kind) {
 		// The server KiChat runs itself, while it runs. Stopped, there is no provider at
@@ -995,7 +1007,8 @@ func (a *App) newImageProvider(settings config.Settings, serverURL string) image
 		if strings.TrimSpace(serverURL) == "" {
 			return nil
 		}
-		return images.NewSDWebUI("images", "sd-server", serverURL, settings.Images.APIKey)
+		return images.WithLang(
+			images.NewSDWebUI("images", "sd-server", serverURL, settings.Images.APIKey), lang)
 	}
 	return images.NewSDWebUI("images", "Stable Diffusion WebUI",
 		settings.Images.BaseURL, settings.Images.APIKey)

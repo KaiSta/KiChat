@@ -35,8 +35,16 @@ var ddgChallengeMarkers = []string{"anomaly.js", "challenge-form", "anomaly-moda
 // ddgBlockedErr is returned when the interstitial is served instead of results.
 // It names the reason and the way out: "no results" would send the reader
 // looking for a selector bug in a page that was never served.
-var ddgBlockedErr = fmt.Errorf("%w: DuckDuckGo verlangt eine Bot-Prüfung (Captcha) statt "+
-	"Suchergebnissen – im Browser lösen oder einen anderen Suchanbieter konfigurieren", ErrBlocked)
+//
+// A function rather than a var because it is a sentence: the language is the caller's, and a
+// package-level error would freeze whichever language was current when the package loaded.
+func ddgBlockedErr(lang string) error {
+	return fmt.Errorf("%w: %s", ErrBlocked, text(lang,
+		"DuckDuckGo verlangt eine Bot-Prüfung (Captcha) statt Suchergebnissen – im Browser "+
+			"lösen oder einen anderen Suchanbieter konfigurieren",
+		"DuckDuckGo served a bot check (captcha) instead of results — solve it in a browser, "+
+			"or configure another search provider"))
+}
 
 // isDDGChallenge reports whether a response body is the interstitial rather than
 // a page of results.
@@ -105,13 +113,16 @@ func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]S
 	}
 	switch {
 	case htmlErr != nil && liteErr != nil:
-		return nil, fmt.Errorf("duckduckgo: html: %v; lite: %v", htmlErr, liteErr)
+		return nil, fmt.Errorf(text(req.Lang, "duckduckgo: html: %v; lite: %v",
+			"duckduckgo: html: %v; lite: %v"), htmlErr, liteErr)
 	case liteErr != nil:
-		return nil, fmt.Errorf("duckduckgo lite: %w", liteErr)
+		return nil, fmt.Errorf(text(req.Lang, "duckduckgo lite: %w", "duckduckgo lite: %w"), liteErr)
 	case htmlErr != nil:
 		return nil, htmlErr
 	default:
-		return nil, fmt.Errorf("duckduckgo: keine Ergebnisse gefunden (Layout möglicherweise geändert)")
+		return nil, errors.New(text(req.Lang,
+			"duckduckgo: keine Ergebnisse gefunden (Layout möglicherweise geändert)",
+			"duckduckgo: no results found (the layout may have changed)"))
 	}
 }
 
@@ -151,7 +162,7 @@ func (d *DuckDuckGoProvider) searchHTML(ctx context.Context, req SearchRequest) 
 		return nil, err
 	}
 	if isDDGChallenge(string(body)) {
-		return nil, ddgBlockedErr
+		return nil, ddgBlockedErr(req.Lang)
 	}
 	return parseDDGHtml(string(body), req.Count)
 }
@@ -221,7 +232,7 @@ func (d *DuckDuckGoProvider) searchLite(ctx context.Context, req SearchRequest) 
 		return nil, err
 	}
 	if isDDGChallenge(string(body)) {
-		return nil, ddgBlockedErr
+		return nil, ddgBlockedErr(req.Lang)
 	}
 	return parseDDGLite(string(body), req.Count)
 }

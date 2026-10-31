@@ -588,7 +588,7 @@ func timeoutNote(lang, line string, out *headTailWriter, elapsed, limit time.Dur
 		"Nach %s abgebrochen: das Zeitlimit dieses Aufrufs (%s) war erreicht.",
 		"Stopped after %s: this call's time limit (%s) was reached."),
 		humanDuration(elapsed), humanDuration(limit))
-	if strings.TrimSpace(out.String()) != "" {
+	if strings.TrimSpace(out.String(lang)) != "" {
 		return when + text(lang,
 			" Die Ausgabe oben ist unvollständig. Ein erneuter Lauf mit derselben Zeile kostet nur "+
 				"wieder die volle Zeit — grenze den Umfang ein (ein Paket, ein Test, `-run`) und lass "+
@@ -647,7 +647,7 @@ func buffersOutput(line string) bool {
 func commandResult(lang, line string, out *headTailWriter, status string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "$ %s\n", line)
-	body := out.String()
+	body := out.String(lang)
 	if strings.TrimSpace(body) == "" {
 		sb.WriteString(text(lang, "(keine Ausgabe)\n", "(no output)\n"))
 	} else {
@@ -827,14 +827,21 @@ func (w *headTailWriter) Write(p []byte) (int, error) {
 // "you are looking at two pieces of one log". Invalid UTF-8 is replaced rather than passed
 // through — a compiler's mangled bytes would otherwise break the JSON the result travels
 // in, and the window would show a broken card.
-func (w *headTailWriter) String() string {
+//
+// The marker speaks the interface's language like every other sentence the model reads
+// (config.ModelLanguage), which is why the language is a parameter: this writer knows
+// nothing else about the call it belongs to, and a German marker inside an English result
+// was the one line of a command's output that did not follow the setting.
+func (w *headTailWriter) String(lang string) string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	head := strings.ToValidUTF8(string(w.head), "\uFFFD")
 	tail := strings.ToValidUTF8(string(w.tail), "\uFFFD")
 	if omitted := w.omitted(); omitted > 0 {
 		return strings.TrimRight(head, "\n") +
-			fmt.Sprintf("\n… %s in der Mitte der Ausgabe wurden weggelassen …\n", humanBytes(omitted)) +
+			fmt.Sprintf(text(lang,
+				"\n… %s in der Mitte der Ausgabe wurden weggelassen …\n",
+				"\n… %s in the middle of the output was left out …\n"), humanBytes(omitted)) +
 			tail
 	}
 	return head + tail

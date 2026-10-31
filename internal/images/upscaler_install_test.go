@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	ilang "kichat/internal/lang"
 )
 
 // TestThePinnedUpscalerArchivesAreComplete: the table is the whole of what a download
@@ -102,7 +104,7 @@ func writeInstall(t *testing.T, withWeights bool, mode os.FileMode) string {
 func TestVerifyingAnUnpackedArchiveChecksTheProgramAndItsWeights(t *testing.T) {
 	t.Run("a complete archive", func(t *testing.T) {
 		dir := writeInstall(t, true, 0o755)
-		program, err := VerifyUpscalerInstall(dir)
+		program, err := VerifyUpscalerInstall(dir, ilang.German)
 		if err != nil {
 			t.Fatalf("VerifyUpscalerInstall: %v", err)
 		}
@@ -112,14 +114,14 @@ func TestVerifyingAnUnpackedArchiveChecksTheProgramAndItsWeights(t *testing.T) {
 	})
 
 	t.Run("without the weights", func(t *testing.T) {
-		_, err := VerifyUpscalerInstall(writeInstall(t, false, 0o755))
+		_, err := VerifyUpscalerInstall(writeInstall(t, false, 0o755), ilang.German)
 		if !errors.Is(err, ErrUpscalerNoModels) {
 			t.Errorf("error = %v, want ErrUpscalerNoModels", err)
 		}
 	})
 
 	t.Run("without a program", func(t *testing.T) {
-		_, err := VerifyUpscalerInstall(t.TempDir())
+		_, err := VerifyUpscalerInstall(t.TempDir(), ilang.German)
 		if !errors.Is(err, ErrUpscalerUnavailable) {
 			t.Errorf("error = %v, want ErrUpscalerUnavailable", err)
 		}
@@ -128,7 +130,7 @@ func TestVerifyingAnUnpackedArchiveChecksTheProgramAndItsWeights(t *testing.T) {
 	t.Run("with a program that was not made executable", func(t *testing.T) {
 		// The published zips carry mode 0, so this is exactly what an install that forgot
 		// the chmod leaves behind.
-		_, err := VerifyUpscalerInstall(writeInstall(t, true, 0o644))
+		_, err := VerifyUpscalerInstall(writeInstall(t, true, 0o644), ilang.German)
 		if os.PathSeparator == '\\' {
 			t.Skip("Windows has no executable bit")
 		}
@@ -142,7 +144,7 @@ func TestVerifyingAnUnpackedArchiveChecksTheProgramAndItsWeights(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(dir, upscalerProgramName()), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := VerifyUpscalerInstall(dir); !errors.Is(err, ErrUpscalerUnavailable) {
+		if _, err := VerifyUpscalerInstall(dir, ilang.German); !errors.Is(err, ErrUpscalerUnavailable) {
 			t.Errorf("error = %v, want ErrUpscalerUnavailable", err)
 		}
 	})

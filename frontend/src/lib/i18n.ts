@@ -559,6 +559,8 @@ const de = {
   'settings.numCtxHint': 'Nur Ollama nutzt diesen Wert pro Anfrage.',
   'settings.maxTokens': 'Max. Antwort-Tokens (0 = unbegrenzt)',
   'settings.compaction': 'Kompaktierung',
+  'settings.compactionHint':
+    'Kompaktierung ersetzt ältere Nachrichten im Kontext durch eine Zusammenfassung. Die Originale bleiben gespeichert und sichtbar.',
   'settings.payload': 'Tool-Ergebnisse',
   // Der Modus, in dem in einem Projektordner gearbeitet wird. Der Tab hält die Schalter,
   // die entscheiden, was ohne Nachfrage läuft.
@@ -1161,6 +1163,10 @@ const de = {
   'err.image.noCaptionModel': 'kein Modell für die Bildbeschreibung verfügbar',
   'err.model.backendUnavailable': 'Backend {{1}} ist nicht verfügbar',
   'err.image.notLocalServer': 'die Bildgenerierung steht nicht auf dem lokalen Server',
+  'err.images.cancelled': 'das Zeichnen wurde gestoppt',
+  'err.images.drawInProgress': 'es wird bereits ein Bild gezeichnet — warte, bis es fertig ist',
+  'err.images.noUpscalerArchive':
+    'für diese Plattform gibt es kein Real-ESRGAN-Archiv — installiere das Programm von Hand und wähle seinen Pfad',
   'err.chat.tooLargeFoldedLimitRequested':
     'Die Anfrage ist zu groß für {{1}} (höchstens {{2}} Token pro Anfrage, angefragt waren {{3}}) — auch mit komprimiertem Verlauf passt sie nicht hinein. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
   'err.chat.tooLargeFoldFailedLimitRequested':
@@ -1196,6 +1202,41 @@ const de = {
     'Der Tool-Aufruf „{{1}}“ wurde verworfen: diesen Namen kennt die App nicht.',
   'err.chat.consentUnknownKind':
     'die Erlaubnis „{{1}}“ ist unbekannt — es gibt nur Dateiänderungen und Befehle',
+  // Die Meldungen aus internal/chat. Sie waren deutsche Sätze, die als reiner Text an das
+  // Fenster gingen — translateError lässt Text ohne Code stehen, also las ein englisches
+  // Fenster Deutsch. Jetzt sind es Codes; ein Argument, das selbst ein Code ist (der
+  // Gegenstand unten, oder der Fehler, der es verursacht hat), wird verschachtelt übersetzt.
+  'err.chat.searchFirstFailed': 'Vorab-Recherche fehlgeschlagen: {{1}}',
+  'err.chat.saveFailed': '{{1}} konnte nicht gespeichert werden: {{2}}',
+  'err.chat.thingAnswer': 'Die Antwort',
+  'err.chat.thingToolCall': 'Der Tool-Aufruf',
+  'err.chat.thingToolResult': 'Das Tool-Ergebnis',
+  'err.chat.thingCancelledCall': 'Der abgebrochene Tool-Aufruf',
+  'err.chat.thingFailedAnswer': 'Die fehlgeschlagene Antwort',
+  'err.chat.thingCondensed': 'Die gekürzte Fassung',
+  'err.chat.thingRevertedFiles': 'Die zurückgesetzten Dateien',
+  'err.chat.thingDiskNote': 'Der Vermerk auf geänderte Dateien',
+  'err.chat.thingSources': 'Die Quellen',
+  'err.chat.maxRounds':
+    'Die maximale Zahl an Tool-Runden ({{1}}) ist erreicht — es wurde keine abschließende Antwort erzeugt. Sende eine neue Nachricht, damit das Modell die Ergebnisse auswertet.',
+  'err.chat.maxRoundsPartial':
+    'Die maximale Zahl an Tool-Runden ({{1}}) ist erreicht — es wurde keine abschließende Antwort erzeugt. Der bisherige Text steht oben, ist aber möglicherweise nicht abgeschlossen. Sende eine neue Nachricht, damit das Modell die Ergebnisse auswertet.',
+  'err.chat.summaryWindowUnknown':
+    'das Kontextfenster des Zusammenfassungs-Modells „{{1}}“ ist unbekannt — verwendet wird das Fenster des Chat-Modells',
+  'err.chat.ceilingNote': ' (höchstens {{1}} Token pro Anfrage)',
+  'err.chat.ceilingNoteRequested':
+    ' (höchstens {{1}} Token pro Anfrage, angefragt waren {{2}})',
+  'err.chat.tooLargeRejected': '{{1}} hat die Anfrage als zu groß abgelehnt{{2}}.',
+  'err.chat.foldedRetry': 'Der Verlauf wurde komprimiert — die Anfrage wird erneut gesendet.',
+  'err.chat.foldFailed': 'Der Verlauf konnte nicht komprimiert werden: {{1}}',
+  'err.chat.indexedUnreadable':
+    'der indizierte Text zu {{1}} konnte nicht gelesen werden ({{2}}) — gekürzt wird der Auszug aus dem Ergebnis',
+  'err.chat.digestBackendMissing':
+    'das Kürzungs-Modell „{{1}}“ gehört zum Backend „{{2}}“, das nicht konfiguriert ist — das Ergebnis wird ungekürzt übernommen',
+  'err.chat.digestKeptWhole':
+    'das Tool-Ergebnis konnte nicht gekürzt werden ({{1}}) — es wird ungekürzt übernommen',
+  'err.chat.gitStateFailed': 'Die Dateien des Projekts konnten nicht geprüft werden: {{1}}',
+  'err.chat.revertUnreadable': 'Die zurückgesetzten Dateien konnten nicht gelesen werden: {{1}}',
   'err.chat.tooLargeFolded':
     'Die Anfrage ist zu groß für {{1}} — auch mit komprimiertem Verlauf passt sie nicht hinein. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
   'err.chat.tooLargeFoldedLimit':
@@ -1870,6 +1911,8 @@ const en: Record<keyof typeof de, string> = {
   'settings.numCtxHint': 'Only Ollama applies this per request.',
   'settings.maxTokens': 'Max reply tokens (0 = unlimited)',
   'settings.compaction': 'Compaction',
+  'settings.compactionHint':
+    'Compaction replaces older messages in the context with a summary. The originals stay stored and viewable.',
   'settings.payload': 'Tool results',
   // The mode in which a project folder is worked in. The tab holds the switches that decide
   // what runs unasked.
@@ -2450,6 +2493,10 @@ const en: Record<keyof typeof de, string> = {
   'err.image.noCaptionModel': 'no model is available to caption pictures',
   'err.model.backendUnavailable': 'backend {{1}} is not available',
   'err.image.notLocalServer': 'picture generation is not set to the local server',
+  'err.images.cancelled': 'the drawing was stopped',
+  'err.images.drawInProgress': 'a picture is already being drawn — wait for it to finish',
+  'err.images.noUpscalerArchive':
+    'there is no Real-ESRGAN archive for this platform — install the program by hand and choose its path',
   'err.chat.tooLargeFoldedLimitRequested':
     'The request is too large for {{1}} (at most {{2}} tokens per request, {{3}} were requested) — it does not fit even with a compacted history. Shorten the message, remove attachments, or choose a model with a higher limit.',
   'err.chat.tooLargeFoldFailedLimitRequested':
@@ -2485,6 +2532,40 @@ const en: Record<keyof typeof de, string> = {
     'The tool call "{{1}}" was dropped: the app does not know that name.',
   'err.chat.consentUnknownKind':
     '"{{1}}" is not a permission this app grants — there are only file changes and commands',
+  // The messages internal/chat emits. They were German sentences sent to the window as
+  // plain text, and translateError leaves text without a code alone — so an English window
+  // read German. They are codes now; an argument that is itself a code (the record below,
+  // or the error that caused it) is translated nested.
+  'err.chat.searchFirstFailed': 'the pre-search failed: {{1}}',
+  'err.chat.saveFailed': '{{1}} could not be saved: {{2}}',
+  'err.chat.thingAnswer': 'The reply',
+  'err.chat.thingToolCall': 'The tool call',
+  'err.chat.thingToolResult': 'The tool result',
+  'err.chat.thingCancelledCall': 'The abandoned tool call',
+  'err.chat.thingFailedAnswer': 'The failed reply',
+  'err.chat.thingCondensed': 'The condensed version',
+  'err.chat.thingRevertedFiles': 'The reverted files',
+  'err.chat.thingDiskNote': 'The note about changed files',
+  'err.chat.thingSources': 'The sources',
+  'err.chat.maxRounds':
+    'The maximum number of tool rounds ({{1}}) is reached, so no concluding answer was produced. Send a new message so the model can work with the results.',
+  'err.chat.maxRoundsPartial':
+    'The maximum number of tool rounds ({{1}}) is reached, so no concluding answer was produced. The text so far is above, but it may be unfinished. Send a new message so the model can work with the results.',
+  'err.chat.summaryWindowUnknown':
+    'the context window of the summarising model "{{1}}" is unknown — the chat model\'s window is used instead',
+  'err.chat.ceilingNote': ' (at most {{1}} tokens per request)',
+  'err.chat.ceilingNoteRequested': ' (at most {{1}} tokens per request; {{2}} were requested)',
+  'err.chat.tooLargeRejected': '{{1}} refused the request as too large{{2}}.',
+  'err.chat.foldedRetry': 'The history was compacted, so the request is being sent again.',
+  'err.chat.foldFailed': 'The history could not be compacted: {{1}}',
+  'err.chat.indexedUnreadable':
+    'the indexed text of {{1}} could not be read ({{2}}) — the excerpt from the result is condensed instead',
+  'err.chat.digestBackendMissing':
+    'the condensing model "{{1}}" belongs to the backend "{{2}}", which is not configured — the result is kept uncondensed',
+  'err.chat.digestKeptWhole':
+    'the tool result could not be condensed ({{1}}) — it is kept uncondensed',
+  'err.chat.gitStateFailed': 'the project\'s files could not be checked: {{1}}',
+  'err.chat.revertUnreadable': 'the reverted files could not be read: {{1}}',
   'err.chat.tooLargeFolded':
     'The request is too large for {{1}} — it does not fit even with a compacted history. Shorten the message, remove attachments, or choose a model with a higher limit.',
   'err.chat.tooLargeFoldedLimit':
@@ -3112,6 +3193,7 @@ const zh: Record<keyof typeof de, string> = {
   'settings.numCtxHint': '仅 Ollama 会在每次请求中应用该值。',
   'settings.maxTokens': '回答最大令牌数（0 = 不限）',
   'settings.compaction': '压缩',
+  'settings.compactionHint': '压缩会用摘要替换上下文中的较早消息。原始消息仍会保留并可查看。',
   'settings.payload': '工具结果',
   // 在项目文件夹中工作的模式。该标签页存放决定哪些操作无需询问即可执行的开关。
   'settings.coding': '编码代理',
@@ -3632,6 +3714,9 @@ const zh: Record<keyof typeof de, string> = {
   'err.image.noCaptionModel': '没有可用于描述图片的模型',
   'err.model.backendUnavailable': '后端 {{1}} 不可用',
   'err.image.notLocalServer': '图片生成未设置为本机服务器',
+  'err.images.cancelled': '绘图已停止',
+  'err.images.drawInProgress': '已经在绘制一张图片 — 请等它完成',
+  'err.images.noUpscalerArchive': '此平台没有 Real-ESRGAN 压缩包 — 请手动安装程序并选择其路径',
   'err.chat.tooLargeFoldedLimitRequested':
     '请求对 {{1}} 来说过大（每次请求最多 {{2}} 个 token，本次请求为 {{3}}）——即使压缩历史后也放不下。请缩短消息、移除附件，或选择上限更高的模型。',
   'err.chat.tooLargeFoldFailedLimitRequested':
@@ -3660,6 +3745,31 @@ const zh: Record<keyof typeof de, string> = {
   'err.chat.aliasedTool': '工具调用 “{{1}}” 将作为 “{{2}}” 执行——这是其他助手对该工具的称呼。',
   'err.chat.droppedTool': '工具调用 “{{1}}” 已被丢弃：应用不认识这个名称。',
   'err.chat.consentUnknownKind': '未知的许可 “{{1}}” —— 只有文件更改和命令两种。',
+  'err.chat.searchFirstFailed': '预检索失败：{{1}}',
+  'err.chat.saveFailed': '{{1}}无法保存：{{2}}',
+  'err.chat.thingAnswer': '回答',
+  'err.chat.thingToolCall': '工具调用',
+  'err.chat.thingToolResult': '工具结果',
+  'err.chat.thingCancelledCall': '已放弃的工具调用',
+  'err.chat.thingFailedAnswer': '失败的回答',
+  'err.chat.thingCondensed': '压缩后的版本',
+  'err.chat.thingRevertedFiles': '已还原的文件',
+  'err.chat.thingDiskNote': '关于已更改文件的备注',
+  'err.chat.thingSources': '来源',
+  'err.chat.maxRounds': '已达到最大工具轮数（{{1}}）——没有生成最终回答。请发送新消息，让模型处理这些结果。',
+  'err.chat.maxRoundsPartial':
+    '已达到最大工具轮数（{{1}}）——没有生成最终回答。上面的文字可能尚未完成。请发送新消息，让模型处理这些结果。',
+  'err.chat.summaryWindowUnknown': '摘要模型 “{{1}}” 的上下文窗口未知 —— 改用对话模型的窗口',
+  'err.chat.ceilingNote': '（每次请求最多 {{1}} 个 token）',
+  'err.chat.ceilingNoteRequested': '（每次请求最多 {{1}} 个 token，本次请求了 {{2}} 个）',
+  'err.chat.tooLargeRejected': '{{1}} 认为请求过大而拒绝了{{2}}。',
+  'err.chat.foldedRetry': '历史已压缩 —— 正在重新发送请求。',
+  'err.chat.foldFailed': '历史无法压缩：{{1}}',
+  'err.chat.indexedUnreadable': '无法读取 {{1}} 的索引文本（{{2}}）—— 改为压缩结果中的摘录',
+  'err.chat.digestBackendMissing': '压缩模型 “{{1}}” 属于未配置的后端 “{{2}}” —— 结果将不压缩保留',
+  'err.chat.digestKeptWhole': '工具结果无法压缩（{{1}}）—— 将不压缩保留',
+  'err.chat.gitStateFailed': '无法检查项目文件：{{1}}',
+  'err.chat.revertUnreadable': '无法读取已还原的文件：{{1}}',
   'err.chat.tooLargeFolded': '请求对 {{1}} 来说过大——即使压缩历史后也放不下。请缩短消息、移除附件，或选择上限更高的模型。',
   'err.chat.tooLargeFoldedLimit':
     '请求对 {{1}} 来说过大（每次请求最多 {{2}} 个 token）——即使压缩历史后也放不下。请缩短消息、移除附件，或选择上限更高的模型。',

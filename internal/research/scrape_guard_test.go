@@ -1,6 +1,7 @@
 package research
 
 import (
+	"kichat/internal/config"
 	"net/http"
 	"testing"
 )
@@ -73,7 +74,7 @@ func TestScrapeRedirectLimit(t *testing.T) {
 // TestPrivateDialControl covers the check that runs on the address actually
 // being dialled, which is what a hostname check cannot guarantee.
 func TestPrivateDialControl(t *testing.T) {
-	control := privateDialControl(false)
+	control := privateDialControl(false, config.LangEnglish)
 	if control == nil {
 		t.Fatal("privateDialControl(false) returned nil; the dial guard is disabled")
 	}
@@ -85,7 +86,7 @@ func TestPrivateDialControl(t *testing.T) {
 	if err := control("tcp", "93.184.216.34:443", nil); err != nil {
 		t.Errorf("dial to a public address was blocked: %v", err)
 	}
-	if privateDialControl(true) != nil {
+	if privateDialControl(true, config.LangEnglish) != nil {
 		t.Error("privateDialControl(true) must not install a guard when the user allowed private hosts")
 	}
 }

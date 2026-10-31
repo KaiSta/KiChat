@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"kichat/internal/store"
+	"kichat/internal/uimsg"
 	"kichat/internal/workspace"
 )
 
@@ -368,7 +369,7 @@ func (e *Engine) externalNote(c store.Chat) (string, map[string]notedVersion) {
 		// A chat that never changed a file fails here too, which is why the language is about
 		// the check rather than about a fault: without the list the turn proceeds on tool
 		// results that may be false, and that is the case worth filing in the trace.
-		e.warn(c.ID, fmt.Sprintf("Die Dateien des Projekts konnten nicht geprüft werden: %s", err.Error()))
+		e.warn(c.ID, uimsg.Errorf("chat.gitStateFailed", err.Error()).Error())
 		return "", nil
 	}
 	if len(snaps) == 0 {
@@ -436,7 +437,7 @@ func (e *Engine) revertNote(c store.Chat) string {
 	if err != nil {
 		// Worth saying out loud: without the note the turn proceeds on a history that is
 		// wrong about the folder, which is exactly the case this exists to prevent.
-		e.warn(c.ID, fmt.Sprintf("Die zurückgesetzten Dateien konnten nicht gelesen werden: %s", err.Error()))
+		e.warn(c.ID, uimsg.Errorf("chat.revertUnreadable", err.Error()).Error())
 		return ""
 	}
 	note, ok := revertedNotice(snaps)

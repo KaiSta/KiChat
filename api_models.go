@@ -8,6 +8,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"kichat/internal/chat"
+	"kichat/internal/config"
 	"kichat/internal/images"
 	"kichat/internal/llm"
 	"kichat/internal/uimsg"
@@ -60,7 +61,7 @@ func (a *App) PickImageFolder(title string) (string, error) {
 	if strings.TrimSpace(dir) == "" {
 		return "", nil
 	}
-	if _, err := images.FindProgram(dir); err != nil {
+	if _, err := images.FindProgram(dir, config.ModelLanguage(a.Settings().Language)); err != nil {
 		return "", err
 	}
 	return dir, nil

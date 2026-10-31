@@ -3,6 +3,7 @@ package research
 import (
 	"context"
 	"errors"
+	"kichat/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,7 +59,8 @@ func TestDuckDuckGoReportsBotChallenge(t *testing.T) {
 
 	p := newTestDDGProvider(srv.URL, srv.URL)
 
-	_, err := p.Search(context.Background(), SearchRequest{Query: "Baden Zeitung Karlsruhe heute", Count: 10})
+	_, err := p.Search(context.Background(), SearchRequest{
+		Query: "Baden Zeitung Karlsruhe heute", Count: 10, Lang: config.LangGerman})
 	if !errors.Is(err, ErrBlocked) {
 		t.Fatalf("err = %v, want it to match ErrBlocked", err)
 	}

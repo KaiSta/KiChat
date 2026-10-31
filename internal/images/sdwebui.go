@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	ilang "kichat/internal/lang"
 )
 
 // SDWebUI talks to a Stable Diffusion WebUI's HTTP API.
@@ -41,6 +43,10 @@ type SDWebUI struct {
 	// not an oversight in this client, it is what the server ships with.
 	basicAuth string
 	client    *http.Client
+
+	// Lang answers the interface language for the sentences this client writes
+	// (images.WithLang). Nil means English.
+	Lang func() string
 
 	// progressUnsupported remembers a 404 on the progress route. It is per client rather
 	// than per draw, because the answer cannot change while the same server is being talked
@@ -255,6 +261,9 @@ type sdResponse struct {
 }
 
 // Generate draws the requested pictures and decodes them.
+// lang is the resolved model language for the sentences this client writes.
+func (s *SDWebUI) lang() string { return ilang.Of(s.Lang) }
+
 func (s *SDWebUI) Generate(ctx context.Context, req Request) (Result, error) {
 	return s.GenerateWithProgress(ctx, req, nil)
 }
@@ -290,7 +299,7 @@ func (s *SDWebUI) GenerateWithProgress(ctx context.Context, req Request, report 
 	}
 	prompt := req.EffectivePrompt()
 	if prompt == "" {
-		return Result{}, errors.New("der Bild-Prompt ist leer")
+		return Result{}, errors.New(text(req.Lang, "der Bild-Prompt ist leer", "the image prompt is empty"))
 	}
 	// The numbers are bounded here as well as by the caller that built the request; see
 	// limits.go. A caller that forgets cannot make this client the one that sends a
@@ -362,7 +371,9 @@ func (s *SDWebUI) GenerateWithProgress(ctx context.Context, req Request, report 
 	for _, encoded := range decoded.Images {
 		data, err := decodeImage(encoded)
 		if err != nil {
-			return Result{}, fmt.Errorf("das Bild des Servers war nicht dekodierbar: %w", err)
+			return Result{}, fmt.Errorf(text(req.Lang,
+				"das Bild des Servers war nicht dekodierbar: %w",
+				"the server's picture could not be decoded: %w"), err)
 		}
 		// The route returns PNG by default, but the format follows the server's own
 		// `samples_format` — so it is read off the bytes instead of assumed. A

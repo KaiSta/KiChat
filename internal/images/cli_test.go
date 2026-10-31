@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	ilang "kichat/internal/lang"
 )
 
 // fakeCLI writes an executable that behaves like `sd-cli` in the parts this client
@@ -327,7 +329,10 @@ exit 0
 `)
 	client := NewCLI("images", "sd-cli", binary, ModelFiles{Model: "/models/fox.gguf"}, Options{})
 
-	_, err := client.Generate(t.Context(), Request{Prompt: "a fox"})
+	// This test pins the German wording. A draw's sentences follow the request rather than the
+	// provider — one value per draw, so a picture cannot finish its message in another language
+	// — and it is the API layer that puts the resolved language there.
+	_, err := client.Generate(t.Context(), Request{Prompt: "a fox", Lang: ilang.German})
 	if err == nil {
 		t.Fatal("a run that wrote no picture was reported as a success")
 	}
@@ -430,8 +435,11 @@ func TestCLIHealthNamesWhatIsMissing(t *testing.T) {
 	})
 
 	t.Run("the binary cannot be executed", func(t *testing.T) {
-		err := NewCLI("images", "sd-cli", notExecutable, ModelFiles{Model: "/models/fox.gguf"}, Options{}).
-			Health(t.Context())
+		client := NewCLI("images", "sd-cli", notExecutable, ModelFiles{Model: "/models/fox.gguf"}, Options{})
+		// These tests pin the German wording, so the provider is told which language it is
+		// in — the app installs the same supplier from its settings.
+		client.Lang = german
+		err := client.Health(t.Context())
 		if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "nicht ausführbar") {
 			t.Errorf("err = %v, want a message about the missing execute bit", err)
 		}
@@ -462,9 +470,11 @@ func TestCLIHealthNamesWhatIsMissing(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		err := NewCLI("images", "sd-cli", binary,
+		client := NewCLI("images", "sd-cli", binary,
 			ModelFiles{DiffusionModel: diffusion, VAE: vae},
-			Options{Pipeline: PipelineFor(PipelineFlux3Klein, "")}).Health(t.Context())
+			Options{Pipeline: PipelineFor(PipelineFlux3Klein, "")})
+		client.Lang = german
+		err := client.Health(t.Context())
 		if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "Text-Encoder") {
 			t.Errorf("err = %v, want the missing text encoder named", err)
 		}
@@ -507,8 +517,10 @@ func TestCLIHealthNamesWhatIsMissing(t *testing.T) {
 		// The file exists, so nothing is wrong with the paths — the *request* is. `-m` and
 		// `--diffusion-model` are one slot, and a command line carrying both draws with
 		// whichever the parser reads last while the panel names the other.
-		err := NewCLI("images", "sd-cli", binary,
-			ModelFiles{Model: model, DiffusionModel: model}, Options{}).Health(t.Context())
+		client := NewCLI("images", "sd-cli", binary,
+			ModelFiles{Model: model, DiffusionModel: model}, Options{})
+		client.Lang = german
+		err := client.Health(t.Context())
 		if !errors.Is(err, ErrUnavailable) || !strings.Contains(err.Error(), "nur eines") {
 			t.Errorf("err = %v, want a message naming the two model slots", err)
 		}
@@ -522,6 +534,7 @@ func TestCLIRefusesTwoDiffusionModels(t *testing.T) {
 	binary := fakeCLI(t, cliRecorder)
 	client := NewCLI("images", "sd-cli", binary,
 		ModelFiles{Model: "/models/flux.gguf", DiffusionModel: "/models/flux.gguf"}, Options{})
+	client.Lang = german
 
 	_, err := client.Generate(t.Context(), Request{Prompt: "a psyduck using waterguns"})
 	if err == nil {

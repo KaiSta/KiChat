@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	ilang "kichat/internal/lang"
 )
 
 // NIMBaseURL is where build.nvidia.com serves its hosted image models. The route is
@@ -92,6 +94,10 @@ type NIM struct {
 	apiKey  string
 	model   string
 	client  *http.Client
+
+	// Lang answers the interface language for the sentences this client writes
+	// (images.WithLang). Nil means English.
+	Lang func() string
 	// keyCheck is where Health asks whether the credential works. It is a field rather than
 	// the constant alone so a test can answer it without reaching the vendor; nothing in the
 	// app sets it.
@@ -242,6 +248,9 @@ type nimResponse struct {
 // Generate draws one picture. A second sampling pass is refused rather than ignored: the
 // hosted route has no img2img pass, and a 200 at base size would look like a successful
 // enlargement to anything that only read the status.
+// lang is the resolved model language for the sentences this client writes.
+func (n *NIM) lang() string { return ilang.Of(n.Lang) }
+
 func (n *NIM) Generate(ctx context.Context, req Request) (Result, error) {
 	if n.apiKey == "" {
 		return Result{}, fmt.Errorf("%w: no key is stored", ErrNotConfigured)
@@ -252,7 +261,7 @@ func (n *NIM) Generate(ctx context.Context, req Request) (Result, error) {
 	}
 	prompt := req.EffectivePrompt()
 	if prompt == "" {
-		return Result{}, errors.New("der Bild-Prompt ist leer")
+		return Result{}, errors.New(text(req.Lang, "der Bild-Prompt ist leer", "the image prompt is empty"))
 	}
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
@@ -309,10 +318,15 @@ func (n *NIM) Generate(ctx context.Context, req Request) (Result, error) {
 	}
 	if len(result.Images) == 0 {
 		if filtered != "" {
-			return Result{}, fmt.Errorf("NVIDIA hat das Bild verworfen (%s) — der Prompt hat die Prüfung des Dienstes nicht passiert; ein anderer Prompt hilft", filtered)
+			return Result{}, fmt.Errorf(text(n.lang(),
+				"NVIDIA hat das Bild verworfen (%s) — der Prompt hat die Prüfung des Dienstes "+
+					"nicht passiert; ein anderer Prompt hilft",
+				"NVIDIA rejected the picture (%s) — the prompt did not pass the service's "+
+					"filter; a different prompt helps"), filtered)
 		}
 		if detail := strings.TrimSpace(decoded.Detail); detail != "" {
-			return Result{}, fmt.Errorf("NVIDIA hat kein Bild geliefert: %s", detail)
+			return Result{}, fmt.Errorf(text(n.lang(),
+				"NVIDIA hat kein Bild geliefert: %s", "NVIDIA delivered no picture: %s"), detail)
 		}
 		return Result{}, errors.New("NVIDIA answered without a picture")
 	}
@@ -336,11 +350,17 @@ func (n *NIM) explain(err error) error {
 		if errors.Is(err, context.Canceled) {
 			return err
 		}
-		return fmt.Errorf("NVIDIA hat nicht geantwortet (Zeitüberschreitung) — die gehostete Warteschlange kann lange sein; der Stop-Knopf beendet das Warten: %w", err)
+		return fmt.Errorf(text(n.lang(),
+			"NVIDIA hat nicht geantwortet (Zeitüberschreitung) — die gehostete Warteschlange kann "+
+				"lange sein; der Stop-Knopf beendet das Warten: %w",
+			"NVIDIA did not answer (timeout) — the hosted queue can be long; the Stop button ends "+
+				"the wait: %w"), err)
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
-		return fmt.Errorf("NVIDIA war nicht erreichbar (Zeitüberschreitung beim Verbinden): %w", err)
+		return fmt.Errorf(text(n.lang(),
+			"NVIDIA war nicht erreichbar (Zeitüberschreitung beim Verbinden): %w",
+			"NVIDIA could not be reached (timeout while connecting): %w"), err)
 	}
 	return err
 }
@@ -358,7 +378,9 @@ func (n *NIM) picture(ctx context.Context, b64, url string) ([]byte, error) {
 	if strings.TrimSpace(b64) != "" {
 		data, err := decodeImage(b64)
 		if err != nil {
-			return nil, fmt.Errorf("das Bild von NVIDIA war nicht dekodierbar: %w", err)
+			return nil, fmt.Errorf(text(n.lang(),
+				"das Bild von NVIDIA war nicht dekodierbar: %w",
+				"NVIDIA's picture could not be decoded: %w"), err)
 		}
 		return data, nil
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"kichat/internal/config"
 	"kichat/internal/events"
 	"kichat/internal/images"
 	rt "kichat/internal/runtime"
@@ -220,7 +221,8 @@ func (a *App) installUpscaler(build images.UpscalerBuild) {
 		// it is: this is what says the folder really holds the executable and the
 		// weights before any of it is written down as installed.
 		a.setUpscalerPhase("verifying")
-		binary, err = images.VerifyUpscalerInstall(filepath.Dir(binary))
+		binary, err = images.VerifyUpscalerInstall(filepath.Dir(binary),
+			config.ModelLanguage(a.Settings().Language))
 	}
 	if err != nil {
 		a.finishUpscaler(err)

@@ -109,7 +109,7 @@ func TestLiveUpscalerInstallFetchesThePinnedArchive(t *testing.T) {
 	}
 	// And what is on disk is a usable install rather than a program that would write a black
 	// picture and exit 0, which is what the digest alone cannot tell us.
-	if _, err := images.VerifyUpscalerInstall(filepath.Dir(program)); err != nil {
+	if _, err := images.VerifyUpscalerInstall(filepath.Dir(program), config.LangGerman); err != nil {
 		t.Fatalf("the unpacked archive is not usable: %v", err)
 	}
 	// The panel's own status agrees, which is the rebuild after the save.

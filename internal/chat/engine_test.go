@@ -13,6 +13,7 @@ import (
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/uimsg"
 )
 
 func newTestStore(t *testing.T) *store.Store {
@@ -331,8 +332,11 @@ func TestToolRoundLimitIsReportedToTheUser(t *testing.T) {
 	if warning == "" {
 		t.Fatal("the user was never told the tool budget ran out")
 	}
-	if !strings.Contains(warning, "Tool-Runden") {
-		t.Errorf("warning = %q, want it to name the tool-round limit", warning)
+	// A code rather than a sentence: the window words it, and the code is what the
+	// dictionary test can check for a translation in all three languages.
+	message, ok := uimsg.Parse(warning)
+	if !ok || message.Code != "chat.maxRounds" {
+		t.Errorf("warning = %q, want the chat.maxRounds code", warning)
 	}
 }
 

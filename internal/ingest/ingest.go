@@ -14,6 +14,7 @@ import (
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 
+	"kichat/internal/config"
 	"kichat/internal/llm"
 	"kichat/internal/uimsg"
 )
@@ -55,7 +56,20 @@ type Extractor struct {
 	// PreferExternalPDF uses poppler's pdftotext when it is installed. It gives
 	// noticeably better fidelity on multi-column and table-heavy PDFs.
 	PreferExternalPDF bool
+
+	// Lang answers the interface language, so the warnings this package writes — the ones the
+	// attachment row and the model both read — follow it (config.ModelLanguage). A supplier
+	// rather than a string, because a settings save must reach the next attachment. Nil means
+	// English, which is config.Default()'s language and what a test's extractor speaks.
+	Lang func() string
 }
+
+// lang is the resolved model language for the text this extractor writes.
+func (e *Extractor) lang() string { return config.LangOf(e.Lang) }
+
+// text picks the sentence for a resolved language (config.Text), so both wordings sit at the
+// call site together.
+func text(lang, de, en string) string { return config.Text(lang, de, en) }
 
 // New returns an Extractor with pdftotext auto-detected.
 func New() *Extractor {
@@ -91,12 +105,12 @@ func (e *Extractor) Ingest(filename, mime string, data []byte) (Result, error) {
 			Kind:  KindImage,
 			Title: title,
 			Mime:  mime,
-			Warnings: []string{
+			Warnings: []string{text(e.lang(),
 				"Bilddatei: wird nur an Modelle mit Vision-Unterstützung gesendet.",
-			},
+				"image file: sent only to models that support vision")},
 		}, nil
 	case ext == ".pdf" || mime == "application/pdf":
-		text, pages, warnings, method, err := extractPDF(data, e.PreferExternalPDF)
+		text, pages, warnings, method, err := extractPDF(data, e.PreferExternalPDF, e.lang())
 		if err != nil {
 			return Result{}, err
 		}
@@ -111,7 +125,7 @@ func (e *Extractor) Ingest(filename, mime string, data []byte) (Result, error) {
 			Mime:     "application/pdf",
 		}, nil
 	case ext == ".docx" || ext == ".doc":
-		text, warnings, err := extractDocx(data)
+		text, warnings, err := extractDocx(data, e.lang())
 		if err != nil {
 			return Result{}, err
 		}
@@ -125,7 +139,7 @@ func (e *Extractor) Ingest(filename, mime string, data []byte) (Result, error) {
 			Mime:     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		}, nil
 	case ext == ".pptx" || ext == ".ppt":
-		text, pages, warnings, err := extractPptx(data)
+		text, pages, warnings, err := extractPptx(data, e.lang())
 		if err != nil {
 			return Result{}, err
 		}
@@ -140,7 +154,7 @@ func (e *Extractor) Ingest(filename, mime string, data []byte) (Result, error) {
 			Mime:     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 		}, nil
 	case ext == ".xlsx" || ext == ".xls" || ext == ".ods":
-		text, pages, warnings, err := extractXlsx(data)
+		text, pages, warnings, err := extractXlsx(data, e.lang())
 		if err != nil {
 			return Result{}, err
 		}
@@ -159,10 +173,12 @@ func (e *Extractor) Ingest(filename, mime string, data []byte) (Result, error) {
 	// Anything else is treated as text and decoded with charset detection.
 	if isBinary(data) {
 		return Result{
-			Kind:     KindBinary,
-			Title:    title,
-			Mime:     mime,
-			Warnings: []string{"Binärformat ohne Textinhalt — nicht in den Kontext übernommen."},
+			Kind:  KindBinary,
+			Title: title,
+			Mime:  mime,
+			Warnings: []string{text(e.lang(),
+				"Binärformat ohne Textinhalt — nicht in den Kontext übernommen.",
+				"binary format with no text content — not added to the context")},
 		}, nil
 	}
 	text := decodeText(data)

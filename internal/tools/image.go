@@ -119,6 +119,9 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	cfg := s.imageSettings()
 	req := images.Request{
 		Prompt: prompt,
+		// The draw's errors are read by the person and by the model, so they follow the
+		// interface language like every other sentence in this package.
+		Lang: s.Language(),
 		// The model decides these, *except* where the user has fixed one in Settings — a value
 		// typed there is an instruction, not a default, so it overrides what the model asked
 		// for. An empty field on both sides means "send nothing", which is what leaves a
@@ -536,8 +539,9 @@ func recipeFrom(req images.Request, result images.Result, captionModel string) s
 // the user typed into, and a local server does not refuse a 100000-step request — it
 // attempts it, for hours. Which bound, and why zero and negative mean "the server's own",
 // is limits.go's business rather than this function's.
-func requestFromRecipe(recipe store.GenerationRecipe) images.Request {
+func requestFromRecipe(recipe store.GenerationRecipe, lang string) images.Request {
 	req := images.Request{
+		Lang:           lang,
 		Prompt:         recipe.Prompt,
 		NegativePrompt: recipe.NegativePrompt,
 		Width:          recipe.Width,
@@ -602,7 +606,7 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 		// arrive from anywhere.
 		return store.Attachment{}, uimsg.Detailf("tools.emptyPrompt", "the stored recipe has an empty prompt")
 	}
-	req := requestFromRecipe(recipe)
+	req := requestFromRecipe(recipe, s.Language())
 	// A redraw is drawn by the pipeline too: a stored recipe that asked for a second pass
 	// under a model that has none would otherwise draw it once here and never again.
 	pipeline := images.PipelineFor(s.imageSettings().Pipeline, s.imageSettings().CLIDiffusionModel)

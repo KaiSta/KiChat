@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	ilang "kichat/internal/lang"
 )
 
 // TestSDBuildsAreWhatTheReleaseReallyPublishes pins the table against the release it
@@ -14,6 +16,11 @@ import (
 // published for Windows and not for Linux, so a Linux row offering it would send a
 // user to an archive that does not exist. That is a claim about the vendor, which is
 // why it is pinned here rather than left to the panel.
+// german is the language supplier these tests install on a provider whose sentences they
+// assert: the app passes config.ModelLanguage from its settings, and the default without one
+// is English (internal/lang.Of).
+func german() string { return ilang.German }
+
 func TestSDBuildsAreWhatTheReleaseReallyPublishes(t *testing.T) {
 	cases := []struct {
 		goos, goarch string
@@ -118,7 +125,7 @@ func TestFindServerProgramUsesTheSameRules(t *testing.T) {
 	t.Run("in the archive's own root", func(t *testing.T) {
 		dir := t.TempDir()
 		want := write(t, filepath.Join(dir, "sd-master-60423ab-bin-Linux-Ubuntu-24.04-x86_64-vulkan"))
-		got, err := FindServerProgram(dir)
+		got, err := FindServerProgram(dir, ilang.German)
 		if err != nil {
 			t.Fatalf("FindServerProgram: %v", err)
 		}
@@ -135,7 +142,7 @@ func TestFindServerProgramUsesTheSameRules(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := write(t, dir)
-		got, err := FindServerProgram(dir)
+		got, err := FindServerProgram(dir, ilang.German)
 		if err != nil {
 			t.Fatalf("FindServerProgram: %v", err)
 		}
@@ -152,7 +159,7 @@ func TestFindServerProgramUsesTheSameRules(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, ProgramName(runtime.GOOS)), []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		_, err := FindServerProgram(dir)
+		_, err := FindServerProgram(dir, ilang.German)
 		if err == nil {
 			t.Fatal("a folder with no server was accepted")
 		}
@@ -183,7 +190,7 @@ func TestFindProgramLooksWhereAnArchiveUnpacksTo(t *testing.T) {
 	t.Run("beside the folder", func(t *testing.T) {
 		dir := t.TempDir()
 		want := writeProgram(t, dir)
-		got, err := FindProgram(dir)
+		got, err := FindProgram(dir, ilang.German)
 		if err != nil {
 			t.Fatalf("FindProgram: %v", err)
 		}
@@ -195,7 +202,7 @@ func TestFindProgramLooksWhereAnArchiveUnpacksTo(t *testing.T) {
 	t.Run("in the archive's own root", func(t *testing.T) {
 		dir := t.TempDir()
 		want := writeProgram(t, filepath.Join(dir, "sd-master-60423ab-bin-Linux-Ubuntu-24.04-x86_64-vulkan"))
-		got, err := FindProgram(dir)
+		got, err := FindProgram(dir, ilang.German)
 		if err != nil {
 			t.Fatalf("FindProgram: %v", err)
 		}
@@ -207,7 +214,7 @@ func TestFindProgramLooksWhereAnArchiveUnpacksTo(t *testing.T) {
 	t.Run("under bin", func(t *testing.T) {
 		dir := t.TempDir()
 		want := writeProgram(t, filepath.Join(dir, "sd-master-60423ab-bin-win-vulkan-x64", "bin"))
-		got, err := FindProgram(dir)
+		got, err := FindProgram(dir, ilang.German)
 		if err != nil {
 			t.Fatalf("FindProgram: %v", err)
 		}
@@ -225,7 +232,7 @@ func TestFindProgramLooksWhereAnArchiveUnpacksTo(t *testing.T) {
 		dir := t.TempDir()
 		cpu := writeProgram(t, filepath.Join(dir, "sd-master-60423ab-bin-Linux-Ubuntu-24.04-x86_64-cpu"))
 		vulkan := writeProgram(t, filepath.Join(dir, "sd-master-60423ab-bin-Linux-Ubuntu-24.04-x86_64-vulkan"))
-		got, err := FindProgram(dir)
+		got, err := FindProgram(dir, ilang.German)
 		if err == nil {
 			t.Fatalf("one of two builds was chosen silently: %q", got)
 		}
@@ -246,7 +253,7 @@ func TestFindProgramLooksWhereAnArchiveUnpacksTo(t *testing.T) {
 		dir := t.TempDir()
 		want := writeProgram(t, dir)
 		writeProgram(t, filepath.Join(dir, "sd-master-60423ab-bin-Linux-Ubuntu-24.04-x86_64-vulkan"))
-		got, err := FindProgram(dir)
+		got, err := FindProgram(dir, ilang.German)
 		if err != nil {
 			t.Fatalf("FindProgram: %v", err)
 		}
@@ -262,7 +269,7 @@ func TestFindProgramLooksWhereAnArchiveUnpacksTo(t *testing.T) {
 	t.Run("two levels down is refused rather than guessed", func(t *testing.T) {
 		dir := t.TempDir()
 		writeProgram(t, filepath.Join(dir, "old", "sd-master-60423ab-bin-Linux-Ubuntu-24.04-x86_64"))
-		if _, err := FindProgram(dir); err == nil {
+		if _, err := FindProgram(dir, ilang.German); err == nil {
 			t.Error("a program two directories down was adopted")
 		}
 	})
@@ -274,7 +281,7 @@ func TestFindProgramLooksWhereAnArchiveUnpacksTo(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		_, err := FindProgram(dir)
+		_, err := FindProgram(dir, ilang.German)
 		if !errors.Is(err, ErrUnavailable) {
 			t.Fatalf("err = %v, want ErrUnavailable", err)
 		}
@@ -288,10 +295,10 @@ func TestFindProgramLooksWhereAnArchiveUnpacksTo(t *testing.T) {
 		if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := FindProgram(file); !errors.Is(err, ErrUnavailable) {
+		if _, err := FindProgram(file, ilang.German); !errors.Is(err, ErrUnavailable) {
 			t.Errorf("err = %v, want ErrUnavailable for a file", err)
 		}
-		if _, err := FindProgram(""); !errors.Is(err, ErrUnavailable) && err == nil {
+		if _, err := FindProgram("", ilang.German); !errors.Is(err, ErrUnavailable) && err == nil {
 			t.Error("an empty folder was accepted")
 		}
 	})

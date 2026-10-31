@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"kichat/internal/images"
+	ilang "kichat/internal/lang"
 	"kichat/internal/llm"
 	"kichat/internal/secret"
 	"kichat/internal/store"
@@ -1190,12 +1191,25 @@ const (
 // means German for a German window and English for everything else, including a Chinese one:
 // the same fallback PromptBody uses, because a sentence nobody wrote is worse than one in the
 // wrong language. What a model is *told* therefore follows the person reading the window.
-func ModelLanguage(lang string) string {
-	if lang == LangGerman {
-		return LangGerman
-	}
-	return LangEnglish
-}
+func ModelLanguage(lang string) string { return ilang.Resolve(lang) }
+
+// Text picks the sentence for a resolved model language, and both halves sit at the call site
+// rather than in a table so that a change to one rule changes both copies of it in one place: a
+// refusal that contradicts itself across two languages is worse than one that is merely
+// untranslated.
+//
+// The language is the *resolved* one (ModelLanguage), not a raw setting: every caller asks
+// ModelLanguage once and then passes the same value to every Text below it, so one answer
+// cannot end up in two languages.
+func Text(lang, de, en string) string { return ilang.Text(lang, de, en) }
+
+// LangOf is Text's companion for a package that carries a language *supplier* rather than a
+// string: settings can be saved while a turn is running, so a service that stored the value at
+// construction would keep answering in the old language until a restart.
+//
+// A nil supplier is English — config.Default()'s language, and what a package built by a test
+// speaks.
+func LangOf(lang func() string) string { return ilang.Of(lang) }
 
 // The tool loop's bounds: how many model/tool rounds one reply may take, and how many
 // tokens of tool results it may carry into the next request.

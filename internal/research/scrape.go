@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +18,7 @@ import (
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/go-shiori/go-readability"
 
+	"kichat/internal/config"
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/uimsg"
@@ -41,6 +43,11 @@ type ScrapeOptions struct {
 	AllowPrivateHosts bool
 	CacheHours        int
 }
+
+// text picks the sentence for a resolved language, so both wordings sit at the call site
+// together (config.Text). The package writes into tool results and error details as well as
+// into the window, and all three follow the interface language (CODING.md §2).
+func text(lang, de, en string) string { return config.Text(lang, de, en) }
 
 // ScrapeResult is the extracted, model-ready text of a page.
 type ScrapeResult struct {
@@ -71,7 +78,17 @@ type Scraper struct {
 
 	robotsMu    sync.Mutex
 	robotsCache map[string]robotsRules
+
+	// Lang answers the interface language, so the sentences this package writes into a
+	// result or an error follow it (config.ModelLanguage). It is a supplier rather than a
+	// string because a settings save must reach the next scrape, not the next restart, and
+	// it is set after construction so Configure — which runs on every save — leaves it alone.
+	// Nil means English, which is config.Default()'s language and what a test's scraper speaks.
+	Lang func() string
 }
+
+// lang is the resolved model language for the text this scraper writes.
+func (s *Scraper) lang() string { return config.LangOf(s.Lang) }
 
 // NewScraper builds a scraper.
 func NewScraper(st *store.Store, opts ScrapeOptions, pdf pdfExtractor) *Scraper {
@@ -109,7 +126,7 @@ func (s *Scraper) Configure(opts ScrapeOptions) {
 	// skipped when an HTTP proxy is configured, because then the connection goes
 	// to the proxy, which is allowed to live on the local network.
 	if !proxyConfigured() {
-		dialer.Control = privateDialControl(opts.AllowPrivateHosts)
+		dialer.Control = privateDialControl(opts.AllowPrivateHosts, s.lang())
 	}
 
 	client := &http.Client{
@@ -125,7 +142,8 @@ func (s *Scraper) Configure(opts ScrapeOptions) {
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxRedirects {
-				return fmt.Errorf("zu viele Weiterleitungen")
+				return errors.New(text(s.lang(),
+					"zu viele Weiterleitungen", "too many redirects"))
 			}
 			// Every hop is re-guarded. The check in Scrape only covers the URL that
 			// was named, and a redirect is exactly how a public address turns into a
@@ -153,7 +171,7 @@ func proxyConfigured() bool {
 // link-local address. It runs on the resolved address that is actually being
 // dialled, which is what makes it immune to a host that answers the second
 // lookup differently from the first.
-func privateDialControl(allowPrivate bool) func(network, address string, _ syscall.RawConn) error {
+func privateDialControl(allowPrivate bool, lang string) func(network, address string, _ syscall.RawConn) error {
 	if allowPrivate {
 		return nil
 	}
@@ -167,7 +185,9 @@ func privateDialControl(allowPrivate bool) func(network, address string, _ sysca
 			return nil
 		}
 		if isPrivateIP(ip) {
-			return fmt.Errorf("Zugriff auf private Adressen ist deaktiviert (%s)", host)
+			return fmt.Errorf(text(lang,
+				"Zugriff auf private Adressen ist deaktiviert (%s)",
+				"access to private addresses is disabled (%s)"), host)
 		}
 		return nil
 	}
@@ -198,14 +218,15 @@ func (s *Scraper) ScrapeDocument(ctx context.Context, rawURL string) (ScrapeResu
 func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (ScrapeResult, error) {
 	clean := normaliseURL(strings.TrimSpace(rawURL))
 	if clean == "" {
-		return ScrapeResult{}, fmt.Errorf("leere URL")
+		return ScrapeResult{}, errors.New(text(s.lang(), "leere URL", "empty URL"))
 	}
 	parsed, err := url.Parse(clean)
 	if err != nil {
-		return ScrapeResult{}, fmt.Errorf("ungültige URL: %w", err)
+		return ScrapeResult{}, fmt.Errorf(text(s.lang(), "ungültige URL: %w", "invalid URL: %w"), err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return ScrapeResult{}, fmt.Errorf("nur http(s) erlaubt, nicht %q", parsed.Scheme)
+		return ScrapeResult{}, fmt.Errorf(text(s.lang(),
+			"nur http(s) erlaubt, nicht %q", "only http(s) is allowed, not %q"), parsed.Scheme)
 	}
 
 	opts := s.options()
@@ -230,7 +251,7 @@ func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 			}
 			// The page was cached under whatever budget was asked for then; the
 			// caller may be asking for less now, so the bound is applied again.
-			trimToTokens(&result, maxTokens)
+			trimToTokens(&result, maxTokens, s.lang())
 			return result, nil
 		}
 	}
@@ -249,7 +270,8 @@ func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return ScrapeResult{}, fmt.Errorf("Abruf fehlgeschlagen: %w", err)
+		return ScrapeResult{}, fmt.Errorf(text(s.lang(),
+			"Abruf fehlgeschlagen: %w", "the fetch failed: %w"), err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -290,19 +312,27 @@ func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 	if bodyCut {
 		// A page this large is rare, but cutting one silently is what made the PDF
 		// limit look like a broken download. The model is told the text stops early.
-		result.Warning = fmt.Sprintf("Seite war größer als %d MB und wurde beim Abruf gekürzt", limit>>20)
+		result.Warning = fmt.Sprintf(text(s.lang(),
+			"Seite war größer als %d MB und wurde beim Abruf gekürzt",
+			"the page was larger than %d MB and was cut short while fetching"), limit>>20)
 	}
 
 	switch {
 	case isPDF:
 		if s.pdf == nil {
-			return ScrapeResult{}, fmt.Errorf("PDF gefunden, aber keine PDF-Extraktion verfügbar")
+			return ScrapeResult{}, errors.New(text(s.lang(),
+				"PDF gefunden, aber keine PDF-Extraktion verfügbar",
+				"a PDF was found, but no PDF extraction is available"))
 		}
-		text, pages, err := s.pdf(body, fileNameFromURL(parsed))
+		// Named `extracted` rather than `text`: `text` is this package's "pick the wording"
+		// helper, and a local of that name would shadow it inside the one function that needs
+		// both (the same reason internal/tools renamed a local in snapshot.go).
+		extracted, pages, err := s.pdf(body, fileNameFromURL(parsed))
 		if err != nil {
-			return ScrapeResult{}, fmt.Errorf("PDF konnte nicht gelesen werden: %w", err)
+			return ScrapeResult{}, fmt.Errorf(text(s.lang(),
+				"PDF konnte nicht gelesen werden: %w", "the PDF could not be read: %w"), err)
 		}
-		result.Markdown = text
+		result.Markdown = extracted
 		result.Pages = pages
 		result.Title = fileNameFromURL(parsed)
 
@@ -335,7 +365,8 @@ func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 
 	result.Markdown = strings.TrimSpace(result.Markdown)
 	if result.Markdown == "" {
-		return ScrapeResult{}, fmt.Errorf("kein lesbarer Inhalt gefunden (%s)", contentType)
+		return ScrapeResult{}, fmt.Errorf(text(s.lang(),
+			"kein lesbarer Inhalt gefunden (%s)", "no readable content found (%s)"), contentType)
 	}
 
 	// The cache keeps the whole page, not the slice this caller asked for: the
@@ -346,7 +377,7 @@ func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 
 	// Token-bounded truncation with an explicit marker, so the model knows the
 	// text was cut rather than just ending.
-	trimToTokens(&result, maxTokens)
+	trimToTokens(&result, maxTokens, s.lang())
 
 	if s.store != nil {
 		_ = s.store.PutScrapeCache(store.ScrapeCacheEntry{
@@ -416,8 +447,8 @@ func cleanMarkdown(md string) string {
 // Exported for the caller that scraped a whole document to index it: it hands the
 // model a bounded excerpt of the same result and points at the indexed chunks for
 // the rest.
-func TrimToTokens(result *ScrapeResult, maxTokens int) {
-	trimToTokens(result, maxTokens)
+func TrimToTokens(result *ScrapeResult, maxTokens int, lang string) {
+	trimToTokens(result, maxTokens, lang)
 }
 
 // readBody reads at most limit bytes and reports whether the body was longer.
@@ -439,15 +470,19 @@ func readBody(body io.Reader, limit int64) (data []byte, cut bool, err error) {
 // trimToTokens applies the token bound with an explicit marker, so the model
 // knows the text was cut rather than just ending. It is shared by the fresh and
 // cached paths so a cached page cannot arrive larger than the caller asked for.
-func trimToTokens(result *ScrapeResult, maxTokens int) {
+func trimToTokens(result *ScrapeResult, maxTokens int, lang string) {
 	if maxTokens > 0 {
 		total := llm.EstimateTokens(result.Markdown)
 		if total > maxTokens {
 			result.Markdown = cutToTokens(result.Markdown, maxTokens)
 			result.Truncated = true
 			remaining := total - llm.EstimateTokens(result.Markdown)
-			result.Warning = fmt.Sprintf("Inhalt gekürzt: ca. %d von %d Tokens übernommen", maxTokens, total)
-			result.Markdown += fmt.Sprintf("\n\n…[gekürzt: ca. %d weitere Tokens nicht übernommen]", remaining)
+			result.Warning = fmt.Sprintf(text(lang,
+				"Inhalt gekürzt: ca. %d von %d Tokens übernommen",
+				"content shortened: about %d of %d tokens kept"), maxTokens, total)
+			result.Markdown += fmt.Sprintf(text(lang,
+				"\n\n…[gekürzt: ca. %d weitere Tokens nicht übernommen]",
+				"\n\n…[shortened: about %d more tokens were left out]"), remaining)
 		}
 	}
 	result.Tokens = llm.EstimateTokens(result.Markdown)
@@ -486,11 +521,15 @@ func (s *Scraper) guardHost(ctx context.Context, u *url.URL, opts ScrapeOptions)
 	}
 	lower := strings.ToLower(host)
 	if lower == "localhost" || strings.HasSuffix(lower, ".local") || strings.HasSuffix(lower, ".internal") {
-		return fmt.Errorf("Zugriff auf lokale Adressen ist deaktiviert (%s)", host)
+		return fmt.Errorf(text(s.lang(),
+			"Zugriff auf lokale Adressen ist deaktiviert (%s)",
+			"access to local addresses is disabled (%s)"), host)
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if isPrivateIP(ip) {
-			return fmt.Errorf("Zugriff auf private Adressen ist deaktiviert (%s)", host)
+			return fmt.Errorf(text(s.lang(),
+				"Zugriff auf private Adressen ist deaktiviert (%s)",
+				"access to private addresses is disabled (%s)"), host)
 		}
 		return nil
 	}
@@ -499,11 +538,14 @@ func (s *Scraper) guardHost(ctx context.Context, u *url.URL, opts ScrapeOptions)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
 	if err != nil {
-		return fmt.Errorf("Host %s nicht auflösbar: %w", host, err)
+		return fmt.Errorf(text(s.lang(),
+			"Host %s nicht auflösbar: %w", "host %s could not be resolved: %w"), host, err)
 	}
 	for _, addr := range addrs {
 		if isPrivateIP(addr.IP) {
-			return fmt.Errorf("Host %s zeigt auf eine private Adresse und ist blockiert", host)
+			return fmt.Errorf(text(s.lang(),
+				"Host %s zeigt auf eine private Adresse und ist blockiert",
+				"host %s points at a private address and is blocked"), host)
 		}
 	}
 	return nil
@@ -560,7 +602,8 @@ func (s *Scraper) checkRobots(ctx context.Context, u *url.URL) error {
 			continue
 		}
 		if strings.HasPrefix(path, disallowed) {
-			return fmt.Errorf("robots.txt verbietet den Abruf von %s", path)
+			return fmt.Errorf(text(s.lang(),
+				"robots.txt verbietet den Abruf von %s", "robots.txt forbids fetching %s"), path)
 		}
 	}
 	return nil

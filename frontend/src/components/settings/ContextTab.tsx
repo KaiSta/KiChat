@@ -16,10 +16,7 @@ export function ContextTab({
   const summaryModel = compact.summaryModel ?? { backend: '', model: '' }
   return (
     <>
-      <Section
-        title={t('settings.compaction')}
-        hint="Kompaktierung ersetzt ältere Nachrichten im Kontext durch eine Zusammenfassung. Die Originale bleiben gespeichert und sichtbar."
-      >
+      <Section title={t('settings.compaction')} hint={t('settings.compactionHint')}>
         <label className="mb-3 flex items-center gap-2 text-[13px]">
           <input
             type="checkbox"

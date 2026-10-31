@@ -21,7 +21,7 @@ import (
 // is enough for the model and keeps the dependency surface small.
 
 // extractDocx pulls paragraphs from word/document.xml.
-func extractDocx(data []byte) (string, []string, error) {
+func extractDocx(data []byte, lang string) (string, []string, error) {
 	zr, err := zipReader(data)
 	if err != nil {
 		return "", nil, uimsg.Errorf("ingest.docxOpen", err)
@@ -43,32 +43,35 @@ func extractDocx(data []byte) (string, []string, error) {
 		if err != nil {
 			continue
 		}
-		text, err := collectOOXMLText(part, ooxmlSpec{
+		partText, err := collectOOXMLText(part, ooxmlSpec{
 			textTags:    []string{"t"},
 			breakTags:   []string{"p"},
 			tabTags:     []string{"tab"},
 			breakMarker: "\n\n",
 		})
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s konnte nicht gelesen werden", name))
+			warnings = append(warnings, fmt.Sprintf(text(lang,
+				"%s konnte nicht gelesen werden", "%s could not be read"), name))
 			continue
 		}
-		if strings.TrimSpace(text) != "" {
+		if strings.TrimSpace(partText) != "" {
 			if strings.Contains(name, "header") || strings.Contains(name, "footer") {
-				out = append(out, "### "+path.Base(name)+"\n"+text)
+				out = append(out, "### "+path.Base(name)+"\n"+partText)
 			} else {
-				out = append(out, text)
+				out = append(out, partText)
 			}
 		}
 	}
 	if len(out) == 0 {
-		warnings = append(warnings, "DOCX enthielt keinen Text (evtl. nur Bilder)")
+		warnings = append(warnings, text(lang,
+			"DOCX enthielt keinen Text (evtl. nur Bilder)",
+			"the DOCX contained no text (perhaps only pictures)"))
 	}
 	return normaliseLines(strings.Join(out, "\n\n")), warnings, nil
 }
 
 // extractPptx pulls slide text, keeping slides separate and ordered.
-func extractPptx(data []byte) (string, int, []string, error) {
+func extractPptx(data []byte, lang string) (string, int, []string, error) {
 	zr, err := zipReader(data)
 	if err != nil {
 		return "", 0, nil, uimsg.Errorf("ingest.pptxOpen", err)
@@ -106,16 +109,17 @@ func extractPptx(data []byte) (string, int, []string, error) {
 		if err != nil {
 			continue
 		}
-		text, err := collectOOXMLText(part, ooxmlSpec{
+		slideText, err := collectOOXMLText(part, ooxmlSpec{
 			textTags:    []string{"t"},
 			breakTags:   []string{"p"},
 			breakMarker: "\n",
 		})
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("Folie %d nicht lesbar", s.index))
+			warnings = append(warnings, fmt.Sprintf(text(lang,
+				"Folie %d nicht lesbar", "slide %d could not be read"), s.index))
 			continue
 		}
-		fmt.Fprintf(&sb, "## Folie %d\n%s\n\n", s.index, strings.TrimSpace(text))
+		fmt.Fprintf(&sb, "## Folie %d\n%s\n\n", s.index, strings.TrimSpace(slideText))
 
 		if noteName := fmt.Sprintf("ppt/notesSlides/notesSlide%d.xml", s.index); hasZipPart(zr, noteName) {
 			if notePart, err := zipPart(zr, noteName); err == nil {
@@ -144,10 +148,10 @@ func extractPptx(data []byte) (string, int, []string, error) {
 // GetPivotTables). That particular call is not made here, but the file this
 // function is handed comes from a chat attachment, and a parser that ends the
 // process on a malformed one is worse than a spreadsheet that cannot be read.
-func extractXlsx(data []byte) (text string, sheets int, warnings []string, err error) {
+func extractXlsx(data []byte, lang string) (content string, sheets int, warnings []string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			text, sheets, warnings, err = "", 0, nil, uimsg.Errorf("ingest.xlsxCrashed", r)
+			content, sheets, warnings, err = "", 0, nil, uimsg.Errorf("ingest.xlsxCrashed", r)
 		}
 	}()
 	f, err := excelize.OpenReader(bytes.NewReader(data))
@@ -174,7 +178,8 @@ func extractXlsx(data []byte) (text string, sheets int, warnings []string, err e
 		// sheet being materialised before the row budget throws most of it away.
 		it, err := f.Rows(sheet)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("Blatt %q nicht lesbar", sheet))
+			warnings = append(warnings, fmt.Sprintf(text(lang,
+				"Blatt %q nicht lesbar", "sheet %q could not be read"), sheet))
 			continue
 		}
 		fmt.Fprintf(&sb, "## Blatt: %s\n\n```csv\n", sheet)
@@ -199,10 +204,12 @@ func extractXlsx(data []byte) (text string, sheets int, warnings []string, err e
 		_ = it.Close()
 		sb.WriteString("```\n\n")
 		if failed {
-			warnings = append(warnings, fmt.Sprintf("Blatt %q nicht lesbar", sheet))
+			warnings = append(warnings, fmt.Sprintf(text(lang,
+				"Blatt %q nicht lesbar", "sheet %q could not be read"), sheet))
 		}
 		if truncated {
-			warnings = append(warnings, fmt.Sprintf("Blatt %q auf %d Zeilen gekürzt", sheet, maxRows))
+			warnings = append(warnings, fmt.Sprintf(text(lang,
+				"Blatt %q auf %d Zeilen gekürzt", "sheet %q was cut to %d rows"), sheet, maxRows))
 		}
 	}
 	return normaliseLines(sb.String()), len(names), warnings, nil

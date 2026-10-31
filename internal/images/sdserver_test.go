@@ -179,6 +179,7 @@ func TestServerSpecRefusesASetupThatCannotStart(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			client := NewCLI("images", "sd-cli", "", tc.files, Options{Folder: tc.folder})
+			client.Lang = german
 			_, err := client.ServerSpec(context.Background(), 1234)
 			if err == nil {
 				t.Fatal("the start was allowed")
@@ -201,6 +202,7 @@ func TestServerSpecRefusesASetupThatCannotStart(t *testing.T) {
 func TestServerSpecRefusesABuildWithNoServerMode(t *testing.T) {
 	withoutFlag := fakeSDServer(t, "usage: sd-something [options]\n  -m <path>  model\n")
 	client := NewCLI("images", "sd-cli", "", ModelFiles{Model: "/models/a.gguf"}, Options{Folder: withoutFlag})
+	client.Lang = german
 	_, err := client.ServerSpec(context.Background(), 1234)
 	if err == nil {
 		t.Fatal("a build without --listen-port was allowed to start")

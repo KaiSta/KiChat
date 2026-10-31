@@ -3,6 +3,7 @@ package research
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -116,7 +117,8 @@ func (b *BraveProvider) Context(ctx context.Context, req SearchRequest, maxToken
 		return GroundedContext{}, ErrEmptyQuery
 	}
 	if !b.Available() {
-		return GroundedContext{}, fmt.Errorf("brave: kein API-Key konfiguriert")
+		return GroundedContext{}, errors.New(text(req.Lang,
+			"brave: kein API-Key konfiguriert", "brave: no API key configured"))
 	}
 	if err := b.limiter.Wait(ctx); err != nil {
 		return GroundedContext{}, err
@@ -169,7 +171,7 @@ func (b *BraveProvider) Context(ctx context.Context, req SearchRequest, maxToken
 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if err := classifyBraveFailure(resp.StatusCode, raw); err != nil {
+		if err := classifyBraveFailure(resp.StatusCode, raw, req.Lang); err != nil {
 			return GroundedContext{}, err
 		}
 	}
@@ -181,18 +183,21 @@ func (b *BraveProvider) Context(ctx context.Context, req SearchRequest, maxToken
 
 	var parsed braveContextResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return GroundedContext{}, fmt.Errorf("brave: Antwort nicht lesbar: %w", err)
+		return GroundedContext{}, fmt.Errorf(text(req.Lang,
+			"brave: Antwort nicht lesbar: %w", "brave: the response could not be read: %w"), err)
 	}
 	// A 200 can still carry an error object on some plans.
 	if parsed.Error != nil && parsed.Error.Code != "" {
-		if err := classifyBraveFailure(resp.StatusCode, mustJSON(parsed.Error)); err != nil {
+		if err := classifyBraveFailure(resp.StatusCode, mustJSON(parsed.Error), req.Lang); err != nil {
 			return GroundedContext{}, err
 		}
 	}
 
 	out := parseBraveContext(parsed, maxTokens)
 	if clamped {
-		out.Warning = fmt.Sprintf("Suchanfrage auf %d Wörter gekürzt (API-Limit)", BraveContextQueryMaxWords)
+		out.Warning = fmt.Sprintf(text(req.Lang,
+			"Suchanfrage auf %d Wörter gekürzt (API-Limit)",
+			"the query was shortened to %d words (API limit)"), BraveContextQueryMaxWords)
 	}
 	return out, nil
 }
@@ -286,7 +291,7 @@ func clampBraveQuery(q string) (string, bool) {
 // out of credits and being throttled for a moment look alike over HTTP but need
 // opposite responses — the first should fall through to another provider and say
 // why, the second is worth retrying — so the error envelope's code decides.
-func classifyBraveFailure(status int, body []byte) error {
+func classifyBraveFailure(status int, body []byte, lang string) error {
 	detail := strings.TrimSpace(string(body))
 	code := ""
 	var env struct {
@@ -304,7 +309,7 @@ func classifyBraveFailure(status int, body []byte) error {
 	case braveCodeRateLimited:
 		return fmt.Errorf("%w: %s", ErrRateLimited, detail)
 	case braveCodeSubscriptionTokenInvalid:
-		return braveKeyRejected(detail)
+		return braveKeyRejected(detail, lang)
 	}
 	// A rejected key is worth its own error: measured against the real API it
 	// arrives as 422, not the 401 the reference suggests, so the status alone
@@ -315,7 +320,7 @@ func classifyBraveFailure(status int, body []byte) error {
 	// clamping and must keep its own error.
 	if status == http.StatusUnauthorized || status == http.StatusForbidden ||
 		(status == http.StatusUnprocessableEntity && namesCredential(detail)) {
-		return braveKeyRejected(detail)
+		return braveKeyRejected(detail, lang)
 	}
 	if status == http.StatusTooManyRequests {
 		return fmt.Errorf("%w: %s", ErrRateLimited, detail)
@@ -332,8 +337,10 @@ func classifyBraveFailure(status int, body []byte) error {
 // English, so the one action that can fix it is appended in the app's language:
 // the message a user reads should point at the settings instead of looking like
 // a server fault.
-func braveKeyRejected(detail string) error {
-	return fmt.Errorf("%w: %s (Brave-API-Key in den Einstellungen prüfen)", ErrInvalidKey, detail)
+func braveKeyRejected(detail, lang string) error {
+	return fmt.Errorf("%w: %s%s", ErrInvalidKey, detail, text(lang,
+		" (Brave-API-Key in den Einstellungen prüfen)",
+		" (check the Brave API key in Settings)"))
 }
 
 // namesCredential reports whether an envelope's detail blames the credential

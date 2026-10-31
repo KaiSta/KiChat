@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	ilang "kichat/internal/lang"
 	"kichat/internal/proc"
 )
 
@@ -209,6 +210,10 @@ type CLI struct {
 	// Timeout bounds one draw; see DefaultCLITimeout.
 	Timeout time.Duration
 
+	// Lang answers the interface language for the sentences Health and Generate write
+	// (images.WithLang). Nil means English, which is what a test's provider speaks.
+	Lang func() string
+
 	// helpOnce memoises the one `-h` probe. Two callers want it — Health proves the process
 	// starts, previewSupport learns whether this build has the preview options — and
 	// spawning the binary twice to answer one question would be silly. A failed probe is
@@ -392,10 +397,11 @@ func (c *CLI) hiresArgs(ctx context.Context, binary string, req Request) ([]stri
 		return nil, nil
 	}
 	if !c.supports(ctx, binary, "--hires") {
-		return nil, fmt.Errorf(
-			"%w: %s kennt die Option --hires nicht — dieser Build kann nicht hochrechnen; "+
-				"ein neueres Release von stable-diffusion.cpp kann es",
-			ErrHiresUnsupported, binary)
+		return nil, fmt.Errorf("%w: %s", ErrHiresUnsupported, fmt.Sprintf(text(req.Lang,
+			"%s kennt die Option --hires nicht — dieser Build kann nicht hochrechnen; ein neueres "+
+				"Release von stable-diffusion.cpp kann es",
+			"%s does not know the --hires option, so this build cannot enlarge; a newer release of "+
+				"stable-diffusion.cpp can"), binary))
 	}
 	args := []string{"--hires"}
 	scaleSent := c.supports(ctx, binary, "--hires-scale")
@@ -435,12 +441,13 @@ func (c *CLI) hiresArgs(ctx context.Context, binary string, req Request) ([]stri
 	// a size rather than about the option that is missing. Upstream ships all five flags in
 	// one table, so this is a fork's shape; it is still worth a refusal that costs nothing.
 	if !scaleSent && !targetSent {
-		return nil, fmt.Errorf(
-			"%w: %s kennt weder --hires-scale noch --hires-width/--hires-height — ohne eine "+
-				"dieser Optionen vergrößert der zweite Durchgang in der Größe, die das Programm "+
-				"selbst wählt, statt in der gefragten; ein neueres Release von "+
-				"stable-diffusion.cpp kann es",
-			ErrHiresUnsupported, binary)
+		return nil, fmt.Errorf("%w: %s", ErrHiresUnsupported, fmt.Sprintf(text(req.Lang,
+			"%s kennt weder --hires-scale noch --hires-width/--hires-height — ohne eine dieser "+
+				"Optionen vergrößert der zweite Durchgang in der Größe, die das Programm selbst "+
+				"wählt, statt in der gefragten; ein neueres Release von stable-diffusion.cpp kann es",
+			"%s knows neither --hires-scale nor --hires-width/--hires-height, so the second pass "+
+				"enlarges to a size the program picks instead of the one asked for; a newer release "+
+				"of stable-diffusion.cpp can"), binary))
 	}
 	return args, nil
 }
@@ -490,7 +497,7 @@ func (c *CLI) userPicksPreview() bool {
 // program is the executable one draw runs: the folder's own sd-cli when a folder is
 // configured, else the typed path. Both entry points resolve through here, so a broken
 // folder is one reported error rather than two behaviours.
-func (c *CLI) program() (string, error) { return ResolveProgram(c.folder, c.binary) }
+func (c *CLI) program() (string, error) { return ResolveProgram(c.folder, c.binary, c.lang()) }
 
 // NewCLI builds a client for one local binary. Options.Extra is the user's extra command
 // line, already split by runtime.SplitArgs — a shell-free splitter, because this must
@@ -525,6 +532,9 @@ func (c *CLI) Files() ModelFiles { return c.files }
 //
 // It does not prove the binary *is* sd-cli — nothing short of a real draw does — and it
 // never loads a model, so it is cheap enough for a settings button.
+// lang is the resolved model language for the sentences this provider writes.
+func (c *CLI) lang() string { return ilang.Of(c.Lang) }
+
 func (c *CLI) Health(ctx context.Context) error {
 	binary, err := c.program()
 	if err != nil {
@@ -535,26 +545,34 @@ func (c *CLI) Health(ctx context.Context) error {
 		return fmt.Errorf("%w: %s", ErrUnavailable, err)
 	}
 	if info.IsDir() {
-		return fmt.Errorf("%w: %s ist ein Ordner, keine Datei", ErrUnavailable, binary)
+		return fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(c.lang(),
+			"%s ist ein Ordner, keine Datei", "%s is a folder, not a file"), binary))
 	}
 	if info.Mode()&0o111 == 0 {
-		return fmt.Errorf("%w: %s ist nicht ausführbar", ErrUnavailable, binary)
+		return fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(c.lang(),
+			"%s ist nicht ausführbar", "%s is not executable"), binary))
 	}
 	if c.files.Empty() {
-		return fmt.Errorf("%w: kein Modell angegeben", ErrUnavailable)
+		return fmt.Errorf("%w: %s", ErrUnavailable, text(c.lang(),
+			"kein Modell angegeben", "no model named"))
 	}
 	// The pipeline names the parts it needs, so the failure names the part rather than the
 	// option: a user who filled in `--diffusion-model` and stopped gets "a text encoder"
 	// instead of a draw that fails after the model has loaded.
 	if p := c.opts.Pipeline; p.Encoder != EncoderAny {
 		if strings.TrimSpace(c.files.DiffusionModel) == "" && strings.TrimSpace(c.files.Model) == "" {
-			return fmt.Errorf("%w: %s braucht ein Diffusionsmodell (--diffusion-model)", ErrUnavailable, p.Name)
+			return fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(c.lang(),
+				"%s braucht ein Diffusionsmodell (--diffusion-model)",
+				"%s needs a diffusion model (--diffusion-model)"), p.Name))
 		}
 		if strings.TrimSpace(c.files.DiffusionModel) != "" && p.Encoder == EncoderLLM && strings.TrimSpace(c.files.LLM) == "" {
-			return fmt.Errorf("%w: %s braucht einen Text-Encoder (--llm)", ErrUnavailable, p.Name)
+			return fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(c.lang(),
+				"%s braucht einen Text-Encoder (--llm)",
+				"%s needs a text encoder (--llm)"), p.Name))
 		}
 		if strings.TrimSpace(c.files.DiffusionModel) != "" && p.RequiresVAE && strings.TrimSpace(c.files.VAE) == "" {
-			return fmt.Errorf("%w: %s braucht einen VAE (--vae)", ErrUnavailable, p.Name)
+			return fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(c.lang(),
+				"%s braucht einen VAE (--vae)", "%s needs a VAE (--vae)"), p.Name))
 		}
 	}
 	if err := c.modelContradiction(); err != nil {
@@ -577,7 +595,8 @@ func (c *CLI) Health(ctx context.Context) error {
 		if errors.As(err, &exitErr) {
 			return nil
 		}
-		return fmt.Errorf("%w: %s ließ sich nicht starten: %v", ErrUnavailable, binary, err)
+		return fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(c.lang(),
+			"%s ließ sich nicht starten: %v", "%s could not be started: %v"), binary, err))
 	}
 	return nil
 }
@@ -596,7 +615,9 @@ func (c *CLI) Health(ctx context.Context) error {
 // spending minutes loading a model the user did not choose.
 func (c *CLI) modelContradiction() error {
 	if strings.TrimSpace(c.files.Model) != "" && strings.TrimSpace(c.files.DiffusionModel) != "" {
-		return errors.New("-m und --diffusion-model sind beide gesetzt, aber es kann nur eines geladen werden")
+		return errors.New(text(c.lang(),
+			"-m und --diffusion-model sind beide gesetzt, aber es kann nur eines geladen werden",
+			"-m and --diffusion-model are both set, but only one of them can be loaded"))
 	}
 	return nil
 }
@@ -650,7 +671,8 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	}
 	prompt := req.EffectivePrompt()
 	if prompt == "" {
-		return Result{}, errors.New("der Bild-Prompt ist leer")
+		return Result{}, errors.New(text(req.Lang,
+			"der Bild-Prompt ist leer", "the image prompt is empty"))
 	}
 	if err := c.modelContradiction(); err != nil {
 		return Result{}, err
@@ -672,7 +694,9 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 
 	dir, err := os.MkdirTemp("", "kichat-sdcli-")
 	if err != nil {
-		return Result{}, fmt.Errorf("kein Arbeitsverzeichnis für das Bild: %w", err)
+		return Result{}, fmt.Errorf(text(req.Lang,
+			"kein Arbeitsverzeichnis für das Bild: %w",
+			"no working directory for the picture: %w"), err)
 	}
 	defer os.RemoveAll(dir)
 	output := filepath.Join(dir, "bild.png")
@@ -792,14 +816,18 @@ func (c *CLI) GenerateWithProgress(ctx context.Context, req Request, report func
 	}
 	if runErr != nil {
 		if drawCtx.Err() != nil {
-			return Result{}, fmt.Errorf("das Zeichnen hat länger als %s gedauert", limit)
+			return Result{}, fmt.Errorf(text(req.Lang,
+				"das Zeichnen hat länger als %s gedauert",
+				"the drawing took longer than %s"), limit)
 		}
 		return Result{}, fmt.Errorf("%s: %v%s", binary, runErr, logTail(stderr.String(), sdlog.tail()))
 	}
 
 	data, err := os.ReadFile(output)
 	if err != nil {
-		return Result{}, fmt.Errorf("das Programm hat kein Bild geschrieben%s", logTail(stderr.String(), sdlog.tail()))
+		return Result{}, fmt.Errorf(text(req.Lang,
+			"das Programm hat kein Bild geschrieben%s",
+			"the program wrote no picture%s"), logTail(stderr.String(), sdlog.tail()))
 	}
 	mime, ext := SniffImage(data, MimePNG, "png")
 	result := Result{

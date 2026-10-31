@@ -632,7 +632,7 @@ func TestTheOutputKeepsBothEndsAndNamesWhatItDropped(t *testing.T) {
 	if _, err := w.Write([]byte("TAIL")); err != nil {
 		t.Fatal(err)
 	}
-	kept := w.String()
+	kept := w.String(config.LangGerman)
 	if !strings.HasPrefix(kept, "HEAD0123") {
 		t.Errorf("the beginning was not kept: %q", kept)
 	}
@@ -641,6 +641,11 @@ func TestTheOutputKeepsBothEndsAndNamesWhatItDropped(t *testing.T) {
 	}
 	if !strings.Contains(kept, "weggelassen") {
 		t.Errorf("the dropped middle is not named: %q", kept)
+	}
+	// The marker is a sentence, so it follows the interface language like every other
+	// sentence the model reads: the writer knows nothing else about the call it belongs to.
+	if english := w.String(config.LangEnglish); !strings.Contains(english, "left out") {
+		t.Errorf("the English marker is not English: %q", english)
 	}
 	if w.omitted() != 2 {
 		t.Errorf("omitted = %d, want the 2 bytes (45, 6) that fell out of the middle", w.omitted())
@@ -652,7 +657,7 @@ func TestTheOutputKeepsBothEndsAndNamesWhatItDropped(t *testing.T) {
 	if _, err := small.Write([]byte("kurz\n")); err != nil {
 		t.Fatal(err)
 	}
-	if got := small.String(); got != "kurz\n" {
+	if got := small.String(config.LangGerman); got != "kurz\n" {
 		t.Errorf("output that fits came back as %q", got)
 	}
 }

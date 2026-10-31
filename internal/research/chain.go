@@ -45,7 +45,15 @@ type Chain struct {
 
 	// braveEndpoint is overridable for tests.
 	braveEndpoint string
+
+	// Lang answers the interface language, so a degraded result or a failure is worded in the
+	// language of the window it is shown in (config.ModelLanguage). A supplier rather than a
+	// string because a settings save has to reach the next search. Nil means English.
+	Lang func() string
 }
+
+// lang is the resolved model language for the text this chain writes.
+func (c *Chain) lang() string { return config.LangOf(c.Lang) }
 
 // NewChain builds the chain. Both providers are always constructed; availability
 // is decided per request.
@@ -106,7 +114,7 @@ func (c *Chain) BraveQueriesThisMonth() int64 {
 func (c *Chain) Search(ctx context.Context, query string, req SearchRequest) (SearchOutcome, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
-		return SearchOutcome{}, errors.New("leere Suchanfrage")
+		return SearchOutcome{}, errors.New(text(c.lang(), "leere Suchanfrage", "empty search query"))
 	}
 
 	c.mu.RLock()
@@ -155,9 +163,9 @@ func (c *Chain) Search(ctx context.Context, query string, req SearchRequest) (Se
 			continue
 		}
 		if !p.Available() {
-			reason := "nicht konfiguriert"
+			reason := text(c.lang(), "nicht konfiguriert", "not configured")
 			if !p.RequiresKey() {
-				reason = "nicht verfügbar"
+				reason = text(c.lang(), "nicht verfügbar", "not available")
 			}
 			errs = append(errs, fmt.Sprintf("%s: %s", name, reason))
 			continue
@@ -166,11 +174,15 @@ func (c *Chain) Search(ctx context.Context, query string, req SearchRequest) (Se
 			firstTried = name
 		}
 
+		// The provider words its own failures, so it needs the language this chain resolved.
+		req.Lang = c.lang()
 		results, err := p.Search(ctx, req)
 		if err == nil && len(results) > 0 {
 			outcome := SearchOutcome{Results: results, Provider: name}
 			if fellBack {
-				outcome.Warning = fmt.Sprintf("%s war nicht verfügbar, Ergebnisse von %s", firstTried, name)
+				outcome.Warning = fmt.Sprintf(text(c.lang(),
+					"%s war nicht verfügbar, Ergebnisse von %s",
+					"%s was not available; results from %s"), firstTried, name)
 			}
 			if c.store != nil {
 				if raw, mErr := jsonMarshalResults(results); mErr == nil {
@@ -188,7 +200,9 @@ func (c *Chain) Search(ctx context.Context, query string, req SearchRequest) (Se
 					// Brave actually billed, so it is said out loud instead of dropped.
 					if _, cErr := c.store.IncrCounter("search:brave", config.CurrentPeriod()); cErr != nil {
 						outcome.Warning = mergeWarning(outcome.Warning,
-							"Das monatliche Brave-Kontingent konnte nicht gezählt werden: "+cErr.Error())
+							text(c.lang(),
+								"Das monatliche Brave-Kontingent konnte nicht gezählt werden: ",
+								"the monthly Brave allowance could not be counted: ")+cErr.Error())
 					}
 				}
 			}
@@ -200,7 +214,7 @@ func (c *Chain) Search(ctx context.Context, query string, req SearchRequest) (Se
 			}
 			errs = append(errs, err.Error())
 		} else {
-			errs = append(errs, fmt.Sprintf("%s: keine Ergebnisse", name))
+			errs = append(errs, fmt.Sprintf(text(c.lang(), "%s: keine Ergebnisse", "%s: no results"), name))
 		}
 		fellBack = true
 	}
@@ -208,7 +222,8 @@ func (c *Chain) Search(ctx context.Context, query string, req SearchRequest) (Se
 	if len(errs) == 0 {
 		return SearchOutcome{}, ErrNoProvider
 	}
-	return SearchOutcome{}, fmt.Errorf("Suche fehlgeschlagen: %s", strings.Join(errs, " | "))
+	return SearchOutcome{}, fmt.Errorf(text(c.lang(),
+		"Suche fehlgeschlagen: %s", "the search failed: %s"), strings.Join(errs, " | "))
 }
 
 // GroundedContext returns pre-extracted, token-budgeted page content for a
@@ -254,6 +269,7 @@ func (c *Chain) GroundedContext(ctx context.Context, query string, req SearchReq
 
 	var reasons []string
 	if brave != nil && brave.Available() {
+		req.Lang = c.lang()
 		grounded, err := brave.Context(ctx, req, maxTokens)
 		if err == nil && !grounded.Empty() {
 			// The context route was the request that was just made, so it is the one
@@ -263,29 +279,34 @@ func (c *Chain) GroundedContext(ctx context.Context, query string, req SearchReq
 		}
 		switch {
 		case err == nil:
-			reasons = append(reasons, "brave-context: keine Abschnitte")
+			reasons = append(reasons, text(c.lang(),
+				"brave-context: keine Abschnitte", "brave-context: no sections"))
 		case errors.Is(err, ErrQuotaExhausted):
-			reasons = append(reasons, "Brave-Kontingent aufgebraucht")
+			reasons = append(reasons, text(c.lang(),
+				"Brave-Kontingent aufgebraucht", "the Brave allowance is used up"))
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			return GroundedContext{}, err
 		default:
 			reasons = append(reasons, err.Error())
 		}
 	} else {
-		reasons = append(reasons, "brave: kein API-Key konfiguriert")
+		reasons = append(reasons, text(c.lang(),
+			"brave: kein API-Key konfiguriert", "brave: no API key configured"))
 	}
 
 	// Fall back to a normal search. Sources are then only as good as their
 	// descriptions, which is worth saying out loud.
 	outcome, err := c.Search(ctx, query, req)
 	if err != nil {
-		return GroundedContext{}, fmt.Errorf("Recherche fehlgeschlagen: %s", strings.Join(reasons, " | "))
+		return GroundedContext{}, fmt.Errorf(text(c.lang(),
+			"Recherche fehlgeschlagen: %s", "the research failed: %s"), strings.Join(reasons, " | "))
 	}
 	grounded := GroundedContext{
 		Provider:  outcome.Provider,
 		MaxTokens: 0,
-		Warning: fmt.Sprintf(
+		Warning: fmt.Sprintf(text(c.lang(),
 			"LLM-Kontext nicht verfügbar (%s) – nur Kurzbeschreibungen aus der Websuche",
+			"LLM context unavailable (%s) — web-search descriptions only"),
 			strings.Join(reasons, " | ")),
 	}
 	if outcome.Warning != "" {
@@ -308,7 +329,9 @@ func (c *Chain) GroundedContext(ctx context.Context, query string, req SearchReq
 		})
 	}
 	if grounded.Empty() {
-		return GroundedContext{}, fmt.Errorf("Recherche ohne verwertbare Inhalte: %s", strings.Join(reasons, " | "))
+		return GroundedContext{}, fmt.Errorf(text(c.lang(),
+			"Recherche ohne verwertbare Inhalte: %s",
+			"the research found nothing usable: %s"), strings.Join(reasons, " | "))
 	}
 	// Not counted here: the Search above already counted its own provider request,
 	// and this result is built from its output.
@@ -343,7 +366,9 @@ func (c *Chain) recordGrounded(cacheKey string, opts Options, grounded GroundedC
 	}
 	if metered && strings.HasPrefix(grounded.Provider, "brave") {
 		if _, err := c.store.IncrCounter("search:brave", config.CurrentPeriod()); err != nil {
-			return "Das monatliche Brave-Kontingent konnte nicht gezählt werden: " + err.Error()
+			return text(c.lang(),
+				"Das monatliche Brave-Kontingent konnte nicht gezählt werden: ",
+				"the monthly Brave allowance could not be counted: ") + err.Error()
 		}
 	}
 	return ""

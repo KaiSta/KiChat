@@ -275,7 +275,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		fail(fmt.Errorf("backend %q is not configured", backendID))
 		e.emit(events.Error, map[string]any{
 			"chatId": req.ChatID,
-			"error":  fmt.Sprintf("Backend %q ist nicht konfiguriert.", backendID),
+			"error":  uimsg.Errorf("chat.backendNotConfigured", backendID).Error(),
 		})
 		return
 	}
@@ -314,7 +314,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	if err := e.seedSearch(ctx, &chat, req.Text, settings, modelInfo.ContextLimit, sources); err != nil {
 		e.emit(events.Warning, map[string]any{
 			"chatId":  req.ChatID,
-			"warning": fmt.Sprintf("Vorab-Recherche fehlgeschlagen: %s", err.Error()),
+			"warning": uimsg.Errorf("chat.searchFirstFailed", err.Error()).Error(),
 		})
 	}
 
@@ -366,7 +366,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	// the list: a row that only asked for tools has no citations to resolve, and a list
 	// under it would be a source panel for a message that says nothing.
 	if result.LastMessageID != "" && result.Text != "" {
-		e.persist(req.ChatID, "Die Quellen",
+		e.persist(req.ChatID, uimsg.Errorf("chat.thingSources"),
 			e.Store.SetMessageSources(result.LastMessageID, sources.All()))
 	}
 

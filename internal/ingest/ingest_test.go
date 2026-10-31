@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"kichat/internal/config"
 	"strings"
 	"testing"
 
@@ -61,7 +62,7 @@ func TestExtractPDFGetsTextAndPageMarkers(t *testing.T) {
 		if preferExternal {
 			method = "pdftotext"
 		}
-		text, pages, warnings, used, err := extractPDF(data, preferExternal)
+		text, pages, warnings, used, err := extractPDF(data, preferExternal, config.LangGerman)
 		if err != nil {
 			t.Fatalf("%s path: extractPDF failed: %v", method, err)
 		}
@@ -91,7 +92,7 @@ func TestExtractPDFGetsTextAndPageMarkers(t *testing.T) {
 }
 
 func TestExtractPDFRejectsNonPDF(t *testing.T) {
-	if _, _, _, _, err := extractPDF([]byte("das ist kein PDF"), false); err == nil {
+	if _, _, _, _, err := extractPDF([]byte("das ist kein PDF"), false, config.LangGerman); err == nil {
 		t.Error("expected an error for non-PDF input")
 	}
 }
@@ -100,7 +101,7 @@ func TestExtractPDFSurvivesTruncatedFile(t *testing.T) {
 	data := makeTestPDF("Inhalt")
 	truncated := data[:len(data)/2]
 	// It must not panic; an error is the correct outcome.
-	_, _, _, _, err := extractPDF(truncated, false)
+	_, _, _, _, err := extractPDF(truncated, false, config.LangGerman)
 	if err == nil {
 		t.Log("truncated input parsed without error; acceptable as long as it did not panic")
 	}
@@ -122,7 +123,7 @@ func TestIsLikelyScanned(t *testing.T) {
 
 func TestPageMarkedTextLabelsPages(t *testing.T) {
 	raw := "Erste Seite Inhalt\fZweite Seite Inhalt\f"
-	text, pages := pageMarkedText(raw)
+	text, pages := pageMarkedText(raw, config.LangGerman)
 	if pages != 2 {
 		t.Fatalf("pages = %d, want 2", pages)
 	}
@@ -202,7 +203,7 @@ func TestExtractDocxAndPptx(t *testing.T) {
 <w:p><w:r><w:t>Zweiter</w:t></w:r><w:r><w:t> Absatz</w:t></w:r></w:p>
 </w:body></w:document>`,
 	})
-	text, warnings, err := extractDocx(docx)
+	text, warnings, err := extractDocx(docx, config.LangGerman)
 	if err != nil {
 		t.Fatalf("extractDocx: %v", err)
 	}
@@ -221,7 +222,7 @@ func TestExtractDocxAndPptx(t *testing.T) {
 		"ppt/slides/slide1.xml": `<p:sld xmlns:a="x"><a:t>Folie eins Titel</a:t><a:p/></p:sld>`,
 		"ppt/slides/slide2.xml": `<p:sld xmlns:a="x"><a:t>Folie zwei Titel</a:t></p:sld>`,
 	})
-	slideText, slides, _, err := extractPptx(pptx)
+	slideText, slides, _, err := extractPptx(pptx, config.LangGerman)
 	if err != nil {
 		t.Fatalf("extractPptx: %v", err)
 	}
@@ -353,7 +354,7 @@ func TestChunkDocumentTracksPageAndHeading(t *testing.T) {
 // other here by chunking the extractor's actual output rather than a hand-written
 // look-alike.
 func TestChunkDocumentReadsThePageMarkersTheExtractorWrites(t *testing.T) {
-	marked, pages := pageMarkedText("Erste Seite mit Inhalt.\n\fZweite Seite mit anderem Inhalt.\n")
+	marked, pages := pageMarkedText("Erste Seite mit Inhalt.\n\fZweite Seite mit anderem Inhalt.\n", config.LangGerman)
 	if pages != 2 {
 		t.Fatalf("fixture produced %d pages, want 2", pages)
 	}

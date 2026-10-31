@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"kichat/internal/config"
 	"kichat/internal/store"
 )
 
@@ -219,7 +220,7 @@ func TestBraveFailureClassification(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := classifyBraveFailure(tc.status, []byte(tc.body))
+			err := classifyBraveFailure(tc.status, []byte(tc.body), config.LangGerman)
 			if !errors.Is(err, tc.want) {
 				t.Errorf("err = %v, want to wrap %v", err, tc.want)
 			}
@@ -245,7 +246,8 @@ func TestBraveFailureClassification(t *testing.T) {
 	// it is answered by clamping the query, and reporting it as a bad key would
 	// send the user to the settings for nothing.
 	requestErr := classifyBraveFailure(http.StatusUnprocessableEntity,
-		[]byte(`{"error":{"status":422,"detail":"The request was rejected.","code":"VALIDATION"}}`))
+		[]byte(`{"error":{"status":422,"detail":"The request was rejected.","code":"VALIDATION"}}`),
+		config.LangGerman)
 	if errors.Is(requestErr, ErrInvalidKey) {
 		t.Errorf("a 422 about the request was classified as a key rejection: %v", requestErr)
 	}
@@ -256,7 +258,7 @@ func TestBraveFailureClassification(t *testing.T) {
 
 	// Anything that is neither a throttle nor a key problem stays an httpError
 	// with its status intact, so the real reason is still reportable.
-	err := classifyBraveFailure(http.StatusInternalServerError, []byte(`{"error":{"status":500,"code":"INTERNAL"}}`))
+	err := classifyBraveFailure(http.StatusInternalServerError, []byte(`{"error":{"status":500,"code":"INTERNAL"}}`), config.LangGerman)
 	var httpErr *httpError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusInternalServerError {
 		t.Errorf("err = %v, want an httpError with status 500", err)
@@ -343,12 +345,12 @@ func TestBraveContextFloorsTokenBudget(t *testing.T) {
 
 func TestBraveContextRequiresKey(t *testing.T) {
 	p := NewBraveProvider("", "")
-	if _, err := p.Context(context.Background(), SearchRequest{Query: "x"}, 0); err == nil {
+	if _, err := p.Context(context.Background(), SearchRequest{Query: "x", Lang: config.LangGerman}, 0); err == nil {
 		t.Error("expected an error without an API key")
 	} else if !strings.Contains(err.Error(), "API-Key") {
 		t.Errorf("err = %v, want a clear missing-key message", err)
 	}
-	if _, err := p.Context(context.Background(), SearchRequest{Query: "   "}, 0); !errors.Is(err, ErrEmptyQuery) {
+	if _, err := p.Context(context.Background(), SearchRequest{Query: "   ", Lang: config.LangGerman}, 0); !errors.Is(err, ErrEmptyQuery) {
 		t.Errorf("err = %v, want ErrEmptyQuery", err)
 	}
 }
@@ -498,6 +500,9 @@ func newTestChainWithBrave(t *testing.T, endpoint, apiKey string) (*Chain, *Brav
 		BraveAPIKey:   apiKey,
 		CacheMinutes:  60,
 	}, endpoint)
+	// These tests pin the German wording, so the chain is told which language it is in —
+	// the app installs the same supplier from its settings.
+	chain.Lang = func() string { return config.LangGerman }
 	brave, ok := chain.providers["brave"].(*BraveProvider)
 	if !ok {
 		t.Fatal("brave provider not constructed")

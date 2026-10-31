@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"fmt"
 
 	"kichat/internal/config"
 	"kichat/internal/events"
@@ -122,10 +121,9 @@ func ceilingNote(too *llm.RequestTooLargeError) string {
 		return ""
 	}
 	if too.Requested > 0 {
-		return fmt.Sprintf(" (höchstens %d Token pro Anfrage, angefragt waren %d)",
-			too.Limit, too.Requested)
+		return uimsg.Errorf("chat.ceilingNoteRequested", too.Limit, too.Requested).Error()
 	}
-	return fmt.Sprintf(" (höchstens %d Token pro Anfrage)", too.Limit)
+	return uimsg.Errorf("chat.ceilingNote", too.Limit).Error()
 }
 
 // foldOutcome is what a size fold did, and it has three names rather than being a bool
@@ -166,15 +164,14 @@ func (e *Engine) foldForSize(ctx context.Context, chat *store.Chat, provider llm
 	// goes: the retry uses the same user message, and a red row in the transcript for
 	// a request nobody answered reads as a broken chat rather than as a recovery.
 	if err := e.dropTrailingAssistant(chat.ID); err != nil {
-		e.persist(chat.ID, "Die fehlgeschlagene Antwort", err)
+		e.persist(chat.ID, uimsg.Errorf("chat.thingFailedAnswer"), err)
 	}
 
 	// The refusal is announced first, and it is the only part that is certain: the
 	// limit named in it is what the user needs to act on if nothing can be folded.
 	e.emit(events.Warning, map[string]any{
-		"chatId": chat.ID,
-		"warning": fmt.Sprintf("%s hat die Anfrage als zu groß abgelehnt%s.",
-			provider.Name(), ceilingNote(too)),
+		"chatId":  chat.ID,
+		"warning": uimsg.Errorf("chat.tooLargeRejected", provider.Name(), ceilingNote(too)).Error(),
 	})
 
 	// What this request was estimated at, for the one calibration a refusal offers.
@@ -211,7 +208,7 @@ func (e *Engine) foldForSize(ctx context.Context, chat *store.Chat, provider llm
 		// would be the one thing in this turn that is not true.
 		e.emit(events.Warning, map[string]any{
 			"chatId":  chat.ID,
-			"warning": "Der Verlauf wurde komprimiert — die Anfrage wird erneut gesendet.",
+			"warning": uimsg.Errorf("chat.foldedRetry").Error(),
 		})
 		return foldFolded
 	}
@@ -223,7 +220,7 @@ func (e *Engine) foldForSize(ctx context.Context, chat *store.Chat, provider llm
 	if err != nil {
 		e.emit(events.Warning, map[string]any{
 			"chatId":  chat.ID,
-			"warning": fmt.Sprintf("Der Verlauf konnte nicht komprimiert werden: %s", err.Error()),
+			"warning": uimsg.Errorf("chat.foldFailed", err.Error()).Error(),
 		})
 		return foldFailed
 	}

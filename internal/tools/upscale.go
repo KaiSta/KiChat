@@ -55,6 +55,8 @@ func (s *Service) Upscale(ctx context.Context, attachmentID string, req images.U
 		Binary:  cfg.ESRGANBinary,
 		Model:   cfg.ESRGANModel,
 		Tile:    cfg.ESRGANTile,
+		// The refusals on this path are read in the enlarge panel, so they follow its language.
+		Lang: s.Language(),
 	}
 	if s.Progress != nil {
 		// Reported under the *source* attachment, which is what the card the user pressed
@@ -136,5 +138,5 @@ func (s *Service) TestUpscaler(ctx context.Context) (string, error) {
 	if !s.imageSettings().UpscalerEnabled {
 		return "", images.ErrUpscaleDisabled
 	}
-	return images.ProbeESRGAN(ctx, s.imageSettings().ESRGANBinary)
+	return images.ProbeESRGAN(ctx, s.imageSettings().ESRGANBinary, s.Language())
 }

@@ -18,6 +18,7 @@ import (
 	"kichat/internal/store"
 	"kichat/internal/tools"
 	"kichat/internal/trace"
+	"kichat/internal/uimsg"
 	"kichat/internal/workspace"
 )
 
@@ -452,9 +453,15 @@ func TestAFailedCondensationStillDeliversTheResult(t *testing.T) {
 	if out != bigPage() {
 		t.Fatal("a failed condensation lost the result")
 	}
+	// The warning is a dictionary code now, so what is pinned is the code — the sentence
+	// belongs to the window, and asserting German prose here is what let it stay German in
+	// an English window.
 	warned := false
 	for _, ev := range log.snapshot() {
-		if ev.name == "chat:warning" && strings.Contains(fmt.Sprint(ev.payload["warning"]), "nicht gekürzt") {
+		if ev.name != "chat:warning" {
+			continue
+		}
+		if message, ok := uimsg.Parse(fmt.Sprint(ev.payload["warning"])); ok && message.Code == "chat.digestKeptWhole" {
 			warned = true
 		}
 	}

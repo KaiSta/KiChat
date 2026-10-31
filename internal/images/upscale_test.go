@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	ilang "kichat/internal/lang"
 )
 
 func TestFitPreservesAspectAndBounds(t *testing.T) {
@@ -61,19 +63,19 @@ func TestTargetForPresets(t *testing.T) {
 		{"bigger", 0, 0, 0, true},
 	}
 	for _, c := range cases {
-		got, err := TargetFor(c.kind, c.long, 3840, 2160)
+		got, err := TargetFor(c.kind, c.long, 3840, 2160, ilang.German)
 		if c.wantErr {
 			if err == nil {
-				t.Errorf("TargetFor(%q) accepted an invalid target: %+v", c.kind, got)
+				t.Errorf("TargetFor(%q, ilang.German) accepted an invalid target: %+v", c.kind, got)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("TargetFor(%q): %v", c.kind, err)
+			t.Errorf("TargetFor(%q, ilang.German): %v", c.kind, err)
 			continue
 		}
 		if got.Width != c.wantW || got.Height != c.wantH {
-			t.Errorf("TargetFor(%q) = %dx%d, want %dx%d", c.kind, got.Width, got.Height, c.wantW, c.wantH)
+			t.Errorf("TargetFor(%q, ilang.German) = %dx%d, want %dx%d", c.kind, got.Width, got.Height, c.wantW, c.wantH)
 		}
 	}
 }

@@ -1,10 +1,11 @@
 package images
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"kichat/internal/uimsg"
 )
 
 // The one Real-ESRGAN build KiChat downloads.
@@ -104,7 +105,8 @@ var upscalerBuilds = map[string]UpscalerBuild{
 // ErrUpscalerNoArchive marks a platform this app has nothing to download for. It is a
 // separate error from ErrUpscalerUnavailable because the answer differs: there is no
 // archive to point the user at, so the only setup that can work is a hand install.
-var ErrUpscalerNoArchive = errors.New("für diese Plattform gibt es kein Real-ESRGAN-Archiv — das Programm von Hand installieren und den Pfad wählen")
+var ErrUpscalerNoArchive = uimsg.Detailf("images.noUpscalerArchive",
+	"there is no Real-ESRGAN archive for this platform; install the program by hand and choose its path")
 
 // UpscalerBuildFor answers the archive for one platform, or why there is none.
 //
@@ -129,7 +131,7 @@ func UpscalerBuildFor(goos, goarch string) (UpscalerBuild, error) {
 // entry pointing at a folder that cannot do the work. The weights are checked by the
 // same helper a run uses (ESRGAN.modelDir), so \"installed\" and \"able to enlarge\" agree
 // by construction rather than by two lists of file names.
-func VerifyUpscalerInstall(dir string) (string, error) {
+func VerifyUpscalerInstall(dir string, lang string) (string, error) {
 	program := filepath.Join(dir, upscalerProgramName())
 	info, err := os.Stat(program)
 	if err != nil || info.IsDir() {
@@ -140,7 +142,8 @@ func VerifyUpscalerInstall(dir string) (string, error) {
 	// such bit, and os.Stat reports 0666 there, so the question is only asked where it
 	// means something.
 	if os.PathSeparator != '\\' && info.Mode().Perm()&0o111 == 0 {
-		return "", fmt.Errorf("%w: %s ist nicht ausführbar", ErrUpscalerUnavailable, program)
+		return "", fmt.Errorf("%w: %s", ErrUpscalerUnavailable, fmt.Sprintf(text(lang,
+			"%s ist nicht ausführbar", "%s is not executable"), program))
 	}
 	models, err := (ESRGAN{Binary: program}).modelDir(program)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"kichat/internal/chat"
+	"kichat/internal/config"
 	"kichat/internal/events"
 	"kichat/internal/ingest"
 	"kichat/internal/research"
@@ -376,7 +377,7 @@ func (a *App) ScrapeIntoChat(chatID, pageURL string, maxTokens int) (store.Attac
 	} else {
 		// Small enough to send whole; the budget only bites above the threshold,
 		// where the text is indexed instead.
-		research.TrimToTokens(&result, maxTokens)
+		research.TrimToTokens(&result, maxTokens, config.ModelLanguage(a.Settings().Language))
 	}
 
 	title := result.Title

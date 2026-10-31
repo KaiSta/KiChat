@@ -113,12 +113,13 @@ type ServerSpec struct {
 // build whose own help does not list the listener flag, because starting it anyway would run
 // it on its documented default port.
 func (c *CLI) ServerSpec(ctx context.Context, port int) (ServerSpec, error) {
-	program, err := ResolveServerProgram(c.folder, c.binary)
+	program, err := ResolveServerProgram(c.folder, c.binary, c.lang())
 	if err != nil {
 		return ServerSpec{}, err
 	}
 	if c.files.Empty() {
-		return ServerSpec{}, fmt.Errorf("%w: kein Modell angegeben", ErrUnavailable)
+		return ServerSpec{}, fmt.Errorf("%w: %s", ErrUnavailable, text(c.lang(),
+			"kein Modell angegeben", "no model named"))
 	}
 	if err := c.modelContradiction(); err != nil {
 		return ServerSpec{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
@@ -128,7 +129,8 @@ func (c *CLI) ServerSpec(ctx context.Context, port int) (ServerSpec, error) {
 		model = strings.TrimSpace(c.files.Model)
 	}
 	if model == "" {
-		return ServerSpec{}, fmt.Errorf("%w: kein Diffusionsmodell angegeben", ErrUnavailable)
+		return ServerSpec{}, fmt.Errorf("%w: %s", ErrUnavailable, text(c.lang(),
+			"kein Diffusionsmodell angegeben", "no diffusion model named"))
 	}
 	if err := c.serverSupport(ctx, program); err != nil {
 		return ServerSpec{}, err
@@ -156,8 +158,9 @@ func (c *CLI) serverSupport(ctx context.Context, program string) error {
 		return nil
 	}
 	if !strings.Contains(help, listenFlag) {
-		return fmt.Errorf("%w: %s kennt %s nicht — dieser Build hat keinen Servermodus",
-			ErrUnavailable, program, listenFlag)
+		return fmt.Errorf("%w: %s", ErrUnavailable, fmt.Sprintf(text(c.lang(),
+			"%s kennt %s nicht — dieser Build hat keinen Servermodus",
+			"%s does not know %s, so this build has no server mode"), program, listenFlag))
 	}
 	return nil
 }

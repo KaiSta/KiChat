@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	ilang "kichat/internal/lang"
 )
 
 // TestLiveESRGAN runs the neural tier against the real portable program. It is skipped
@@ -51,7 +53,7 @@ func TestLiveESRGAN(t *testing.T) {
 	defer cancel()
 
 	// The program is usable, which for this build means the driver came up.
-	if _, err := ProbeESRGAN(ctx, program); err != nil {
+	if _, err := ProbeESRGAN(ctx, program, ilang.German); err != nil {
 		t.Fatalf("the program did not run: %v", err)
 	}
 	// The weights are beside it, or nothing below means anything.

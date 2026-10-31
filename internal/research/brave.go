@@ -3,6 +3,7 @@ package research
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -102,7 +103,7 @@ type braveResponse struct {
 // Search runs a Brave web search.
 func (b *BraveProvider) Search(ctx context.Context, req SearchRequest) ([]SearchResult, error) {
 	if !b.Available() {
-		return nil, fmt.Errorf("brave: kein API-Key konfiguriert")
+		return nil, errors.New(text(req.Lang, "brave: kein API-Key konfiguriert", "brave: no API key configured"))
 	}
 	if err := b.limiter.Wait(ctx); err != nil {
 		return nil, err
@@ -160,7 +161,7 @@ func (b *BraveProvider) Search(ctx context.Context, req SearchRequest) ([]Search
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		// Shared with the LLM-context route: also tells an exhausted credit
 		// balance apart from a momentary throttle, which the status alone cannot.
-		if err := classifyBraveFailure(resp.StatusCode, raw); err != nil {
+		if err := classifyBraveFailure(resp.StatusCode, raw, req.Lang); err != nil {
 			return nil, err
 		}
 	}
@@ -172,7 +173,8 @@ func (b *BraveProvider) Search(ctx context.Context, req SearchRequest) ([]Search
 
 	var parsed braveResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("brave: Antwort nicht lesbar: %w", err)
+		return nil, fmt.Errorf(text(req.Lang,
+			"brave: Antwort nicht lesbar: %w", "brave: the response could not be read: %w"), err)
 	}
 	return parseBraveResponse(parsed, count), nil
 }

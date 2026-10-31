@@ -57,13 +57,19 @@ type generateResult struct {
 // carries on either way: the reply is already on screen, so a warning describes
 // what happened more truthfully than aborting would. There is nothing to return
 // — no caller can do anything about it, which is exactly why it used to be lost.
-func (e *Engine) persist(chatID, what string, err error) {
+//
+// what names the record that did not land, as a uimsg error whose code is one of the
+// `chat.thing*` entries: the sentence is the window's, so the noun inside it has to be
+// translatable too — a German noun in an English toast was the same bug one level down.
+// Its payload is handed to the outer code as an argument, which translateError translates
+// recursively (the same nesting a wrapped refusal uses).
+func (e *Engine) persist(chatID string, what, err error) {
 	if err == nil {
 		return
 	}
 	e.emit(events.Warning, map[string]any{
 		"chatId":  chatID,
-		"warning": fmt.Sprintf("%s konnte nicht gespeichert werden: %s", what, err.Error()),
+		"warning": uimsg.Errorf("chat.saveFailed", what.Error(), err.Error()).Error(),
 	})
 }
 
@@ -100,7 +106,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 	if revertNote != "" {
 		defer func() {
 			if revertDelivered {
-				e.persist(in.Chat.ID, "Die zurückgesetzten Dateien", e.Store.ClearReverts(in.Chat.ID))
+				e.persist(in.Chat.ID, uimsg.Errorf("chat.thingRevertedFiles"), e.Store.ClearReverts(in.Chat.ID))
 			}
 		}()
 	}
@@ -117,7 +123,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 				return
 			}
 			for path, version := range diskNoted {
-				e.persist(in.Chat.ID, "Der Vermerk auf geänderte Dateien",
+				e.persist(in.Chat.ID, uimsg.Errorf("chat.thingDiskNote"),
 					e.Store.MarkFileSnapshotNoted(in.Chat.ID, path, version.disk, version.after))
 			}
 		}()
@@ -296,7 +302,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			row.Status = store.StatusFailed
 			row.StopReason = "request_error"
 			row.Content = ""
-			e.persist(in.Chat.ID, "Die Antwort", e.Store.UpdateMessage(row))
+			e.persist(in.Chat.ID, uimsg.Errorf("chat.thingAnswer"), e.Store.UpdateMessage(row))
 			result.Status = row.Status
 			return result, err
 		}
@@ -370,7 +376,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// Persist the reply together with its tool calls before executing them, so
 		// the transcript is replayable even if the process dies mid-tool.
 		row.ToolCallsJSON = encodeToolCalls(calls)
-		e.persist(in.Chat.ID, "Die Antwort", e.Store.UpdateMessage(row))
+		e.persist(in.Chat.ID, uimsg.Errorf("chat.thingAnswer"), e.Store.UpdateMessage(row))
 		result.Status = row.Status
 
 		result.Text = joinText(result.Text, text)
@@ -437,16 +443,22 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 	// Falling out of the loop means the iteration budget ran out while the model
 	// was still calling tools, so the turn ends on tool results with no answer.
 	// Saying so is better than a turn that appears to have produced nothing.
-	extra := ""
+	//
+	// Two sentences rather than one with an optional clause, and each written where it is
+	// emitted: the clause is a warning of its own, and a translator reading a concatenated
+	// string cannot tell where it starts. Both are literals at the call site because that is
+	// what the dictionary test reads — a code behind a variable is one nothing checks.
 	if result.Text != "" {
-		extra = " Der bisherige Text steht oben, ist aber möglicherweise nicht abgeschlossen."
+		e.emit(events.Warning, map[string]any{
+			"chatId":  in.Chat.ID,
+			"warning": uimsg.Errorf("chat.maxRoundsPartial", maxIter).Error(),
+		})
+	} else {
+		e.emit(events.Warning, map[string]any{
+			"chatId":  in.Chat.ID,
+			"warning": uimsg.Errorf("chat.maxRounds", maxIter).Error(),
+		})
 	}
-	e.emit(events.Warning, map[string]any{
-		"chatId": in.Chat.ID,
-		"warning": fmt.Sprintf("Die maximale Zahl an Tool-Runden (%d) ist erreicht — es wurde keine "+
-			"abschließende Antwort erzeugt.%s Sende eine neue Nachricht, damit das Modell die "+
-			"Ergebnisse auswertet.", maxIter, extra),
-	})
 	return result, nil
 }
 
@@ -515,7 +527,7 @@ func (e *Engine) startTool(chatID string, row store.Message, call llm.ToolCall) 
 		Status:    store.ToolPending,
 		CreatedAt: time.Now(),
 	}
-	e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
+	e.persist(chatID, uimsg.Errorf("chat.thingToolCall"), e.Store.UpsertToolCall(record))
 	e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 	return record
 }
@@ -587,7 +599,7 @@ func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Messag
 		output = fmt.Sprintf("Tool error: %s", uimsg.Sentence(execErr))
 	}
 	record.ResultJSON = resultJSON(output, summary)
-	e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
+	e.persist(chatID, uimsg.Errorf("chat.thingToolCall"), e.Store.UpsertToolCall(record))
 	e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 
 	// The condensation happens after the record: the tool card keeps what the tool
@@ -623,7 +635,7 @@ func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Messag
 		record.ContextTokens = llm.EstimateTokens(delivered)
 		record.Condensed = condensedByModel
 		record.Withheld = withheld
-		e.persist(chatID, "Der Tool-Aufruf", e.Store.UpsertToolCall(record))
+		e.persist(chatID, uimsg.Errorf("chat.thingToolCall"), e.Store.UpsertToolCall(record))
 		e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 	}
 	e.appendToolResult(chatID, call, delivered, record.Status)
@@ -858,7 +870,7 @@ func (e *Engine) cancelRemainingCalls(chatID string, row store.Message, calls []
 			Status:     store.ToolCancelled,
 			CreatedAt:  time.Now(),
 		}
-		e.persist(chatID, "Der abgebrochene Tool-Aufruf", e.Store.UpsertToolCall(record))
+		e.persist(chatID, uimsg.Errorf("chat.thingCancelledCall"), e.Store.UpsertToolCall(record))
 		e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 		e.appendToolResult(chatID, call, cancelledToolOutput, store.ToolCancelled)
 	}
@@ -883,7 +895,7 @@ func (e *Engine) appendToolResult(chatID string, call llm.ToolCall, output, stat
 		// Not a cosmetic failure: the assistant message that asked for this tool is
 		// already stored, so losing the result leaves a tool call without an answer
 		// and every later request in this chat is rejected by the backend.
-		e.persist(chatID, "Das Tool-Ergebnis", err)
+		e.persist(chatID, uimsg.Errorf("chat.thingToolResult"), err)
 		return
 	}
 	e.emit(events.Message, map[string]any{"chatId": chatID, "message": msg})

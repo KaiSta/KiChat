@@ -24,7 +24,15 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"strings"
+
+	ilang "kichat/internal/lang"
+	"kichat/internal/uimsg"
 )
+
+// text picks the sentence for a resolved language, so both wordings sit at the call site
+// together (config.Text). Every sentence this package writes is read by a person (a toast, a
+// card) or by the model (a tool result), and both follow the interface language — CODING.md §2.
+func text(resolved, de, en string) string { return ilang.Text(resolved, de, en) }
 
 // Request is one text-to-image generation, normalised across servers.
 type Request struct {
@@ -66,6 +74,11 @@ type Request struct {
 	// beside Prompt rather than replacing it so a picture can record both: what was
 	// asked for, and what the model was really drawn from.
 	Caption string
+	// Lang is the resolved language this request's errors and warnings are worded in
+	// (config.ModelLanguage). It travels on the request rather than on the provider because a
+	// provider is rebuilt on every settings save and a request is not: one value per draw, so
+	// a picture started in one language cannot finish its error message in another.
+	Lang string
 }
 
 // EffectivePrompt is what a backend should draw from: the caption when there is one,
@@ -294,7 +307,7 @@ var ErrHiresUnsupported = errors.New("image backend cannot run a second sampling
 // is "nothing happened" rather than "something broke". Without a distinct value the
 // caller can only see a context error through an HTTP client's own wrapping, and the
 // user's own click reads as a crash.
-var ErrCancelled = errors.New("das Zeichnen wurde abgebrochen")
+var ErrCancelled = uimsg.Detailf("images.cancelled", "the drawing was stopped")
 
 // ErrDrawInProgress marks a draw refused because this app is already drawing another
 // picture.
@@ -305,7 +318,8 @@ var ErrCancelled = errors.New("das Zeichnen wurde abgebrochen")
 // same checkpoint in memory twice, which is how a working setup becomes an out-of-memory
 // failure. The user's answer is to wait, which is why the message says so and the UI shows
 // it as an ordinary toast rather than as a broken setup.
-var ErrDrawInProgress = errors.New("es wird bereits ein Bild gezeichnet — bitte warten, bis es fertig ist")
+var ErrDrawInProgress = uimsg.Detailf("images.drawInProgress",
+	"a picture is already being drawn; wait for it to finish")
 
 // ErrNoModel marks a generation request against a server that has no checkpoint
 // loaded. It is its own error because the fix is specific and the message a bare
@@ -339,4 +353,23 @@ func (e *HTTPError) Error() string {
 // connection outright, which is a transport error rather than an HTTP one.
 func (e *HTTPError) Retryable() bool {
 	return e.StatusCode == 429 || e.StatusCode >= 500
+}
+
+// WithLang installs the language supplier on a provider that words its own errors, and returns
+// the provider unchanged so a construction can be wrapped in one expression.
+//
+// It is a function rather than a field on the interface for the reason llm.RequestCeiling is a
+// separate interface: a backend that writes no sentence does not have to carry an empty field,
+// and a provider added later is not silently language-less — it is simply not in the switch
+// below, which is visible where the others are.
+func WithLang(p Provider, lang func() string) Provider {
+	switch typed := p.(type) {
+	case *CLI:
+		typed.Lang = lang
+	case *SDWebUI:
+		typed.Lang = lang
+	case *NIM:
+		typed.Lang = lang
+	}
+	return p
 }

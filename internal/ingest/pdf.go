@@ -17,22 +17,27 @@ import (
 // extractPDF reads a PDF, preferring poppler's pdftotext for layout fidelity and
 // falling back to the built-in pure-Go parser. The method used is reported so
 // the UI can be honest about the quality of the extraction.
-func extractPDF(data []byte, preferExternal bool) (text string, pages int, warnings []string, method string, err error) {
+//
+// The named results avoid the name `text`, which is this package's "pick the wording" helper:
+// a result of that name would shadow it inside the one function that needs both.
+func extractPDF(data []byte, preferExternal bool, lang string) (content string, pages int, warnings []string, method string, err error) {
 	if preferExternal && PDFToTextAvailable() {
 		out, runErr := runPDFToText(data)
 		if runErr == nil && strings.TrimSpace(out) != "" {
-			text, pages = pageMarkedText(out)
-			if isLikelyScanned(text, pages) {
-				warnings = append(warnings, scannedWarning)
+			content, pages = pageMarkedText(out, lang)
+			if isLikelyScanned(content, pages) {
+				warnings = append(warnings, scannedWarning(lang))
 			}
-			return text, pages, warnings, "pdftotext", nil
+			return content, pages, warnings, "pdftotext", nil
 		}
 		if runErr != nil {
-			warnings = append(warnings, fmt.Sprintf("pdftotext fehlgeschlagen (%v), nutze internen PDF-Parser", runErr))
+			warnings = append(warnings, fmt.Sprintf(text(lang,
+				"pdftotext fehlgeschlagen (%v), nutze internen PDF-Parser",
+				"pdftotext failed (%v), using the built-in PDF parser"), runErr))
 		}
 	}
 
-	builtinText, builtinPages, builtinErr := extractPDFBuiltin(data)
+	builtinText, builtinPages, builtinErr := extractPDFBuiltin(data, lang)
 	if builtinErr != nil {
 		if len(warnings) > 0 {
 			return "", 0, warnings, "", uimsg.Errorf("ingest.pdfUnreadable", builtinErr)
@@ -40,14 +45,20 @@ func extractPDF(data []byte, preferExternal bool) (text string, pages int, warni
 		return "", 0, nil, "", uimsg.Errorf("ingest.pdfUnreadable", builtinErr)
 	}
 	if isLikelyScanned(builtinText, builtinPages) {
-		warnings = append(warnings, scannedWarning)
+		warnings = append(warnings, scannedWarning(lang))
 	}
 	return builtinText, builtinPages, warnings, "builtin", nil
 }
 
-// scannedWarning explains the one limitation the app cannot work around.
-const scannedWarning = "Das PDF enthält offenbar kaum Text (gescannte Seiten). " +
-	"OCR ist nicht installiert (tesseract fehlt), daher kann der Inhalt nicht gelesen werden."
+// scannedWarning explains the one limitation the app cannot work around. A function rather
+// than a const because it is a sentence: the language is the caller's.
+func scannedWarning(lang string) string {
+	return text(lang,
+		"Das PDF enthält offenbar kaum Text (gescannte Seiten). "+
+			"OCR ist nicht installiert (tesseract fehlt), daher kann der Inhalt nicht gelesen werden.",
+		"the PDF appears to contain very little text (scanned pages). "+
+			"OCR is not installed (tesseract is missing), so the content cannot be read.")
+}
 
 // isLikelyScanned reports whether a PDF produced almost no text relative to its
 // page count, which means it is a scan rather than a text document.
@@ -84,13 +95,20 @@ func runPDFToText(data []byte) (string, error) {
 	return stdout.String(), nil
 }
 
+// pageMarkerLabel opens a page, and it is a **format** rather than a sentence: chunk.go
+// matches `^## Seite (\d+)` to recover the page number a chunk belongs to, so translating it
+// would leave every page reference in a chat wrong — the one thing CODING.md §2 excludes from
+// the language rule ("anything another piece of code parses rather than reads"). The label the
+// *window* shows ("page 3") is a different string, in internal/tools.
+const pageMarkerLabel = "## Seite "
+
 // pageMarkedText splits pdftotext output on form feeds and labels each page so
 // the model can cite page numbers.
-func pageMarkedText(raw string) (string, int) {
+func pageMarkedText(raw string, lang string) (string, int) {
 	raw = normaliseLines(raw)
 	parts := strings.Split(raw, "\f")
 	if len(parts) <= 1 {
-		return "## Seite 1\n" + strings.TrimSpace(raw), 1
+		return pageMarkerLabel + "1\n" + strings.TrimSpace(raw), 1
 	}
 	var sb strings.Builder
 	pages := 0
@@ -100,7 +118,7 @@ func pageMarkedText(raw string) (string, int) {
 			continue
 		}
 		pages++
-		fmt.Fprintf(&sb, "## Seite %d\n%s\n\n", pages, content)
+		fmt.Fprintf(&sb, pageMarkerLabel+"%d\n%s\n\n", pages, content)
 	}
 	if pages == 0 {
 		pages = 1
@@ -110,7 +128,7 @@ func pageMarkedText(raw string) (string, int) {
 
 // extractPDFBuiltin uses the pure-Go parser. It recovers from panics because
 // malformed PDFs can trip up strict parsers.
-func extractPDFBuiltin(data []byte) (text string, pages int, err error) {
+func extractPDFBuiltin(data []byte, lang string) (content string, pages int, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = uimsg.Errorf("ingest.pdfCrashed", r)
@@ -138,7 +156,7 @@ func extractPDFBuiltin(data []byte) (text string, pages int, err error) {
 			continue
 		}
 		content = normaliseLines(content)
-		fmt.Fprintf(&sb, "## Seite %d\n%s\n\n", i, content)
+		fmt.Fprintf(&sb, pageMarkerLabel+"%d\n%s\n\n", i, content)
 	}
 	out := strings.TrimRight(sb.String(), "\n")
 	if strings.TrimSpace(out) == "" {

@@ -213,14 +213,21 @@ func TestGroqsOversizedRefusalFoldsTheChatAndAnswers(t *testing.T) {
 		t.Errorf("trigger = %q, want %q", summaries[0].Trigger, triggerTooLarge)
 	}
 
-	// The user is told why, with the limit the vendor named in it.
+	// The user is told why, with the limit the vendor named in it. The sentence is the
+	// window's, so what is pinned is the code and the number it carries — the refusal names
+	// the limit, and the note inside it names the requested size.
 	sawWarning := false
 	for _, ev := range captured.snapshot() {
 		if ev.name != events.Warning {
 			continue
 		}
-		text, _ := ev.payload["warning"].(string)
-		if strings.Contains(text, "zu groß") && strings.Contains(text, "10000") {
+		message, ok := uimsg.Parse(fmt.Sprint(ev.payload["warning"]))
+		if !ok || message.Code != "chat.tooLargeRejected" {
+			continue
+		}
+		note, ok := uimsg.Parse(message.Args[1])
+		if ok && note.Code == "chat.ceilingNoteRequested" &&
+			len(note.Args) == 2 && note.Args[0] == "10000" {
 			sawWarning = true
 		}
 	}
@@ -374,10 +381,16 @@ func TestAFoldThatFailsIsNotReportedAsNothingToFold(t *testing.T) {
 		t.Errorf("code = %q, want the fold-failed code rather than nothing-to-fold", message.Code)
 	}
 	// The cause is named, and it is the summariser rather than the chat: that warning
-	// and the sentence above describe one event, so they cannot disagree.
+	// and the sentence above describe one event, so they cannot disagree. The summariser's
+	// own refusal arrives nested inside the code, which is how one message carries both.
 	sawCause := false
 	for _, w := range warnings {
-		if strings.Contains(w, "konnte nicht komprimiert werden") && strings.Contains(w, "antwortet nicht") {
+		message, ok := uimsg.Parse(w)
+		if !ok || message.Code != "chat.foldFailed" || len(message.Args) != 1 {
+			continue
+		}
+		cause, ok := uimsg.Parse(message.Args[0])
+		if ok && cause.Code == "chat.summaryFailed" && strings.Contains(cause.Args[0], "antwortet nicht") {
 			sawCause = true
 		}
 	}
