@@ -126,7 +126,9 @@ func TestDeepSeekStreamParsesReasoningContent(t *testing.T) {
 		`{"choices":[{"delta":{"content":null,"reasoning_content":"Der Nutzer "}}]}`,
 		`{"choices":[{"delta":{"content":null,"reasoning_content":"will ein Wort."}}]}`,
 		`{"choices":[{"delta":{"content":"Hallo"}}]}`,
-		`{"choices":[{"delta":{"content":", Welt"}}],"usage":{"prompt_tokens":31,"completion_tokens":7,"total_tokens":38}}`,
+		// The cache split arrives at the top level of `usage`, not inside
+		// prompt_tokens_details: 24 of the 31 prompt tokens were a prefix hit.
+		`{"choices":[{"delta":{"content":", Welt"}}],"usage":{"prompt_tokens":31,"completion_tokens":7,"total_tokens":38,"prompt_cache_hit_tokens":24,"prompt_cache_miss_tokens":7}}`,
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -178,6 +180,12 @@ func TestDeepSeekStreamParsesReasoningContent(t *testing.T) {
 	}
 	if usage == nil || usage.PromptTokens != 31 || usage.CompletionTokens != 7 {
 		t.Errorf("usage = %+v, want the numbers the stream reported", usage)
+	}
+	// The cache hit count is what makes a cached round visible in the reply's own
+	// numbers; dropping the top-level field would leave it at zero for every reply.
+	if usage != nil && usage.CachedPromptTokens != 24 {
+		t.Errorf("cached prompt tokens = %d, want the 24 the usage frame reported",
+			usage.CachedPromptTokens)
 	}
 	// A measured prompt_tokens is what the context meter needs, and only
 	// stream_options.include_usage makes the API send it.

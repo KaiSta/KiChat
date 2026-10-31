@@ -20,6 +20,10 @@ export function MessageStats({ message }: { message: storeTypes.Message }) {
   // Being explicit about provenance matters: a number we timed ourselves is not
   // the same as one the backend reported.
   const estimated = message.statsSource === 'estimated'
+  // How much of this request the backend served from its own prompt cache. Absent
+  // means the backend reported nothing, which is not the same fact as "nothing was
+  // cached" — so the row is left out rather than shown as zero.
+  const cacheHits = message.cacheHitTokens ?? 0
 
   return (
     <div className="mt-2 text-[11px]" style={{ color: 'var(--text-faint)' }}>
@@ -62,6 +66,15 @@ export function MessageStats({ message }: { message: storeTypes.Message }) {
           <Row label={t('metrics.model')} value={message.model || '–'} />
           <Row label={t('metrics.backend')} value={message.backend || '–'} />
           <Row label={t('metrics.promptTokens')} value={formatNumber(message.promptTokens)} />
+          {cacheHits > 0 && (
+            <Row
+              label={t('metrics.cacheHits')}
+              value={t('metrics.cacheHitsValue', {
+                tokens: formatNumber(cacheHits),
+                percent: message.promptTokens > 0 ? Math.round((cacheHits / message.promptTokens) * 100) : 0,
+              })}
+            />
+          )}
           <Row label={t('metrics.completionTokens')} value={formatNumber(message.completionTokens)} />
           <Row label={t('metrics.stopReason')} value={message.stopReason || '–'} />
           <Row

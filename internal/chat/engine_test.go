@@ -654,7 +654,8 @@ func TestEnginePersistsSpeedStats(t *testing.T) {
 		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192},
 		replies: [][]llm.StreamEvent{{
 			{Type: llm.EventDelta, Text: "Antwort"},
-			{Type: llm.EventUsage, Usage: &llm.Usage{PromptTokens: 120, CompletionTokens: 8, TotalTokens: 128}},
+			{Type: llm.EventUsage, Usage: &llm.Usage{PromptTokens: 120, CompletionTokens: 8,
+				TotalTokens: 128, CachedPromptTokens: 96}},
 			{Type: llm.EventDone, Stats: &llm.GenerationStats{
 				TokensPerSecond: 42.5, TimeToFirstTokenMs: 180, GenerationMs: 190,
 				StopReason: "stop", Source: llm.SourceLMStudio,
@@ -689,6 +690,11 @@ func TestEnginePersistsSpeedStats(t *testing.T) {
 	}
 	if assistant.PromptTokens != 120 || assistant.CompletionTokens != 8 {
 		t.Errorf("tokens = %d/%d, want 120/8", assistant.PromptTokens, assistant.CompletionTokens)
+	}
+	// The cache split is stored with the rest of the numbers, because the window shows
+	// it beside the prompt size and a reply's cost is not inferable without it.
+	if assistant.CacheHitTokens != 96 {
+		t.Errorf("cache hits = %d, want the 96 the backend reported", assistant.CacheHitTokens)
 	}
 	if assistant.StatsSource != llm.SourceLMStudio {
 		t.Errorf("stats source = %q", assistant.StatsSource)

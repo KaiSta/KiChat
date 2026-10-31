@@ -176,11 +176,12 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		}
 		if _, err := tx.Exec(`
 INSERT INTO messages (`+messageColumns+`)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			m.ID, c.ID, m.Seq, m.Role, m.Content, m.Reasoning, m.Name, m.ToolCallsJSON,
 			m.ToolCallID, status, millis(m.CreatedAt), m.Backend, m.Model,
 			m.PromptTokens, m.CompletionTokens, m.TokensPerSecond, m.TTFTMs,
-			m.GenerationMs, m.StopReason, m.StatsSource, sourcesJSON(m.Sources)); err != nil {
+			m.GenerationMs, m.StopReason, m.StatsSource, m.CacheHitTokens,
+			sourcesJSON(m.Sources)); err != nil {
 			return fmt.Errorf("write message %s: %w", m.ID, err)
 		}
 	}

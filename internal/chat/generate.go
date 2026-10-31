@@ -361,6 +361,11 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		if usage != nil {
 			row.PromptTokens = usage.PromptTokens
 			row.CompletionTokens = usage.CompletionTokens
+			// How much of that prompt the backend served from its own cache. It is
+			// stored because it is the half of the request a reader cannot infer: two
+			// rounds can send the same 200 000 tokens and cost an order of magnitude
+			// apart (DEEPSEEK.md §5).
+			row.CacheHitTokens = usage.CachedPromptTokens
 		}
 		switch {
 		case ctx.Err() != nil:

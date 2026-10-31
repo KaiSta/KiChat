@@ -548,6 +548,14 @@ CREATE INDEX IF NOT EXISTS idx_file_snapshots_chat ON file_snapshots(chat_id, up
 	// Empty for a file nobody has told the model about, and cleared by a write, which makes
 	// the file the model's own text again.
 	`ALTER TABLE file_snapshots ADD COLUMN noted_sha TEXT NOT NULL DEFAULT ''`,
+	// 15: how much of a message's prompt the backend served from its own cache.
+	//
+	// A hosted backend caches a request prefix and bills a hit far below a miss
+	// (DEEPSEEK.md §5), so this number is the difference between a reply that looked
+	// expensive and one that re-used everything it could. Zero is every row written
+	// before this column existed and every backend that reports nothing, which is why
+	// the window shows the row only when it is positive.
+	`ALTER TABLE messages ADD COLUMN cache_hit_tokens INTEGER NOT NULL DEFAULT 0`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

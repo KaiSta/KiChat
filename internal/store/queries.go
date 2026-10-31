@@ -216,7 +216,8 @@ func (s *Store) ListChats(includeArchived bool) ([]Chat, error) {
 
 const messageColumns = `id,chat_id,seq,role,content,reasoning,name,tool_calls_json,
   tool_call_id,status,created_at,backend,model,prompt_tokens,completion_tokens,
-  tokens_per_second,ttft_ms,generation_ms,stop_reason,stats_source,sources_json`
+  tokens_per_second,ttft_ms,generation_ms,stop_reason,stats_source,cache_hit_tokens,
+  sources_json`
 
 func scanMessage(row interface{ Scan(...any) error }) (Message, error) {
 	var m Message
@@ -225,7 +226,8 @@ func scanMessage(row interface{ Scan(...any) error }) (Message, error) {
 	err := row.Scan(&m.ID, &m.ChatID, &m.Seq, &m.Role, &m.Content, &m.Reasoning,
 		&m.Name, &m.ToolCallsJSON, &m.ToolCallID, &m.Status, &created, &m.Backend,
 		&m.Model, &m.PromptTokens, &m.CompletionTokens, &m.TokensPerSecond,
-		&m.TTFTMs, &m.GenerationMs, &m.StopReason, &m.StatsSource, &sources)
+		&m.TTFTMs, &m.GenerationMs, &m.StopReason, &m.StatsSource, &m.CacheHitTokens,
+		&sources)
 	if err != nil {
 		return Message{}, err
 	}
@@ -272,11 +274,11 @@ func (s *Store) CreateMessage(m Message) error {
 	}
 	_, err := s.db.Exec(`
 INSERT INTO messages (`+messageColumns+`)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.ID, m.ChatID, m.Seq, m.Role, m.Content, m.Reasoning, m.Name,
 		m.ToolCallsJSON, m.ToolCallID, m.Status, millis(m.CreatedAt), m.Backend,
 		m.Model, m.PromptTokens, m.CompletionTokens, m.TokensPerSecond, m.TTFTMs,
-		m.GenerationMs, m.StopReason, m.StatsSource, sourcesJSON(m.Sources))
+		m.GenerationMs, m.StopReason, m.StatsSource, m.CacheHitTokens, sourcesJSON(m.Sources))
 	if err != nil {
 		return err
 	}
@@ -321,11 +323,11 @@ func (s *Store) AppendMessage(m Message) (Message, error) {
 
 	if _, err := tx.Exec(`
 INSERT INTO messages (`+messageColumns+`)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.ID, m.ChatID, m.Seq, m.Role, m.Content, m.Reasoning, m.Name,
 		m.ToolCallsJSON, m.ToolCallID, m.Status, millis(m.CreatedAt), m.Backend,
 		m.Model, m.PromptTokens, m.CompletionTokens, m.TokensPerSecond, m.TTFTMs,
-		m.GenerationMs, m.StopReason, m.StatsSource, sourcesJSON(m.Sources)); err != nil {
+		m.GenerationMs, m.StopReason, m.StatsSource, m.CacheHitTokens, sourcesJSON(m.Sources)); err != nil {
 		return m, err
 	}
 	if _, err := tx.Exec(`UPDATE chats SET updated_at=? WHERE id=?`, millis(time.Now()), m.ChatID); err != nil {
@@ -343,10 +345,11 @@ func (s *Store) UpdateMessage(m Message) error {
 	_, err := s.db.Exec(`
 UPDATE messages SET content=?,reasoning=?,tool_calls_json=?,status=?,
   prompt_tokens=?,completion_tokens=?,tokens_per_second=?,ttft_ms=?,
-  generation_ms=?,stop_reason=?,stats_source=?,backend=?,model=? WHERE id=?`,
+  generation_ms=?,stop_reason=?,stats_source=?,backend=?,model=?,
+  cache_hit_tokens=? WHERE id=?`,
 		m.Content, m.Reasoning, m.ToolCallsJSON, m.Status, m.PromptTokens,
 		m.CompletionTokens, m.TokensPerSecond, m.TTFTMs, m.GenerationMs,
-		m.StopReason, m.StatsSource, m.Backend, m.Model, m.ID)
+		m.StopReason, m.StatsSource, m.Backend, m.Model, m.CacheHitTokens, m.ID)
 	return err
 }
 

@@ -74,6 +74,12 @@ func NormaliseMode(mode string) string {
 }
 
 // Message is one turn in a chat.
+//
+// CacheHitTokens is how much of PromptTokens the backend served from its own prompt cache, and
+// it is the half of a request a reader cannot infer: two rounds can send the same 200 000 tokens
+// and cost an order of magnitude apart (DEEPSEEK.md §5). Zero means the backend reported no such
+// number, which is not the same fact as a request that re-used nothing — which is why the window
+// shows it only when it is positive.
 type Message struct {
 	ID               string    `json:"id"`
 	ChatID           string    `json:"chatId"`
@@ -89,6 +95,7 @@ type Message struct {
 	Backend          string    `json:"backend"`
 	Model            string    `json:"model"`
 	PromptTokens     int       `json:"promptTokens"`
+	CacheHitTokens   int       `json:"cacheHitTokens,omitempty"`
 	CompletionTokens int       `json:"completionTokens"`
 	TokensPerSecond  float64   `json:"tokensPerSecond"`
 	TTFTMs           int64     `json:"ttftMs"`

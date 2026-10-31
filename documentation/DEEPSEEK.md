@@ -158,8 +158,16 @@ the cache is matched **from the start of the request** in 64-token blocks, and t
 billed far below a miss. Neither the feature nor the price is something KiChat controls; what it
 controls is whether a prefix ever matches.
 
-The consequence that shapes a coding reply is a layout rule:
+Two consequences, and the second is why a coding reply is laid out the way it is:
 
+- **The hit count is read, stored and shown.** The stream fills `Usage.CachedPromptTokens` from
+  `prompt_cache_hit_tokens` — the top level of `usage`, not the `prompt_tokens_details
+  .cached_tokens` an OpenAI-shaped server sends — and the engine writes it onto the reply's row
+  (`messages.cache_hit_tokens`, migration 15). The reply's **Details** shows it as *Cache hits*
+  with its share of the prompt, so a round that re-used everything it could is distinguishable
+  from one that did not. The miss count is not read: `prompt_tokens − hits` says the same thing,
+  and two numbers that must agree are two numbers that can disagree. Zero means "nobody reported
+  one", which is why the row is absent rather than zero on a backend that publishes nothing.
 - **A block that changes between the rounds of one reply must not sit in front of the history it
   would invalidate.** A changed prefix cannot match at the point of change or anywhere after it,
   so a project's git block rides in the tail of the request rather than in the system message
@@ -168,6 +176,10 @@ The consequence that shapes a coding reply is a layout rule:
   zero — a full miss for the whole history behind it, every round.
   `TestAProjectsGitStateStaysOutOfTheCachedPrefix` pins the property, that every message but the
   last is byte-identical across an edit.
+
+What the numbers still do not add up to is **money**: KiChat carries no price table, so a reply's
+Details says how many of its input tokens came from the cache and not what the round cost. A
+vendor that changes its prices would otherwise silently change what the app displays.
 
 The one thing this cannot protect is the system prompt itself: `{{context_used}}` and
 `{{datetime}}` change between requests by definition, so a prompt that uses them opts out of

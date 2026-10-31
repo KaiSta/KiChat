@@ -1185,6 +1185,7 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 		{"tool_calls", "condensed"},
 		{"tool_calls", "withheld"},
 		{"messages", "sources_json"},
+		{"messages", "cache_hit_tokens"},
 		{"chats", "mode"},
 		{"chats", "workspace"},
 		{"file_snapshots", "reverted_at"},

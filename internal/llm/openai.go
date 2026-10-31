@@ -574,6 +574,14 @@ type openAIChunk struct {
 		PromptTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
+		// DeepSeek reports its prefix-cache split at the top level of `usage`
+		// rather than inside prompt_tokens_details, with the hit count on its own
+		// and the rest as misses. Reading it is what makes a cached round visible
+		// at all: without it the hit count is simply zero for every DeepSeek
+		// reply, which is indistinguishable from a cache that never hit
+		// (DEEPSEEK.md §5).
+		PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`
+		PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"`
 		// Some OpenAI-compatible servers report the thinking share here instead
 		// of in a namespace of their own. Reading it keeps the context meter
 		// honest about a model that spent its budget thinking.
@@ -1246,6 +1254,12 @@ func (p *openAICompatProvider) consume(ctx context.Context, rc io.ReadCloser, ev
 			}
 			if chunk.Usage.PromptTokensDetails != nil {
 				u.CachedPromptTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+			}
+			// The top-level spelling wins where a vendor sends both: it is the field
+			// that vendor documents, and a stale or zeroed `cached_tokens` beside it
+			// would otherwise hide every hit.
+			if chunk.Usage.PromptCacheHitTokens > 0 {
+				u.CachedPromptTokens = chunk.Usage.PromptCacheHitTokens
 			}
 			if chunk.Usage.CompletionTokensDetails != nil {
 				u.ReasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens

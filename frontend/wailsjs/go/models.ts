@@ -2113,6 +2113,7 @@ export namespace store {
 	    backend: string;
 	    model: string;
 	    promptTokens: number;
+	    cacheHitTokens?: number;
 	    completionTokens: number;
 	    tokensPerSecond: number;
 	    ttftMs: number;
@@ -2143,6 +2144,7 @@ export namespace store {
 	        this.backend = source["backend"];
 	        this.model = source["model"];
 	        this.promptTokens = source["promptTokens"];
+	        this.cacheHitTokens = source["cacheHitTokens"];
 	        this.completionTokens = source["completionTokens"];
 	        this.tokensPerSecond = source["tokensPerSecond"];
 	        this.ttftMs = source["ttftMs"];
