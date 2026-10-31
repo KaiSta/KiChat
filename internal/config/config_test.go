@@ -66,24 +66,41 @@ func TestLoadKeepsDefaultsForFieldsAddedLater(t *testing.T) {
 	}
 }
 
-// TestToolLoopDefaultsSuitACodingProject pins the two figures the coding path is
-// measured against: a reply gets enough rounds to read, edit and run a check more than
-// once, and enough tool-result tokens for a failing check plus several reads. Both were
-// sized for a research turn — 6 rounds and 25 000 tokens — which a two-file change
-// exhausts before it has read the failure.
+// TestToolLoopDefaultsSuitACodingProject pins the figures the two modes are measured
+// against: a project's reply gets enough rounds to read, edit and run a check more than
+// once — more than an ordinary chat, which ends when the model stops asking for tools —
+// and enough tool-result tokens for a failing check plus several reads. Both round figures
+// used to be one, sized for a research turn (6, then 24), which a two-file change exhausts
+// before it has read the failure.
 func TestToolLoopDefaultsSuitACodingProject(t *testing.T) {
 	def := Default()
 	if def.ToolIterations != 24 {
 		t.Errorf("ToolIterations = %d, want 24", def.ToolIterations)
 	}
+	if def.CodingToolIterations != 60 {
+		t.Errorf("CodingToolIterations = %d, want 60", def.CodingToolIterations)
+	}
 	if def.ToolTokenBudget != 60000 {
 		t.Errorf("ToolTokenBudget = %d, want 60000", def.ToolTokenBudget)
 	}
-	// The ceiling has to leave room above the default, or the default is the ceiling: a
+	if def.CodingToolTokenBudget != 120000 {
+		t.Errorf("CodingToolTokenBudget = %d, want 120000", def.CodingToolTokenBudget)
+	}
+	// A project must not be the smaller of the two: the field it reads is the one that has
+	// to survive a refactor, and a chat's figure was never sized for one.
+	if def.CodingToolIterations <= def.ToolIterations {
+		t.Errorf("CodingToolIterations = %d, want more than the chat's %d",
+			def.CodingToolIterations, def.ToolIterations)
+	}
+	if def.CodingToolTokenBudget <= def.ToolTokenBudget {
+		t.Errorf("CodingToolTokenBudget = %d, want more than the chat's %d",
+			def.CodingToolTokenBudget, def.ToolTokenBudget)
+	}
+	// The ceiling has to leave room above both defaults, or the default is the ceiling: a
 	// refactor with a few more files than usual is a choice the user can make.
-	if MaxToolIterations <= DefaultToolIterations {
-		t.Errorf("MaxToolIterations = %d, want more than the default %d",
-			MaxToolIterations, DefaultToolIterations)
+	if MaxToolIterations <= DefaultCodingToolIterations {
+		t.Errorf("MaxToolIterations = %d, want more than the coding default %d",
+			MaxToolIterations, DefaultCodingToolIterations)
 	}
 }
 
@@ -99,21 +116,42 @@ func TestToolLoopRepairKeepsAChoiceAndBoundsAHandEditedBlob(t *testing.T) {
 		t.Errorf("an unset ToolIterations became %d, want the default %d",
 			unset.ToolIterations, DefaultToolIterations)
 	}
+	// A blob written before the project's field existed carries no coding figure, and that
+	// absence is exactly what a project upgrading to it has: it must open on the default.
+	if unset.CodingToolIterations != DefaultCodingToolIterations {
+		t.Errorf("an unset CodingToolIterations became %d, want the default %d",
+			unset.CodingToolIterations, DefaultCodingToolIterations)
+	}
 	if unset.ToolTokenBudget != DefaultToolTokenBudget {
 		t.Errorf("an unset ToolTokenBudget became %d, want the default %d",
 			unset.ToolTokenBudget, DefaultToolTokenBudget)
 	}
+	if unset.CodingToolTokenBudget != DefaultCodingToolTokenBudget {
+		t.Errorf("an unset CodingToolTokenBudget became %d, want the default %d",
+			unset.CodingToolTokenBudget, DefaultCodingToolTokenBudget)
+	}
 
-	huge := Settings{ToolIterations: 5000}
+	huge := Settings{ToolIterations: 5000, CodingToolIterations: 5000}
 	huge.normalise()
 	if huge.ToolIterations != MaxToolIterations {
 		t.Errorf("a stored 5000 became %d, want the %d ceiling", huge.ToolIterations, MaxToolIterations)
 	}
+	if huge.CodingToolIterations != MaxToolIterations {
+		t.Errorf("a stored coding 5000 became %d, want the %d ceiling",
+			huge.CodingToolIterations, MaxToolIterations)
+	}
 
-	chosen := Settings{ToolIterations: 6}
+	chosen := Settings{ToolIterations: 6, CodingToolIterations: 12, ToolTokenBudget: 30000, CodingToolTokenBudget: 90000}
 	chosen.normalise()
 	if chosen.ToolIterations != 6 {
 		t.Errorf("a stored 6 became %d, want it kept", chosen.ToolIterations)
+	}
+	if chosen.CodingToolIterations != 12 {
+		t.Errorf("a stored coding 12 became %d, want it kept", chosen.CodingToolIterations)
+	}
+	if chosen.ToolTokenBudget != 30000 || chosen.CodingToolTokenBudget != 90000 {
+		t.Errorf("stored token budgets became %d/%d, want 30000/90000 kept",
+			chosen.ToolTokenBudget, chosen.CodingToolTokenBudget)
 	}
 }
 

@@ -1263,7 +1263,9 @@ Available tools: {{tool_list}}`,
     ],
     autoTitle: true,
     toolIterations: 24,
+    codingToolIterations: 60,
     toolTokenBudget: 60000,
+    codingToolTokenBudget: 120000,
     nativeTools: true,
     // Both off, like the shipped default: a fixture that granted a permission would hide
     // the very state the coding tab's switches are about.

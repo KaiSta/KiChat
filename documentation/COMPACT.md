@@ -204,6 +204,17 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   quiet, so the fold it sees is the mid-turn one). The mid-turn switch is **subordinate**: a chat
   whose automatic compaction is off does not regain it between rounds.
 
+  A **project** is the one exception, and `autoFoldThreshold` is where it is written down: it
+  asks its threshold between rounds whatever the switch says. The switch is a choice a chat can
+  make because a chat has an alternative — end the answer, fold before the next message — while
+  a project's reply *is* the piece of work, and the round it is in the middle of is the answer,
+  so a request that outgrows the window costs that work instead of delaying it. Nothing else
+  folds it either: `Assemble` ([internal/chat/context.go](../internal/chat/context.go)) measures
+  an over-full request and never trims one. The master switches are not overridden, so
+  compaction switched off is still no fold, and
+  `TestAProjectChecksBetweenRoundsWithoutTheChatSwitch` pins both halves — the fold with the
+  chat switch where it ships, and none with the feature off.
+
   How far that fold goes is `ceilingTarget`, and it used to be ignored: the walk priced the aim
   against the caller's own `Target`, which an automatic run leaves at **0** — where 0 means "fold
   as far as the cut allows". Every ceiling fold therefore went all the way to the newest user
@@ -833,7 +844,7 @@ approximate. Two things happen with it:
 | setting | default | effect |
 | --- | --- | --- |
 | `Enabled` | `true` | master switch for the automatic **threshold** (manual still works, and a backend's published ceiling folds regardless — §4) |
-| `MidTurnCheck` | `false` | ask the threshold again between the tool rounds of one answer. Off because it costs a summary inside an answer somebody waits for; it is the only mid-turn check a backend with no published ceiling gets (§4) |
+| `MidTurnCheck` | `false` | ask the threshold again between the tool rounds of one answer. Off because it costs a summary inside an answer somebody waits for; it is the only mid-turn check a backend with no published ceiling gets, and a **project** asks it regardless — its reply has no fold point between two messages (§4) |
 | `Threshold` | `0.80` | projected ratio at which the threshold bound fires |
 | `KeepRecentTurns` | `6` | turns kept verbatim; also the floor for the forced-short-chat rule |
 | `ReserveForResponse` | `1024` | headroom the budget keeps for the answer |

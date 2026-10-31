@@ -54,6 +54,15 @@ func sleepCommand(seconds int) string {
 	return "sleep " + strconv.Itoa(seconds)
 }
 
+// announceThenSleepCommand prints one word and then hangs, which is the shape of a test
+// run that got somewhere before it stopped: the output exists and the command did not end.
+func announceThenSleepCommand(word string, seconds int) string {
+	if runtime.GOOS == "windows" {
+		return "echo " + word + " & " + sleepCommand(seconds)
+	}
+	return "echo " + word + "; " + sleepCommand(seconds)
+}
+
 // commandService is projectService with a confirmer that says yes, so a test can be about
 // what the command does rather than about the gate.
 func commandService(t *testing.T) (*Service, string, string) {
@@ -252,6 +261,62 @@ func TestACommandThatDoesNotEndIsStoppedAndItsTreeDies(t *testing.T) {
 	time.Sleep(2500 * time.Millisecond)
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Error("a grandchild survived the timeout and wrote into the project folder")
+	}
+}
+
+// TestATimedOutCommandKeepsWhatItPrinted is the half of the timeout result that is not
+// empty. A command that printed before the wall was reached has to travel with that text:
+// otherwise a test run that got somewhere is indistinguishable from one that said nothing,
+// and the model's next move is a guess.
+func TestATimedOutCommandKeepsWhatItPrinted(t *testing.T) {
+	service, chatID, _ := commandService(t)
+	out, err := service.Execute(context.Background(), chatID, ToolRunCommand,
+		`{"command":`+jsonString(announceThenSleepCommand("before_the_wall", 30))+`,"timeout_seconds":1}`)
+	if err != nil {
+		t.Fatalf("run_command: %v", err)
+	}
+	// Twice: once in the echoed command line, once in the output the tool kept.
+	if got := strings.Count(out, "before_the_wall"); got < 2 {
+		t.Errorf("the timeout result does not carry what the command printed (%d mentions):\n%s", got, out)
+	}
+	if !strings.Contains(out, "Ausgabe oben ist unvollständig") {
+		t.Errorf("a timed-out command with output does not say its output is partial:\n%s", out)
+	}
+	if strings.Contains(out, "keine Ausgabe aufgefangen") {
+		t.Errorf("a command with output was reported as having captured none:\n%s", out)
+	}
+}
+
+// TestATimedOutCommandWithNoOutputSaysWhy is the case that was reported: `go test … | tail
+// -40` was stopped at its limit and the card said "(keine Ausgabe)" beside "the output above
+// is incomplete", which reads as a silent success. The filter buffers, so nothing had
+// arrived — the result has to say that, name the cause and give the way out, or the model
+// has to guess whether the tests passed and whether retrying is worth five more minutes.
+func TestATimedOutCommandWithNoOutputSaysWhy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the buffering fixture is a POSIX pipeline")
+	}
+	service, chatID, _ := commandService(t)
+	// The pipeline is the point: the producer writes, but `tail` keeps the last lines in
+	// memory until its input ends — and the kill means it never does. This is the shape of
+	// the reported call, `go test -v … 2>&1 | tail -40`.
+	line := "(echo hallo; " + sleepCommand(30) + ") | tail -1"
+	out, err := service.Execute(context.Background(), chatID, ToolRunCommand,
+		`{"command":`+jsonString(line)+`,"timeout_seconds":1}`)
+	if err != nil {
+		t.Fatalf("run_command: %v", err)
+	}
+	if !strings.Contains(out, "keine Ausgabe aufgefangen") {
+		t.Errorf("a silent timeout is reported as if the command had been quiet:\n%s", out)
+	}
+	if !strings.Contains(out, "`| tail`") {
+		t.Errorf("the result does not name the buffering pipe as the cause:\n%s", out)
+	}
+	if !strings.Contains(out, "-timeout 60s") {
+		t.Errorf("the result does not say how to get output before the cut:\n%s", out)
+	}
+	if strings.Contains(out, "Ausgabe oben ist unvollständig") {
+		t.Errorf("an empty result claims to have partial output above it:\n%s", out)
 	}
 }
 

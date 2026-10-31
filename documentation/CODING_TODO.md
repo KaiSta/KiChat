@@ -25,12 +25,17 @@ shell is killed.
 Three things this list used to open with are now held, and it matters what they do and do not
 reach:
 
-- **24 tool rounds and 60 000 tool-result tokens per reply**, up from 6 and 25 000, with the
-  Settings ceiling at **100** rounds (`config.DefaultToolIterations`, `MaxToolIterations`,
-  `DefaultToolTokenBudget`). Reading four files, editing two and running `make check` fits now.
-  The token figure is still cut to the room the next request actually has, so a small local
-  window is unaffected; and a settings row that already stores 6 keeps 6, because a present
-  value cannot be told from a deliberate one — the new default reaches a fresh install only.
+- **A project replies on its own figures: 60 rounds and 120 000 tool-result tokens**, against
+  a chat's 24 and 60 000 (`config.DefaultCodingToolIterations`, `DefaultCodingToolTokenBudget`,
+  `DefaultToolIterations`, `DefaultToolTokenBudget`; `MaxToolIterations` is the ceiling both
+  round fields are repaired against). Reading four files, editing two and running `make check`
+  fits. They are separate figures because sharing them was the bug: a chat set to 10 rounds
+  cut a project at 10, and the shared token budget was two whole reads of a file the size of
+  `app.go` (24 429 tokens each) with most of the project's rounds still to come
+  (`chat.maxToolRounds` and `chat.maxToolResultTokens` pick by mode). Both are still cut to
+  the room the next request actually has, so a small local window is unaffected; and a
+  settings row that already stores 6 — or an absent token field — is repaired the same way,
+  so a fresh install and an upgraded one both get the project's figures.
 - **The working tree travels with the prompt.** A project whose folder is a git repository gets
   `<project_git>` on every turn: branch (or detached), ahead/behind, and every pending path with
   the staged half, the kind of change and its line counts — 40 entries and 4 KiB at most, charged

@@ -190,6 +190,42 @@ func (e *Engine) Send(req TurnRequest) error {
 	return nil
 }
 
+// maxToolRounds is how many model/tool rounds this chat's reply may take, and it is
+// chosen by mode rather than shared.
+//
+// A project's reply is a piece of work that is supposed to keep going — read, edit, run the
+// tests, read the failure, edit again — so it reads its own figure
+// (`Settings.CodingToolIterations`, 60 by default). Every other chat ends when the model
+// stops asking for tools, and its figure guards against a model that never does. One shared
+// number could not be both: a chat setting of ten, which is somebody's idea of a question
+// being answered, cut a refactor at ten rounds.
+//
+// A zero in the project's field falls back to the chat's number rather than to one round:
+// it is what a `config.Settings` literal in a test carries, and a settings blob has had it
+// repaired by `normalise` long before it gets here.
+func maxToolRounds(chat store.Chat, settings config.Settings) int {
+	if chat.IsProject() && settings.CodingToolIterations > 0 {
+		return settings.CodingToolIterations
+	}
+	return settings.ToolIterations
+}
+
+// maxToolResultTokens is how much tool-result text one reply may carry into its next
+// request, and it is chosen by mode for the same reason the rounds are.
+//
+// The material differs more than the size of the reply does: a chat's budget is spent on
+// scraped pages and search results, a project's on source files and the output of a build.
+// A whole read of `app.go` measures 24 429 tokens, so two of them spent most of the chat's
+// 60 000 — and the budget is per answer, so a project still working through its rounds then
+// read notices instead of file contents. A project therefore has its own figure, which is
+// still bounded and still cut to the room the next request has (`chat.roomForToolResults`).
+func maxToolResultTokens(chat store.Chat, settings config.Settings) int {
+	if chat.IsProject() && settings.CodingToolTokenBudget > 0 {
+		return settings.CodingToolTokenBudget
+	}
+	return settings.ToolTokenBudget
+}
+
 // runTurn performs one full exchange, including any tool iterations.
 func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	started := time.Now()
@@ -321,7 +357,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		Model:       modelInfo,
 		Settings:    settings,
 		UseNative:   useNativeTools,
-		MaxToolIter: settings.ToolIterations,
+		MaxToolIter: maxToolRounds(chat, settings),
 		Sources:     sources,
 	}
 	result, genErr := e.generate(ctx, in)

@@ -823,7 +823,7 @@ func TestToolProtocolFollowsAdvertisedCapabilities(t *testing.T) {
 // over the limit is cut with the truncation marker, and once the budget is spent
 // the model is told so rather than handed empty text.
 func TestToolOutputBudgetCapsPerAnswer(t *testing.T) {
-	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: 100})
+	budget := newToolOutputBudget(100)
 
 	small := strings.Repeat("wort ", 5)
 	if got, withheld := budget.take(small); got != small || withheld {
@@ -851,7 +851,7 @@ func TestToolOutputBudgetCapsPerAnswer(t *testing.T) {
 // TestToolOutputBudgetDefaultsWhenUnset keeps an unset setting from silently
 // disabling the bound.
 func TestToolOutputBudgetDefaultsWhenUnset(t *testing.T) {
-	if b := newToolOutputBudget(config.Settings{}); b.remaining != config.DefaultToolTokenBudget {
+	if b := newToolOutputBudget(0); b.remaining != config.DefaultToolTokenBudget {
 		t.Errorf("remaining = %d, want the %d default", b.remaining, config.DefaultToolTokenBudget)
 	}
 }
@@ -862,7 +862,7 @@ func TestToolOutputBudgetDefaultsWhenUnset(t *testing.T) {
 // thousand, which is Groq's shape exactly — so the room left in the next request, and
 // not the setting, is what decides how much of a result may be carried.
 func TestToolOutputBudgetFollowsTheRoomARequestHasLeft(t *testing.T) {
-	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: config.DefaultToolTokenBudget})
+	budget := newToolOutputBudget(config.DefaultToolTokenBudget)
 	budget.capTo(400)
 
 	got, _ := budget.take(strings.Repeat("wort ", 5000))
@@ -878,7 +878,7 @@ func TestToolOutputBudgetFollowsTheRoomARequestHasLeft(t *testing.T) {
 // more room than an earlier one must not hand back what the earlier round had to give
 // up, because the rounds of one answer produce one history between them.
 func TestToolOutputBudgetNeverLoosens(t *testing.T) {
-	budget := newToolOutputBudget(config.Settings{ToolTokenBudget: 100})
+	budget := newToolOutputBudget(100)
 	budget.capTo(5000)
 
 	got, _ := budget.take(strings.Repeat("wort ", 5000))

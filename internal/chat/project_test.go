@@ -588,6 +588,254 @@ func TestATurnIsToldWhenAFileChangedOutsideTheApp(t *testing.T) {
 	}
 }
 
+// TestAProjectRepliesOnItsOwnRoundBudget pins the split between the two round figures. A
+// project was being cut at ten rounds because the only figure there was — the chat's — said
+// ten; the project now reads its own, and a chat keeps its own even when the project's is
+// the larger one. The numbers are small on purpose: ten and fifteen, with more scripted
+// tool calls than either, so the loop can be counted rather than inferred.
+func TestAProjectRepliesOnItsOwnRoundBudget(t *testing.T) {
+	folder := t.TempDir()
+	workspace.ForgetAgentDocs()
+
+	st := newTestStore(t)
+	project := store.Chat{
+		ID: "project-1", Title: "Projekt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.\nVerfügbare Tools: {{tool_list}}",
+		Temperature:  0.7, TopP: 0.9,
+		Mode: store.ModeCoding, Workspace: folder,
+	}
+	plain := store.Chat{
+		ID: "chat-1", Title: "Chat", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.",
+		Temperature:  0.7, TopP: 0.9,
+	}
+	for _, chat := range []store.Chat{project, plain} {
+		if err := st.CreateChat(chat); err != nil {
+			t.Fatalf("create chat: %v", err)
+		}
+	}
+
+	// A tool both modes offer, so each loop is counted for its own budget rather than
+	// stopping because the tool it named is unknown in one of them.
+	call := "```tool_call\n{\"name\": \"search_web\", \"arguments\": {\"query\": \"mietrecht\"}}\n```"
+	reply := []llm.StreamEvent{{Type: llm.EventDelta, Text: call}}
+	replies := make([][]llm.StreamEvent, 30)
+	for i := range replies {
+		replies[i] = reply
+	}
+	provider := &fakeProvider{
+		model: llm.ModelInfo{
+			ID: "fake-model", Backend: "fake", ContextLimit: 8192,
+			// Capabilities without tools keep the text protocol in play.
+			State: llm.StateLoaded, Capabilities: []string{"vision"},
+		},
+		replies: replies,
+	}
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.ToolIterations = 10
+	settings.CodingToolIterations = 15
+	engine := NewEngine(st, registry, &tools.Service{Store: st},
+		func() config.Settings { return settings }, (&eventLog{}).emit)
+
+	turn(t, engine, project.ID, "Recherchiere Mietrecht.")
+	if n := provider.requestCount(); n != 15 {
+		t.Errorf("a project's reply took %d rounds, want its own 15 rather than the chat's 10", n)
+	}
+
+	before := provider.requestCount()
+	turn(t, engine, plain.ID, "Recherchiere Mietrecht.")
+	if n := provider.requestCount() - before; n != 10 {
+		t.Errorf("a chat's reply took %d rounds, want its own 10 rather than the project's 15", n)
+	}
+}
+
+// TestAProjectCarriesMoreToolResultThanItsChatBudget is the other half of the same split:
+// the text a tool returns is budgeted by mode too. A source file that fits the project's
+// figure but not the chat's arrives whole in a project — the failure the shared figure
+// caused was a project reading notices with most of its rounds still unspent, because the
+// chat's 60 000 tokens are two whole reads of a file the size of `app.go`.
+func TestAProjectCarriesMoreToolResultThanItsChatBudget(t *testing.T) {
+	folder := t.TempDir()
+	workspace.ForgetAgentDocs()
+	// About 3 700 tokens: past a 100-token chat budget, and small against this window.
+	body := "package main\n" +
+		strings.Repeat("// eine Zeile Inhalt, die gelesen werden muss\n", 300) +
+		"// ZULETZT\n"
+	if err := os.WriteFile(filepath.Join(folder, "main.go"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st := newTestStore(t)
+	project := store.Chat{
+		ID: "project-1", Title: "Projekt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.\nVerfügbare Tools: {{tool_list}}",
+		Temperature:  0.7, TopP: 0.9,
+		Mode: store.ModeCoding, Workspace: folder,
+	}
+	plain := store.Chat{
+		ID: "chat-1", Title: "Chat", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.",
+		Temperature:  0.7, TopP: 0.9,
+	}
+	for _, chat := range []store.Chat{project, plain} {
+		if err := st.CreateChat(chat); err != nil {
+			t.Fatalf("create chat: %v", err)
+		}
+	}
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{
+			ID: "fake-model", Backend: "fake", ContextLimit: 32768,
+			State: llm.StateLoaded, Capabilities: []string{llm.CapTools},
+		},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventToolCall, ToolCall: &llm.ToolCall{
+				ID: "call-1", Name: tools.ToolReadFile, Arguments: `{"path":"main.go"}`,
+			}}},
+			{{Type: llm.EventDelta, Text: "Gelesen."}, {Type: llm.EventDone}},
+		},
+	}
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.ToolTokenBudget = 100
+	settings.CodingToolTokenBudget = config.DefaultCodingToolTokenBudget
+	engine := NewEngine(st, registry, &tools.Service{Store: st},
+		func() config.Settings { return settings }, (&eventLog{}).emit)
+
+	turn(t, engine, project.ID, "Lies main.go.")
+
+	messages, err := st.ListMessages(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var carried string
+	for _, m := range messages {
+		if m.Role == string(llm.RoleTool) && m.Name == tools.ToolReadFile {
+			carried = m.Content
+		}
+	}
+	if carried == "" {
+		t.Fatal("the read's result was not kept as a tool message")
+	}
+	if !strings.Contains(carried, "ZULETZT") {
+		t.Errorf("the project read %d characters, not the whole file — the chat's 100-token budget was used",
+			len(carried))
+	}
+	if strings.Contains(carried, "gekürzt") {
+		t.Errorf("the project's result was cut although its own budget is %d tokens: %q",
+			settings.CodingToolTokenBudget, carried[:min(len(carried), 200)])
+	}
+
+	// The other direction, asked of the selector: a chat has no tool in this test that can
+	// return more than 100 tokens, so its figure is pinned where the mode is decided.
+	if got := maxToolResultTokens(plain, settings); got != settings.ToolTokenBudget {
+		t.Errorf("a chat's budget = %d, want its own %d", got, settings.ToolTokenBudget)
+	}
+}
+
+// TestAProjectChecksBetweenRoundsWithoutTheChatSwitch pins the project's half of the
+// between-rounds fold. `Compact.MidTurnCheck` is a choice a *chat* can make, because a chat
+// can end the answer and be folded before the next message; a project's reply is one piece
+// of work that grows a tool result at a time, and the round it is in the middle of is that
+// work — the assembly only measures an over-full request, it never trims one. So a project
+// asks its threshold between rounds with the switch where it ships, and the master switch is
+// still the master switch.
+func TestAProjectChecksBetweenRoundsWithoutTheChatSwitch(t *testing.T) {
+	// run plays one project turn whose first reply asks for a tool *and* writes a long
+	// report, so the round after it is the one that can outgrow the threshold. With no
+	// published ceiling — every local backend's shape — the threshold is the only bound
+	// that can fold it.
+	run := func(t *testing.T, configure func(*config.Settings)) (summaries int, carriedOldest bool) {
+		t.Helper()
+		folder := t.TempDir()
+		workspace.ForgetAgentDocs()
+
+		st := newTestStore(t)
+		project := store.Chat{
+			// chat-1 because the history and summary helpers are written against it.
+			ID: "chat-1", Title: "Projekt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+			Backend: "fake", Model: "fake-model",
+			SystemPrompt: "Du bist ein Assistent.\nVerfügbare Tools: {{tool_list}}",
+			Temperature:  0.7, TopP: 0.9, AutoCompact: true,
+			Mode: store.ModeCoding, Workspace: folder,
+		}
+		if err := st.CreateChat(project); err != nil {
+			t.Fatalf("create chat: %v", err)
+		}
+		// More turns than KeepRecentTurns, or the planner has nothing older than this turn
+		// to fold and the assertion would pass for the wrong reason.
+		seedLongHistory(t, st, 8)
+
+		call := "```tool_call\n{\"name\": \"search_web\", \"arguments\": {\"query\": \"mietrecht\"}}\n```"
+		report := strings.Repeat("Der Bericht ist lang und wird länger. ", 450)
+		provider := &fakeProvider{
+			// No ceiling: this is the backend shape only the threshold can fold for.
+			model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+			replies: [][]llm.StreamEvent{
+				{{Type: llm.EventDelta, Text: call + "\n\n" + report}},
+				{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}},
+				{{Type: llm.EventDelta, Text: "Fertig."}, {Type: llm.EventDone}},
+			},
+		}
+		registry := llm.NewRegistry(nil)
+		registry.Register(provider)
+
+		settings := config.Default()
+		settings.AutoTitle = false
+		// The chat switch, left exactly where it ships.
+		settings.Compact.MidTurnCheck = false
+		settings.Compact.Threshold = 0.8
+		configure(&settings)
+		engine := NewEngine(st, registry, &tools.Service{Store: st},
+			func() config.Settings { return settings }, (&eventLog{}).emit)
+
+		// The check before the turn has to stay quiet, or the fold measured below would be
+		// that one and the test would prove nothing about the mid-turn path.
+		before, _, err := engine.buildAssembly(context.Background(), &project, "fake", "fake-model",
+			settings, provider.model, tools.TextProtocolHint)
+		if err != nil {
+			t.Fatalf("buildAssembly: %v", err)
+		}
+		if before.Budget.ProjectedRatio >= settings.Compact.Threshold {
+			t.Fatalf("the turn's own check already folds at %.2f", before.Budget.ProjectedRatio)
+		}
+
+		turn(t, engine, project.ID, "Eine neue Frage")
+		last := provider.requestAt(provider.requestCount() - 1)
+		for _, m := range last.Messages {
+			if strings.Contains(m.Content, "Frage 0:") {
+				carriedOldest = true
+			}
+		}
+		return len(summariesOf(t, st)), carriedOldest
+	}
+
+	summaries, carriedOldest := run(t, func(*config.Settings) {})
+	if summaries != 1 {
+		t.Fatalf("compactions in a project with the chat switch off = %d, want the one the second round asked for",
+			summaries)
+	}
+	if carriedOldest {
+		t.Error("the round after the fold still carried the oldest turn verbatim")
+	}
+
+	// Not an override of the feature: automatic compaction switched off is still no fold.
+	if summaries, _ := run(t, func(s *config.Settings) { s.Compact.Enabled = false }); summaries != 0 {
+		t.Fatalf("compactions with automatic compaction off = %d, want none", summaries)
+	}
+}
+
 func containsName(names []string, want string) bool {
 	for _, name := range names {
 		if name == want {

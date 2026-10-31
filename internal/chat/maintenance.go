@@ -137,9 +137,11 @@ func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions
 // grows — the assert before the turn priced neither the reply nor the tool result that the
 // previous round added — so the size has to be asked again before each request. The ceiling
 // below is always asked: crossing it costs the whole answer. The user's threshold is asked
-// only when they switched the between-rounds check on, because a window fold pays for itself
-// differently — it is one summary call inside an answer somebody is waiting for, and it is
-// the only mid-turn check a backend that publishes no ceiling can get at all.
+// when they switched the between-rounds check on — or always in a project, which has no
+// moment between answers to fold at (autoFoldThreshold has the argument). A window fold pays
+// for itself differently from a ceiling: it is one summary call inside an answer somebody is
+// waiting for, and in a chat the alternative is ending the answer and folding before the
+// next message.
 func (e *Engine) autoFold(ctx context.Context, chat *store.Chat, provider llm.Provider,
 	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings,
 	midTurn bool) error {
@@ -488,11 +490,21 @@ func triggerName(force bool) string {
 // The mid-turn switch is subordinate deliberately: a chat with automatic compaction off
 // does not regain it between rounds, which is the reading a checkbox in the compaction
 // panel has to have.
+//
+// A **project** is the one exception to the switch, and the reason it is written down here
+// rather than as a second condition in the loop. `Compact.MidTurnCheck` is a choice a chat
+// can make because a chat has an alternative: the answer ends, and the fold happens before
+// the next message. A project has no such moment — its reply is one piece of work, and the
+// round it is in the middle of *is* the answer, so a request that outgrows the window costs
+// that work rather than delaying it. The assembly only measures an over-full request, it
+// never trims one (Assemble, in context.go), so nothing else folds it either. A project therefore
+// asks its threshold between rounds whatever the switch says; the master switches above are
+// not overridden, so compaction switched off still means no fold.
 func autoFoldThreshold(settings config.Settings, chat store.Chat, midTurn bool) float64 {
 	if !settings.Compact.Enabled || !chat.AutoCompact {
 		return 0
 	}
-	if midTurn && !settings.Compact.MidTurnCheck {
+	if midTurn && !settings.Compact.MidTurnCheck && !chat.IsProject() {
 		return 0
 	}
 	return effectiveThreshold(chat, settings)

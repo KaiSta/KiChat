@@ -611,7 +611,7 @@ const de = {
   'settings.autoCompact': 'Automatisch komprimieren',
   'settings.midTurnCheck': 'Zwischen Tool-Runden prüfen',
   'settings.midTurnCheckHint':
-    'Prüft die Größe vor jeder weiteren Tool-Runde erneut. Nötig für lokale Modelle, die kein Anfrage-Limit melden — kostet dafür eine Zusammenfassung mitten in der Antwort.',
+    'Prüft die Größe vor jeder weiteren Tool-Runde erneut. Nötig für lokale Modelle, die kein Anfrage-Limit melden — kostet dafür eine Zusammenfassung mitten in der Antwort. Gilt für Chats; ein Projekt prüft immer, weil seine Antwort nicht zwischen zwei Nachrichten gefaltet werden kann.',
   'settings.threshold': 'Schwelle',
   'settings.keepTurns': 'Letzte Turns im Volltext',
   'settings.reserve': 'Reserve für Antwort',
@@ -622,7 +622,10 @@ const de = {
   'settings.summaryModelHint':
     'Ein Reasoning-Modell kann sein Ausgabebudget beim Denken aufbrauchen, statt eine Zusammenfassung zu schreiben. Ein kleines Instruct-Modell umgeht das.',
   'settings.toolBudget': 'Tool-Budget',
-  'settings.toolBudgetHint': 'Token-Budget für Tool-Ergebnisse pro Antwort',
+  'settings.toolBudgetHint': 'Token-Budget für Tool-Ergebnisse pro Chat-Antwort',
+  'settings.codingToolBudget': 'Token-Budget für Tool-Ergebnisse im Coding-Agent',
+  'settings.codingToolBudgetHint':
+    'Gilt für Projekt-Chats. Quellcode und Build-Ausgaben sind dichter als Seiten — ein ganzer Blick in eine große Datei kostet allein über 24 000 Tokens.',
   'settings.research': 'Recherche',
   'settings.braveKey': 'Brave Search API-Key',
   'settings.braveKeySet': 'Ein Key ist gespeichert.',
@@ -883,7 +886,10 @@ const de = {
   'settings.allowPrivateHint':
     'Standardmäßig blockiert, damit fremde Seiten keine internen Dienste abfragen können.',
   'settings.autoTitle': 'Chats automatisch benennen',
-  'settings.toolIterations': 'Max. Tool-Runden pro Antwort',
+  'settings.toolIterations': 'Max. Tool-Runden pro Chat-Antwort',
+  'settings.codingToolIterations': 'Max. Tool-Runden pro Coding-Antwort',
+  'settings.codingToolIterationsHint':
+    'Gilt für Projekt-Chats. Ein normaler Chat nutzt die Zahl daneben, die für eine Frage gedacht ist — ein Umbau über mehrere Dateien braucht mehr: lesen, ändern, Tests laufen lassen, den Fehler lesen, wieder ändern.',
   'settings.nativeTools': 'Native Tool-Aufrufe verwenden',
   'settings.nativeToolsHint':
     'Wenn aus, wird das Text-Protokoll genutzt, das mit jedem Modell funktioniert.',
@@ -1896,7 +1902,7 @@ const en: Record<keyof typeof de, string> = {
   'settings.autoCompact': 'Compact automatically',
   'settings.midTurnCheck': 'Check between tool rounds',
   'settings.midTurnCheckHint':
-    'Re-checks the size before every further tool round. Needed for local models, which publish no per-request limit — at the cost of one summary in the middle of an answer.',
+    'Re-checks the size before every further tool round. Needed for local models, which publish no per-request limit — at the cost of one summary in the middle of an answer. Applies to chats; a project always checks, because its reply cannot be folded between two messages.',
   'settings.threshold': 'Threshold',
   'settings.keepTurns': 'Recent turns kept verbatim',
   'settings.reserve': 'Response reserve',
@@ -1907,7 +1913,10 @@ const en: Record<keyof typeof de, string> = {
   'settings.summaryModelHint':
     'A reasoning model can spend its output budget thinking instead of writing a summary. A small instruction model avoids that.',
   'settings.toolBudget': 'Tool budget',
-  'settings.toolBudgetHint': 'Token budget for tool results per answer',
+  'settings.toolBudgetHint': 'Token budget for tool results per chat reply',
+  'settings.codingToolBudget': 'Token budget for tool results in a project',
+  'settings.codingToolBudgetHint':
+    'Applies to project chats. Source files and build output are denser than pages — one whole read of a large file costs over 24 000 tokens on its own.',
   'settings.research': 'Research',
   'settings.braveKey': 'Brave Search API key',
   'settings.braveKeySet': 'A key is stored.',
@@ -2156,7 +2165,10 @@ const en: Record<keyof typeof de, string> = {
   'settings.allowPrivateHint':
     'Blocked by default so a fetched page cannot probe internal services.',
   'settings.autoTitle': 'Name chats automatically',
-  'settings.toolIterations': 'Max tool rounds per reply',
+  'settings.toolIterations': 'Max tool rounds per chat reply',
+  'settings.codingToolIterations': 'Max tool rounds per coding reply',
+  'settings.codingToolIterationsHint':
+    'Applies to project chats. An ordinary chat uses the figure beside it, which is sized for a question — a change across several files needs more: read, edit, run the tests, read the failure, edit again.',
   'settings.nativeTools': 'Use native tool calls',
   'settings.nativeToolsHint':
     'When off, a text protocol is used instead, which works with every model.',
@@ -3108,7 +3120,7 @@ const zh: Record<keyof typeof de, string> = {
   'settings.autoCompact': '自动压缩',
   'settings.midTurnCheck': '在工具轮次之间检查',
   'settings.midTurnCheckHint':
-    '在每次继续工具轮次前重新检查大小。适用于不公布单次请求上限的本地模型——代价是回答中途多一次摘要。',
+    '在每次继续工具轮次前重新检查大小。适用于不公布单次请求上限的本地模型——代价是回答中途多一次摘要。仅适用于对话；项目始终会检查，因为它的回答无法在两条消息之间折叠。',
   'settings.threshold': '阈值',
   'settings.keepTurns': '保留原文的最近轮数',
   'settings.reserve': '为回答预留',
@@ -3118,7 +3130,10 @@ const zh: Record<keyof typeof de, string> = {
   'settings.summaryModelUnavailable': '（不可用）',
   'settings.summaryModelHint': '推理模型可能把输出预算耗尽在思考上，写不出摘要。使用小型指令模型可避免这一点。',
   'settings.toolBudget': '工具预算',
-  'settings.toolBudgetHint': '每次回答的工具结果 token 预算',
+  'settings.toolBudgetHint': '每次对话回答的工具结果 token 预算',
+  'settings.codingToolBudget': '项目对话的工具结果 token 预算',
+  'settings.codingToolBudgetHint':
+    '适用于项目对话。源代码和构建输出比网页更密集——完整读取一个大文件本身就要超过 24 000 个 token。',
   'settings.research': '研究',
   'settings.braveKey': 'Brave Search API 密钥',
   'settings.braveKeySet': '已保存密钥。',
@@ -3345,7 +3360,10 @@ const zh: Record<keyof typeof de, string> = {
   'settings.allowPrivate': '允许访问本地/私有地址',
   'settings.allowPrivateHint': '默认阻止，以免被抓取的网页探测内部服务。',
   'settings.autoTitle': '自动命名对话',
-  'settings.toolIterations': '每次回答的最大工具轮数',
+  'settings.toolIterations': '每次对话回答的最大工具轮数',
+  'settings.codingToolIterations': '每次编码回答的最大工具轮数',
+  'settings.codingToolIterationsHint':
+    '适用于项目对话。普通对话使用旁边那个为单次提问设定的数值——跨多个文件的修改需要更多轮：读取、修改、运行测试、读取失败、再修改。',
   'settings.nativeTools': '使用原生工具调用',
   'settings.nativeToolsHint': '关闭时改用文本协议，适用于所有模型。',
   'settings.save': '保存',

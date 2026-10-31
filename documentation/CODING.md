@@ -321,6 +321,20 @@ indistinguishable from one that hung — the card says "running", the phase line
 and two minutes pass — so `chat:tool-output` carries the output as it arrives and the card
 shows it under its own heading, scrolled to the newest line.
 
+**A command that was stopped says what it managed to say.** The result keeps what arrived
+before the wall, and the note after it is worded in two cases (`timeoutNote`), because
+"(keine Ausgabe)" beside "the output above is incomplete" reads as a silent success — the
+worst of the readings available to a model. When nothing arrived, the note says exactly that
+and names the likely cause: `… | tail -40` holds its lines until its input ends, so a
+pipeline through a buffering filter prints nothing while it runs and loses all of it when
+the tree is killed. It then says what to do — drop the pipe, narrow the scope (one package,
+`-run`), and let the program report its own limit (`go test -timeout 60s`) — because the
+alternative is a model that guesses whether the tests passed and spends another five minutes
+on the same line. A command that printed before the cut gets the partial-output wording and
+the same advice, without the pipe explanation it does not need. Pinned by
+`TestATimedOutCommandKeepsWhatItPrinted` and `TestATimedOutCommandWithNoOutputSaysWhy`, and
+advertised in the tool's own description so the model avoids the pattern when it can.
+
 Three decisions, all of them sizing the feature against the build it exists for:
 
 | | Choose | Why |

@@ -60,9 +60,24 @@ type Settings struct {
 	DefaultSystemPrompt string         `json:"defaultSystemPrompt"`
 	PromptPresets       []PromptPreset `json:"promptPresets"`
 	AutoTitle           bool           `json:"autoTitle"`
-	ToolIterations      int            `json:"toolIterations"`
-	ToolTokenBudget     int            `json:"toolTokenBudget"`
-	NativeTools         bool           `json:"nativeTools"`
+	// ToolIterations is the round budget of an ordinary chat's reply, and
+	// CodingToolIterations the one a project replies on. There are two fields because
+	// the two turns are different shapes: a chat's answer ends when the model stops
+	// asking for tools, while a project's reply is a piece of work — read, edit, run
+	// the tests, read the failure, edit again — that a figure tuned for questions
+	// would cut short. Sharing one number meant exactly that: a chat set to ten
+	// stopped a refactor at ten rounds. The mode picks (chat.maxToolRounds).
+	ToolIterations       int `json:"toolIterations"`
+	CodingToolIterations int `json:"codingToolIterations"`
+	// ToolTokenBudget is how much tool-result text one reply of an ordinary chat may
+	// carry into its next request, CodingToolTokenBudget the same for a project. They
+	// are separate for the reason the round figures are: a project's reply spends its
+	// budget on source files and test output, where a chat's spends it on pages. Two
+	// whole reads of a file the size of `app.go` measure 48 858 tokens, most of the
+	// chat figure — so a project's answer ran dry while it still had rounds left.
+	ToolTokenBudget       int  `json:"toolTokenBudget"`
+	CodingToolTokenBudget int  `json:"codingToolTokenBudget"`
+	NativeTools           bool `json:"nativeTools"`
 	// Runtime is the llama.cpp that KiChat runs itself, as opposed to the one a
 	// user started and pointed a backend at. Every field here describes a
 	// capability the app provides rather than a server it contacts, which is why
@@ -1173,22 +1188,33 @@ const (
 // The tool loop's bounds: how many model/tool rounds one reply may take, and how many
 // tokens of tool results it may carry into the next request.
 //
-// The default is sized for a coding project rather than for a question, because that is
-// the case that runs out first. Reading four files, editing two and running `make check`
-// is already past the six rounds this used to ship, and a first `make check` failure plus
-// three reads spends a 25 000-token budget on its own — so a refactor was being cut in
-// half at a number that suited a research chat. A research turn does not get longer by
-// the change: the loop ends when the model stops calling tools, and the budget below is
-// still capped by the room the next request actually has (`chat.roomForToolResults`), so
-// a small local window keeps cutting results where it always did.
+// There are two round figures because there are two shapes of reply. A chat's answer ends
+// when the model stops asking for tools, so its figure is the guard against a model that
+// never does. A project's reply is a piece of work: reading four files, editing two and
+// running `make check` is six rounds before the first failure comes back, and the failure
+// is then read and fixed. That is why the project's default is the larger one — and why it
+// is a separate field rather than one shared number, which is what stopped a project at
+// ten rounds when its chat setting said ten.
 //
-// MaxToolIterations is the ceiling the Settings field offers and the load repair enforces.
-// It is a bound rather than the default because a long autonomous run is a choice — and
-// because each round is a request the user pays for in time and tokens.
+// A research turn does not get longer because the project has its own figures: the loop
+// still ends when the model stops calling tools, and the token budget is still capped by
+// the room the next request actually has (`chat.roomForToolResults`), so a small local
+// window keeps cutting results where it always did.
+//
+// The project's token budget is twice the chat's because the material is denser: a failing
+// `make check` is a few thousand tokens before anything is read, and a source file is worth
+// more per token than a page. It is not unbounded for the same reason the rounds are not —
+// it is what stops one enormous build log from filling the window on its own.
+//
+// MaxToolIterations is the ceiling both round fields are repaired against, and it is a
+// bound rather than a default because a long autonomous run is a choice — and because each
+// round is a request the user pays for in time and tokens.
 const (
-	DefaultToolIterations  = 24
-	MaxToolIterations      = 100
-	DefaultToolTokenBudget = 60000
+	DefaultToolIterations        = 24
+	DefaultCodingToolIterations  = 60
+	MaxToolIterations            = 100
+	DefaultToolTokenBudget       = 60000
+	DefaultCodingToolTokenBudget = 120000
 )
 
 // Default returns the shipped configuration.
@@ -1249,12 +1275,14 @@ func Default() Settings {
 			Files:    false,
 			Commands: false,
 		},
-		DefaultSystemPrompt: PromptBody(PresetResearch, LangEnglish),
-		PromptPresets:       DefaultPresets(LangEnglish),
-		AutoTitle:           true,
-		ToolIterations:      DefaultToolIterations,
-		ToolTokenBudget:     DefaultToolTokenBudget,
-		NativeTools:         true,
+		DefaultSystemPrompt:   PromptBody(PresetResearch, LangEnglish),
+		PromptPresets:         DefaultPresets(LangEnglish),
+		AutoTitle:             true,
+		ToolIterations:        DefaultToolIterations,
+		CodingToolIterations:  DefaultCodingToolIterations,
+		ToolTokenBudget:       DefaultToolTokenBudget,
+		CodingToolTokenBudget: DefaultCodingToolTokenBudget,
+		NativeTools:           true,
 		// Image generation ships switched off. It is a second server the user has
 		// to be running — a WebUI is a several-gigabyte install of its own — so
 		// offering an address and probing it would report a failure for a feature
@@ -1652,8 +1680,25 @@ func (s *Settings) normalise() {
 	if s.ToolIterations > MaxToolIterations {
 		s.ToolIterations = MaxToolIterations
 	}
+	// The project's figure is repaired the same way and against the same ceiling: zero is
+	// "nobody chose yet" and takes the coding default, and a hand-edited 5000 is clamped
+	// rather than rejected. A row written before this field existed carries none of it, so
+	// the default is what every installation upgrading to it gets — including the project
+	// that was being cut at its chat's ten rounds.
+	if s.CodingToolIterations <= 0 {
+		s.CodingToolIterations = DefaultCodingToolIterations
+	}
+	if s.CodingToolIterations > MaxToolIterations {
+		s.CodingToolIterations = MaxToolIterations
+	}
 	if s.ToolTokenBudget <= 0 {
 		s.ToolTokenBudget = DefaultToolTokenBudget
+	}
+	// The project's budget is repaired the same way: an absent field is what every
+	// installation upgrading to it carries, and a zero from an emptied text box means
+	// the default rather than "no tool results at all".
+	if s.CodingToolTokenBudget <= 0 {
+		s.CodingToolTokenBudget = DefaultCodingToolTokenBudget
 	}
 	if len(s.PromptPresets) == 0 {
 		s.PromptPresets = DefaultPresets(s.Language)

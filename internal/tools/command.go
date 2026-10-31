@@ -211,7 +211,9 @@ func commandDefinitions() []llm.ToolDefinition {
 				"restore, git clean -f), werden ebenso abgelehnt — committe oder stashe die Änderungen " +
 				"zuerst. " +
 				"Schreibe keine Befehle, die eine Frage stellen, und starte keinen Server oder Beobachter, " +
-				"der weiterläuft: er wird nach dem Timeout abgebrochen. Dateien, die du ändern willst, " +
+				"der weiterläuft: er wird nach dem Timeout abgebrochen. Eine Pipe wie `| tail` gibt erst " +
+				"am Ende aus, und bei einem Abbruch ist ihre Ausgabe verloren — prüfe lieber enger " +
+				"(`-run`, ein Paket) und lass das Programm sein eigenes Timeout setzen. Dateien, die du ändern willst, " +
 				"änderst du mit edit_file/write_file, nicht über die Shell. Der Nutzer sieht den Befehl " +
 				"und muss ihn bestätigen.",
 			Schema: map[string]any{
@@ -501,9 +503,8 @@ func (s *Service) execCommand(ctx context.Context, chatID string, root workspace
 		return Result{}, uimsg.Wrapf("tools.commandStopped",
 			"the turn was stopped, so the command was killed", ctx.Err())
 	case wasTimedOut:
-		return summarized(commandResult(line, out, fmt.Sprintf(
-			"Nach %s abgebrochen: der Befehl war noch nicht fertig. Die Ausgabe oben ist unvollständig.",
-			humanDuration(elapsed))), "tool.sum.commandTimeout", humanDuration(elapsed)), nil
+		return summarized(commandResult(line, out, timeoutNote(out, elapsed, timeout)),
+			"tool.sum.commandTimeout", humanDuration(elapsed)), nil
 	case waitErr != nil:
 		// A non-zero exit, which is a result: the code is what the model reasons about,
 		// and the output above it is the reason.
@@ -529,6 +530,33 @@ func (s *Service) execCommand(ctx context.Context, chatID string, root workspace
 // The line is repeated because the result is replayed into later turns on its own — by the
 // time a model reads this it may be several rounds past the call, and "Exit-Code 1" without
 // the command above it says nothing.
+// timeoutNote is what the model reads when the call's own limit stopped the command, and
+// it is written as two cases because "no output" beside "the output above is incomplete"
+// reads as a silent success — the worst of the available readings.
+//
+// The silent case is not rare and it is not the command's fault: `… | tail -40` keeps the
+// last lines in memory and writes them when the *input* ends, so a pipeline through any
+// buffering filter produces nothing at all while it runs. Since the app kills the tree, the
+// filter never gets to flush, and the model is handed an empty result for a build that may
+// have printed thousands of lines. Neither that nor a real silence is a fact the model can
+// act on, so the note names the cause and the way out (drop the pipe, narrow the scope, let
+// the program report its own limit first) rather than only saying it was stopped.
+func timeoutNote(out *headTailWriter, elapsed, limit time.Duration) string {
+	when := fmt.Sprintf("Nach %s abgebrochen: das Zeitlimit dieses Aufrufs (%s) war erreicht.",
+		humanDuration(elapsed), humanDuration(limit))
+	if strings.TrimSpace(out.String()) != "" {
+		return when + " Die Ausgabe oben ist unvollständig. Ein erneuter Lauf mit derselben Zeile " +
+			"kostet nur wieder die volle Zeit — grenze den Umfang ein (ein Paket, ein Test, `-run`) " +
+			"und lass das Programm sein eigenes Limit setzen (bei `go test` z. B. `-timeout 60s`), " +
+			"damit es vorher ausgibt, wo es hängt."
+	}
+	return when + " Es wurde keine Ausgabe aufgefangen — das heißt nicht, dass der Befehl still " +
+		"war: eine Pipe wie `| tail`, `| head` oder `| sort` schreibt erst, wenn der Befehl endet, " +
+		"und dieser endete nicht. Führe ihn ohne Pipe aus, grenze den Umfang ein, und lass das " +
+		"Programm sein eigenes Limit setzen (bei `go test` z. B. `-timeout 60s`), damit es vorher " +
+		"ausgibt, wo es hängt."
+}
+
 func commandResult(line string, out *headTailWriter, status string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "$ %s\n", line)

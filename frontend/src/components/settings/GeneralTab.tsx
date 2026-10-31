@@ -151,17 +151,30 @@ export function GeneralTab({
               onChange={(e) => patch({ toolIterations: Number(e.target.value) })}
             />
           </Field>
-          <Field label={t('settings.nativeTools')} hint={t('settings.nativeToolsHint')}>
-            <label className="flex items-center gap-2 pt-1 text-[13px]">
-              <input
-                type="checkbox"
-                checked={draft.nativeTools}
-                onChange={(e) => patch({ nativeTools: e.target.checked })}
-              />
-              {draft.nativeTools ? t('common.yes') : t('common.no')}
-            </label>
+          {/* The project's figure, beside the chat's so the difference is one glance. Two
+              fields because the two replies are different shapes, and one number tuned for
+              a question was cutting a refactor short. */}
+          <Field label={t('settings.codingToolIterations')} hint={t('settings.codingToolIterationsHint')}>
+            <input
+              className="input"
+              type="number"
+              min="1"
+              max="100"
+              value={draft.codingToolIterations}
+              onChange={(e) => patch({ codingToolIterations: Number(e.target.value) })}
+            />
           </Field>
         </div>
+        <Field label={t('settings.nativeTools')} hint={t('settings.nativeToolsHint')}>
+          <label className="flex items-center gap-2 pt-1 text-[13px]">
+            <input
+              type="checkbox"
+              checked={draft.nativeTools}
+              onChange={(e) => patch({ nativeTools: e.target.checked })}
+            />
+            {draft.nativeTools ? t('common.yes') : t('common.no')}
+          </label>
+        </Field>
       </Section>
 
       <AboutSection info={info} />

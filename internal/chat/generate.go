@@ -78,8 +78,9 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		maxIter = 1
 	}
 	// Tool results are charged against one budget for the whole answer, so a
-	// single large scrape cannot fill the window on its own.
-	toolBudget := newToolOutputBudget(in.Settings)
+	// single large scrape cannot fill the window on its own. The figure is the mode's
+	// (maxToolResultTokens): a project's reads and build output against a chat's pages.
+	toolBudget := newToolOutputBudget(maxToolResultTokens(in.Chat, in.Settings))
 
 	// A tool-heavy turn is many requests back to back, and the minute's *request*
 	// allowance can be smaller than the rounds the model will ask for. Reading it before
@@ -696,12 +697,14 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 // of a single generate call.
 type toolOutputBudget struct{ remaining int }
 
-func newToolOutputBudget(settings config.Settings) *toolOutputBudget {
-	remaining := settings.ToolTokenBudget
-	if remaining <= 0 {
-		remaining = config.DefaultToolTokenBudget
+// newToolOutputBudget starts the answer's budget from the mode's figure. A zero is read as
+// the default — a hand-edited blob or a settings literal — and the figure is tightened to
+// each request's remaining room as the rounds go (capTo).
+func newToolOutputBudget(tokens int) *toolOutputBudget {
+	if tokens <= 0 {
+		tokens = config.DefaultToolTokenBudget
 	}
-	return &toolOutputBudget{remaining: remaining}
+	return &toolOutputBudget{remaining: tokens}
 }
 
 // capTo tightens the budget to the room one request has left for tool results.
