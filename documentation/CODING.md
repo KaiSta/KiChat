@@ -674,6 +674,19 @@ block rather than a warning. Measured about **11 ms per git call** on this check
 20 runs); the assembly is rebuilt on every tool round, so a long turn pays that per round, which
 is the number to revisit if the probe ever becomes noticeable on a large repository.
 
+It does **not** travel in the system message, and that is a cost property rather than a
+presentational one. The block changes the moment the assistant edits a file, and a hosted
+backend caches a request's *prefix* — DeepSeek matches it from the start of the request
+([DEEPSEEK.md](DEEPSEEK.md) §5) — so a block that differs from round to round inside message
+zero makes every round of a reply a cache miss for the whole history behind it. It therefore
+rides in the **tail** of the request: appended to the newest message, which is the user's
+question on the first round and the newest tool result on every round after it, so that the
+system message and the history either side of it stay byte-identical for the length of a reply.
+It is appended rather than sent as a message of its own because a second user turn in a row is a
+shape the strict chat templates refuse, and appending changes neither the roles nor the count.
+`TestAProjectsGitStateStaysOutOfTheCachedPrefix` pins it the only way that means anything: two
+assemblies with a file written between them, and every message but the last has to be identical.
+
 ## 9. Watching it without the app
 
 `make frontend && go run ./tools/uiharness` renders the whole mode against a mocked bridge: the

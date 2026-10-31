@@ -86,6 +86,31 @@ func systemMessage(t *testing.T, e *Engine, c store.Chat) string {
 	return assembly.Messages[0].Content
 }
 
+// requestMessages is a chat's request as it is actually sent: the system message first, then
+// the history, with the per-turn state in the tail.
+func requestMessages(t *testing.T, e *Engine, c store.Chat) []llm.Message {
+	t.Helper()
+	assembly, _, err := e.buildAssembly(context.Background(), &c, c.Backend, c.Model,
+		config.Default(), llm.ModelInfo{ID: c.Model, Backend: c.Backend, ContextLimit: 8192}, "")
+	if err != nil {
+		t.Fatalf("buildAssembly: %v", err)
+	}
+	if len(assembly.Messages) == 0 || assembly.Messages[0].Role != llm.RoleSystem {
+		t.Fatalf("the assembly does not open with a system message: %+v", assembly.Messages)
+	}
+	return assembly.Messages
+}
+
+// containsGitState reports whether any message of a request carries the project's git block.
+func containsGitState(msgs []llm.Message) bool {
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "<project_git") {
+			return true
+		}
+	}
+	return false
+}
+
 // TestAProjectsGuidanceReachesTheSystemPrompt is the whole point of reading AGENTS.md
 // rather than asking the user to paste it into a setting: the file the repository already
 // carries is the one the model is given.
@@ -231,26 +256,42 @@ func TestAProjectsPromptCarriesItsGitState(t *testing.T) {
 		}
 	}
 
+	// One turn's worth of history. The block rides on the newest message, so a chat with no
+	// messages has nothing but the system message to carry it — which is the placement this
+	// test is here to rule out.
+	if err := st.CreateMessage(store.Message{
+		ID: "m1", ChatID: project.ID, Seq: 1, Role: "user",
+		Content: "Was ist noch offen?", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create message: %v", err)
+	}
+
 	settings := config.Default()
 	settings.AutoTitle = false
 	engine := NewEngine(st, llm.NewRegistry(nil), nil,
 		func() config.Settings { return settings }, (&eventLog{}).emit)
 
-	system := systemMessage(t, engine, project)
-	if !strings.Contains(system, `<project_git branch="main"`) {
-		t.Fatalf("a project's system prompt carries no git state:\n%s", system)
+	request := requestMessages(t, engine, project)
+	system := request[0].Content
+	if strings.Contains(system, "<project_git") {
+		t.Errorf("the git state is back in the system message, where one edit invalidates the"+
+			" cache of the whole history behind it:\n%s", system)
 	}
-	if !strings.Contains(system, "Änderungen seit dem letzten Commit (1)") {
-		t.Errorf("the block does not say how much changed:\n%s", system)
+	tail := request[len(request)-1].Content
+	if !strings.Contains(tail, `<project_git branch="main"`) {
+		t.Fatalf("a project's request carries no git state:\n%s", tail)
+	}
+	if !strings.Contains(tail, "Änderungen seit dem letzten Commit (1)") {
+		t.Errorf("the block does not say how much changed:\n%s", tail)
 	}
 	// The change itself, with the half of it that is staged and the size of the diff: that is what
 	// makes the block useful rather than a branch name.
-	if !strings.Contains(system, "main.go: nicht gestaged (geändert) +2 −0") {
-		t.Errorf("the block does not describe the modified file:\n%s", system)
+	if !strings.Contains(tail, "main.go: nicht gestaged (geändert) +2 −0") {
+		t.Errorf("the block does not describe the modified file:\n%s", tail)
 	}
 
-	if plainSystem := systemMessage(t, engine, plain); strings.Contains(plainSystem, "<project_git") {
-		t.Errorf("a chat with no coding mode got the project's git state:\n%s", plainSystem)
+	if plainRequest := requestMessages(t, engine, plain); containsGitState(plainRequest) {
+		t.Errorf("a chat with no coding mode got the project's git state:\n%+v", plainRequest)
 	}
 
 	// A project folder that is nobody's repository: no block, no error, no warning.
@@ -264,8 +305,8 @@ func TestAProjectsPromptCarriesItsGitState(t *testing.T) {
 	if err := st.CreateChat(plainFolder); err != nil {
 		t.Fatalf("create chat: %v", err)
 	}
-	if scratch := systemMessage(t, engine, plainFolder); strings.Contains(scratch, "<project_git") {
-		t.Errorf("a folder that is not a repository got a git block:\n%s", scratch)
+	if scratch := requestMessages(t, engine, plainFolder); containsGitState(scratch) {
+		t.Errorf("a folder that is not a repository got a git block:\n%+v", scratch)
 	}
 
 	// And it is on the meter: a block nobody can account for is context that grows without
@@ -290,6 +331,71 @@ func TestAProjectsPromptCarriesItsGitState(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("the git state is missing from the context budget: %+v", assembly.Budget.Segments)
+	}
+}
+
+// TestAProjectsGitStateStaysOutOfTheCachedPrefix is why the block left the system message.
+//
+// A hosted backend caches a prompt *prefix* — DeepSeek's in 64-token blocks, billing a hit an
+// order of magnitude below a miss — so a block that changes whenever the assistant edits a
+// file must not sit in front of the history it would invalidate. What has to survive an edit
+// untouched is every message but the last: the tail is where the change belongs, and it is the
+// one message a new round rewrites anyway.
+func TestAProjectsGitStateStaysOutOfTheCachedPrefix(t *testing.T) {
+	folder := gitFolder(t)
+	st := newTestStore(t)
+	project := store.Chat{
+		ID: "project-1", Title: "Projekt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.\nVerfügbare Tools: {{tool_list}}",
+		Temperature:  0.7, TopP: 0.9, AutoCompact: false,
+		Mode: store.ModeCoding, Workspace: folder,
+	}
+	if err := st.CreateChat(project); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if err := st.CreateMessage(store.Message{
+		ID: "m1", ChatID: project.ID, Seq: 1, Role: "user",
+		Content: "Was ist noch offen?", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create message: %v", err)
+	}
+
+	settings := config.Default()
+	settings.AutoTitle = false
+	engine := NewEngine(st, llm.NewRegistry(nil), nil,
+		func() config.Settings { return settings }, (&eventLog{}).emit)
+
+	before := requestMessages(t, engine, project)
+
+	// What a coding round does, and the reason this test exists: the tree changes between two
+	// requests of the same reply. Every edit used to rewrite message zero, which re-priced the
+	// whole history at the miss rate on each following round.
+	if err := os.WriteFile(filepath.Join(folder, "neu.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	after := requestMessages(t, engine, project)
+
+	if len(before) != len(after) {
+		t.Fatalf("the edit changed the request's shape: %d messages before, %d after",
+			len(before), len(after))
+	}
+	for i := 0; i < len(before)-1; i++ {
+		if before[i].Role != after[i].Role || before[i].Content != after[i].Content {
+			t.Errorf("message %d changed across an edit, which costs the cache of everything after"+
+				" it:\nbefore: %s\nafter:  %s", i, before[i].Content, after[i].Content)
+		}
+	}
+	if strings.Contains(before[0].Content, "<project_git") {
+		t.Error("the git state is in the system message again")
+	}
+	// The point is to move the block, not to lose it: the rail has to report the file the round
+	// wrote, and to differ from what the previous request carried.
+	if tail := after[len(after)-1].Content; !strings.Contains(tail, "neu.go") {
+		t.Errorf("the tail does not report the file the round wrote:\n%s", tail)
+	}
+	if before[len(before)-1].Content == after[len(after)-1].Content {
+		t.Error("the tail did not change when the tree did")
 	}
 }
 

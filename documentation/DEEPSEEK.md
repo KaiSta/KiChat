@@ -150,6 +150,29 @@ configured, but it is the same shape MISTRAL.md §11 records for Mistral.
 
 ---
 
+### Prompt caching, and the one layout rule it forces
+
+Context caching is automatic here and needs nothing in the request: the vendor's guide
+([api-docs.deepseek.com/guides/kv_cache](https://api-docs.deepseek.com/guides/kv_cache/)) says
+the cache is matched **from the start of the request** in 64-token blocks, and that a hit is
+billed far below a miss. Neither the feature nor the price is something KiChat controls; what it
+controls is whether a prefix ever matches.
+
+The consequence that shapes a coding reply is a layout rule:
+
+- **A block that changes between the rounds of one reply must not sit in front of the history it
+  would invalidate.** A changed prefix cannot match at the point of change or anywhere after it,
+  so a project's git block rides in the tail of the request rather than in the system message
+  (`Assemble` in `internal/chat/context.go`, and [CODING.md](CODING.md) §8 for what the block
+  says): the assistant edits a file on nearly every round, and that edit used to rewrite message
+  zero — a full miss for the whole history behind it, every round.
+  `TestAProjectsGitStateStaysOutOfTheCachedPrefix` pins the property, that every message but the
+  last is byte-identical across an edit.
+
+The one thing this cannot protect is the system prompt itself: `{{context_used}}` and
+`{{datetime}}` change between requests by definition, so a prompt that uses them opts out of
+prefix caching for the whole conversation. That is the user's own text and is left alone.
+
 ## 6. Refusals
 
 An empty key is refused **before any request is made**. `requiresKey` is true, so
@@ -190,7 +213,7 @@ same branch Mistral joined.
 | --- | --- |
 | `TestDeepSeekListingCarriesWhatThePlanningNeeds` | the window on `ContextLimit`/`MaxContext`, `vlm` from an image modality, `CapTools`, `CapThink` from `effort` absence/presence, `State: loaded` |
 | `TestDeepSeekListingSkipsAnEntryItCannotRead` | a malformed entry is dropped, its neighbour survives |
-| `TestDeepSeekStreamParsesReasoningContent` | the field name, the content that follows it, usage, the `Bearer` header, the chat path |
+| `TestDeepSeekStreamParsesReasoningContent` | the field name, the content that follows it, usage including the cache-hit split, the `Bearer` header, the chat path |
 | `TestDeepSeekFallsBackToTheV1Path` | the second route still answers after a 404 on the first |
 | `TestDeepSeekWithoutAKeyIsNotAttempted` | `ErrMissingAPIKey` from `ListModels`, `Health` and `Chat` |
 | `TestRegistryBuildsDeepSeekFromConfig` | the kind selects the provider, the default address, `requiresKey`, the flavour, and that a disabled entry builds nothing |

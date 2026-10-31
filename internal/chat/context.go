@@ -261,11 +261,20 @@ func Assemble(in AssemblyInput) Assembly {
 		})
 	}
 
-	// The working tree, when the folder is a git repository. It follows the guidance file because
-	// it is the same kind of fact — read out of the project on every turn — and it is silent for
-	// a folder that is not a repository, which is the ordinary case of a scratch folder.
+	// The working tree, when the folder is a git repository. It is silent for a folder that is
+	// not a repository, which is the ordinary case of a scratch folder.
+	//
+	// It deliberately does *not* join the system message, and that is a cost decision rather
+	// than a cosmetic one. The block changes the moment the assistant edits a file, and a
+	// hosted backend's prompt cache matches the request from its start (DEEPSEEK.md §5), so a
+	// block that differs from round to round inside message zero makes every round of a coding
+	// reply a miss for the whole history behind it — the first edit would re-bill the entire
+	// prompt at the miss price, on each of the reply's rounds. It rides at the end of the
+	// request instead (see the append after the history below), so the system message and the
+	// history stay byte-identical across a reply and only the newest block is uncached.
+	var gitState string
 	if state, detail, ok := projectGitState(in.Chat); ok {
-		systemParts = append(systemParts, state)
+		gitState = state
 		tokens := llm.EstimateTokens(state)
 		budget.Memory += tokens
 		budget.Segments = append(budget.Segments, ContextSegment{
@@ -396,6 +405,30 @@ func Assemble(in AssemblyInput) Assembly {
 		var rewriteDelta int
 		msgs, rewriteDelta = sanitiseToolHistory(msgs, toolNameSet(in.KnownTools))
 		budget.History += rewriteDelta
+	}
+
+	// The per-turn state (gitState) rides at the very end of the request, after everything the
+	// cache is meant to keep. The last message is the one that changed anyway — the user's
+	// question on the first round, the newest tool result on every round after it — so nothing
+	// in front of it shifts, where a block in the system message shifted all of it.
+	//
+	// Appended to that message rather than sent as one of its own: on the first round the
+	// newest message is the user's question, and a second user turn in a row is a shape the
+	// strict chat templates this app already works around refuse (see the note on the single
+	// system message above). Appending text changes neither the roles nor the count. A request
+	// with no history at all — a preview — has only the system message to carry it, and no
+	// cache worth protecting.
+	//
+	// The system prompt can still change between requests on its own: `{{context_used}}` and
+	// `{{datetime}}` are the user's own text, and rewriting what their prompt says to favour a
+	// vendor's cache is not this function's call.
+	if gitState != "" {
+		last := len(msgs) - 1
+		if msgs[last].Content == "" {
+			msgs[last].Content = gitState
+		} else {
+			msgs[last].Content += "\n\n" + gitState
+		}
 	}
 
 	budget.ToolSchemas = toolTokens
