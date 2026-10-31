@@ -324,9 +324,14 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// model wrote in prose and the model can correct itself on the next round. The
 		// reasoning is in toolhistory.go. A nil name list means there is no tool service
 		// at all: no declared set to check against, so the executor's own error stands.
+		//
+		// The two sets differ on purpose: `known` is every tool the app can execute, and
+		// `toolDefs` is what this request declares. A repaired name is checked against the
+		// first, a borrowed one against both — an alias must not hand a turn a tool the
+		// request withheld.
 		if known := engineKnownTools(e, &in.Chat); len(calls) > 0 && known != nil {
 			var notes, dropped []string
-			calls, notes, dropped = resolveToolCalls(calls, known, in.UseNative)
+			calls, notes, dropped = resolveToolCalls(calls, known, definitionNames(toolDefs), in.UseNative)
 			for _, note := range notes {
 				e.warn(in.Chat.ID, note)
 			}

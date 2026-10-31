@@ -6,6 +6,7 @@ import (
 
 	"kichat/internal/llm"
 	"kichat/internal/tools"
+	"kichat/internal/uimsg"
 )
 
 // A tool call has to name a tool. Two things can break that: a model that mangles
@@ -23,20 +24,20 @@ import (
 // This file is that decision: a mangled name is repaired where the intent is
 // unambiguous, dropped where it is not, and a history that already holds a name the
 // app cannot execute is demoted to plain text rather than sent as a tool call.
-const (
-	// renamedToolNote is the warning a repaired name produces, so a call that ran
-	// under a name the model invented is explained rather than silently corrected.
-	renamedToolNote = "Der Tool-Aufruf „%s“ wurde als „%s“ ausgeführt — das Modell hatte den Namen verfälscht."
-	// aliasedToolNote is the same for a name that is not mangled but borrowed: `bash`
-	// where this app says `run_command`. It says which convention the name came from,
-	// because "verfälscht" would be wrong about a name the model wrote exactly right.
-	aliasedToolNote = "Der Tool-Aufruf „%s“ wurde als „%s“ ausgeführt — „%s“ ist der Name, den andere Assistenten dafür verwenden."
-	// droppedToolNote is the warning for a name nothing matches.
-	droppedToolNote = "Der Tool-Aufruf „%s“ wurde verworfen: diesen Namen kennt die App nicht."
-	// droppedToolText is what the transcript says when no call survived, so a turn
-	// does not end on an empty answer nobody can explain.
-	droppedToolText = "[Der Modell-Aufruf „%s“ wurde verworfen: diesen Namen kennt die App nicht.]"
-)
+//
+// The three sentences a repair produces are `uimsg` codes, not text: they are shown as a toast
+// in the window, and a German sentence here reached an English and a Chinese window unchanged.
+// They are written as literals at the call site rather than as constants, because that is what
+// the dictionary test in the root package reads (`uimsg.*("code"`) — a code behind an identifier
+// is a code nothing checks for a translation.
+//
+// droppedToolText below is the exception and stays a sentence, because it is written into a
+// stored message: the transcript shows it as it was recorded, and the model reads it as part of
+// the history it replays.
+
+// droppedToolText is what the transcript says when no call survived, so a turn
+// does not end on an empty answer nobody can explain.
+const droppedToolText = "[Der Modell-Aufruf „%s“ wurde verworfen: diesen Namen kennt die App nicht.]"
 
 // toolNameSet turns names into a lookup.
 func toolNameSet(names []string) map[string]bool {
@@ -106,7 +107,14 @@ var toolAliases = map[string][]string{
 // something this function cannot know, and a wrong tool with the right arguments is
 // worse than a refused call — `generate_image` handed a scrape's URL as its prompt is
 // the expensive shape of that mistake.
-func repairToolName(name string, known map[string]bool) (string, bool) {
+//
+// `known` is every tool the app can execute, which is wider than what a request offers. An
+// alias is therefore also resolved against `offered` — the tools this request declares — and
+// only there: a borrowed `bash` must not reach a `run_command` the request withheld (a project
+// with nobody to ask), and `fetch` must not reach a `scrape_url` whose scraper is switched off.
+// A nil `offered` means "no restriction", which is what replaying a stored history wants: that
+// call was executed, so the tool it ran as is the answer.
+func repairToolName(name string, known, offered map[string]bool) (string, bool) {
 	trimmed := strings.TrimSpace(strings.Trim(name, "`\"'"))
 	if trimmed == "" {
 		return "", false
@@ -137,15 +145,22 @@ func repairToolName(name string, known map[string]bool) (string, bool) {
 		return match, false
 	}
 	for _, target := range toolAliases[lower] {
-		if known[target] {
-			return target, true
+		if !known[target] {
+			continue
 		}
+		if offered != nil && !offered[target] {
+			continue
+		}
+		return target, true
 	}
 	return "", false
 }
 
 // resolveToolCalls repairs a mangled name where the intent is unambiguous, and decides
 // what happens to a call no tool answers.
+//
+// known is every tool the app can execute and offered the ones this request declares; a repaired
+// name resolves within the first, a borrowed one within both (repairToolName has the argument).
 //
 // dropUnknown is the one thing the two tool modes disagree about, and it follows where
 // the name came from. A native call is generated against a `tools` array the vendor
@@ -158,20 +173,24 @@ func repairToolName(name string, known map[string]bool) (string, bool) {
 // it, and no vendor sees the name. There the error is the useful answer: it names what
 // the model asked for, the model can correct itself on the next round, and a history
 // that still carries the name is demoted to text when it is replayed (sanitiseToolHistory).
-func resolveToolCalls(calls []llm.ToolCall, known []string, dropUnknown bool) (kept []llm.ToolCall,
+func resolveToolCalls(calls []llm.ToolCall, known, offered []string, dropUnknown bool) (kept []llm.ToolCall,
 	notes []string, dropped []string) {
 
 	names := toolNameSet(known)
+	offeredNames := toolNameSet(offered)
 	for _, call := range calls {
 		if names[call.Name] {
 			kept = append(kept, call)
 			continue
 		}
-		if repaired, aliased := repairToolName(call.Name, names); repaired != "" {
+		if repaired, aliased := repairToolName(call.Name, names, offeredNames); repaired != "" {
+			// chat.aliasedTool is the borrowed name (`bash` where this app says
+			// `run_command`), chat.renamedTool the mangled one. They are two sentences because
+			// "the model had mangled the name" is wrong about a name it wrote exactly right.
 			if aliased {
-				notes = append(notes, fmt.Sprintf(aliasedToolNote, call.Name, repaired, call.Name))
+				notes = append(notes, uimsg.Errorf("chat.aliasedTool", call.Name, repaired).Error())
 			} else {
-				notes = append(notes, fmt.Sprintf(renamedToolNote, call.Name, repaired))
+				notes = append(notes, uimsg.Errorf("chat.renamedTool", call.Name, repaired).Error())
 			}
 			call.Name = repaired
 			kept = append(kept, call)
@@ -181,7 +200,7 @@ func resolveToolCalls(calls []llm.ToolCall, known []string, dropUnknown bool) (k
 			kept = append(kept, call)
 			continue
 		}
-		notes = append(notes, fmt.Sprintf(droppedToolNote, call.Name))
+		notes = append(notes, uimsg.Errorf("chat.droppedTool", call.Name).Error())
 		dropped = append(dropped, call.Name)
 	}
 	return kept, notes, dropped
@@ -222,9 +241,16 @@ func renderToolResultText(name, content string) string {
 //
 // Messages are in conversation order, so a call is seen before the result that answers
 // it; a result whose call was never seen is demoted for the same reason.
+//
+// A repaired call takes its result's name with it. The tool turn carries the name it ran under
+// (Ollama sends it as `tool_name`), so a call replayed as `run_command` beside a result named
+// `bash` is a pair that disagrees about which tool ran — and for a call dropped before this
+// repair existed, the stored result still says the name was unknown.
 func sanitiseToolHistory(msgs []llm.Message, known map[string]bool) ([]llm.Message, int) {
 	delta := 0
 	kept := map[string]bool{}
+	// The name each call was repaired to, so the result answering it travels under that name.
+	repaired := map[string]string{}
 	for i := range msgs {
 		m := &msgs[i]
 		before := llm.EstimateTokens(m.Content)
@@ -235,6 +261,8 @@ func sanitiseToolHistory(msgs []llm.Message, known map[string]bool) ([]llm.Messa
 				m.Content = renderToolResultText(m.Name, m.Content)
 				m.Name, m.ToolCallID = "", ""
 				delta += llm.EstimateTokens(m.Content) - before
+			} else if name := repaired[m.ToolCallID]; name != "" {
+				m.Name = name
 			}
 			continue
 		}
@@ -245,11 +273,14 @@ func sanitiseToolHistory(msgs []llm.Message, known map[string]bool) ([]llm.Messa
 		for _, call := range m.ToolCalls {
 			name := call.Name
 			if !known[name] {
-				name, _ = repairToolName(name, known)
+				name, _ = repairToolName(name, known, nil)
 			}
 			if name == "" {
 				m.Content = joinText(m.Content, fmt.Sprintf(droppedToolText, call.Name))
 				continue
+			}
+			if name != call.Name {
+				repaired[call.ID] = name
 			}
 			call.Name = name
 			kept[call.ID] = true

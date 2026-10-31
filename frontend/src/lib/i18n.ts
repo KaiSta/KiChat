@@ -1176,6 +1176,12 @@ const de = {
     'das Modell hat einen Tool-Aufruf mit einem Namen erzeugt, den die Anfrage nicht deklariert hat — der Anbieter hat die Anfrage deshalb abgelehnt. Sende die Nachricht erneut; geschieht es wieder, wähle für diesen Chat ein anderes Modell.',
   'err.chat.noModelInChat': 'Kein Modell ausgewählt. Bitte oben im Chat ein Modell wählen.',
   'err.chat.noTools': 'keine Tools verfügbar',
+  'err.chat.renamedTool':
+    'Der Tool-Aufruf „{{1}}“ wurde als „{{2}}“ ausgeführt — das Modell hatte den Namen verfälscht.',
+  'err.chat.aliasedTool':
+    'Der Tool-Aufruf „{{1}}“ wird als „{{2}}“ ausgeführt — das ist der Name, den andere Assistenten dafür verwenden.',
+  'err.chat.droppedTool':
+    'Der Tool-Aufruf „{{1}}“ wurde verworfen: diesen Namen kennt die App nicht.',
   'err.chat.tooLargeFolded':
     'Die Anfrage ist zu groß für {{1}} — auch mit komprimiertem Verlauf passt sie nicht hinein. Kürze die Nachricht, entferne Anhänge oder wähle ein Modell mit einem höheren Limit.',
   'err.chat.tooLargeFoldedLimit':
@@ -2445,6 +2451,12 @@ const en: Record<keyof typeof de, string> = {
     'the model produced a tool call with a name the request did not declare, so the provider rejected the request. Send the message again; if it happens again, choose a different model for this chat.',
   'err.chat.noModelInChat': 'No model selected. Choose one at the top of the chat.',
   'err.chat.noTools': 'no tools are available',
+  'err.chat.renamedTool':
+    'The tool call "{{1}}" ran as "{{2}}" — the model had mangled the name.',
+  'err.chat.aliasedTool':
+    'The tool call "{{1}}" runs as "{{2}}" — that is the name other assistants use for it.',
+  'err.chat.droppedTool':
+    'The tool call "{{1}}" was dropped: the app does not know that name.',
   'err.chat.tooLargeFolded':
     'The request is too large for {{1}} — it does not fit even with a compacted history. Shorten the message, remove attachments, or choose a model with a higher limit.',
   'err.chat.tooLargeFoldedLimit':
@@ -3610,6 +3622,9 @@ const zh: Record<keyof typeof de, string> = {
   'err.chat.malformedToolCall': '模型生成的工具调用使用了请求中未声明的名称，提供方因此拒绝了该请求。请重新发送消息；若再次出现，请为该对话选择其他模型。',
   'err.chat.noModelInChat': '未选择模型。请在对话顶部选择一个模型。',
   'err.chat.noTools': '没有可用的工具',
+  'err.chat.renamedTool': '工具调用 “{{1}}” 已作为 “{{2}}” 执行——模型把名称写错了。',
+  'err.chat.aliasedTool': '工具调用 “{{1}}” 将作为 “{{2}}” 执行——这是其他助手对该工具的称呼。',
+  'err.chat.droppedTool': '工具调用 “{{1}}” 已被丢弃：应用不认识这个名称。',
   'err.chat.tooLargeFolded': '请求对 {{1}} 来说过大——即使压缩历史后也放不下。请缩短消息、移除附件，或选择上限更高的模型。',
   'err.chat.tooLargeFoldedLimit':
     '请求对 {{1}} 来说过大（每次请求最多 {{2}} 个 token）——即使压缩历史后也放不下。请缩短消息、移除附件，或选择上限更高的模型。',

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"kichat/internal/research"
 	"kichat/internal/store"
 	"kichat/internal/tools"
+	"kichat/internal/uimsg"
 )
 
 // TestRepairToolName pins the rule that decides what a mangled name meant. It is
@@ -33,7 +36,7 @@ func TestRepairToolName(t *testing.T) {
 		{"scrape", ""},
 		{"", ""},
 	} {
-		if got, _ := repairToolName(tc.in, known); got != tc.want {
+		if got, _ := repairToolName(tc.in, known, nil); got != tc.want {
 			t.Errorf("repairToolName(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
@@ -46,36 +49,78 @@ func TestRepairToolName(t *testing.T) {
 // hand a turn a tool that was withheld from it.
 func TestANameFromAnotherConventionResolves(t *testing.T) {
 	project := toolNameSet([]string{"read_file", "run_command", "edit_file"})
-	if got, aliased := repairToolName("bash", project); got != "run_command" || !aliased {
+	if got, aliased := repairToolName("bash", project, project); got != "run_command" || !aliased {
 		t.Errorf("bash resolved to %q (aliased=%v), want run_command through the alias table", got, aliased)
 	}
 	for _, name := range []string{"read", "cat"} {
-		if got, _ := repairToolName(name, project); got != "read_file" {
+		if got, _ := repairToolName(name, project, project); got != "read_file" {
 			t.Errorf("%s resolved to %q, want read_file", name, got)
 		}
 	}
 	research := toolNameSet([]string{"search_web", "scrape_url"})
-	if got, _ := repairToolName("bash", research); got != "" {
+	if got, _ := repairToolName("bash", research, research); got != "" {
 		t.Errorf("bash resolved to %q in a request that does not offer run_command", got)
 	}
 	// A mangled name is still reported as mangled: `verfälscht` would be the wrong sentence
 	// for a name the model wrote exactly as it learned it.
-	if _, aliased := repairToolName("scr scrape_url", toolNameSet([]string{"scrape_url"})); aliased {
+	scrape := toolNameSet([]string{"scrape_url"})
+	if _, aliased := repairToolName("scr scrape_url", scrape, scrape); aliased {
 		t.Error("a repaired name was reported as an alias")
 	}
 
-	// And through the resolver a native call goes through, with the note the user sees.
+	// And through the resolver a native call goes through, with the note the user sees. The
+	// note is a dictionary code, so what is pinned is the code and its arguments rather than a
+	// German sentence an English window would have shown as it was.
 	kept, notes, dropped := resolveToolCalls([]llm.ToolCall{
 		{ID: "call-1", Name: "bash", Arguments: `{"command":"echo hi"}`},
-	}, []string{"run_command"}, true)
+	}, []string{"run_command"}, []string{"run_command"}, true)
 	if len(kept) != 1 || kept[0].Name != "run_command" || len(dropped) != 0 {
 		t.Fatalf("a bash call was not resolved onto run_command: kept=%v dropped=%v", kept, dropped)
 	}
 	if kept[0].Arguments != `{"command":"echo hi"}` {
 		t.Errorf("the arguments were rewritten: %q", kept[0].Arguments)
 	}
-	if len(notes) != 1 || !strings.Contains(notes[0], "„bash“") || !strings.Contains(notes[0], "„run_command“") {
-		t.Errorf("the note does not say what was renamed to what: %v", notes)
+	if len(notes) != 1 {
+		t.Fatalf("a repaired name produced %d notes, want one", len(notes))
+	}
+	note, ok := uimsg.Parse(notes[0])
+	if !ok || note.Code != "chat.aliasedTool" {
+		t.Fatalf("the note is %q, want the chat.aliasedTool code", notes[0])
+	}
+	if len(note.Args) != 2 || note.Args[0] != "bash" || note.Args[1] != "run_command" {
+		t.Errorf("the note does not say what runs as what: %v", note.Args)
+	}
+}
+
+// TestABorrowedNameCannotReachAWithheldTool is the limit of the table, pinned where it can
+// actually fail: `known` is every tool the app can execute, which is wider than the request's
+// own list, so an alias resolved against that alone would hand a turn a tool it was never
+// offered — `fetch` reaching a `scrape_url` whose scraper is switched off, or `bash` reaching a
+// `run_command` in a project with nobody to ask.
+func TestABorrowedNameCannotReachAWithheldTool(t *testing.T) {
+	known := []string{"search_web", "scrape_url", "run_command"}
+	withheld := []string{"search_web"}
+
+	kept, notes, dropped := resolveToolCalls([]llm.ToolCall{
+		{ID: "call-1", Name: "fetch", Arguments: `{"url":"https://example.com"}`},
+		{ID: "call-2", Name: "bash", Arguments: `{"command":"echo hi"}`},
+	}, known, withheld, true)
+	if len(kept) != 0 || len(dropped) != 2 {
+		t.Fatalf("a withheld tool was reached: kept=%v dropped=%v", kept, dropped)
+	}
+	for _, note := range notes {
+		if message, ok := uimsg.Parse(note); !ok || message.Code != "chat.droppedTool" {
+			t.Errorf("a withheld name was reported as %q, want the dropped code", note)
+		}
+	}
+
+	// The same two calls against a request that offers them: both resolve.
+	kept, _, _ = resolveToolCalls([]llm.ToolCall{
+		{ID: "call-1", Name: "fetch", Arguments: `{"url":"https://example.com"}`},
+		{ID: "call-2", Name: "bash", Arguments: `{"command":"echo hi"}`},
+	}, known, known, true)
+	if len(kept) != 2 || kept[0].Name != "scrape_url" || kept[1].Name != "run_command" {
+		t.Errorf("offered names did not resolve: %v", kept)
 	}
 }
 
@@ -156,12 +201,71 @@ func TestAMangledNameIsRepairedBeforeTheCallIsStored(t *testing.T) {
 	// And the user was told, rather than handed a call that silently changed name.
 	warned := false
 	for _, ev := range log.snapshot() {
-		if ev.name == "chat:warning" && strings.Contains(fmt.Sprint(ev.payload["warning"]), "verfälscht") {
+		if ev.name != "chat:warning" {
+			continue
+		}
+		if message, ok := uimsg.Parse(fmt.Sprint(ev.payload["warning"])); ok && message.Code == "chat.renamedTool" {
 			warned = true
 		}
 	}
 	if !warned {
 		t.Error("the repaired name was not reported")
+	}
+}
+
+// TestABorrowedNameAndItsOwnFieldNamesStillWork drives the pair end to end, and the pair is
+// the point: the *name* is resolved in this package and the *fields* in internal/tools, so a
+// repair that did only the first would tell the user the call ran while the model was told it
+// had named no path — the worst of both answers.
+func TestABorrowedNameAndItsOwnFieldNamesStillWork(t *testing.T) {
+	st := newTestStore(t)
+	folder := t.TempDir()
+	if err := os.WriteFile(filepath.Join(folder, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateChat(store.Chat{
+		ID: "chat-1", Title: "Projekt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model", SystemPrompt: "Du bist ein Assistent.",
+		Temperature: 0.7, TopP: 0.9, AutoCompact: false,
+		Mode: store.ModeCoding, Workspace: folder,
+	}); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072,
+			State: llm.StateLoaded, Capabilities: []string{llm.CapTools}},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventToolCall, ToolCall: &llm.ToolCall{
+				ID: "call-1", Name: "read", Arguments: `{"file_path":"main.go"}`,
+			}}},
+			{{Type: llm.EventDelta, Text: "Gelesen."}, {Type: llm.EventDone}},
+		},
+	}
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.ToolIterations = 3
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+	engine := NewEngine(st, registry, tools.New(st, nil, nil),
+		func() config.Settings { return settings }, (&eventLog{}).emit)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Lies main.go."}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the turn did not finish")
+	}
+
+	carried := ""
+	for _, m := range provider.requestAt(1).Messages {
+		if m.Role == llm.RoleTool {
+			carried = m.Content
+		}
+	}
+	if !strings.Contains(carried, "package main") {
+		t.Errorf("a borrowed name with its own field names did not reach the tool: %q",
+			truncateForTest(carried, 200))
 	}
 }
 
@@ -223,7 +327,10 @@ func TestAnUnresolvableNativeNameIsNotStored(t *testing.T) {
 	}
 	warned := false
 	for _, ev := range log.snapshot() {
-		if ev.name == "chat:warning" && strings.Contains(fmt.Sprint(ev.payload["warning"]), "verworfen") {
+		if ev.name != "chat:warning" {
+			continue
+		}
+		if message, ok := uimsg.Parse(fmt.Sprint(ev.payload["warning"])); ok && message.Code == "chat.droppedTool" {
 			warned = true
 		}
 	}
@@ -298,6 +405,10 @@ func storedToolTurn(name, content string) []store.Message {
 // TestAStoredMangledCallIsRepairedInTheHistory covers chats written before the fix: a
 // call that named "scr scrape_url" is sent as `scrape_url`, so the result keeps its
 // matching tool turn instead of being demoted for a name nothing recognises.
+//
+// The result's own name travels with it. A backend that carries the tool name on the result
+// (Ollama sends `tool_name`) would otherwise replay a call named `scrape_url` answered by a
+// tool turn named `scr scrape_url` — a pair that disagrees about which tool ran.
 func TestAStoredMangledCallIsRepairedInTheHistory(t *testing.T) {
 	assembly := Assemble(AssemblyInput{
 		Chat:       store.Chat{ID: "chat-1", SystemPrompt: "Du bist ein Assistent."},
@@ -307,13 +418,13 @@ func TestAStoredMangledCallIsRepairedInTheHistory(t *testing.T) {
 	})
 
 	var names []string
-	result := ""
+	result, resultName := "", ""
 	for _, m := range assembly.Messages {
 		for _, c := range m.ToolCalls {
 			names = append(names, c.Name)
 		}
 		if m.Role == llm.RoleTool {
-			result = m.Content
+			result, resultName = m.Content, m.Name
 		}
 	}
 	if len(names) != 1 || names[0] != "scrape_url" {
@@ -321,6 +432,38 @@ func TestAStoredMangledCallIsRepairedInTheHistory(t *testing.T) {
 	}
 	if result != "Der Seiteninhalt." {
 		t.Errorf("the tool result did not stay a tool turn: %q", result)
+	}
+	if resultName != "scrape_url" {
+		t.Errorf("the tool result is named %q, want the repaired scrape_url", resultName)
+	}
+}
+
+// TestAStoredBorrowedNameIsRepairedInTheHistory is the same replay for the vocabulary another
+// convention taught the model: a call stored as `bash` runs as `run_command`, and its result
+// says so too — the transcript of an older turn is the one place the two names can disagree.
+func TestAStoredBorrowedNameIsRepairedInTheHistory(t *testing.T) {
+	assembly := Assemble(AssemblyInput{
+		Chat:       store.Chat{ID: "chat-1", SystemPrompt: "Du bist ein Assistent."},
+		Messages:   storedToolTurn("bash", "hallo"),
+		KnownTools: []string{"run_command"},
+		Limit:      100000, LimitSource: "backend", Reserve: 1000,
+	})
+
+	var names []string
+	resultName := ""
+	for _, m := range assembly.Messages {
+		for _, c := range m.ToolCalls {
+			names = append(names, c.Name)
+		}
+		if m.Role == llm.RoleTool {
+			resultName = m.Name
+		}
+	}
+	if len(names) != 1 || names[0] != "run_command" {
+		t.Fatalf("history carried tool calls %v, want the repaired run_command", names)
+	}
+	if resultName != "run_command" {
+		t.Errorf("the tool result is named %q, want the repaired run_command", resultName)
 	}
 }
 
