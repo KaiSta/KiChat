@@ -9,59 +9,57 @@ DuckDuckGo search, picture generation, and SQLite storage.
 
 This file is the **index and the rules**, not the manual. It is loaded into every
 session, so it stays short and points at three places instead of repeating them:
-
-| Read | For |
-| --- | --- |
-| [`CODE_MAP.md`](documentation/CODE_MAP.md) | where any package, file or extension point lives, and the request lifecycle |
-| [`.claude/skills/`](.claude/skills) | the procedures — one per recurring task, loaded only when used |
-| the subsystem documents (bottom of this file) | the measured facts behind each backend or feature |
-
-An agent that does not load Agent Skills should open the `SKILL.md` named in the
-table below directly; the files are plain Markdown by design.
+[`CODE_MAP.md`](documentation/CODE_MAP.md) for where anything lives (including the
+storage schema and the request lifecycle), [`.claude/skills/`](.claude/skills) for the
+procedures — one per recurring task, loaded only when used — and the subsystem
+documents at the bottom for the measured facts behind each backend. An agent that does
+not load Agent Skills should open the `SKILL.md` named below directly; the files are
+plain Markdown by design.
 
 ## Start here
 
 ```sh
-make check        # gofmt, vet (linux/windows/darwin), tests, tsc
+make check        # gofmt, vet (linux, windows, darwin, both arm64 halves), tests, tsc
 make build        # build/bin/kichat
 make run          # build and launch
 ```
 
-One thing bites on this machine: **every Linux build needs `-tags webkit2_41`**
-because only webkit2gtk-4.1 is installed. `make` handles it; a raw `wails build`
-needs the tag. Node used to be the second — it lived in `~/.local/node/bin` and was
-not on `PATH` — and it is now the system install in `/usr/bin`, so nothing has to be
-exported; the Makefile still falls back to that directory when `npm` is not found.
+**Every Linux build needs `-tags webkit2_41`**, because only webkit2gtk-4.1 is
+installed. `make` adds it; a raw `wails build` does not. What this machine actually
+has, and why each version is or is not a problem, is in
+[`build-platforms`](.claude/skills/build-platforms/SKILL.md).
 
 ## Where things live
 
+Go logic is one package per subsystem under `internal/`; the window is
+`frontend/src`, where `lib/i18n.ts` holds every user-facing string. The places
+opened most:
+
 | Path | What |
 | --- | --- |
-| `main.go` | Wails bootstrap, embedded `frontend/dist`, `--version` |
 | `app.go`, `api*.go` | the bridge: every method the window can call, split by domain (`api.go` holds settings, keys and the shared types) |
 | `internal/chat` | context assembly, the model/tool loop, compaction, pacing |
 | `internal/llm` | the provider interface and every chat backend |
-| `internal/images` | picture generation: WebUI, `sd-cli`, managed `sd-server`; and enlarging: Lanczos, optional Real-ESRGAN |
-| `internal/runtime` | llama.cpp install and supervision, GPU placement, model folders |
-| `internal/research`, `internal/tools`, `internal/ingest` | search/scrape, model tools, attachments |
-| `internal/store`, `internal/config`, `internal/secret`, `internal/dbkey`, `internal/events` | state (encrypted at rest), settings, API keys, the database key and its recovery copy, event names |
-| `internal/uimsg` | a user-facing message from Go as a dictionary key (`i18n:` payload, `err.*` entries) |
-| `frontend/src` | the window; `lib/i18n.ts` holds every user-facing string |
+| `internal/tools`, `internal/workspace` | what the model can call, and the folder boundary every file tool resolves against |
+| `internal/images`, `internal/runtime` | picture generation and enlarging; llama.cpp install and supervision |
+| `internal/store`, `internal/config`, `internal/secret` | state (encrypted at rest), settings, API keys |
 
-[`CODE_MAP.md`](documentation/CODE_MAP.md) has the per-file detail, the storage schema, and a
-table mapping "to add X, touch Y" to the right skill.
+[`CODE_MAP.md`](documentation/CODE_MAP.md) has the rest — every bridge file, every
+package with its entry points and tests, the frontend components, and the table
+mapping "to add X, touch Y" to the right skill.
 
 ## Skills
 
 | Skill | Use when |
 | --- | --- |
-| [`add-llm-backend`](.claude/skills/add-llm-backend/SKILL.md) | adding a chat backend, or changing a listing, stream, refusal or capability |
-| [`add-image-backend`](.claude/skills/add-image-backend/SKILL.md) | adding a picture backend, or changing parameters, hires, tiling or progress |
-| [`change-settings`](.claude/skills/change-settings/SKILL.md) | adding or changing a setting, default or prompt preset |
-| [`build-platforms`](.claude/skills/build-platforms/SKILL.md) | producing an artifact, or changing the Makefile's build/packaging recipes |
+| [`add-llm-backend`](.claude/skills/add-llm-backend/SKILL.md) | a chat backend, or a listing, stream, refusal or capability |
+| [`add-image-backend`](.claude/skills/add-image-backend/SKILL.md) | a picture backend, or parameters, hires, tiling, progress |
+| [`change-settings`](.claude/skills/change-settings/SKILL.md) | a setting, a default or a prompt preset |
+| [`build-platforms`](.claude/skills/build-platforms/SKILL.md) | an artifact, the Makefile, or a build reporting the wrong version |
+| [`commit`](.claude/skills/commit/SKILL.md) | committing: subject, body, staging, the release commit |
 | [`cut-release`](.claude/skills/cut-release/SKILL.md) | "cut x.y.z", bumping `VERSION`, tagging |
-| [`live-tests`](.claude/skills/live-tests/SKILL.md) | running or adding a test against a real service |
-| [`verify-ui`](.claude/skills/verify-ui/SKILL.md) | changing anything the window renders, or a bridge binding |
+| [`live-tests`](.claude/skills/live-tests/SKILL.md) | a test against a real service |
+| [`verify-ui`](.claude/skills/verify-ui/SKILL.md) | anything the window renders, or a bridge binding |
 
 ## Rules that are not negotiable
 
@@ -85,184 +83,92 @@ table mapping "to add X, touch Y" to the right skill.
 - **The scratch directory at the repo root is gitignored**; `frontend/dist`,
   `build/bin` and `node_modules` are build output.
 
-## Environment (verified, not assumed)
-
-| Tool | Here | Consequence |
-| --- | --- | --- |
-| Go | 1.27.3 | fine; the language version is `go.mod`'s `go 1.27.0`, which is also the toolchain CI installs, so the two agree |
-| Wails CLI | 2.15.0 | fine |
-| Node / npm | 22.23.4 / 12.2.1 in `/usr/bin` | on `PATH`; the Makefile's `~/.local/node/bin` fallback is no longer used here |
-| webkit2gtk | 4.1 only | **every Linux build needs `-tags webkit2_41`** |
-
-`vite dev` needs Node ≥ 20.19 / ≥ 22.12 (below that, Vite 7 dies with
-`crypto.hash is not a function`), and npm 9 cannot install Tailwind's native binding
-at all (`libc`-aware optional dependencies arrived in npm 10). The full
-history, including what upgrading the toolchain does and does not change, is in
-[`README.md`](README.md); the fix is a current Node, not a Makefile change.
-
 ## Checks that must pass
 
-```sh
-make check                                  # the next seven, in one step
-make build                                  # the last one, into build/bin/kichat
+`make check` is gofmt, `go vet` on linux/windows/darwin plus `make vet-arm64`, the
+Go tests and `tsc`; `make build` writes `build/bin/kichat`. Both must exit 0.
 
-gofmt -l .                                  # must print nothing
-go vet ./...
-GOOS=windows go vet ./...                   # the Windows half compiles
-GOOS=darwin go vet ./...                    # the macOS half compiles
-make vet-arm64                              # the linux/arm64 and windows/arm64 halves compile
-cd frontend && npx tsc --noEmit             # or: npm run build (tsc && vite build)
-go test ./... -count=1
-wails build -tags webkit2_41                # the last one, into build/bin/kichat
-```
+CI runs those targets rather than a second copy of the commands, so a change to the
+build belongs in the Makefile, and no job uploads an artifact: **a pushed tag is
+what ships**. Which job builds what is in
+[`build-platforms`](.claude/skills/build-platforms/SKILL.md).
 
-CI runs these targets rather than a second copy of the commands:
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) has `make check` and `make build`
-on Linux (the only platform that links, and the one `-tags webkit2_41` exists for),
-`make windows` on Windows and `make darwin` on macOS. A job that restated a recipe
-would be free to drift from it, so a change to the build belongs in the Makefile and is
-then picked up by every job.
+Two traps a green run can hide:
 
-CI keeps nothing: no job uploads an artifact. **A pushed tag is what ships** —
-[`release.yml`](.github/workflows/release.yml) runs `make deb`, `make nsis` and
-`make dmg` for the tag, checks each artifact reports its version, and attaches the
-three to a GitHub Release whose notes are the tag's annotation. The `cut-release`
-skill has the consequences.
-
-`wails build` regenerates `frontend/wailsjs/go/models.ts`: after changing a Go
-struct that crosses the bridge, build (or `wails generate module`) **before**
-type-checking the frontend, or `tsc` fails on the missing field.
-
-A nil Go slice marshals to `null`, not `[]`. A binding that returns a slice needs
-its empty case rendered in the harness or pinned in a root-level Go test — that is
-what `runtime_status_test.go` is for, and how Settings → Backends once died on
-`.find` of null.
-
-## Live tests
-
-Offline tests never touch the network. Live ones are gated by environment
-variables: `KICHAT_LIVE=1` plus a key, or a real model/server. They skip when the
-variable is absent, and a skip is not a pass.
-
-**Never put an API key in a tracked file.** Pass it in the environment; the app
-stores keys through `internal/secret`. The full matrix — which variable gates which
-test, what each one buys, and what it costs — is in the
-[`live-tests`](.claude/skills/live-tests/SKILL.md) skill.
-
-## Platforms
-
-A Windows build cross-builds from Linux or macOS with no mingw; a macOS `.app` can
-only be built on a Mac, and Wails exits **0** having built nothing when asked
-otherwise — which is why the Makefile checks the host. `make nsis` needs
-`makensis` on `PATH` and fails loudly when it is missing, because Wails does not.
-A `linux/arm64` package needs an arm64 host — the Linux build is cgo against
-webkit2gtk, and no x64 machine can link it — while `windows/arm64` cross-builds exactly
-like amd64, so the release ships a `.deb` and a Setup.exe per architecture and
-`make vet-arm64` compiles both halves anywhere. The installer is not
-byte-reproducible; the .deb is. Everything measured about
-these targets, including the version resource and the DMG, is in the
-[`build-platforms`](.claude/skills/build-platforms/SKILL.md) skill.
+- **`frontend/wailsjs/go/models.ts` is generated.** After changing a Go struct that
+  crosses the bridge, build (or `wails generate module`) **before** type-checking
+  the frontend, or `tsc` fails on a field that is not there yet.
+- **A nil Go slice marshals to `null`, not `[]`.** A binding that returns a slice
+  needs its empty case rendered in the harness or pinned in a root-level Go test —
+  `runtime_status_test.go` is the example, and Settings → Backends once died on
+  `.find` of null.
 
 ## Versioning
 
-The version is authored once, in `VERSION`, and every surface is derived from it:
-`make build` links it into `internal/version` (Settings → About, `kichat --version`)
-and rewrites `wails.json`'s `info` block, which is where the Windows resource and
-the macOS bundle version come from. Three traps:
+The number is authored once, in `VERSION`; `make build` links it into
+`internal/version` (Settings → About, `kichat --version`) and rewrites `wails.json`'s
+`info` block, which is where the Windows resource and the macOS bundle version come
+from. The traps that make a build report the wrong number are in
+[`build-platforms`](.claude/skills/build-platforms/SKILL.md); the procedure — bump,
+commit, tag, push — is [`cut-release`](.claude/skills/cut-release/SKILL.md).
 
-- **The linker path is the contract.** `-X kichat/internal/version.Version=…` stops
-  matching the moment that package or variable is renamed, and every build then
-  silently reports `dev`.
-- **A pre-release needs Debian's `~`**: `0.2.0~beta1`, not `0.2.0-beta.1`, or `apt
-  upgrade` treats the pre-release as newer than the final.
-- **The Windows version resource is rendered, not linked**, and `wails build` has
-  no flag to override it — `make version-info` is what keeps it in step.
-- **The build date is the commit's date, never the build clock.** A wall-clock
-  timestamp would break the byte-identical rebuilds `-trimpath` otherwise
-  guarantees.
+The release commit is written for users: a short bullet list of changes they can
+observe, in plain language, because its body is published as the release page.
 
-**The release commit is written for users, as a short bullet list.** Its body becomes
-the tag's annotation and therefore the GitHub release page, so it is the changelog
-somebody reads before installing: a handful of bullets, each a change they can
-observe, in plain language. No file or package names, no measurements, no reasoning —
-those belong in the commits that made the change and in the subsystem documents.
-Short is the point: a reader should learn what arrives in this version without
-opening anything else. A release with nothing a user can see says so in one bullet.
+## Commits
 
-The release procedure itself (the commit, the tag, the push rules, the repair of a
-missing tag) is the [`cut-release`](.claude/skills/cut-release/SKILL.md) skill.
+The subject is `area: description` — lowercase, imperative, the behaviour change and
+not the files. The areas, the body's shape, one change per commit and the
+`build: release x.y.z` exception are in [`commit`](.claude/skills/commit/SKILL.md).
+`git` here is always `--no-pager`.
 
-## Verifying the UI
+## Live tests
 
-Prefer the mock-bridge harness over driving the real window:
+Offline tests never touch the network. Live ones are gated by `KICHAT_LIVE=1` plus a
+key or a real model, skip when the variable is absent, and **a skip is not a pass**.
+Never put an API key in a tracked file: pass it in the environment, and the app stores
+keys through `internal/secret`. The matrix — which variable gates which test, what
+each one buys, what it costs — is
+[`live-tests`](.claude/skills/live-tests/SKILL.md).
+
+## The window
 
 ```sh
 make frontend && go run ./tools/uiharness    # http://127.0.0.1:8791/
 ```
 
-It renders the built frontend with a mocked Go bridge, has fixtures for every
-markdown feature, and query flags for the states that are otherwise unreachable
-(`?throttle=1`, `?pace=1`, `?spread=1`, `?ceiling=8000`, `?images=sdserver`, …). It
-proves rendering, state flow and event wiring — not backend behaviour. An
-`unmodelled binding called: X` in the console means the mock needs X. The flag
-table, the native-window traps (`xdotool`, `import`) and the streaming-renderer
-check are in the [`verify-ui`](.claude/skills/verify-ui/SKILL.md) skill.
-
-## Git commits
-
-The subject is `area: description` — lowercase, imperative, and it describes the
-behaviour change, not the files. Areas in use: `chat`, `llm`, `ui`, `research`,
-`docs`, `store`, `build`, `config`, `api`, `settings`, `secret`, `ingest`, `tools`,
-`icon`; a new area is fine when the change belongs nowhere else. A second effect
-joins with "and":
-
-```
-chat: make compaction work with a reasoning model
-research: report a refused search, and keep tests out of the keyring
-icon: draw the mark once, derive every surface from it, and make the taskbar one show
-```
-
-The body is prose, not a changelog: the failure or limitation that motivated the
-change, what was measured, what changed and why, and which checks stayed green.
-Numbers go in where they exist; a body that only lists the files is a stub. One
-commit is one coherent change, and files are staged explicitly, never `git add -A`.
-The exception is the `build: release x.y.z` commit: its body is the user-facing
-bullets described under [Versioning](#versioning), because it is published as the
-release note.
-
-**Always `--no-pager`.** `git log`, `git diff` and `git show` open a pager that
-blocks a non-interactive shell — it looks hung, and the output lands in a temp file
-instead of the result.
+The mock-bridge harness renders the built frontend with query flags for the states
+that are otherwise unreachable. It proves rendering, state flow and event wiring —
+not backend behaviour — and an `unmodelled binding called: X` in the console means
+the mock needs X. The flag table, the native-window traps and the streaming-renderer
+check are [`verify-ui`](.claude/skills/verify-ui/SKILL.md).
 
 ## Documentation
 
 | Document | What it holds |
 | --- | --- |
 | [`PLAN.md`](documentation/PLAN.md) | the architecture, and the reasoning behind it |
-| [`COMPACT.md`](documentation/COMPACT.md) | context compaction: strategy, arithmetic, failure modes |
-| [`CODING.md`](documentation/CODING.md) | coding mode: what makes a conversation a project, the folder boundary, the confirmation gate, and the terminal's shell, caps and timeout |
+| [`COMPACT.md`](documentation/COMPACT.md) | compaction: strategy, arithmetic, failure modes |
+| [`CODING.md`](documentation/CODING.md) | coding mode: folder boundary, confirmation gate, the terminal's shell, caps and timeout |
 | [`RESEARCH.md`](documentation/RESEARCH.md) | search and scraping: providers, refusals, guards, budgets |
-| [`IMAGES.md`](documentation/IMAGES.md) | picture generation: three server kinds, parameters, profiles, verification |
-| [`IMAGES-CLOUD.md`](documentation/IMAGES-CLOUD.md) | hosted picture backends: which free tiers exist, what each would cost, and the one that was built (NVIDIA NIM) |
-| [`UPSCALING.md`](documentation/UPSCALING.md) | enlarging a picture: the resampler, Real-ESRGAN, targets, the Enlarge panel |
-| [`LLAMACPP.md`](documentation/LLAMACPP.md) | the llama.cpp provider and managed runtime, projectors, ternary models |
-| [`GROQ.md`](documentation/GROQ.md) | the Groq backend: listing, ceiling, pacing, refusals |
-| [`NVIDIA.md`](documentation/NVIDIA.md) | the build.nvidia.com backend and its availability check |
-| [`MISTRAL.md`](documentation/MISTRAL.md) | the Mistral backend, alias collapse, typed chunks |
-| [`DEEPSEEK.md`](documentation/DEEPSEEK.md) | the DeepSeek backend, reasoning content, refusals |
-| [`ENCRYPTION.md`](documentation/ENCRYPTION.md) | the encrypted database: page-level encryption, the key and its recovery copy, the migration, the tests, and what the driver forced us to change |
+| [`IMAGES.md`](documentation/IMAGES.md) | picture generation: three server kinds, parameters, profiles |
+| [`IMAGES-CLOUD.md`](documentation/IMAGES-CLOUD.md) | hosted picture backends: the free tiers and their cost |
+| [`UPSCALING.md`](documentation/UPSCALING.md) | enlarging: the resampler, Real-ESRGAN, the Enlarge panel |
+| [`LLAMACPP.md`](documentation/LLAMACPP.md) | the llama.cpp provider and runtime, projectors, ternary models |
+| [`GROQ.md`](documentation/GROQ.md), [`NVIDIA.md`](documentation/NVIDIA.md), [`MISTRAL.md`](documentation/MISTRAL.md), [`DEEPSEEK.md`](documentation/DEEPSEEK.md) | a hosted backend each: listing, window, ceiling, pacing, refusals |
+| [`ENCRYPTION.md`](documentation/ENCRYPTION.md) | the encrypted database: page encryption, the key and its recovery copy |
 | [`CODE_MAP.md`](documentation/CODE_MAP.md) | where the code is, and the extension points |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | pull requests, the CLA, commit style |
 
 Each one distinguishes what was observed from what is expected. When you measure
-something new about a backend, put it where a reader will look for it and leave
-this page a pointer.
+something new about a backend, put it where a reader will look for it and leave this
+page a pointer.
 
 ## Keeping this file useful
 
-- If a section here grows past a screen, it is a procedure: move it to
-  `.claude/skills/` and leave a row in the table.
-- If it is a fact about a vendor or a measurement, it belongs in the subsystem
-  document or the provider's doc comment.
+- A section that grows past a screen is a procedure: move it to `.claude/skills/` and
+  leave a row in the table.
+- A fact about a vendor, or a measurement, belongs in the subsystem document or the
+  provider's doc comment.
 - If a skill's `description` stops matching the task it covers, fix the description
   first — that is what decides when the skill is loaded.

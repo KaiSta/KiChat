@@ -27,14 +27,45 @@ The Debian-only targets (`install`, `uninstall`, `deb`, `lint-deb`) say so and e
 on another host, rather than failing part-way through an `install -D` Windows does
 not have.
 
+## This machine, measured
+
+| Tool | Here | Consequence |
+| --- | --- | --- |
+| Go | 1.27.3 | `go.mod` says `go 1.27.0`, which is also the toolchain CI installs, so the two agree |
+| Wails CLI | 2.15.0 | fine |
+| Node / npm | 22.23.4 / 12.2.1, in `/usr/bin` | on `PATH`; the `~/.local/node/bin` fallback is unused here |
+| webkit2gtk | 4.1 (2.52.6) only | the `webkit2_41` tag above |
+
+## What derives from `VERSION`
+
+`make build` links the number into `internal/version` (`VERSION_LDFLAGS`) and rewrites
+`wails.json`'s `info` block, which is where the Windows resource and the macOS bundle
+version come from. So Settings → About and `kichat --version` cannot disagree with
+`VERSION` unless one of these breaks:
+
+- **The linker path is the contract.** `-X kichat/internal/version.Version=…` stops
+  matching the moment that package or variable is renamed, and every build then silently
+  reports `dev` — a wrong answer, not an error.
+- **The Windows version resource is rendered, not linked**, and no `wails` flag overrides it:
+  `make version-info` is what keeps it in step, and `productVersion` has to stay numeric
+  (see the Windows section).
+- **The build date is the commit's date, never the build clock.** A wall-clock stamp would
+  break the byte-identical rebuilds `-trimpath` otherwise guarantees.
+
 ## The traps that produce a wrong answer rather than an error
 
 - **`webkit2_41`.** Only webkit2gtk-4.1 exists on Ubuntu 24.04+/Mint 22+, so a raw
   `wails build` fails to *link*. `make build` adds the tag; a hand-run build needs
   `-tags webkit2_41`.
-- **`node` off `PATH` in this environment** (`~/.local/node/bin`). npm is a script
-  with `#!/usr/bin/env node`, so a path to npm is not enough. Export the directory
-  or install Node system-wide; the Makefile is not the place to fix it.
+- **`node` missing from `PATH`.** npm is a script with `#!/usr/bin/env node`, so a
+  path to npm is not enough. It bit on this machine for a while, when Node lived in
+  `~/.local/node/bin` and nothing exported it, and the Makefile still falls back to that
+  directory when `npm` is not found. The fix is a current Node on `PATH`, not a Makefile
+  change: `vite dev` needs ≥ 20.19 / ≥ 22.12 (below that Vite 7 dies with
+  `crypto.hash is not a function`), and npm 9 cannot install Tailwind's native binding
+  at all, because `libc`-aware optional dependencies arrived in npm 10. The full history,
+  including what upgrading the toolchain does and does not change, is in
+  [`README.md`](../../../README.md).
 - **The frontend is embedded.** `main.go` has `go:embed all:frontend/dist`, so a
   bare `go build ./...` on a fresh clone fails with `pattern all:frontend/dist: no
   matching files found`. That is expected; `make build` builds the frontend first.
@@ -159,6 +190,21 @@ cannot run it.
 The .deb is the artifact with a **byte-identical rebuild**: `-trimpath` and a
 commit-date-derived build stamp are what make that true. The NSIS installer is not,
 for the timestamp reason above.
+
+## What CI runs, and what ships
+
+CI runs these targets rather than a second copy of the commands:
+[`ci.yml`](../../../.github/workflows/ci.yml) has `make check` and `make build` on Linux
+(the only platform that links, and the one the `webkit2_41` tag exists for), `make windows`
+on Windows and `make darwin` on macOS. A job that restated a recipe would be free to drift
+from it, so a change to the build belongs in the Makefile and is then picked up by every
+job.
+
+No job uploads an artifact. **A pushed tag is what ships**:
+[`release.yml`](../../../.github/workflows/release.yml) runs `make deb`, `make nsis` and
+`make dmg` for the tag, checks each artifact reports its version, and attaches the three to
+a GitHub Release whose notes are the tag's annotation — [`cut-release`](../cut-release/SKILL.md)
+has the consequences, including that a plain `git push` carries local annotated tags.
 
 ## Verifying an artifact, never assuming
 

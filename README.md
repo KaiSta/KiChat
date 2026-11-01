@@ -906,7 +906,7 @@ document, and each one distinguishes what was observed from what is expected.
 | [`NVIDIA.md`](documentation/NVIDIA.md) | the build.nvidia.com backend and its availability check |
 | [`MISTRAL.md`](documentation/MISTRAL.md) | the Mistral backend, alias collapse, typed content chunks |
 | [`DEEPSEEK.md`](documentation/DEEPSEEK.md) | the DeepSeek backend, reasoning content, refusals |
-| [`AGENTS.md`](AGENTS.md) | the index: rules, the checks that must pass, the live-test matrix, and a skill per recurring task |
+| [`AGENTS.md`](AGENTS.md) | the index: the rules that are not negotiable, the checks that must pass, and a skill per recurring task |
 | [`CODE_MAP.md`](documentation/CODE_MAP.md) | where every package, file and extension point lives, and the request lifecycle |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | pull requests, the CLA, commit style, the harness |
 
