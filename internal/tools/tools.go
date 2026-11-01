@@ -1102,6 +1102,23 @@ func looseFloat(value any, fallback float64) float64 {
 var (
 	fencedToolCall = regexp.MustCompile("(?s)```(?:tool_call|json|tool)\\s*(\\{.*?\\})\\s*```")
 	xmlToolCall    = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>`)
+
+	// The same family of templates has a second shape, where the tool is named in an
+	// attribute and the arguments are the body — there is no `name` key to read:
+	//
+	//	<tool_call><function=search_web>{"query": "…"}</function></tool_call>
+	//
+	// Qwen3 and the templates derived from it emit this, and a local model trained on it
+	// writes it whatever protocol the request asked for. The backend's own parser knows
+	// only the JSON shape above, so it answers such a call with its name and no arguments
+	// (measured on a 9B local model: three queries became one call with `{}`, and the
+	// search tool was asked for a query it had never been given). This is what recovers
+	// them from the text.
+	//
+	// The body is matched lazily against the closing tag rather than at the first brace,
+	// so a nested argument object `{"a": {"b": 1}}` is not cut short.
+	toolCallBlock  = regexp.MustCompile(`(?s)<tool_call>.*?</tool_call>`)
+	functionCallIn = regexp.MustCompile(`(?s)<function=([A-Za-z0-9_.:\-]+)\s*>\s*(\{.*?\})\s*</function>`)
 )
 
 type textToolCall struct {
@@ -1147,10 +1164,50 @@ func ParseTextToolCalls(text string) ([]llm.ToolCall, string) {
 		strip(m)
 		visible = strings.Replace(visible, m[0], "", 1)
 	}
+	// One block may name more than one tool, and the whole block is hidden once, so the
+	// caller sees neither the leftover wrapper nor a second copy of the protocol.
+	for _, block := range toolCallBlock.FindAllString(text, -1) {
+		found := false
+		for _, m := range functionCallIn.FindAllStringSubmatch(block, -1) {
+			found = true
+			calls = append(calls, llm.ToolCall{
+				ID:        fmt.Sprintf("text_%d", len(calls)+1),
+				Name:      m[1],
+				Arguments: m[2],
+			})
+		}
+		if found {
+			visible = strings.Replace(visible, block, "", 1)
+		}
+	}
 	if len(calls) == 0 {
 		return nil, text
 	}
 	return calls, strings.TrimSpace(visible)
+}
+
+// ArgumentsLost reports whether a call the backend made itself arrived without the
+// arguments it was supposed to carry, while the text of the same reply names the same tool
+// with some.
+//
+// This is the half of the `<function=name>` shape that a text protocol cannot repair on its
+// own, because such a reply is *not* text-only: the backend recognises the tool, hands the
+// engine a call with `{}` and leaves the arguments in the prose. The tool is then asked a
+// question it cannot answer ("query is missing"), which reads as the search being broken
+// rather than as one lost field. A call that kept its arguments is never second-guessed —
+// the text beside it is only the same call rendered again.
+func ArgumentsLost(calls, parsed []llm.ToolCall) bool {
+	for _, call := range calls {
+		switch strings.TrimSpace(call.Arguments) {
+		case "", "{}":
+			for _, fromText := range parsed {
+				if fromText.Name == call.Name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // TextProtocolHint is appended to the system prompt when a model cannot call

@@ -317,10 +317,20 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		text, reasoning, calls, stats, usage, streamErr := e.consume(ctx, in.Chat.ID, row.ID, events)
 		e.traceReply(in, row.ID, time.Since(requestStart).Milliseconds(), usage, streamErr)
 
-		// A model that cannot call tools natively may have emitted a tool call in
-		// text form; parse it out and hide the protocol from the user.
-		if !in.UseNative && len(calls) == 0 {
-			if parsed, visible := tools.ParseTextToolCalls(text); len(parsed) > 0 {
+		// A tool call may arrive in text form even from a model that can call tools natively:
+		// the templates that name the tool in an attribute (`<tool_call><function=search_web>
+		// {"query": …}</function></tool_call>`) are recognised by the backend only as far as
+		// the name, so it hands back a call with no arguments and leaves the real ones in the
+		// prose. The tool is then asked with `{}` — a search card reading "query is missing"
+		// while the query sits in the message above it.
+		//
+		// So the text is parsed whichever protocol the request used, and it wins in the two
+		// cases where it is the only complete record: no call arrived, or one arrived empty
+		// for a tool the text names. A call that came back with its arguments is the
+		// backend's answer and is left alone.
+		if parsed, visible := tools.ParseTextToolCalls(text); len(parsed) > 0 {
+			switch {
+			case len(calls) == 0, tools.ArgumentsLost(calls, parsed):
 				calls = parsed
 				text = visible
 			}

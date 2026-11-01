@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -337,6 +338,78 @@ func TestToolRoundLimitIsReportedToTheUser(t *testing.T) {
 	message, ok := uimsg.Parse(warning)
 	if !ok || message.Code != "chat.maxRounds" {
 		t.Errorf("warning = %q, want the chat.maxRounds code", warning)
+	}
+}
+
+// TestAToolCallTheBackendSentWithoutArgumentsTakesThemFromTheText is the failure a local
+// model hit and a user reported as "web search is broken": the model writes its template's
+// own shape — the tool named in an attribute, the arguments as the body — and the backend
+// recognises the name but not the body, so the engine is handed `search_web` with `{}` while
+// the queries sit in the reply's text. The card read "query is missing" and two of the three
+// searches were never made.
+//
+// The text protocol used to be parsed only for a request without native tools, which this
+// model does have; now it is parsed either way, and a call that arrived empty is replaced by
+// what the model actually asked for.
+func TestAToolCallTheBackendSentWithoutArgumentsTakesThemFromTheText(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	const reply = "Ich suche.\n\n" +
+		"<tool_call> <function=search_web> {\"query\": \"Nachrichten Deutschland heute\", \"count\": 8} </function> </tool_call>" +
+		" <tool_call> <function=search_web> {\"query\": \"Nachrichten Europa aktuell\", \"count\": 8} </function> </tool_call>"
+	provider := &fakeProvider{
+		model: llm.ModelInfo{
+			ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded,
+			// A model the app may hand tools to natively, which is what the backend in the
+			// report was: it parsed the name and nothing else.
+			Capabilities: []string{llm.CapTools},
+		},
+		replies: [][]llm.StreamEvent{
+			{
+				{Type: llm.EventDelta, Text: reply},
+				{Type: llm.EventToolCall, ToolCall: &llm.ToolCall{ID: "call_1", Name: "search_web", Arguments: "{}"}},
+			},
+			{{Type: llm.EventDelta, Text: "Fertig."}},
+		},
+	}
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.ToolIterations = 3
+	engine := NewEngine(st, registry, &tools.Service{Store: st},
+		func() config.Settings { return settings }, (&eventLog{}).emit)
+
+	turn(t, engine, "chat-1", "Nachrichten")
+
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls []llm.ToolCall
+	visible := ""
+	for _, m := range messages {
+		if m.Role != string(llm.RoleAssistant) || m.ToolCallsJSON == "" {
+			continue
+		}
+		if err := json.Unmarshal([]byte(m.ToolCallsJSON), &calls); err != nil {
+			t.Fatalf("decode stored calls: %v", err)
+		}
+		visible = m.Content
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("stored %d calls, want the two searches the model asked for (%+v)", len(calls), calls)
+	}
+	for i, want := range []string{"Deutschland heute", "Europa aktuell"} {
+		if !strings.Contains(calls[i].Arguments, want) {
+			t.Errorf("call %d reached the tool as %q, want the query %q", i, calls[i].Arguments, want)
+		}
+	}
+	// The user reads an answer, not the protocol that produced it.
+	if strings.Contains(visible, "tool_call") || strings.Contains(visible, "function=") {
+		t.Errorf("a tool call the app recovered still shows its markup: %q", visible)
 	}
 }
 

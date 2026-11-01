@@ -217,6 +217,15 @@ Losing the user's own text to save context would be unacceptable in a research t
 Local model support for native tools is inconsistent, and silently sending unsupported
 `tools` produces worse behaviour than falling back.
 
+**The text is read whatever the protocol was**, because a local model can write its own
+template's shape — `<tool_call><function=search_web>{"query": …}</function></tool_call>` —
+at a backend that recognises the tool's name and not its body. That call arrives with `{}`
+and reaches the tool as an empty request ("query is missing"), which reads as a broken tool
+while the arguments sit in the reply's text. So the text protocol is parsed for a native
+request too, it replaces a call that arrived without its arguments, and its markup is
+removed from what the user sees. A call that came back with its arguments is never
+second-guessed.
+
 **SQLite via `modernc.org/sqlite`.** Pure Go, so no cgo and no cross-compilation pain.
 FTS5 with BM25 was verified working before committing to it.
 

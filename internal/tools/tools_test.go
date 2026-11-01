@@ -62,6 +62,27 @@ func TestParseTextToolCallsHandlesBothProtocols(t *testing.T) {
 			wantArgSub:  "",
 			wantVisible: "",
 		},
+		{
+			// The shape a local model trained on a Qwen3-derived template writes, whatever
+			// protocol the request asked for: the tool is an attribute and the arguments are
+			// the body, so there is no `name` key to read.
+			name:        "function attribute with the arguments as its body",
+			input:       "Ich suche.\n\n<tool_call> <function=search_web> {\"query\": \"Nachrichten Deutschland heute\", \"count\": 8} </function> </tool_call>",
+			wantCalls:   1,
+			wantTool:    "search_web",
+			wantArgSub:  "Nachrichten Deutschland heute",
+			wantVisible: "Ich suche.",
+		},
+		{
+			// A nested argument object must not be cut at the inner brace, which is what a
+			// match that stops at the first `}` would do.
+			name:        "function attribute with nested arguments",
+			input:       "<tool_call><function=run_command>{\"command\": \"ls\", \"env\": {\"A\": \"b\"}}</function></tool_call>",
+			wantCalls:   1,
+			wantTool:    "run_command",
+			wantArgSub:  "\"env\": {\"A\": \"b\"}",
+			wantVisible: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,6 +115,11 @@ func TestParseTextToolCallsIgnoresOrdinaryCode(t *testing.T) {
 		"Nur Text, kein Tool.",
 		"```go\nfunc main() {}\n```",
 		"```json\n{\"name\": \"nicht-ganz\", \"arguments\": }\n```",
+		// The attribute form only counts inside a `<tool_call>` wrapper. A sentence that
+		// explains the syntax is prose, and executing it would be the app answering a
+		// question nobody asked.
+		"So sieht es aus: <function=search_web>{\"query\": \"x\"}</function>",
+		"<tool_call><function=search_web>kein JSON</function></tool_call>",
 	}
 	for _, in := range inputs {
 		calls, visible := ParseTextToolCalls(in)
@@ -121,6 +147,56 @@ func TestParseTextToolCallsHandlesMultipleCalls(t *testing.T) {
 	}
 	if strings.TrimSpace(visible) != "" {
 		t.Errorf("visible = %q, want empty", visible)
+	}
+}
+
+// TestParseTextToolCallsReadsTheAttributeFormFromALocalModel is the reply that made this
+// exist, copied from a 9B local model asked for news in three places. It writes the whole
+// answer as protocol and nothing else; the backend recognised one of the three tool names
+// and handed the engine that call with no arguments, so the user saw a search card reading
+// "query is missing" and the two other searches were never made.
+func TestParseTextToolCallsReadsTheAttributeFormFromALocalModel(t *testing.T) {
+	reply := "I'll search for current news on the requested topics. Let me run the queries properly.\n\n" +
+		"<tool_call> <function=search_web> {\"query\": \"Nachrichten Deutschland heute\", \"count\": 8} </function> </tool_call>" +
+		" <tool_call> <function=search_web> {\"query\": \"Nachrichten Europa aktuell\", \"count\": 8} </function> </tool_call>" +
+		" <tool_call> <function=search_web> {\"query\": \"Nachrichten Landkreis Karlsruhe aktuell\", \"count\": 8} </function> </tool_call>"
+
+	calls, visible := ParseTextToolCalls(reply)
+	if len(calls) != 3 {
+		t.Fatalf("got %d calls, want the three the model asked for (%+v)", len(calls), calls)
+	}
+	for i, want := range []string{"Deutschland heute", "Europa aktuell", "Landkreis Karlsruhe aktuell"} {
+		if calls[i].Name != "search_web" {
+			t.Errorf("call %d names %q, want search_web", i, calls[i].Name)
+		}
+		if !strings.Contains(calls[i].Arguments, want) {
+			t.Errorf("call %d arguments = %q, want the query %q", i, calls[i].Arguments, want)
+		}
+	}
+	if strings.Contains(visible, "tool_call") || strings.Contains(visible, "function=") {
+		t.Errorf("protocol leaked into the visible answer: %q", visible)
+	}
+	if !strings.Contains(visible, "I'll search for current news") {
+		t.Errorf("the model's own sentence was dropped: %q", visible)
+	}
+}
+
+// TestArgumentsLostSeparatesALostArgumentFromAnEmptyOne pins the rule the engine uses to
+// prefer the text: only a call whose arguments went missing *and* whose tool the text names
+// is replaced, so a tool that genuinely takes no arguments is left as the backend sent it.
+func TestArgumentsLostSeparatesALostArgumentFromAnEmptyOne(t *testing.T) {
+	text := []llm.ToolCall{{Name: "search_web", Arguments: `{"query":"x"}`}}
+	if !ArgumentsLost([]llm.ToolCall{{Name: "search_web", Arguments: "{}"}}, text) {
+		t.Error("a search call that lost its query was not reported as lost")
+	}
+	if !ArgumentsLost([]llm.ToolCall{{Name: "search_web"}}, text) {
+		t.Error("a search call with no arguments at all was not reported as lost")
+	}
+	if ArgumentsLost([]llm.ToolCall{{Name: "search_web", Arguments: `{"query":"y"}`}}, text) {
+		t.Error("a call that kept its arguments was overruled")
+	}
+	if ArgumentsLost([]llm.ToolCall{{Name: "list_files", Arguments: "{}"}}, text) {
+		t.Error("a call for another tool was matched against the text's tool")
 	}
 }
 
