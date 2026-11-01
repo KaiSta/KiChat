@@ -79,6 +79,17 @@ func TestAnOversizedRequestIsToldApartFromAThrottle(t *testing.T) {
 			want:   true,
 		},
 		{
+			// Measured on a b12024 llama-server loaded with `-c 16384`, asked for
+			// 20016 tokens. It states both numbers in its own sentence and puts the
+			// limit second, which is why the Limit/Requested pair above finds nothing.
+			name:      "llama.cpp: the loaded window was exceeded",
+			status:    http.StatusBadRequest,
+			body:      `{"error":{"code":400,"message":"request (20016 tokens) exceeds the available context size (16384 tokens), try increasing it","type":"exceed_context_size_error"}}`,
+			want:      true,
+			limit:     16384,
+			requested: 20016,
+		},
+		{
 			name:   "an invalid key",
 			status: http.StatusUnauthorized,
 			body:   `{"error":{"message":"Invalid API Key","type":"invalid_request_error","code":"invalid_api_key"}}`,
@@ -122,8 +133,11 @@ func TestAnOversizedRequestIsToldApartFromAThrottle(t *testing.T) {
 			}
 			// The vendor's own words travel with it: the chat layer replaces the
 			// message it shows, and a log still has to carry what the backend said.
-			if !strings.Contains(err.Error(), "too large") && !strings.Contains(err.Error(), "reduce") {
-				t.Errorf("error text = %q, want the vendor's message kept", err.Error())
+			// The whole body is checked rather than a word from it, because the
+			// wording is the vendor's and llama.cpp spells the same verdict without
+			// ever saying "too large" or "reduce".
+			if !strings.Contains(err.Error(), he.Body) {
+				t.Errorf("error text = %q, want the vendor's body %q kept", err.Error(), he.Body)
 			}
 			var unwrapped *HTTPError
 			if !errors.As(err, &unwrapped) || unwrapped != he {

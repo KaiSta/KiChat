@@ -84,10 +84,21 @@ var (
 	// `context_length_exceeded`), its documented 413 ("reduce the size of the
 	// request body"), and the equivalent sentences other OpenAI-compatible
 	// servers send.
-	reducePhrase = regexp.MustCompile(`(?i)\breduce (?:your message size|the (?:length|size) of the (?:messages|request))|maximum context length|\bcontext_length_exceeded\b`)
+	reducePhrase = regexp.MustCompile(`(?i)\breduce (?:your message size|the (?:length|size) of the (?:messages|request))|maximum context length|\bcontext_length_exceeded\b|exceeds the available context size|\bexceed_context_size_error\b`)
 	// "Limit 10000, Requested 15088" / "Limit: 7000, Used 1911, Requested 6248".
 	limitInBody     = regexp.MustCompile(`(?i)\blimit:?\s*([0-9]+)`)
 	requestedInBody = regexp.MustCompile(`(?i)\brequested:?\s*([0-9]+)`)
+	// llama.cpp states both numbers in its own sentence instead of in a
+	// `Limit/Requested` pair, so the two readings above find nothing there:
+	//
+	//	request (20016 tokens) exceeds the available context size (16384 tokens), try increasing it
+	//
+	// Measured against a b12024 build loaded with `-c 16384`. Without the phrase in
+	// reducePhrase this refusal was not a verdict at all: the app folded nothing, the
+	// turn failed, and a scraped page looked like a broken tool rather than a request
+	// that did not fit.
+	llamaCppLimit     = regexp.MustCompile(`(?i)available context size \(([0-9]+) tokens\)`)
+	llamaCppRequested = regexp.MustCompile(`(?i)\brequest \(([0-9]+) tokens\)`)
 )
 
 // malformedToolCallPhrase matches the refusal a backend returns when the call the
@@ -141,9 +152,11 @@ func classifyRequestTooLarge(err error) error {
 		return err
 	}
 	return &RequestTooLargeError{
-		Cause:     err,
-		Limit:     firstNumber(limitInBody, body),
-		Requested: firstNumber(requestedInBody, body),
+		Cause: err,
+		Limit: first(firstNumber(limitInBody, body),
+			firstNumber(llamaCppLimit, body)),
+		Requested: first(firstNumber(requestedInBody, body),
+			firstNumber(llamaCppRequested, body)),
 	}
 }
 
@@ -237,6 +250,15 @@ func ceilingFromHeaders(h http.Header) int {
 }
 
 // firstNumber reads the first number a pattern found in a refusal body, or 0.
+// first is the first positive number of the two readings, for a body that states the same
+// pair in more than one wording.
+func first(a, b int) int {
+	if a > 0 {
+		return a
+	}
+	return b
+}
+
 func firstNumber(re *regexp.Regexp, body string) int {
 	m := re.FindStringSubmatch(body)
 	if m == nil {

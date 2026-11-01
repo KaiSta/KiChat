@@ -2,9 +2,11 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // llama.cpp ships `llama-server`, an OpenAI-compatible HTTP server that KiChat
@@ -131,11 +133,23 @@ type llamaCppProps struct {
 	// could not analyse; decoding that into a struct would turn "the server did
 	// not say" into Go's `false` and silently withdraw tool support from a
 	// server that never denied it. Absence and false are different answers.
-	ChatTemplateCaps map[string]bool `json:"chat_template_caps"`
+	//
+	// The values are raw rather than bool, because the map is not uniformly
+	// boolean: a build reports `"reasoning_effort_levels": ["low", "medium"]`
+	// beside `"supports_tool_calls": true`, and typing the map as bool made the
+	// whole /props decode fail on that array. The window then read as unknown, the
+	// template's tool support was withdrawn with it, and a 16k local server was
+	// budgeted as though it had no window at all.
+	ChatTemplateCaps map[string]json.RawMessage `json:"chat_template_caps"`
 	Modalities       struct {
 		Vision bool `json:"vision"`
 	} `json:"modalities"`
-	ModelPath  string `json:"model_path"`
+	ModelPath string `json:"model_path"`
+	// ModelAlias is what `--alias` renamed the model to, and it is the id a listing
+	// row carries when the server was started that way. Comparing only model_path
+	// left such a row unnamed: the router case matched nothing, so the window was
+	// thrown away and the panel said the context size was unknown.
+	ModelAlias string `json:"model_alias"`
 	TotalSlots int    `json:"total_slots"`
 	BuildInfo  string `json:"build_info"`
 	// IsSleeping marks a server that unloaded its weights after
@@ -271,8 +285,13 @@ func (p *openAICompatProvider) enrichLlamaCpp(ctx context.Context, models []Mode
 	// guessing "yes" costs nothing when it is wrong, because such a model simply
 	// answers in prose.
 	supportsTools := true
-	if v, ok := props.ChatTemplateCaps["supports_tool_calls"]; ok {
-		supportsTools = v
+	if raw, ok := props.ChatTemplateCaps["supports_tool_calls"]; ok {
+		var v bool
+		// A value that is not a bool is the server saying something this app does
+		// not model, which is not a "no".
+		if err := json.Unmarshal(raw, &v); err == nil {
+			supportsTools = v
+		}
 	}
 	thinking := llamaCppTemplateTogglesThinking(props.ChatTemplate)
 	for _, i := range targets {
@@ -311,6 +330,16 @@ func llamaCppLoadedIndex(props *llamaCppProps, models []ModelInfo) int {
 	if props == nil || props.ModelPath == "" {
 		return -1
 	}
+	// An `--alias` is the row's own id, so it wins over the file name: the file name
+	// match below would otherwise attach the reading to whichever row happened to be
+	// named after the same file, or to none at all.
+	if alias := strings.TrimSpace(props.ModelAlias); alias != "" {
+		for i := range models {
+			if models[i].ID == alias {
+				return i
+			}
+		}
+	}
 	for i := range models {
 		if models[i].ID == props.ModelPath {
 			return i
@@ -338,14 +367,25 @@ func modelFileBase(name string) string {
 	return name
 }
 
-// propsFor returns the cached /props reading, fetching it once. A missing route
-// (404) is remembered, because a build without /props will not grow one. Any
-// other failure is deliberately not remembered, so a server that was merely
-// still loading its model is asked again instead of being written off for the
-// rest of the session.
+// propsTTL is how long a /props reading is trusted.
+//
+// It is a variable so a test can make it small. The reading describes one *running*
+// server, and that server can be replaced underneath the app: a managed model
+// restarted with another `-c`, or a router that swapped the model it answers for.
+// Measured on b12024: the same provider kept reporting a 16384-token window after the
+// server was restarted with `-c 4096`, which is a budget four times too large for the
+// rest of the session. Thirty seconds matches the catalogue's own TTL, so the two
+// readings refresh together instead of disagreeing.
+var propsTTL = 30 * time.Second
+
+// propsFor returns the cached /props reading, fetching it once a propsTTL. A missing
+// route (404) is remembered, because a build without /props will not grow one. Any
+// other failure is deliberately not remembered, so a server that was merely still
+// loading its model is asked again instead of being written off for the rest of the
+// session.
 func (p *openAICompatProvider) propsFor(ctx context.Context) *llamaCppProps {
 	p.mu.Lock()
-	if p.propsLoaded {
+	if p.propsLoaded && time.Since(p.propsAt) < propsTTL {
 		cached := p.props
 		p.mu.Unlock()
 		return cached
@@ -368,6 +408,7 @@ func (p *openAICompatProvider) propsFor(ctx context.Context) *llamaCppProps {
 	p.mu.Lock()
 	p.props = loaded
 	p.propsLoaded = true
+	p.propsAt = time.Now()
 	p.mu.Unlock()
 	return loaded
 }

@@ -113,6 +113,9 @@ type openAICompatProvider struct {
 	// InvalidateCache is where it is dropped.
 	props       *llamaCppProps
 	propsLoaded bool
+	// propsAt is when the last /props reading was taken, so a server replaced
+	// underneath the app is noticed; see propsTTL.
+	propsAt time.Time
 
 	// requestCeilings remembers, per model, the largest single request the account
 	// may send and where that number came from. Groq's per-minute token allowance is

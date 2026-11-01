@@ -528,8 +528,23 @@ func (a *App) startManagedModel(backendID string) (err error) {
 		// that failed leaves the reminder in place: that model is still on the old
 		// build.
 		a.clearInstallCompleted()
+		// The catalogue and the providers' metadata describe the server that was
+		// running before this one, and llama.cpp's loaded window is chosen at start:
+		// switching from a model loaded at 16384 to one loaded at 4096 otherwise kept
+		// the old window, and the turn was budgeted against a size the new server
+		// refuses. Cheap here, and the alternative is a wrong number for 30 seconds.
+		a.invalidateModels()
 	}
 	return err
+}
+
+// invalidateModels drops the model catalogue and every provider's cached metadata, so the
+// next listing describes the server that is running now. It is a no-op before the services
+// exist — a start that happens that early has no catalogue to be wrong about.
+func (a *App) invalidateModels() {
+	if registry := a.currentRegistry(); registry != nil {
+		registry.Invalidate()
+	}
 }
 
 // managedProjector resolves the multimodal projector for a managed model: the file the

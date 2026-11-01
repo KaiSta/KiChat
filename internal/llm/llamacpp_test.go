@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // llamaCppListing is what a direct llama-server answers on /v1/models. It is one
@@ -39,6 +40,131 @@ const llamaCppPropsBody = `{
 	"build_info":"b1234-abcdef",
 	"is_sleeping":false
 }`
+
+// llamaCppPropsWithNonBoolCaps is the same response from a b12024 build, whose
+// `chat_template_caps` is not uniformly boolean: `reasoning_effort_levels` is an array.
+// The field is a map of raw values for exactly this reason — read as `map[string]bool`,
+// the whole /props decode failed on that array, and a server loaded with `-c 16384` then
+// reported no window at all and lost its tool support with it.
+const llamaCppPropsWithNonBoolCaps = `{
+	"default_generation_settings":{"n_ctx":16384,"params":{}},
+	"total_slots":4,
+	"model_path":"/models/ornith.gguf",
+	"chat_template":"{%- if enable_thinking is defined %}<|think|>{%- endif %}",
+	"chat_template_caps":{"supports_tool_calls":true,"supports_parallel_tool_calls":true,
+		"reasoning_effort_levels":["low","medium","high"],"at_most_one_tool":false},
+	"modalities":{"vision":false},
+	"build_info":"b12024-996d4c5d0",
+	"is_sleeping":false
+}`
+
+// TestLlamaCppWindowSurvivesCapsThatAreNotAllBooleans pins the decode against a real
+// build's /props: one array among the caps must not cost the provider the window, the
+// template's tool support, or the model's own name.
+func TestLlamaCppWindowSurvivesCapsThatAreNotAllBooleans(t *testing.T) {
+	srv, _ := llamaCppServer(t, llamaCppListing, llamaCppPropsWithNonBoolCaps, http.StatusOK)
+
+	models, err := newLlamaCppProvider("llamacpp", "llama.cpp", srv.URL, "").ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("listed %d models, want 1", len(models))
+	}
+	m := models[0]
+	if m.ContextLimit != 16384 {
+		t.Errorf("ContextLimit = %d, want the 16384 the server is loaded with", m.ContextLimit)
+	}
+	if !m.Has(CapTools) {
+		t.Errorf("tools were withdrawn by a field the app does not model: %v", m.Capabilities)
+	}
+}
+
+// TestLlamaCppRereadsPropsWhenTheServerIsReplaced pins the freshness of the one reading
+// that describes a *running* server. Measured on b12024: the same provider went on
+// reporting a 16384-token window after the server was restarted with `-c 4096`, which is
+// a budget four times too large for every turn that follows.
+func TestLlamaCppRereadsPropsWhenTheServerIsReplaced(t *testing.T) {
+	var mu sync.Mutex
+	props := llamaCppPropsBody
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		body := props
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/v1/models":
+			fmt.Fprint(w, llamaCppListing)
+		case "/props":
+			fmt.Fprint(w, body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	p := newLlamaCppProvider("llamacpp", "llama.cpp", srv.URL, "")
+	ctx := context.Background()
+	models, err := p.ListModels(ctx)
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if models[0].ContextLimit != 8192 {
+		t.Fatalf("first reading = %d, want 8192", models[0].ContextLimit)
+	}
+
+	// The server is restarted with another window. Within the TTL the reading stands:
+	// that is the cache doing its job, not a bug.
+	mu.Lock()
+	props = llamaCppPropsWithNonBoolCaps
+	mu.Unlock()
+	models, _ = p.ListModels(ctx)
+	if models[0].ContextLimit != 8192 {
+		t.Errorf("inside the TTL the reading changed to %d, want it still cached", models[0].ContextLimit)
+	}
+
+	// Past it, the next listing asks again.
+	was := propsTTL
+	propsTTL = time.Millisecond
+	t.Cleanup(func() { propsTTL = was })
+	time.Sleep(5 * time.Millisecond)
+	models, err = p.ListModels(ctx)
+	if err != nil {
+		t.Fatalf("ListModels after the TTL: %v", err)
+	}
+	if models[0].ContextLimit != 16384 {
+		t.Errorf("after the TTL the window is %d, want the restarted server's 16384", models[0].ContextLimit)
+	}
+}
+
+// TestLlamaCppReadsTheAliasedRow pins the other way a row is named. `--alias` replaces
+// the id a server lists, so comparing only `model_path` left the reading unattached and
+// the model's window unstated — which the panel shows as an unknown context size.
+func TestLlamaCppReadsTheAliasedRow(t *testing.T) {
+	listing := `{"object":"list","data":[` +
+		`{"id":"alias-a","meta":{"n_ctx_train":32768}},` +
+		`{"id":"alias-b","meta":{"n_ctx_train":32768}}]}`
+	props := `{"default_generation_settings":{"n_ctx":2048},"total_slots":2,` +
+		`"model_path":"/models/a.gguf","model_alias":"alias-a",` +
+		`"chat_template":"","chat_template_caps":{},"modalities":{"vision":false}}`
+	srv, _ := llamaCppServer(t, listing, props, http.StatusOK)
+
+	models, err := newLlamaCppProvider("llamacpp", "llama.cpp", srv.URL, "").ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("listed %d models, want 2", len(models))
+	}
+	if models[0].State != StateLoaded || models[0].ContextLimit != 2048 {
+		t.Errorf("the aliased row is %s with window %d, want loaded with 2048",
+			models[0].State, models[0].ContextLimit)
+	}
+	if models[1].State != StateNotLoaded || models[1].ContextLimit != 0 {
+		t.Errorf("the other row is %s with window %d, want unloaded and unstated",
+			models[1].State, models[1].ContextLimit)
+	}
+}
 
 // llamaCppServer wires a fake llama-server that answers the two routes a direct
 // server answers, and counts how often /props was asked so a test can pin the

@@ -1047,5 +1047,11 @@ func (a *App) StopManagedModel(backendID string) error {
 	if srv == nil {
 		return nil
 	}
-	return srv.Stop()
+	if err := srv.Stop(); err != nil {
+		return err
+	}
+	// A row that is no longer served must stop claiming the window it was loaded
+	// with; the next listing reads nothing and the model reads as stopped.
+	a.invalidateModels()
+	return nil
 }
