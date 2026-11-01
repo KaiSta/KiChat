@@ -48,7 +48,9 @@ go run ./tools/uiharness      # http://127.0.0.1:8791/
 - **One coherent change.** The commit subject is `area: description` —
   lowercase, imperative, describing the behaviour change rather than the files
   (`chat: make compaction work with a reasoning model`). The body says what was
-  wrong, what you measured, what changed, and which checks stayed green.
+  wrong, what you measured, what changed, and which checks stayed green. Both are
+  short and in plain language, and the message ends on its last real line: no
+  attribution or co-author trailers.
 - **Tests pin behaviour, not implementation.** A test should fail if the user
   or the model would notice a difference. Live tests that touch metered
   services are gated by `KICHAT_LIVE=1` and must never run in the default set.

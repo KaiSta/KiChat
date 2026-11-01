@@ -22,14 +22,44 @@ newer-looking final.
 ## 2. One commit, `build: release x.y.z`, carrying `VERSION` and the `wails.json`
 info block it rewrites — nothing else
 
-Its body is the release note that gets published, so it is written for the person
-installing the build rather than for the reader of the diff: **short, and a bullet
-list** of what changed since the previous bump commit, each bullet a change they can
-observe. `git log <previous bump>..HEAD` is the source to read, not text to copy —
-no file names, package names, measurements or internal reasoning. A release with
-nothing a user can see says so in one bullet.
+### The message *is* the release note
 
-Not `release: bump version to …`: 0.4.0 is the outlier that did that.
+Its body is not a summary of the diff — it becomes the tag's annotation, and therefore
+the GitHub release page, so it is the only thing someone sees before deciding to
+install this version. Write it for that reader, not for the reader of the commit.
+
+The rules are the ones in [`commit`](../commit/SKILL.md), tightened for a page that has
+no diff beside it:
+
+- **Short, and a bullet list.** A handful of bullets, one line each, in the order a
+  person cares about: what the version brings first, smaller fixes after. If an item
+  needs a paragraph, it is either two bullets or it belongs in the documentation.
+- **Plain language, about what the user gets**, not about how it was built. "Pictures
+  can now be enlarged 4×" — not "added an upscaler provider". No file names, package
+  names, measurements or internal reasoning.
+- **No attribution lines.** The note is published, so nothing after the last bullet: no
+  `Generated with …`, no `Co-Authored-By:`, no thanks to a model or a tool. End on the
+  last real bullet.
+- **A release with nothing a user can observe says so in one bullet.** "Maintenance
+  only: no visible change." An empty note reads as a build that failed.
+- `git log <previous bump>..HEAD` is the source to read, not text to copy: each commit
+  says what changed in the code, and the note says what that means for the person
+  running the app.
+
+```
+- Coding mode: a folder can now be read, edited and run with confirmation, and a long
+  command can be stopped without ending the reply.
+- Answers are cheaper on a hosted backend: the prompt is laid out so its beginning can be
+  reused, which cuts what a long coding reply costs.
+- Pictures can be enlarged, 2× or 4×.
+```
+
+What does not go in: "refactored the provider registry", "reduced prompt tokens by 30%
+across twelve files", "see the commits". Those describe the work, and the note describes
+the version.
+
+Not `release: bump version to …` either: 0.4.0 is the outlier that did that, and the
+subject is `build: release x.y.z`.
 
 ## 3. Verify before publishing anything
 

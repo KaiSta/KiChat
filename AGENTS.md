@@ -112,15 +112,17 @@ from. The traps that make a build report the wrong number are in
 [`build-platforms`](.claude/skills/build-platforms/SKILL.md); the procedure — bump,
 commit, tag, push — is [`cut-release`](.claude/skills/cut-release/SKILL.md).
 
-The release commit is written for users: a short bullet list of changes they can
-observe, in plain language, because its body is published as the release page.
+The release commit is written for users: a short bullet list in plain language of what
+the new version brings, with no attribution lines, because its body is published as the
+release page.
 
 ## Commits
 
 The subject is `area: description` — lowercase, imperative, the behaviour change and
-not the files. The areas, the body's shape, one change per commit and the
-`build: release x.y.z` exception are in [`commit`](.claude/skills/commit/SKILL.md).
-`git` here is always `--no-pager`.
+not the files — and subject and body are both short, plain language. No attribution
+lines: no `Co-Authored-By`, no "generated with" trailer. The areas, the body's shape,
+one change per commit and the `build: release x.y.z` exception are in
+[`commit`](.claude/skills/commit/SKILL.md); `git` here is always `--no-pager`.
 
 ## Live tests
 
