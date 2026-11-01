@@ -107,7 +107,14 @@ const (
 // that is not a git working tree — git missing included. None of those is worth reporting: the
 // block is an addition to the conversation, and a turn without it is the turn that existed
 // before it.
-func projectGitState(c store.Chat) (block, detail string, ok bool) {
+//
+// full is false from the second round of a reply on. The list is orientation — what is pending
+// before the model decides anything — and it is the only part of the block that is large: forty
+// paths with their line counts reach the 4 KiB cap, and re-sending that on every round of a reply
+// bills it at the miss price each time (DEEPSEEK.md §5), for a list the model has by then often
+// written itself. The summary keeps the branch, the count and the staleness warning, so a round
+// that changes the tree still sees the change in the numbers.
+func projectGitState(c store.Chat, full bool) (block, detail string, ok bool) {
 	if !c.IsProject() {
 		return "", "", false
 	}
@@ -119,13 +126,13 @@ func projectGitState(c store.Chat) (block, detail string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
-	return renderGitState(state), gitStateDetail(state), true
+	return renderGitState(state, full), gitStateDetail(state), true
 }
 
 // renderGitState writes the block. Its one instruction is about staleness rather than about
 // what to do with the list: the list is context, and telling a coding model what to conclude
 // from context is how a prompt starts overriding the person.
-func renderGitState(state workspace.GitState) string {
+func renderGitState(state workspace.GitState, full bool) string {
 	var sb strings.Builder
 	sb.WriteString(gitOpen)
 	if state.Detached {
@@ -147,6 +154,13 @@ func renderGitState(state workspace.GitState) string {
 		"Er kann sich während des Turns ändern; was du bearbeitest, prüfst du an der Datei.\n")
 	if state.Total == 0 {
 		sb.WriteString("Keine Änderungen seit dem letzten Commit.\n")
+	} else if !full {
+		what := fmt.Sprintf("%d Änderungen", state.Total)
+		if state.Total == 1 {
+			what = "1 Änderung"
+		}
+		fmt.Fprintf(&sb, "%s seit dem letzten Commit. Die Pfade nennt dieser Block nur zu Beginn "+
+			"des Turns; `git status` zeigt die aktuelle Liste.\n", what)
 	} else {
 		fmt.Fprintf(&sb, "Änderungen seit dem letzten Commit (%d):\n", state.Total)
 		shown := 0

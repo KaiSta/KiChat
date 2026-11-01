@@ -444,6 +444,66 @@ func TestTheClockRidesInTheTailToo(t *testing.T) {
 	}
 }
 
+// TestALaterRoundGetsTheSummaryAndNotTheList is the other half of the tail's cost. The list of
+// pending paths orients the request that opens a turn; forty of them with their line counts reach
+// the 4 KiB cap, and the tail is the one part of a request no cache can bring down to a hit, so it
+// is worth paying for once and not on each of the rounds of a reply that already holds the files
+// it wrote. The branch, the count and the staleness warning stay, so a round that changes the tree
+// still sees the change in the numbers.
+func TestALaterRoundGetsTheSummaryAndNotTheList(t *testing.T) {
+	folder := gitFolder(t) // leaves main.go modified, so there is something to list
+	// And enough of a tree that the difference is about the list rather than about one line: the
+	// summary has to be independent of how many paths are pending, which is the whole point.
+	for i := 0; i < 26; i++ {
+		name := "datei-" + string(rune('a'+i)) + "-mit-einem-langen-namen.go"
+		if err := os.WriteFile(filepath.Join(folder, name), []byte("package main\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	chat := store.Chat{
+		ID: "project-1", Title: "Projekt", SystemPrompt: "Du bist ein Assistent.",
+		Mode: store.ModeCoding, Workspace: folder,
+	}
+	assemble := func(messages []store.Message) string {
+		t.Helper()
+		assembly := Assemble(AssemblyInput{
+			Chat: chat, Messages: messages,
+			Limit: 100000, LimitSource: "backend", Reserve: 1000,
+		})
+		last := assembly.Messages[len(assembly.Messages)-1]
+		if !strings.Contains(last.Content, "<project_git") {
+			t.Fatalf("the request carries no working-tree block:\n%s", last.Content)
+		}
+		return last.Content
+	}
+
+	// The turn's first request: the newest message is the question that opened it.
+	first := assemble([]store.Message{
+		{ID: "m1", ChatID: chat.ID, Seq: 1, Role: "user", Content: "Was ist offen?"},
+	})
+	// A round after it: the newest message is a row the reply itself produced.
+	later := assemble(storedToolTurn("read_file", "package main\n"))
+
+	if !strings.Contains(first, "datei-m-mit-einem-langen-namen.go") {
+		t.Errorf("the turn opens without the list of pending paths:\n%s", first)
+	}
+	if strings.Contains(later, "datei-") {
+		t.Errorf("a later round still lists every path, which is re-sent at the miss price on"+
+			" each of them:\n%s", later)
+	}
+	for _, want := range []string{`branch="main"`, `changed="27"`, "27 Änderungen"} {
+		if !strings.Contains(later, want) {
+			t.Errorf("the summary lost %q:\n%s", want, later)
+		}
+	}
+	// Bounded, not merely smaller: the summary is a sentence and a count, so the tree can grow
+	// to the renderer's 4 KiB cap without this block growing with it.
+	if got := llm.EstimateTokens(later); got >= llm.EstimateTokens(first)/4 {
+		t.Errorf("the summary costs %d tokens against the list's %d, so it still grows with the"+
+			" tree", got, llm.EstimateTokens(first))
+	}
+}
+
 // TestProjectToolsAreOfferedOnlyToAProject is the gate itself, asked of both halves:
 // what the request declares, and what the app would *execute* if the model named it.
 //

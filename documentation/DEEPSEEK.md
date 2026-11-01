@@ -173,7 +173,10 @@ Two consequences, and the second is why a coding reply is laid out the way it is
   so a project's git block rides in the tail of the request rather than in the system message
   (`Assemble` in `internal/chat/context.go`, and [CODING.md](CODING.md) §8 for what the block
   says): the assistant edits a file on nearly every round, and that edit used to rewrite message
-  zero — a full miss for the whole history behind it, every round.
+  zero — a full miss for the whole history behind it, every round. Living in the tail is not a
+  licence to be large there either — the tail is never a hit — which is why the full list of
+  pending paths travels only with the request that opens the turn and the rounds after it carry
+  a 132-token summary instead.
   `TestAProjectsGitStateStaysOutOfTheCachedPrefix` pins the property, that every message but the
   last is byte-identical across an edit.
 

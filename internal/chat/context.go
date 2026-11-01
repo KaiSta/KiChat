@@ -279,8 +279,16 @@ func Assemble(in AssemblyInput) Assembly {
 	// prompt at the miss price, on each of the reply's rounds. It rides at the end of the
 	// request instead (see the append after the history below), so the system message and the
 	// history stay byte-identical across a reply and only the newest block is uncached.
+	//
+	// The full list of paths is for the turn's first request only, the one that opens with the
+	// user's question; every round after that carries the summary. Forty paths with their line
+	// counts reach the 4 KiB cap, and a block at the tail is the one part of the request that is
+	// never a cache hit — so the list is worth paying for once, as orientation, and not on each
+	// of the rounds of a reply that is already holding the files it wrote.
+	firstRound := len(in.Messages) == 0 ||
+		in.Messages[len(in.Messages)-1].Role == string(llm.RoleUser)
 	var gitState string
-	if state, detail, ok := projectGitState(in.Chat); ok {
+	if state, detail, ok := projectGitState(in.Chat, firstRound); ok {
 		gitState = state
 		tokens := llm.EstimateTokens(state)
 		budget.Memory += tokens

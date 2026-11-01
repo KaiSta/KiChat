@@ -654,7 +654,9 @@ and a compaction has to fit it like any other segment.
 Beside it, when the folder is a git working tree, travels the **working tree's state**
 (`SegmentGit`, labelled `Git-Status`): the branch (or `detached="true"`), how far it is ahead or
 behind its upstream, and every pending path with the half of it that is staged, the kind of
-change and its line counts. It answers the question the transcript cannot — is the earlier work
+change and its line counts, on the request that opens a turn; the rounds after it carry the branch,
+the count and the warning without the list (see the tail below). It answers the question the
+transcript cannot — is the earlier work
 finished, staged, or already committed — without spending a tool round and a confirmation card
 on `git status`, and it is what the model reads before it decides that a file it remembers is
 still unmodified.
@@ -686,6 +688,21 @@ It is appended rather than sent as a message of its own because a second user tu
 shape the strict chat templates refuse, and appending changes neither the roles nor the count.
 `TestAProjectsGitStateStaysOutOfTheCachedPrefix` pins it the only way that means anything: two
 assemblies with a file written between them, and every message but the last has to be identical.
+
+**The list itself is only worth sending once.** A block at the tail is the one part of a request
+no cache can turn into a hit, and the list is the only part of the working-tree block that grows:
+measured on a scratch repository, one pending path renders 123 tokens, twenty-seven render 576,
+and forty with long names render 810 — re-sent on each of a reply's rounds, which is what a
+burned context actually looks like. So `Assemble` sends the full list on the turn's **first**
+request, the one whose newest message is the question that opened it, and the summary on every
+round after that: the branch, `changed="N"`, ahead/behind, the staleness sentence and a pointer
+to `git status` for the paths. That block is 132 tokens whatever the tree holds, and a round that
+edits a file still sees the change in the count. What is given up is the list of paths on rounds
+where the model is usually the one that wrote them — and can ask for it, with `git status` or by
+reading the file. `TestALaterRoundGetsTheSummaryAndNotTheList` pins both halves: the turn opens
+with the paths, a later round names none of them, and its block stays under a quarter of the
+list's size with twenty-seven paths pending.
+
 
 ## 9. Watching it without the app
 
