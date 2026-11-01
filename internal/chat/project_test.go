@@ -481,8 +481,9 @@ func TestALaterRoundGetsTheSummaryAndNotTheList(t *testing.T) {
 	first := assemble([]store.Message{
 		{ID: "m1", ChatID: chat.ID, Seq: 1, Role: "user", Content: "Was ist offen?"},
 	})
-	// A round after it: the newest message is a row the reply itself produced.
-	later := assemble(storedToolTurn("read_file", "package main\n"))
+	// A round after a write, which is the round that carries the working tree at all (read-only
+	// rounds skip it, see the test below).
+	later := assemble(storedToolTurn("write_file", "main.go geschrieben.\n"))
 
 	if !strings.Contains(first, "datei-m-mit-einem-langen-namen.go") {
 		t.Errorf("the turn opens without the list of pending paths:\n%s", first)
@@ -501,6 +502,53 @@ func TestALaterRoundGetsTheSummaryAndNotTheList(t *testing.T) {
 	if got := llm.EstimateTokens(later); got >= llm.EstimateTokens(first)/4 {
 		t.Errorf("the summary costs %d tokens against the list's %d, so it still grows with the"+
 			" tree", got, llm.EstimateTokens(first))
+	}
+}
+
+// TestAReadOnlyRoundPaysNothingForTheWorkingTree is the other half of the tail's economy. A read
+// cannot move the tree, so the round after it used to spend a git probe and 132 uncached tokens to
+// repeat a count the model had just acted on. The block is back on the round after a write, where
+// the count moving is the news.
+func TestAReadOnlyRoundPaysNothingForTheWorkingTree(t *testing.T) {
+	folder := gitFolder(t)
+	chat := store.Chat{
+		ID: "project-1", Title: "Projekt", SystemPrompt: "Du bist ein Assistent.",
+		Mode: store.ModeCoding, Workspace: folder,
+	}
+	assemble := func(messages []store.Message) []llm.Message {
+		t.Helper()
+		return Assemble(AssemblyInput{
+			Chat: chat, Messages: messages,
+			Limit: 100000, LimitSource: "backend", Reserve: 1000,
+		}).Messages
+	}
+
+	opening := []store.Message{
+		{ID: "m1", ChatID: chat.ID, Seq: 1, Role: "user", Content: "Was ist offen?"},
+	}
+	if !containsGitState(assemble(opening)) {
+		t.Fatal("the request that opens a turn carries no working tree")
+	}
+	if containsGitState(assemble(storedToolTurn("read_file", "package main\n"))) {
+		t.Error("a read-only round probed the tree and carried the block anyway")
+	}
+	if !containsGitState(assemble(storedToolTurn("write_file", "main.go geschrieben.\n"))) {
+		t.Error("the round after a write carries no working tree")
+	}
+	// The command tool is the one that can change anything, so it counts as a write for this
+	// purpose even when it only ran `ls`.
+	if !containsGitState(assemble(storedToolTurn("run_command", "$ ls\n"))) {
+		t.Error("the round after a command carries no working tree")
+	}
+	// And the meter agrees with the request it describes: no block, no segment.
+	budget := Assemble(AssemblyInput{
+		Chat: chat, Messages: storedToolTurn("read_file", "package main\n"),
+		Limit: 100000, LimitSource: "backend", Reserve: 1000,
+	}).Budget
+	for _, seg := range budget.Segments {
+		if seg.Kind == SegmentGit {
+			t.Errorf("a read-only round was charged for a git block it did not send: %+v", seg)
+		}
 	}
 }
 

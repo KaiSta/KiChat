@@ -655,9 +655,9 @@ and a compaction has to fit it like any other segment.
 Beside it, when the folder is a git working tree, travels the **working tree's state**
 (`SegmentGit`, labelled `Git-Status`): the branch (or `detached="true"`), how far it is ahead or
 behind its upstream, and every pending path with the half of it that is staged, the kind of
-change and its line counts, on the request that opens a turn; the rounds after it carry the branch,
-the count and the warning without the list (see the tail below). It answers the question the
-transcript cannot — is the earlier work
+change and its line counts, on the request that opens a turn and again after every round that wrote
+something; a round that only read carries neither, because it cannot have moved the tree (see the
+tail below). It answers the question the transcript cannot — is the earlier work
 finished, staged, or already committed — without spending a tool round and a confirmation card
 on `git status`, and it is what the model reads before it decides that a file it remembers is
 still unmodified.
@@ -703,6 +703,16 @@ where the model is usually the one that wrote them — and can ask for it, with 
 reading the file. `TestALaterRoundGetsTheSummaryAndNotTheList` pins both halves: the turn opens
 with the paths, a later round names none of them, and its block stays under a quarter of the
 list's size with twenty-seven paths pending.
+
+**A round that only read pays nothing for the block at all.** `movedFolder` asks the round's own
+result name: `write_file`, `edit_file` and `run_command` can change the folder — the command tool
+because a command is anything — and every other tool cannot. A read-only round therefore skips the
+probe as well as the block: no `git status` and no `git diff --numstat` (11 ms each, measured), no
+`SegmentGit` in the meter, and no tokens. That is a real omission rather than a smaller block, since
+the tail is never stored — skipping does not hand the model an older snapshot, it hands it none, and
+a stretch of reading has nothing to learn from a count that did not move. The block is back on the
+round after the next write. `TestAReadOnlyRoundPaysNothingForTheWorkingTree` pins all four cases:
+the opening request has it, a read has not, a write brings it back, and so does a command.
 
 **The turn's notes travel in the tail as well**, and for a sharper reason than the list. The
 revert note and the `<project_changed_on_disk>` block are sent on the round that opens a turn and

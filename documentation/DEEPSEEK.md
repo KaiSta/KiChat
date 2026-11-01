@@ -175,8 +175,9 @@ Two consequences, and the second is why a coding reply is laid out the way it is
   says): the assistant edits a file on nearly every round, and that edit used to rewrite message
   zero — a full miss for the whole history behind it, every round. Living in the tail is not a
   licence to be large there either — the tail is never a hit — which is why the full list of
-  pending paths travels only with the request that opens the turn and the rounds after it carry
-  a 132-token summary instead. The same test applies to the conversation's own corrections: a
+  pending paths travels only with the request that opens the turn, a 132-token summary travels
+  after each round that wrote something, and a round that only read carries neither — it cannot
+  have moved the tree, so it neither probes nor sends. The same test applies to the conversation's own corrections: a
   revert note or a "this file changed on disk" block is sent on the round that opens a turn and
   gone from the next one, so it travels in the tail too (the `TurnNotes` argument of `Assemble`)
   rather than as prompt text, where it would rewrite message zero twice per turn.

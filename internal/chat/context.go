@@ -9,6 +9,7 @@ import (
 
 	"kichat/internal/llm"
 	"kichat/internal/store"
+	"kichat/internal/tools"
 	"kichat/internal/workspace"
 )
 
@@ -293,17 +294,21 @@ func Assemble(in AssemblyInput) Assembly {
 	// of the rounds of a reply that is already holding the files it wrote.
 	firstRound := len(in.Messages) == 0 ||
 		in.Messages[len(in.Messages)-1].Role == string(llm.RoleUser)
+	// A round that could not have moved the tree reads nothing new from it: the probe and its
+	// tokens are skipped, and the block comes back on the round after the write that moved it.
 	var gitState string
-	if state, detail, ok := projectGitState(in.Chat, firstRound); ok {
-		gitState = state
-		tokens := llm.EstimateTokens(state)
-		budget.Memory += tokens
-		budget.Segments = append(budget.Segments, ContextSegment{
-			Kind:   SegmentGit,
-			Label:  "Git-Status",
-			Tokens: tokens,
-			Detail: detail,
-		})
+	if firstRound || movedFolder(in.Messages) {
+		if state, detail, ok := projectGitState(in.Chat, firstRound); ok {
+			gitState = state
+			tokens := llm.EstimateTokens(state)
+			budget.Memory += tokens
+			budget.Segments = append(budget.Segments, ContextSegment{
+				Kind:   SegmentGit,
+				Label:  "Git-Status",
+				Tokens: tokens,
+				Detail: detail,
+			})
+		}
 	}
 
 	// A notice about indexed documents keeps retrieval discoverable without
@@ -587,6 +592,33 @@ func Assemble(in AssemblyInput) Assembly {
 		MaxIncludedSeq:     maxIncluded,
 		AgedReads:          agedReads,
 	}
+}
+
+// movedFolder reports whether the round that just ran could have changed the folder: its result
+// came from a tool that writes.
+//
+// A read — read_file, list_dir, search_files, a scrape — cannot move the tree, so re-reading it and
+// re-sending it says nothing. What that costs is not nothing: a block at the tail is the one part of
+// a request no cache turns into a hit, so a read-only round used to pay a git probe and its tokens
+// to repeat a count it had just acted on.
+//
+// What "skip" means here is worth stating, because the tail is not stored: omitting the block does
+// not leave the model with an older snapshot, it leaves it with none. That is the trade — the block
+// rides on the turn's first request and on the round after every write, and a stretch of reading
+// runs without it, which is exactly when it has nothing to say.
+func movedFolder(messages []store.Message) bool {
+	if len(messages) == 0 {
+		return false
+	}
+	last := messages[len(messages)-1]
+	if last.Role != string(llm.RoleTool) {
+		return false
+	}
+	switch last.Name {
+	case tools.ToolWriteFile, tools.ToolEditFile, tools.ToolRunCommand:
+		return true
+	}
+	return false
 }
 
 // turnClock is the exact time of the request being assembled, for its tail.
