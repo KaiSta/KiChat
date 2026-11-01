@@ -105,6 +105,57 @@ func TestAChangeIsShownBeforeItIsMade(t *testing.T) {
 	}
 }
 
+func TestAFileChangedDuringApprovalIsNotOverwritten(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool, args, original string
+	}{
+		{"overwrite", ToolWriteFile, `{"path":"a.txt","content":"model text"}`, "original"},
+		{"edit", ToolEditFile, `{"path":"a.txt","old_string":"original","new_string":"model text"}`, "original"},
+		{"create", ToolWriteFile, `{"path":"a.txt","content":"model text"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := map[string]string{}
+			if tc.original != "" {
+				files["a.txt"] = tc.original
+			}
+			service, chatID, folder := projectService(t, files)
+			path := filepath.Join(folder, "a.txt")
+			service.Confirm = func(_ context.Context, _ *ApprovalRequest) error {
+				return os.WriteFile(path, []byte("user text"), 0o644)
+			}
+			if _, err := service.Execute(context.Background(), chatID, tc.tool, tc.args); err == nil {
+				t.Fatal("a changed file was overwritten after the preview")
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != "user text" {
+				t.Fatalf("file = %q, %v, want the user's text", got, err)
+			}
+		})
+	}
+}
+
+func TestARetargetedLinkIsNotWrittenAfterApproval(t *testing.T) {
+	service, chatID, folder := projectService(t, map[string]string{"a.txt": "same", "b.txt": "same"})
+	link := filepath.Join(folder, "link.txt")
+	if err := os.Symlink("a.txt", link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	service.Confirm = func(_ context.Context, _ *ApprovalRequest) error {
+		if err := os.Remove(link); err != nil {
+			return err
+		}
+		return os.Symlink("b.txt", link)
+	}
+	if _, err := service.Execute(context.Background(), chatID, ToolWriteFile,
+		`{"path":"link.txt","content":"model text"}`); err == nil {
+		t.Fatal("a different target was written after approval")
+	}
+	body, err := os.ReadFile(filepath.Join(folder, "b.txt"))
+	if err != nil || string(body) != "same" {
+		t.Fatalf("new target = %q, %v, want unchanged", body, err)
+	}
+}
+
 // TestACreateWouldNotBeShownWithoutTheContent is the other half of the same promise, and
 // the reason the question is asked at all: a write that was never confirmed must leave the
 // folder exactly as it was.

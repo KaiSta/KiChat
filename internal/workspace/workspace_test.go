@@ -100,6 +100,20 @@ func TestASymlinkOutOfTheFolderIsRefused(t *testing.T) {
 	}
 }
 
+func TestDanglingSymlinkCannotCreateOutsideProject(t *testing.T) {
+	root, dir := project(t, nil)
+	outside := filepath.Join(t.TempDir(), "not-yet-created.txt")
+	if err := os.Symlink(outside, filepath.Join(dir, "link.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := root.Write("link.txt", "content"); err == nil {
+		t.Fatal("a dangling symlink was accepted for writing")
+	}
+	if _, err := os.Stat(outside); !os.IsNotExist(err) {
+		t.Fatalf("outside file was created: %v", err)
+	}
+}
+
 // TestAnAbsolutePathInsideTheFolderIsAccepted is the other half of the rule: a model
 // that was shown an absolute path writes one back, and refusing it would cost a round
 // for a path that is plainly inside.
@@ -161,6 +175,25 @@ func TestSearchReportsWhenHitLimitCutsOneFile(t *testing.T) {
 	}
 	if len(matches.Hits) != 1 || !matches.Stopped {
 		t.Fatalf("matches = %+v, want one hit and a stopped search", matches)
+	}
+}
+
+func TestAgentsFileDoesNotFollowSymlinkOutsideProject(t *testing.T) {
+	root, dir := project(t, map[string]string{"nested/file.go": "package a\n"})
+	outside := filepath.Join(t.TempDir(), "AGENTS.md")
+	if err := os.WriteFile(outside, []byte("outside instructions"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range []string{filepath.Join(dir, "AGENTS.md"), filepath.Join(dir, "nested", "AGENTS.md")} {
+		if err := os.Symlink(outside, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	if _, _, err := root.AgentsFile(0); !errors.Is(err, ErrOutside) {
+		t.Fatalf("root guidance error = %v, want ErrOutside", err)
+	}
+	if _, _, err := root.AgentsFileNear("nested/file.go", 0); !errors.Is(err, ErrOutside) {
+		t.Fatalf("nested guidance error = %v, want ErrOutside", err)
 	}
 }
 

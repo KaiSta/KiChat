@@ -197,7 +197,15 @@ func (a *App) RevertFileChange(chatID, path string) error {
 	}
 
 	if snap.Existed {
-		if _, err := root.Write(snap.Path, snap.BeforeText); err != nil {
+		change, err := root.DescribeWrite(snap.Path, snap.BeforeText)
+		if err != nil {
+			return uimsg.Errorf("project.revertFailed", snap.Path, err)
+		}
+		before := change.Before()
+		if before.Existed && workspace.Digest(before.Content) != snap.AfterSHA {
+			return uimsg.Errorf("project.revertConflict", snap.Path)
+		}
+		if _, err := root.WriteApproved(snap.Path, change); err != nil {
 			return uimsg.Errorf("project.revertFailed", snap.Path, err)
 		}
 	} else if err := root.Remove(snap.Path); err != nil {

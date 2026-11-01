@@ -512,3 +512,107 @@ func TestAnApproximateEditRefusesTwoCandidates(t *testing.T) {
 		t.Errorf("count = %d, want 2", ambiguous.Count)
 	}
 }
+
+func TestApprovedWriteUsesOpenedFileWhenPathChanges(t *testing.T) {
+	root, dir := project(t, map[string]string{"a.txt": "original", "other.txt": "other"})
+	change, err := root.DescribeWrite("a.txt", "approved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = root.applyChangeAtHooks("a.txt", change, nil, func() {
+		if err := os.Rename(filepath.Join(dir, "a.txt"), filepath.Join(dir, "moved.txt")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("other.txt", filepath.Join(dir, "a.txt")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "other.txt")); err != nil || string(b) != "other" {
+		t.Fatalf("replacement target = %q, %v", b, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "moved.txt")); err != nil || string(b) != "approved" {
+		t.Fatalf("opened file = %q, %v", b, err)
+	}
+}
+
+func TestApprovedWriteRejectsChangedOpenedFile(t *testing.T) {
+	root, dir := project(t, map[string]string{"a.txt": "original"})
+	change, err := root.DescribeWrite("a.txt", "approved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = root.applyChangeAtHooks("a.txt", change, nil, func() {
+		if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("user edit"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err == nil {
+		t.Fatal("accepted a changed file")
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "a.txt")); err != nil || string(b) != "user edit" {
+		t.Fatalf("file = %q, %v", b, err)
+	}
+}
+
+func TestApprovedCreateDoesNotReplaceNewFile(t *testing.T) {
+	root, dir := project(t, nil)
+	change, err := root.DescribeWrite("a.txt", "approved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("user file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.WriteApproved("a.txt", change); err == nil {
+		t.Fatal("replaced a file created after approval")
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "a.txt")); err != nil || string(b) != "user file" {
+		t.Fatalf("file = %q, %v", b, err)
+	}
+}
+
+func TestApprovedWriteRejectsIdenticalReplacementFile(t *testing.T) {
+	root, dir := project(t, map[string]string{"a.txt": "original"})
+	change, err := root.DescribeWrite("a.txt", "approved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "a.txt"), filepath.Join(dir, "old.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.WriteApproved("a.txt", change); err == nil {
+		t.Fatal("accepted a different file with the same contents")
+	}
+}
+
+func TestApprovedWriteCannotFollowParentSwappedOutside(t *testing.T) {
+	root, dir := project(t, map[string]string{"sub/a.txt": "original"})
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "a.txt"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	change, err := root.DescribeWrite("sub/a.txt", "approved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = root.applyChangeAtHooks("sub/a.txt", change, func() {
+		if err := os.Rename(filepath.Join(dir, "sub"), filepath.Join(dir, "moved")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(dir, "sub")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}, nil)
+	if err == nil {
+		t.Fatal("followed a parent symlink outside the workspace")
+	}
+	if b, err := os.ReadFile(filepath.Join(outside, "a.txt")); err != nil || string(b) != "outside" {
+		t.Fatalf("outside file = %q, %v", b, err)
+	}
+}

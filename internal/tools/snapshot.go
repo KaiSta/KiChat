@@ -13,12 +13,8 @@ package tools
 // digest with the file on disk, so work done in the user's own editor in the meantime is a
 // refusal rather than a casualty — and the first is what the revert restores.
 //
-// **The record is taken before the change and written after it.** Before, because reading the
-// file afterwards would record the new text as the old one. After, because a change that was
-// refused, or that failed half way, must not leave a row claiming something happened. What the
-// two orderings mean together is that a file this app could not read has no undo: the change
-// still happens (the person allowed it and the write works), and the model is told in the
-// result that it cannot be taken back, which is the honest place for that sentence.
+// The pre-image is verified on the file handle used for the write; its record is stored
+// afterwards so a refused or failed change does not leave a row claiming it succeeded.
 
 import (
 	"time"
@@ -35,30 +31,6 @@ type preImage struct {
 	ok bool
 	// why is the sentence the model gets when it cannot be, empty otherwise.
 	why string
-}
-
-// preImageOf reads the file a change is about to touch.
-//
-// A file that is not there is the best case: the undo of a create is a deletion, and nothing
-// has to be stored for it. A file that is too large or is not text has no undo — this app will
-// not put back something it never read — and a file that cannot be read at all is reported.
-func (s *Service) preImageOf(root workspace.Root, rel string) preImage {
-	lang := s.Language()
-	// Named `file` rather than `text`: `text` is this package's "pick the wording" helper, and a
-	// local of that name would shadow it inside the one function that needs both.
-	file, err := root.Text(rel)
-	if err != nil {
-		return preImage{why: text(lang,
-			" Die Änderung konnte nicht zum Rückgängigmachen gesichert werden: ",
-			" The change could not be saved so it can be undone: ") + err.Error() + "."}
-	}
-	if file.Existed && !file.Writable {
-		return preImage{why: text(lang,
-			" Die Änderung kann nicht rückgängig gemacht werden: die Datei ist keine Textdatei oder "+
-				"zu groß, um sie zu sichern.",
-			" The change cannot be undone: the file is not a text file or is too large to be saved.")}
-	}
-	return preImage{text: file, ok: true}
 }
 
 // remember records a change, and returns the sentence the model should see if it could not be.

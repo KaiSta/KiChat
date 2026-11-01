@@ -5,11 +5,8 @@ package workspace
 // The split between Describe* and the operation itself is the whole design here, and it
 // is not a convenience. A person cannot consent to "write_file pkg/a.go" — that is a tool
 // name, not a change — and asking them *after* the file was written is not consent at
-// all. So every modification is computed twice: once to be shown, and once to be
-// performed. The second computation is deliberately independent, because a described
-// change is a value that travels through a window and comes back, and a span of time in
-// which the folder can move under it is exactly when a preview stops matching what gets
-// applied.
+// all. A described change keeps the exact pre-image and replacement so that applying it
+// after approval can verify the opened target and write precisely what was shown.
 //
 // Nothing here asks anybody anything. Whether a change is allowed is the app's question
 // (internal/tools carries it to the window), and this package stays the layer that can say
@@ -17,6 +14,7 @@ package workspace
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -73,6 +71,21 @@ type Change struct {
 	// They are part of what is being approved: a typo in a path makes folders, and a
 	// listing that says so is how the person notices before rather than after.
 	CreatesDirs []string
+
+	// The approved preview is valid only while the same path and contents remain.
+	approvedPath string
+	beforeDigest string
+	existed      bool
+	fileInfo     fs.FileInfo
+	rootInfo     fs.FileInfo
+	before       string
+	updated      string
+	editResult   EditResult
+}
+
+// Before returns the pre-image used to construct this change.
+func (c Change) Before() Text {
+	return Text{Path: c.Path, Content: c.before, Existed: c.existed, Writable: true}
 }
 
 // WriteResult is what a write did.
@@ -83,6 +96,8 @@ type WriteResult struct {
 	// Lines is the file's length after the write, PreviousLines before it.
 	Lines         int
 	PreviousLines int
+	// Before is the verified pre-image for undo.
+	Before Text
 }
 
 // EditResult is what an edit did.
@@ -103,6 +118,8 @@ type EditResult struct {
 	// this is the one place the new text exists before it reaches the disk, and the undo record
 	// needs it to notice a file that changed afterwards (see internal/tools/snapshot.go).
 	Digest string
+	// Before is the verified pre-image for undo.
+	Before Text
 }
 
 // DescribeWrite reports what writing content to rel would do.
@@ -117,12 +134,15 @@ func (r Root) DescribeWrite(rel, content string) (Change, error) {
 	}
 	diff := CompareDiff(before, content)
 	change := Change{
-		Path:        r.Relative(abs),
-		Hunks:       diff.Hunks,
-		Added:       diff.Added,
-		Removed:     diff.Removed,
-		Truncated:   diff.Truncated,
-		NewlineOnly: diff.NewlineOnly,
+		Path:         r.Relative(abs),
+		Hunks:        diff.Hunks,
+		Added:        diff.Added,
+		Removed:      diff.Removed,
+		Truncated:    diff.Truncated,
+		NewlineOnly:  diff.NewlineOnly,
+		approvedPath: abs,
+		beforeDigest: Digest(before),
+		existed:      mode != 0,
 	}
 	if mode == 0 {
 		change.Operation = OperationCreate
@@ -130,7 +150,41 @@ func (r Root) DescribeWrite(rel, content string) (Change, error) {
 		change.Operation = OperationOverwrite
 	}
 	change.CreatesDirs = r.missingDirs(abs)
+	change.before, change.updated = before, content
+	if err := r.captureChangeIdentity(&change); err != nil {
+		return Change{}, err
+	}
 	return change, nil
+}
+
+// captureChangeIdentity lets the write reject replacement files even when their contents match.
+func (r Root) captureChangeIdentity(change *Change) error {
+	var err error
+	change.rootInfo, err = os.Stat(r.path)
+	if err != nil {
+		return err
+	}
+	if change.existed {
+		change.fileInfo, err = os.Stat(change.approvedPath)
+	}
+	return err
+}
+
+// ValidateChange refuses a preview whose target or contents changed during approval.
+func (r Root) ValidateChange(rel string, change Change) error {
+	abs, err := r.Resolve(rel)
+	if err != nil {
+		return err
+	}
+	file, err := r.Text(rel)
+	if err != nil {
+		return err
+	}
+	if abs != change.approvedPath || file.Existed != change.existed ||
+		(file.Existed && (!file.Writable || Digest(file.Content) != change.beforeDigest)) {
+		return fmt.Errorf("the file changed while approval was pending; read it again and request a new change")
+	}
+	return nil
 }
 
 // Write writes content to rel, creating the file and any missing folders above it.
@@ -147,28 +201,100 @@ func (r Root) DescribeWrite(rel, content string) (Change, error) {
 // tool that helpfully appended one would put a line in somebody's diff that the model
 // never wrote, and a model can be told to end a file with a newline.
 func (r Root) Write(rel, content string) (WriteResult, error) {
-	abs, before, mode, err := r.inspectWrite(rel, content)
+	change, err := r.DescribeWrite(rel, content)
 	if err != nil {
 		return WriteResult{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	return r.WriteApproved(rel, change)
+}
+
+// WriteApproved applies exactly the previewed bytes and returns the pre-image used for undo.
+func (r Root) WriteApproved(rel string, change Change) (WriteResult, error) {
+	if change.Operation != OperationCreate && change.Operation != OperationOverwrite {
+		return WriteResult{}, fmt.Errorf("not an approved write")
+	}
+	if err := r.applyChange(rel, change); err != nil {
 		return WriteResult{}, err
 	}
-	created := mode == 0
-	if created {
-		// A new file: the mode a text file gets, adjusted by the umask. An existing file
-		// keeps its own bits, which os.WriteFile does by itself when the file is there.
-		mode = 0o644
+	return WriteResult{Path: change.Path, Created: !change.existed,
+		Lines: countLines(change.updated), PreviousLines: countLines(change.before),
+		Before: Text{Path: change.Path, Content: change.before, Existed: change.existed, Writable: true}}, nil
+}
+
+// applyChange opens the resolved target beneath an anchored root, validates the opened inode,
+// then writes through that same handle. O_EXCL prevents a create from replacing a new file.
+func (r Root) applyChange(rel string, change Change) error {
+	return r.applyChangeAtHooks(rel, change, nil, nil)
+}
+
+// The hooks let tests exercise filesystem changes at the open boundaries.
+func (r Root) applyChangeAtHooks(rel string, change Change, beforeOpen, afterOpen func()) error {
+	abs, err := r.Resolve(rel)
+	if err != nil {
+		return err
 	}
-	if err := os.WriteFile(abs, []byte(content), mode); err != nil {
-		return WriteResult{}, err
+	if abs != change.approvedPath || change.rootInfo == nil {
+		return fmt.Errorf("the file changed while approval was pending; read it again and request a new change")
 	}
-	return WriteResult{
-		Path:          r.Relative(abs),
-		Created:       created,
-		Lines:         countLines(content),
-		PreviousLines: countLines(before),
-	}, nil
+	root, err := os.OpenRoot(r.path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	info, err := root.Stat(".")
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, change.rootInfo) {
+		return fmt.Errorf("the project folder changed while approval was pending")
+	}
+	name := r.Relative(change.approvedPath)
+	if !change.existed {
+		if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			return err
+		}
+	}
+	flags := os.O_RDWR
+	if !change.existed {
+		flags |= os.O_CREATE | os.O_EXCL
+	}
+	if beforeOpen != nil {
+		beforeOpen()
+	}
+	file, err := root.OpenFile(name, flags, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if afterOpen != nil {
+		afterOpen()
+	}
+	if change.existed {
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || change.fileInfo == nil || !os.SameFile(info, change.fileInfo) {
+			return fmt.Errorf("the file changed while approval was pending; read it again and request a new change")
+		}
+		data, err := io.ReadAll(io.LimitReader(file, MaxWriteBytes+1))
+		if err != nil {
+			return err
+		}
+		if len(data) > MaxWriteBytes || Digest(string(data)) != change.beforeDigest {
+			return fmt.Errorf("the file changed while approval was pending; read it again and request a new change")
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if err := file.Truncate(0); err != nil {
+			return err
+		}
+	}
+	if _, err := io.WriteString(file, change.updated); err != nil {
+		return err
+	}
+	return file.Close()
 }
 
 // inspectWrite resolves a path and reports what is at it: its text, and the permission
@@ -251,7 +377,7 @@ func (r Root) missingDirs(abs string) []string {
 // exactly the edits that Edit would refuse — so a person is never asked to approve
 // something that cannot be applied.
 func (r Root) DescribeEdit(rel, old, new string, replaceAll bool) (Change, error) {
-	abs, text, _, occurrences, matched, _, err := r.inspectEdit(rel, old, new, replaceAll)
+	abs, text, _, occurrences, matched, approx, err := r.inspectEdit(rel, old, new, replaceAll)
 	if err != nil {
 		return Change{}, err
 	}
@@ -262,14 +388,33 @@ func (r Root) DescribeEdit(rel, old, new string, replaceAll bool) (Change, error
 	// from the line the match really starts on, so the card points into the file.
 	diff := compareDiffAt(matched, new, lineOf(text, matched))
 	change := Change{
-		Path:        r.Relative(abs),
-		Operation:   OperationEdit,
-		Hunks:       diff.Hunks,
-		Added:       diff.Added * occurrences,
-		Removed:     diff.Removed * occurrences,
-		Truncated:   diff.Truncated,
-		NewlineOnly: diff.NewlineOnly,
-		Occurrences: occurrences,
+		Path:         r.Relative(abs),
+		Operation:    OperationEdit,
+		Hunks:        diff.Hunks,
+		Added:        diff.Added * occurrences,
+		Removed:      diff.Removed * occurrences,
+		Truncated:    diff.Truncated,
+		NewlineOnly:  diff.NewlineOnly,
+		Occurrences:  occurrences,
+		approvedPath: abs,
+		beforeDigest: Digest(text),
+		existed:      true,
+	}
+	updated := editText(text, old, new, matched, replaceAll, approx)
+	if len(updated) > MaxWriteBytes {
+		return Change{}, fmt.Errorf("%s would grow to %s, larger than the %s one change may produce",
+			r.Relative(abs), humanBytes(int64(len(updated))), humanBytes(MaxWriteBytes))
+	}
+	replaced := 1
+	if replaceAll {
+		replaced = occurrences
+	}
+	change.before, change.updated = text, updated
+	change.editResult = EditResult{Path: change.Path, Occurrences: replaced, Line: lineOf(text, matched),
+		Added: countLines(new), Removed: countLines(matched), Approximate: approx, Digest: Digest(updated),
+		Before: Text{Path: change.Path, Content: text, Existed: true, Writable: true}}
+	if err := r.captureChangeIdentity(&change); err != nil {
+		return Change{}, err
 	}
 	return change, nil
 }
@@ -286,46 +431,33 @@ func (r Root) DescribeEdit(rel, old, new string, replaceAll bool) (Change, error
 // newline all survive an edit they are not part of: this is a string replacement inside
 // text, not a re-rendering of it.
 func (r Root) Edit(rel, old, new string, replaceAll bool) (EditResult, error) {
-	abs, text, mode, occurrences, matched, approx, err := r.inspectEdit(rel, old, new, replaceAll)
+	change, err := r.DescribeEdit(rel, old, new, replaceAll)
 	if err != nil {
 		return EditResult{}, err
 	}
-	// One occurrence, because inspectEdit has already refused an ambiguous match: an edit
-	// whose text appears twice is an error, never the first of the two.
-	var updated string
-	switch {
-	case !replaceAll:
-		updated = strings.Replace(text, matched, new, 1)
-	case approx:
-		// Every span carries the file's own indentation, so replacing `matched` everywhere would
-		// only touch the occurrences that happen to be byte-identical to the first one — and
-		// report all of them as replaced.
-		updated = replaceWhitespaceMatches(text, old, new)
-	default:
-		updated = strings.ReplaceAll(text, matched, new)
+	return r.EditApproved(rel, change)
+}
+
+// EditApproved applies the exact edit shown in the preview.
+func (r Root) EditApproved(rel string, change Change) (EditResult, error) {
+	if change.Operation != OperationEdit {
+		return EditResult{}, fmt.Errorf("not an approved edit")
 	}
-	// The authoritative form of the bound inspectEdit checked: that estimate is based on the
-	// first matched span, and whitespace-tolerant spans can be longer than it.
-	if len(updated) > MaxWriteBytes {
-		return EditResult{}, fmt.Errorf("%s would grow to %s, larger than the %s one change may "+
-			"produce", r.Relative(abs), humanBytes(int64(len(updated))), humanBytes(MaxWriteBytes))
-	}
-	if err := os.WriteFile(abs, []byte(updated), mode); err != nil {
+	if err := r.applyChange(rel, change); err != nil {
 		return EditResult{}, err
 	}
-	replaced := 1
-	if replaceAll {
-		replaced = occurrences
+	return change.editResult, nil
+}
+
+func editText(text, old, new, matched string, replaceAll, approx bool) string {
+	switch {
+	case !replaceAll:
+		return strings.Replace(text, matched, new, 1)
+	case approx:
+		return replaceWhitespaceMatches(text, old, new)
+	default:
+		return strings.ReplaceAll(text, matched, new)
 	}
-	return EditResult{
-		Path:        r.Relative(abs),
-		Occurrences: replaced,
-		Line:        lineOf(text, matched),
-		Added:       countLines(new),
-		Removed:     countLines(matched),
-		Approximate: approx,
-		Digest:      Digest(updated),
-	}, nil
 }
 
 // inspectEdit reads the file to be edited and refuses the edit if it cannot be made.

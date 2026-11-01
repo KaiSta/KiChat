@@ -10,8 +10,8 @@ package tools
 // a policy engine validating a call: they are reading a diff and deciding whether it is
 // what they wanted, and "write_file pkg/a.go" is not something anybody can decide. So the
 // change is computed first (workspace.DescribeWrite / DescribeEdit), handed over with the
-// question, and only then performed — and the performing re-derives everything, so a
-// preview that travelled through a window and came back cannot be what gets applied.
+// question, and only then performed. The opened target is checked against the preview
+// after approval, and the approved bytes are written through that same handle.
 //
 // The second is that a refusal is an answer, not a failure. Every other tool in this
 // package reports what went wrong so the model can try something else; a refusal has to
@@ -274,16 +274,14 @@ func (s *Service) writeFile(ctx context.Context, chatID, argsJSON string) (Resul
 	if err := s.approveChange(ctx, chatID, ToolWriteFile, change); err != nil {
 		return Result{}, err
 	}
-	// The text an undo puts back, read before it is replaced.
-	pre := s.preImageOf(root, args.Path)
-	result, err := root.Write(args.Path, args.Content)
+	result, err := root.WriteApproved(args.Path, change)
 	if err != nil {
 		return Result{}, s.changeError(args.Path, err)
 	}
 	// The read cache is told rather than left to notice: a model that re-reads this file to
 	// check what it wrote must get the file, not a sentence about what the app remembers.
 	s.forgetReads(chatID, root.Absolute(result.Path))
-	note := s.remember(chatID, pre, workspace.Digest(args.Content))
+	note := s.remember(chatID, preImage{text: result.Before, ok: true}, workspace.Digest(args.Content))
 	if result.Created {
 		return summarized(fmt.Sprintf(text(lang, "%s neu geschrieben (%s).%s", "%s created (%s).%s"),
 			result.Path, lines(lang, result.Lines), note),
@@ -319,10 +317,7 @@ func (s *Service) editFile(ctx context.Context, chatID, argsJSON string) (Result
 	if err := s.approveChange(ctx, chatID, ToolEditFile, change); err != nil {
 		return Result{}, err
 	}
-	// Read before the edit for the same reason a write does it: afterwards the file already
-	// holds the new text, and that is not what an undo restores.
-	pre := s.preImageOf(root, args.Path)
-	result, err := root.Edit(args.Path, args.OldString, args.NewString, replaceAll)
+	result, err := root.EditApproved(args.Path, change)
 	if err != nil {
 		return Result{}, s.changeError(args.Path, err)
 	}
@@ -330,7 +325,7 @@ func (s *Service) editFile(ctx context.Context, chatID, argsJSON string) (Result
 	s.forgetReads(chatID, root.Absolute(result.Path))
 	// Said to the model, not only to the person: a model whose whitespace was forgiven needs
 	// to know it was, or it learns that guessing indentation works.
-	note := s.remember(chatID, pre, result.Digest)
+	note := s.remember(chatID, preImage{text: result.Before, ok: true}, result.Digest)
 	if result.Approximate {
 		note += text(lang,
 			" Der Einzug wich ab: ersetzt wurde die Zeile so, wie sie in der Datei steht.",

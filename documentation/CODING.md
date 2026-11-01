@@ -86,8 +86,14 @@ Every tool that changes something goes through `Service.Confirm`, which the app 
   set from that list, so a fourth tool of this kind cannot be added and forgotten.
 - The tool computes what it *would* do and asks. `workspace.DescribeWrite`/`DescribeEdit` exist
   for that alone: a person cannot consent to "write_file pkg/a.go", and asking after the write
-  is not consent at all. The change is then **re-derived** when it is performed, because a
-  preview that travelled through a window and came back must never be what gets applied.
+  is not consent at all. After approval, an `os.Root`-anchored operation opens the resolved
+  target, checks its identity and contents against the preview, and writes the approved bytes
+  through that same handle. A create uses exclusive creation. Undo records the verified
+  pre-image, not a separate path read. A retargeted path cannot redirect the opened handle.
+  This is not an atomic compare-and-write: a concurrent in-place writer can still change the
+  same inode after validation, and a rename after opening can leave the write on the moved
+  inode. Rooted operations also do not prevent hard links or bind mounts to outside files.
+  Undo's separate digest check and deletion remain subject to concurrent filesystem changes.
 - The question is an event (`chat:approval`), and the turn's own goroutine blocks on it. No
   further tool call or model round can pass an unanswered question, and every other chat keeps
   running, because the block is one turn's goroutine.

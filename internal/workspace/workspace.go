@@ -186,9 +186,14 @@ func resolveExisting(candidate string) (string, error) {
 			}
 			return filepath.Join(resolved, rest), nil
 		}
-		// A missing or unreadable element is not the answer here: the leaf of a path
-		// that is about to be created never exists, and the containment question is
-		// about the directory that does.
+		// Only a genuinely missing component may be skipped. A dangling symlink can
+		// point outside the root even though its target does not exist yet; accepting
+		// it would let a subsequent write create the target outside the project.
+		if _, statErr := os.Lstat(dir); statErr == nil {
+			return "", err
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			return "", statErr
+		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			// Nothing on the way exists. The root itself was checked by Open, so the
@@ -315,7 +320,12 @@ func (r Root) Remove(rel string) error {
 	if info.IsDir() {
 		return fmt.Errorf("%s is a folder", r.Relative(abs))
 	}
-	return os.Remove(abs)
+	root, err := os.OpenRoot(r.path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.Remove(r.Relative(abs))
 }
 
 // Digest is the fingerprint of a text, used to notice that a file changed after this app wrote
@@ -786,7 +796,10 @@ func (r Root) AgentsFileNear(rel string, maxBytes int) (Doc, bool, error) {
 // agentsAt reads the AGENTS.md in one folder. rel is where the model should think it lives,
 // which for a nested file is its folder's path rather than the root.
 func (r Root) agentsAt(dir, rel string, maxBytes int) (Doc, bool, error) {
-	path := filepath.Join(dir, AgentsFileName)
+	path, err := r.Resolve(filepath.Join(dir, AgentsFileName))
+	if err != nil {
+		return Doc{}, false, err
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
