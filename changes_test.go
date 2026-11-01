@@ -28,10 +28,26 @@ type approvalApp struct {
 	arrived chan struct{}
 }
 
+// newApprovalApp is an app that can be driven through the bindings, which means it has to be
+// one that is *ready*: every binding calls ensure(), and an app that has not been through
+// initialisation refuses with db.locked.
+//
+// So it is an isolated install — its own config directory, its own key store, its own secret
+// store — unlocked with a passphrase, exactly like a first launch on a machine with no keyring.
+// The first version of this helper built a bare `&App{ctx: …}` instead, which meant init() ran
+// against the developer's real `~/.config/kichat` and the real keyring: it passed on a machine
+// whose keyring holds a key, and on CI — no keyring, no database — every binding answered
+// `db.locked`, which is the failure this helper exists to stop repeating.
 func newApprovalApp(t *testing.T) *approvalApp {
 	t.Helper()
 	recorder := &approvalApp{arrived: make(chan struct{})}
-	recorder.app = &App{ctx: context.Background()}
+	recorder.app = databaseTestEnv(t)()
+	if err := recorder.app.init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if err := recorder.app.UnlockDatabase("a passphrase long enough"); err != nil {
+		t.Fatalf("unlocking the isolated database: %v", err)
+	}
 	recorder.app.emitFn = func(name string, payload any) {
 		if name != events.Approval {
 			return
