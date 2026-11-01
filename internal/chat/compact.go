@@ -701,7 +701,11 @@ func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt,
 	// page that fills a small window is a request no local model accepts. The answer
 	// shrinks to the room that is left, and the page — not the cap — decides the rest.
 	if opts.ContextLimit > 0 {
-		if room := opts.ContextLimit - promptTokens; room > 0 && room < answer {
+		room := opts.ContextLimit - promptTokens
+		if room <= 0 {
+			return "", uimsg.Errorf(opts.BudgetCode, "context_limit", 0)
+		}
+		if room < answer {
 			answer = room
 		}
 	}

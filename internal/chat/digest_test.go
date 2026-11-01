@@ -1441,3 +1441,13 @@ func TestABoundedReadIsRecognised(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractionRefusesPromptThatLeavesNoOutputRoom(t *testing.T) {
+	digester := newDigester([]llm.StreamEvent{{Type: llm.EventDelta, Text: "should not be called"}})
+	_, err := DigestToolOutput(context.Background(), digester, "small", DigestOptions{
+		Text: bigPage(), MaxTokens: 100, ContextLimit: 100,
+	})
+	if err == nil || digester.requestCount() != 0 {
+		t.Fatalf("err = %v, requests = %d", err, digester.requestCount())
+	}
+}
