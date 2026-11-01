@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -208,6 +209,94 @@ func TestADeadServerIsReportedByTheCallersName(t *testing.T) {
 	st := srv.Status()
 	if !strings.Contains(st.Error, "sd-server") || !strings.Contains(st.Error, "unsupported quantisation") {
 		t.Errorf("error = %q, want the program's name and its own last output", st.Error)
+	}
+}
+
+// An old readiness probe may finish after a restart; it must not mark the old
+// server ready or let its exit overwrite the replacement's status.
+func TestRestartIgnoresTheOldReadinessProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a shell")
+	}
+	binary, _ := fakeServer(t, "sleep 30\n")
+	model := writeModel(t)
+	srv := NewServer("test")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	firstFinished := make(chan struct{})
+	var once sync.Once
+	srv.probe = func(context.Context, string) error {
+		first := false
+		once.Do(func() { first = true; close(entered) })
+		if first {
+			<-release
+			defer close(firstFinished)
+		}
+		return nil
+	}
+	if err := srv.Start(Options{Binary: binary, Model: model}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Stop() })
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first probe did not start")
+	}
+	if err := srv.Start(Options{Binary: binary, Model: model}); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	newPID := srv.Status().PID
+	close(release)
+	select {
+	case <-firstFinished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first probe did not finish")
+	}
+	if !waitFor(t, 5*time.Second, func() bool { return srv.Status().State == StateRunning }) {
+		t.Fatalf("replacement never became ready: %+v", srv.Status())
+	}
+	// Let the old monitor consume its already-reaped process after the probe returns.
+	time.Sleep(100 * time.Millisecond)
+	if st := srv.Status(); st.State != StateRunning || st.PID != newPID || st.URL == "" {
+		t.Fatalf("old monitor replaced the new server's status: %+v, want pid %d", st, newPID)
+	}
+}
+
+// A stopped process cannot become ready when a pending probe succeeds.
+func TestStopIgnoresTheOldReadinessProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a shell")
+	}
+	binary, _ := fakeServer(t, "sleep 30\n")
+	srv := NewServer("test")
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	srv.probe = func(context.Context, string) error {
+		close(entered)
+		<-release
+		close(done)
+		return nil
+	}
+	if err := srv.Start(Options{Binary: binary, Model: writeModel(t)}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		_ = srv.Stop()
+		t.Fatal("probe did not start")
+	}
+	if err := srv.Stop(); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	close(release)
+	<-done
+	// The stopped process is already reaped; let the monitor consume that exit.
+	time.Sleep(100 * time.Millisecond)
+	if st := srv.Status(); st.State != StateStopped || st.PID != 0 || st.URL != "" {
+		t.Fatalf("stopped server became ready: %+v", st)
 	}
 }
 

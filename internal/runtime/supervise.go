@@ -116,9 +116,11 @@ type Status struct {
 type Server struct {
 	name string
 
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	waited chan struct{}
+	// Serialize starts and stops so a timeout from an old process cannot stop a replacement.
+	lifecycle sync.Mutex
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	waited    chan struct{}
 	// binary is the launcher the current — or last — process was started from. A
 	// running server keeps the build it started with, so this is what tells the
 	// cleanup list which build must not be deleted while it answers.
@@ -215,7 +217,9 @@ func (s *Server) Start(opts Options) error {
 		return uimsg.Errorf("runtime.modelIsFolder", opts.Model)
 	}
 
-	if err := s.Stop(); err != nil {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	if err := s.stop(); err != nil {
 		return err
 	}
 
@@ -305,25 +309,47 @@ func (s *Server) monitor(cmd *exec.Cmd, url, readyPath string, waited chan struc
 	for {
 		select {
 		case err := <-exit:
-			s.finished(err)
+			s.finished(cmd, err)
 			return
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				label := s.program()
-				s.log.addf("Zeitüberschreitung: %s war nach %s nicht bereit", label, s.readyTimeout)
-				s.fail(fmt.Sprintf("%s war nach %s nicht bereit", label, s.readyTimeout))
-				_ = s.Stop()
+				s.lifecycle.Lock()
+				s.mu.Lock()
+				current := s.cmd == cmd && !s.stopRequested
+				s.mu.Unlock()
+				if current {
+					label := s.program()
+					s.log.addf("Zeitüberschreitung: %s war nach %s nicht bereit", label, s.readyTimeout)
+					s.fail(fmt.Sprintf("%s war nach %s nicht bereit", label, s.readyTimeout))
+					_ = s.stop()
+				}
+				s.lifecycle.Unlock()
 				return
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			err := s.probe(ctx, url+readyPath)
 			cancel()
 			if err == nil {
-				s.setState(StateRunning)
-				s.log.addf("Modell geladen, Server bereit")
-				// Keep watching: a server that dies later has to be reported
-				// rather than leaving the UI showing a green row.
-				s.finished(<-exit)
+				// A probe may finish after Stop or after a replacement has started.
+				s.mu.Lock()
+				current := s.cmd == cmd && !s.stopRequested && s.status.State == StateStarting
+				if current {
+					select {
+					case <-waited:
+						current = false
+					default:
+						s.status.State = StateRunning
+						s.status.Error = ""
+					}
+				}
+				s.mu.Unlock()
+				if current {
+					s.publish()
+					s.log.addf("Modell geladen, Server bereit")
+				}
+				// Wait even if the process exited during the probe: its failure must
+				// still be reported unless a stop or a replacement owns the row.
+				s.finished(cmd, <-exit)
 				return
 			}
 		}
@@ -343,13 +369,21 @@ func (s *Server) program() string {
 }
 
 // finished records the exit of a process that is no longer running.
-func (s *Server) finished(err error) {
-	label := s.program()
+func (s *Server) finished(cmd *exec.Cmd, err error) {
+	// Take the log tail before the state lock: the log watcher also takes it.
+	tail := s.log.tail(6)
 	s.mu.Lock()
+	if s.cmd != cmd {
+		s.mu.Unlock()
+		return
+	}
+	label := s.label
+	if label == "" {
+		label = "llama-server"
+	}
 	requested := s.stopRequested
-	s.cmd = nil
 	state := s.status.State
-	s.mu.Unlock()
+	s.cmd = nil
 
 	switch {
 	case requested, state == StateFailed:
@@ -360,21 +394,38 @@ func (s *Server) finished(err error) {
 		// stopped server still showing a PID is a stopped server that looks
 		// running.
 		if state != StateFailed {
-			s.markStopped()
+			s.status.State = StateStopped
 		}
 	case err != nil:
-		tail := s.log.tail(6)
-		s.log.addf("%s beendet: %v", label, err)
-		s.fail(fmt.Sprintf("%s wurde beendet: %v%s", label, err, formatTail(tail)))
+		s.status.State = StateFailed
+		s.status.Error = fmt.Sprintf("%s wurde beendet: %v%s", label, err, formatTail(tail))
 	default:
-		s.log.addf("%s beendet", label)
-		s.fail(fmt.Sprintf("%s hat sich beendet", label))
+		s.status.State = StateFailed
+		s.status.Error = fmt.Sprintf("%s hat sich beendet", label)
 	}
+	s.status.PID, s.status.Port, s.status.URL = 0, 0, ""
+	s.status.Offload = Offload{}
+	s.mu.Unlock()
+	if !requested && state != StateFailed {
+		if err != nil {
+			s.log.addf("%s beendet: %v", label, err)
+		} else {
+			s.log.addf("%s beendet", label)
+		}
+	}
+	s.publish()
 }
 
 // Stop shuts the server down and waits for it to be gone. It is safe to call when
 // nothing is running.
 func (s *Server) Stop() error {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	return s.stop()
+}
+
+// stop runs with lifecycle held.
+func (s *Server) stop() error {
 	s.mu.Lock()
 	cmd, waited := s.cmd, s.waited
 	if cmd == nil || cmd.Process == nil {
