@@ -1117,8 +1117,28 @@ var (
 	//
 	// The body is matched lazily against the closing tag rather than at the first brace,
 	// so a nested argument object `{"a": {"b": 1}}` is not cut short.
+	//
+	// The same template writes the body a second way, one parameter per tag, and that is
+	// the form a 9B local model actually chose when it was asked to search with native
+	// tools switched off:
+	//
+	//	<tool_call>
+	//	<function=search_web>
+	//	<parameter=query>
+	//	Nachrichten Deutschland Europa heute
+	//	</parameter>
+	//	<parameter=count>
+	//	5
+	//	</parameter>
+	//	</function>
+	//	</tool_call>
+	//
+	// Only the object body was read, so this one reached the user as raw markup with no
+	// search made at all — the model then repeated itself, which is what "local models
+	// cannot search any more" looked like.
 	toolCallBlock  = regexp.MustCompile(`(?s)<tool_call>.*?</tool_call>`)
-	functionCallIn = regexp.MustCompile(`(?s)<function=([A-Za-z0-9_.:\-]+)\s*>\s*(\{.*?\})\s*</function>`)
+	functionCallIn = regexp.MustCompile(`(?s)<function=([A-Za-z0-9_.:\-]+)\s*>(.*?)</function>`)
+	parameterPair  = regexp.MustCompile(`(?s)<parameter=([A-Za-z0-9_.:\-]+)\s*>(.*?)</parameter>`)
 )
 
 type textToolCall struct {
@@ -1169,11 +1189,15 @@ func ParseTextToolCalls(text string) ([]llm.ToolCall, string) {
 	for _, block := range toolCallBlock.FindAllString(text, -1) {
 		found := false
 		for _, m := range functionCallIn.FindAllStringSubmatch(block, -1) {
+			args, ok := functionArguments(m[2])
+			if !ok {
+				continue
+			}
 			found = true
 			calls = append(calls, llm.ToolCall{
 				ID:        fmt.Sprintf("text_%d", len(calls)+1),
 				Name:      m[1],
-				Arguments: m[2],
+				Arguments: args,
 			})
 		}
 		if found {
@@ -1184,6 +1208,39 @@ func ParseTextToolCalls(text string) ([]llm.ToolCall, string) {
 		return nil, text
 	}
 	return calls, strings.TrimSpace(visible)
+}
+
+// functionArguments turns the body of a `<function=name>` element into the JSON object the
+// tool expects. It accepts the two forms the templates write: the arguments as an object,
+// and one `<parameter=key>` tag per argument.
+//
+// A parameter's value is kept as a number, a boolean or null when it reads as one, because
+// a count written as `5` must not reach the tool as the string "5" — but a value that is
+// only text stays text, and the tags' own whitespace is trimmed off it.
+func functionArguments(body string) (string, bool) {
+	trimmed := strings.TrimSpace(body)
+	if strings.HasPrefix(trimmed, "{") {
+		return strings.TrimSpace(body), true
+	}
+	pairs := parameterPair.FindAllStringSubmatch(body, -1)
+	if len(pairs) == 0 {
+		return "", false
+	}
+	args := make(map[string]any, len(pairs))
+	for _, p := range pairs {
+		value := strings.TrimSpace(p[2])
+		var decoded any
+		if err := json.Unmarshal([]byte(value), &decoded); err == nil {
+			args[p[1]] = decoded
+			continue
+		}
+		args[p[1]] = value
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
 }
 
 // ArgumentsLost reports whether a call the backend made itself arrived without the

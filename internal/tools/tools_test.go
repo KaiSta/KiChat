@@ -83,6 +83,18 @@ func TestParseTextToolCallsHandlesBothProtocols(t *testing.T) {
 			wantArgSub:  "\"env\": {\"A\": \"b\"}",
 			wantVisible: "",
 		},
+		{
+			// The same template's other body form, copied from a 9B local model asked to
+			// search with native tools off: one tag per argument instead of an object. It
+			// used to reach the user as raw markup, with no search made at all.
+			name: "function attribute with one tag per argument",
+			input: "<tool_call>\n<function=search_web>\n<parameter=query>\nNachrichten Deutschland Europa heute\n</parameter>\n" +
+				"<parameter=count>\n5\n</parameter>\n</function>\n</tool_call>",
+			wantCalls:   1,
+			wantTool:    "search_web",
+			wantArgSub:  "Nachrichten Deutschland Europa heute",
+			wantVisible: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,6 +116,28 @@ func TestParseTextToolCallsHandlesBothProtocols(t *testing.T) {
 				t.Errorf("visible = %q, want %q", strings.TrimSpace(visible), tc.wantVisible)
 			}
 		})
+	}
+}
+
+// TestParseTextToolCallsKeepsAParameterTyped pins that the one-tag-per-argument form
+// reaches the tool as the values it names: a count written as `5` is a number, so the
+// search asks for five results rather than for the word "5".
+func TestParseTextToolCallsKeepsAParameterTyped(t *testing.T) {
+	reply := "<tool_call>\n<function=search_web>\n<parameter=query>\nNachrichten Karlsruhe\n</parameter>\n" +
+		"<parameter=count>\n5\n</parameter>\n<parameter=freshness>\npd\n</parameter>\n</function>\n</tool_call>"
+	calls, _ := ParseTextToolCalls(reply)
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(calls))
+	}
+	var args searchArgs
+	if err := decodeLoose(calls[0].Arguments, &args); err != nil {
+		t.Fatalf("decodeLoose(%s): %v", calls[0].Arguments, err)
+	}
+	if args.Query != "Nachrichten Karlsruhe" {
+		t.Errorf("query = %q", args.Query)
+	}
+	if got := looseInt(args.Count, 8); got != 5 {
+		t.Errorf("count = %d, want 5 (arguments were %s)", got, calls[0].Arguments)
 	}
 }
 
