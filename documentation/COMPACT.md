@@ -10,7 +10,8 @@ running build. Claims that are design intent rather than verified behaviour say 
 **Contents:** 1 problem · 2 invariants · 3 data model · 4 entry points · 5 planning ·
 6 summariser choice · 7 budgeting the summarisation call · 8 the transcript ·
 9 the prompts · 10 reasoning models · 11 storage, events, UI · 12 settings ·
-13 failure modes · 14 how this is verified · 15 known gaps · 16 where the code is.
+13 failure modes · 14 how this is verified · 15 known gaps · 16 where the code is ·
+17 condensing a tool result · 18 ageing a reply's older results.
 
 The code references are `file:line` for the revision this was written against; the symbol
 names next to them (`PlanCompaction`, `summariser`, `expressibleOnNative`, …) are the durable
@@ -1291,3 +1292,48 @@ single-GPU setup the condense model competes with the chat model for VRAM, which
 reason the feature stays off until somebody picks a model, and the settings hints say so.
 
 ---
+
+## 18. Ageing a reply's older tool results
+
+The third answer to "this request is too large", beside the fold (§5) and condensing (§17):
+stop *re-sending* what the reply has already read. It lives in `ageToolResults`
+(`internal/chat/toolhistory.go`), is called by `Assemble`, and is not a setting.
+
+**Why it exists.** A tool result is the only part of a coding reply that grows without bound:
+each round adds a file window, a build log, a search, and every *later* round re-sends all of
+them. The fold does not help, because the growth happens *inside* one answer, between folds —
+with a 1M-token window and the 0.80 default, a reply may reach 400 000 tokens and re-send that
+on each of up to sixty rounds. The rule is the difference between "the newest windows" and
+"everything ever read". This is arithmetic from the two constants, not a measurement: the app
+still has no per-round token ledger, so what a session of this shape really cost is read from
+the backend's own accounting rather than from here.
+
+**The rule.** Within the reply being answered — the messages after the newest user message —
+tool results are kept verbatim newest-first up to `toolsKeptVerbatimTokens` (32 000, roughly the
+last half-dozen file windows), and anything older than that budget and larger than
+`toolStubMinTokens` (600) is replaced by one sentence:
+
+> `[Tool-Ergebnis von read_file: 4 812 Tokens, aus Platzgründen aus dieser Anfrage entfernt.
+> Der Text bleibt im Verlauf gespeichert; rufe das Tool bei Bedarf erneut auf.]`
+
+A short result is never dropped: an error line or a test summary is cheap to keep and is often
+the thing that matters, and a notice in its place would cost more explanation than it saves.
+Earlier turns are untouched — what an earlier answer was based on is compaction's to summarise,
+not this reply's to rewrite.
+
+**The coupling that makes it safe.** Dropping a `read_file` result would otherwise be a trap:
+the app remembers which file each turn has read, and a model asking again for a range it already
+read is answered "unchanged — use a different offset". That is true about the transcript and
+useless about the request, because the request no longer carries the text. `Engine.buildAssembly`
+therefore forgets the read for exactly the files that were dropped (`Service.ForgetReads`,
+`internal/tools/reads.go`), so the ordinary way to refresh a window works again. Every other
+read keeps the shortcut.
+
+**What does not change.** The stored rows and the tool cards keep the full record; the rewrite
+is on the request only. The saving is taken off the history segment, so the meter keeps
+describing what is sent.
+
+**Pinned by** `TestOldToolResultsAreAgedOutOfTheRequest` (oldest dropped, newest kept, calls
+still pair), `TestAToolResultFromAnEarlierTurnIsNotAged` (scope), `TestAShortToolResultIsNeverAged`
+(the floor) and `TestAssembleAgesTheReplyItIsAssembling` (the boundary survives the assembly
+loop, which skips messages and inserts the system message at position zero).

@@ -16,6 +16,7 @@ import (
 	"kichat/internal/tools"
 	"kichat/internal/trace"
 	"kichat/internal/uimsg"
+	"kichat/internal/workspace"
 )
 
 // Measurements remember what a backend said the prompt cost, so the context
@@ -585,7 +586,23 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 		in.Measured = measurement.PromptTokens
 		in.MeasuredSeq = measurement.Seq
 	}
-	return Assemble(in), toolDefs, nil
+	assembled := Assemble(in)
+
+	// A read whose result the request had to drop is a read the model may ask for again, and
+	// the tool's own memory is what would refuse it: it answers an unchanged range with "you
+	// already read this", which is true about the transcript and useless about the request. The
+	// memory is dropped for exactly the files that were dropped, and for those only — every
+	// other read keeps the shortcut.
+	if len(assembled.AgedReads) > 0 && e.Tools != nil && chat.Workspace != "" {
+		if root, err := workspace.Open(chat.Workspace); err == nil {
+			for _, rel := range assembled.AgedReads {
+				if abs, err := root.Resolve(rel); err == nil {
+					e.Tools.ForgetReads(chat.ID, abs)
+				}
+			}
+		}
+	}
+	return assembled, toolDefs, nil
 }
 
 // ceilingFor is what the backend has published about the largest single request it

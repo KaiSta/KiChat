@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -34,6 +35,112 @@ import (
 // droppedToolText below is the exception and stays a sentence, because it is written into a
 // stored message: the transcript shows it as it was recorded, and the model reads it as part of
 // the history it replays.
+
+// The two numbers that decide how much tool material one reply keeps in the request.
+//
+// A tool result is the only thing in a coding reply that grows without bound: every round adds
+// another file, another build log, another search, and every *later* round re-sends all of them.
+// That is the quadratic term in the cost of an answer — a 25-round reply that ends at 150 000
+// tokens sent several million — and no threshold fixes it, because the growth happens *inside*
+// the reply, between the folds.
+//
+// So the newest results are kept verbatim and the older ones are replaced by a sentence saying
+// what was dropped and how to get it back. The transcript is untouched: the tool card still
+// shows the full record, and the model can call the tool again, which for a file read is the
+// ordinary way to refresh a window anyway (the app forgets the earlier read when it drops the
+// result — see Engine.buildAssembly).
+//
+// The budget is not a share of the window on purpose. A 1M-token model does not make a 400 000-
+// token request cheaper or more useful; it only makes it possible, and this is the number that
+// decides what a reply actually carries. 32 000 tokens is roughly the last half-dozen file
+// windows, which is what an edit round is working from.
+const (
+	toolsKeptVerbatimTokens = 32_000
+	// toolStubMinTokens is the size below which a result is never dropped. A short result is
+	// cheap to keep and is often the one that matters — an error line, a test summary, the
+	// notice that a file is unchanged — while replacing it would cost more explanation than
+	// it saves.
+	toolStubMinTokens = 600
+)
+
+// ageToolResults keeps the newest tool results of the current reply and stubs the older ones.
+//
+// currentReply is index-aligned with msgs and says which messages belong to the reply being
+// answered: results from earlier turns are left alone, because those are what compaction folds
+// and a reply has no business rewriting a previous answer's evidence.
+//
+// droppedReads names the files whose `read_file` result was stubbed, so the caller can let the
+// model read them again; saved is the token difference, which the caller subtracts from the
+// budget so the meter describes the request that is sent rather than the one that could have
+// been.
+func ageToolResults(msgs []llm.Message, currentReply []bool) (aged []llm.Message,
+	droppedReads []string, saved int) {
+
+	arguments := map[string]string{}
+	for _, m := range msgs {
+		for _, call := range m.ToolCalls {
+			arguments[call.ID] = call.Arguments
+		}
+	}
+
+	aged = make([]llm.Message, len(msgs))
+	copy(aged, msgs)
+
+	kept := 0
+	for i := len(aged) - 1; i >= 0; i-- {
+		if i >= len(currentReply) || !currentReply[i] || aged[i].Role != llm.RoleTool {
+			continue
+		}
+		size := llm.EstimateTokens(aged[i].Content)
+		if kept+size <= toolsKeptVerbatimTokens || size < toolStubMinTokens {
+			kept += size
+			continue
+		}
+		if path := readPath(aged[i].Name, arguments[aged[i].ToolCallID]); path != "" {
+			droppedReads = append(droppedReads, path)
+		}
+		stub := toolStub(aged[i].Name, size)
+		aged[i].Content = stub
+		kept += llm.EstimateTokens(stub)
+		saved += size - llm.EstimateTokens(stub)
+	}
+	return aged, droppedReads, saved
+}
+
+// toolStub is what the model reads in place of a result it is no longer sent.
+//
+// It names the tool and the size, because "something was removed" without either is a gap the
+// model has to guess at, and it says the text still exists — otherwise a model reasonably
+// concludes the tool failed.
+func toolStub(name string, tokens int) string {
+	if name == "" {
+		name = "unbekannt"
+	}
+	return fmt.Sprintf("[Tool-Ergebnis von %s: %d Tokens, aus Platzgründen aus dieser Anfrage "+
+		"entfernt. Der Text bleibt im Verlauf gespeichert; rufe das Tool bei Bedarf erneut auf.]",
+		name, tokens)
+}
+
+// readPath is the file a `read_file` call named, empty for any other tool.
+//
+// The argument names are the same three the read tool itself accepts (`path`, `file_path`,
+// `file`, `filename`): a model that spelled it one way is the model whose result can be asked
+// for again, so the alias has to be read here too or that read would be dropped for good.
+func readPath(name, arguments string) string {
+	if name != tools.ToolReadFile || arguments == "" {
+		return ""
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return ""
+	}
+	for _, key := range []string{"path", "file_path", "file", "filename"} {
+		if value, ok := args[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
 
 // droppedToolText is what the transcript says when no call survived, so a turn
 // does not end on an empty answer nobody can explain.

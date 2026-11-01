@@ -520,3 +520,201 @@ func messagesContain(msgs []llm.Message, want string) bool {
 	}
 	return false
 }
+
+// readResult is one file-read result of a size worth ageing: a header line and enough body
+// that the estimator charges about two thousand tokens for it.
+func readResult(name string) string {
+	return "[read_file " + name + "]\n" + strings.Repeat("x = 1\n", 1200)
+}
+
+// TestOldToolResultsAreAgedOutOfTheRequest is the cost property behind the ageing rule: a
+// reply's tool results are re-sent on every later round, so only the newest ones stay verbatim
+// and the rest become a notice the model can act on.
+func TestOldToolResultsAreAgedOutOfTheRequest(t *testing.T) {
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "arbeite das ab"}}
+	current := []bool{true}
+	for i := 0; i < 16; i++ {
+		id := fmt.Sprintf("call-%d", i)
+		name := fmt.Sprintf("datei%d.go", i)
+		msgs = append(msgs,
+			llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{
+				ID: id, Name: tools.ToolReadFile,
+				Arguments: fmt.Sprintf(`{"path":%q}`, name),
+			}}},
+			llm.Message{Role: llm.RoleTool, Name: tools.ToolReadFile, ToolCallID: id,
+				Content: readResult(name)},
+		)
+		current = append(current, false, true)
+	}
+
+	aged, dropped, saved := ageToolResults(msgs, current)
+
+	if len(dropped) == 0 || saved <= 0 {
+		t.Fatalf("nothing was aged out: %d dropped, %d tokens saved", len(dropped), saved)
+	}
+	// The newest result is what the round is working from, so it is never the one dropped.
+	newest := msgs[len(msgs)-1].Content
+	if aged[len(aged)-1].Content != newest {
+		t.Error("the newest tool result was aged out; the round would start blind")
+	}
+	// Every dropped result is older than every kept one: an age rule that dropped a recent
+	// result while keeping an older one would be incoherent. The stubs therefore come first.
+	seenKept := false
+	for i := range aged {
+		if aged[i].Role != llm.RoleTool {
+			continue
+		}
+		stubbed := strings.HasPrefix(aged[i].Content, "[Tool-Ergebnis von read_file:")
+		if !stubbed {
+			seenKept = true
+			continue
+		}
+		if seenKept {
+			t.Errorf("message %d was dropped although a newer result was kept", i)
+		}
+	}
+	// The files named are the old ones, and the model is told how to get them back. The first
+	// tool result is at index 2: a user turn, then the assistant call that answers it.
+	for _, path := range dropped {
+		if !strings.Contains(strings.Join(dropped, ","), path) {
+			t.Errorf("dropped path %q is not reported", path)
+		}
+	}
+	if !strings.Contains(aged[2].Content, "rufe das Tool bei Bedarf erneut auf") {
+		t.Errorf("a dropped result does not say it can be fetched again:\n%s", aged[2].Content)
+	}
+	// Assistant turns are not touched: the calls stay, so the results still pair with them.
+	if len(aged[1].ToolCalls) != 1 || aged[1].ToolCalls[0].ID != "call-0" {
+		t.Error("a dropped result lost the tool call that answers it")
+	}
+}
+
+// TestAToolResultFromAnEarlierTurnIsNotAged keeps the rule scoped to the reply: a previous
+// answer's evidence is compaction's to summarise, and rewriting it would change what an
+// earlier turn can still be shown to have been based on.
+func TestAToolResultFromAnEarlierTurnIsNotAged(t *testing.T) {
+	old := readResult("alt.go")
+	msgs := []llm.Message{
+		{Role: llm.RoleUser, Content: "erste Frage"},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "old-1", Name: tools.ToolReadFile,
+			Arguments: `{"path":"alt.go"}`}}},
+		{Role: llm.RoleTool, Name: tools.ToolReadFile, ToolCallID: "old-1", Content: old},
+		{Role: llm.RoleUser, Content: "zweite Frage"},
+	}
+	// Only the last message belongs to the reply being answered.
+	aged, dropped, saved := ageToolResults(msgs, []bool{false, false, false, true})
+
+	if len(dropped) != 0 || saved != 0 {
+		t.Errorf("an earlier turn was aged out: %v, %d tokens", dropped, saved)
+	}
+	if aged[2].Content != old {
+		t.Error("the previous turn's tool result was rewritten")
+	}
+}
+
+// TestAShortToolResultIsNeverAged is the floor: an error line or a test summary is cheap to
+// keep and is often the thing that matters, and a notice in its place would cost more
+// explanation than it saved.
+func TestAShortToolResultIsNeverAged(t *testing.T) {
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "arbeite das ab"}}
+	current := []bool{true}
+	// One short result first, then enough large ones to spend the whole budget.
+	for i := 0; i < 16; i++ {
+		id := fmt.Sprintf("call-%d", i)
+		content := readResult(fmt.Sprintf("datei%d.go", i))
+		if i == 0 {
+			content = "exit status 1: no such file"
+		}
+		msgs = append(msgs,
+			llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: id,
+				Name: tools.ToolReadFile, Arguments: fmt.Sprintf(`{"path":"datei%d.go"}`, i)}}},
+			llm.Message{Role: llm.RoleTool, Name: tools.ToolReadFile, ToolCallID: id,
+				Content: content},
+		)
+		current = append(current, false, true)
+	}
+
+	aged, _, saved := ageToolResults(msgs, current)
+	if saved <= 0 {
+		t.Fatal("nothing was aged out, so the floor was not tested")
+	}
+	if aged[2].Content != "exit status 1: no such file" {
+		t.Errorf("a short result was aged out:\n%s", aged[2].Content)
+	}
+}
+
+// TestAssembleAgesTheReplyItIsAssembling is the same rule through the real entry point: the
+// boundary between "this reply" and "an earlier turn" has to survive the assembly loop, which
+// skips messages (an empty assistant turn is never sent) and inserts the system message at
+// position zero. A flag array that drifted by one would age the wrong half of the conversation.
+func TestAssembleAgesTheReplyItIsAssembling(t *testing.T) {
+	var messages []store.Message
+	seq := 1
+	add := func(role, content string) {
+		messages = append(messages, store.Message{ID: fmt.Sprintf("m%d", seq), Seq: seq,
+			Role: role, Content: content})
+		seq++
+	}
+	read := func(name string) {
+		id := fmt.Sprintf("call-%d", seq)
+		messages = append(messages, store.Message{
+			ID: fmt.Sprintf("m%d", seq), Seq: seq, Role: "assistant",
+			ToolCallsJSON: fmt.Sprintf(`[{"id":%q,"name":"read_file","arguments":"{\"path\":\"%s\"}"}]`,
+				id, name),
+		})
+		seq++
+		add("tool", readResult(name))
+		messages[len(messages)-1].Name = tools.ToolReadFile
+		messages[len(messages)-1].ToolCallID = id
+	}
+
+	// An earlier turn's read, which is not this reply's to rewrite.
+	add("user", "erste Frage")
+	read("alt.go")
+	add("assistant", "erledigt")
+
+	// The reply being assembled, long enough to outgrow the verbatim budget.
+	add("user", "arbeite das ab")
+	for i := 0; i < 16; i++ {
+		read(fmt.Sprintf("datei%d.go", i))
+	}
+
+	assembly := Assemble(AssemblyInput{
+		Chat:       asmChat("Du bist ein Assistent."),
+		Messages:   messages,
+		KnownTools: []string{tools.ToolReadFile},
+		Limit:      200_000, Reserve: 1024,
+	})
+
+	if len(assembly.AgedReads) == 0 {
+		t.Fatal("nothing was aged out of a reply that is far over the budget")
+	}
+	for _, path := range assembly.AgedReads {
+		if path == "alt.go" {
+			t.Error("the previous turn's read was aged out")
+		}
+	}
+	// The current reply's oldest read is a notice, its newest is verbatim.
+	var sawStub, sawNewest bool
+	for _, m := range assembly.Messages {
+		if strings.Contains(m.Content, "rufe das Tool bei Bedarf erneut auf") {
+			sawStub = true
+		}
+		if strings.Contains(m.Content, "datei15.go") && strings.Contains(m.Content, "x = 1") {
+			sawNewest = true
+		}
+		if strings.Contains(m.Content, "alt.go") && !strings.Contains(m.Content, "x = 1") {
+			t.Error("the earlier turn's read content was rewritten")
+		}
+	}
+	if !sawStub {
+		t.Error("no result was replaced by a notice")
+	}
+	if !sawNewest {
+		t.Error("the newest read was dropped as well")
+	}
+	// The meter describes what is sent: the dropped text is gone from the history segment.
+	if assembly.Budget.History <= 0 {
+		t.Errorf("history segment = %d tokens", assembly.Budget.History)
+	}
+}

@@ -138,6 +138,13 @@ type Assembly struct {
 	// request. It lets a backend's reported prompt_tokens be tied to an exact
 	// conversation state.
 	MaxIncludedSeq int
+
+	// AgedReads are the files whose `read_file` result was dropped from the request's tail
+	// to keep the reply from re-sending everything it has ever read (see ageToolResults).
+	// The caller uses them for one thing: the app's memory that the turn has already read that
+	// file has to go too, or the model asking for it again is answered "unchanged" about text
+	// it can no longer see.
+	AgedReads []string
 }
 
 // Assemble builds the complete request payload and the budget for a chat.
@@ -316,9 +323,23 @@ func Assemble(in AssemblyInput) Assembly {
 	msgs := make([]llm.Message, 0, len(in.Messages)+1)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: strings.Join(systemParts, "\n\n")})
 
+	// The newest user message opens the reply being assembled, and that boundary is what tool
+	// ageing is scoped to: the results of *this* answer are the ones that grow between the
+	// folds, and an earlier turn's evidence is compaction's to summarise.
+	newestUserSeq := 0
+	for _, m := range in.Messages {
+		if m.Role == string(llm.RoleUser) && m.Seq > newestUserSeq {
+			newestUserSeq = m.Seq
+		}
+	}
+
 	// Verbatim history, plus any inlined attachment text.
 	historyCount := 0
 	maxIncluded := 0
+	// currentReply is index-aligned with msgs: it says which of them belong to the reply
+	// being answered, which is what ageToolResults is scoped to. It starts with the system
+	// message's own entry, which msgs already carries.
+	currentReply := []bool{false}
 	for _, m := range in.Messages {
 		if m.Seq < firstVerbatim {
 			continue
@@ -394,6 +415,7 @@ func Assemble(in AssemblyInput) Assembly {
 		budget.History += historyTokens
 		historyCount++
 		msgs = append(msgs, lm)
+		currentReply = append(currentReply, m.Seq > newestUserSeq)
 	}
 
 	// A stored call can name a tool the app does not have — a model that mangled the
@@ -406,6 +428,13 @@ func Assemble(in AssemblyInput) Assembly {
 		msgs, rewriteDelta = sanitiseToolHistory(msgs, toolNameSet(in.KnownTools))
 		budget.History += rewriteDelta
 	}
+
+	// A reply's tool results are the part of the request that grows between folds, and every
+	// round re-sends all of them. The newest ones are what the round is working from; the
+	// older ones are dropped to a notice (ageToolResults) and the saving comes off the history
+	// segment, so the meter keeps describing the request that is sent.
+	msgs, agedReads, agedTokens := ageToolResults(msgs, currentReply)
+	budget.History -= agedTokens
 
 	// The per-turn state (gitState) rides at the very end of the request, after everything the
 	// cache is meant to keep. The last message is the one that changed anyway — the user's
@@ -511,6 +540,7 @@ func Assemble(in AssemblyInput) Assembly {
 		MemoryCompactionID: memoryID,
 		AttachmentNotice:   notice,
 		MaxIncludedSeq:     maxIncluded,
+		AgedReads:          agedReads,
 	}
 }
 
