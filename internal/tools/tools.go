@@ -1166,6 +1166,15 @@ func ParseTextToolCalls(text string) ([]llm.ToolCall, string) {
 		}
 		args := firstNonEmptyRaw(parsed.Arguments, parsed.Args, parsed.Parameters)
 		if len(args) == 0 || string(args) == "null" {
+			// The same model often writes the arguments beside the name instead of under
+			// them — `{"name": "search_web", "query": "…", "count": 8}` — and reading only
+			// `arguments` turned that into a call with `{}`: the search was then asked for
+			// a query it had been given, and refused with "query is missing". Whatever is
+			// left of the object once the name and the wrapper keys are removed is the
+			// arguments, in either spelling.
+			args = inlineArguments(match[1])
+		}
+		if len(args) == 0 {
 			args = []byte("{}")
 		}
 		calls = append(calls, llm.ToolCall{
@@ -1208,6 +1217,30 @@ func ParseTextToolCalls(text string) ([]llm.ToolCall, string) {
 		return nil, text
 	}
 	return calls, strings.TrimSpace(visible)
+}
+
+// inlineArguments returns a text-form call's arguments when the model wrote them beside the
+// name rather than under an `arguments` key.
+//
+// The wrapper keys are removed and everything else is kept as it was written, so a nested
+// value survives, and an object that held nothing but its name yields nothing — which is
+// what keeps a call the model really made without arguments from growing one.
+func inlineArguments(call string) []byte {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(call), &fields); err != nil {
+		return nil
+	}
+	for _, wrapper := range []string{"name", "tool", "arguments", "args", "parameters"} {
+		delete(fields, wrapper)
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }
 
 // functionArguments turns the body of a `<function=name>` element into the JSON object the
@@ -1255,16 +1288,47 @@ func functionArguments(body string) (string, bool) {
 // the text beside it is only the same call rendered again.
 func ArgumentsLost(calls, parsed []llm.ToolCall) bool {
 	for _, call := range calls {
-		switch strings.TrimSpace(call.Arguments) {
-		case "", "{}":
-			for _, fromText := range parsed {
-				if fromText.Name == call.Name {
-					return true
-				}
+		if !argumentsBlank(call.Arguments) {
+			continue
+		}
+		for _, fromText := range parsed {
+			if fromText.Name == call.Name && !argumentsBlank(fromText.Arguments) {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+// argumentsBlank reports whether a call carries nothing a tool can work with: an empty
+// string, an empty object, or an object whose every value is blank.
+//
+// The last case is not pedantry. A backend that half-parses the template hands over
+// `{"query": ""}` rather than `{}`, which no emptiness check on the raw string catches —
+// and the tool then refuses with the same "query is missing" a genuinely absent argument
+// produces, so the reply looks broken while its real query sits in the text beside it.
+func argumentsBlank(args string) bool {
+	trimmed := strings.TrimSpace(args)
+	switch trimmed {
+	case "", "{}", "null":
+		return true
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &fields); err != nil {
+		return false
+	}
+	for _, value := range fields {
+		switch v := value.(type) {
+		case nil:
+		case string:
+			if strings.TrimSpace(v) != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // TextProtocolHint is appended to the system prompt when a model cannot call

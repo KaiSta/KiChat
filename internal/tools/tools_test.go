@@ -119,6 +119,42 @@ func TestParseTextToolCallsHandlesBothProtocols(t *testing.T) {
 	}
 }
 
+// TestParseTextToolCallsReadsArgumentsWrittenBesideTheName is the reply that reproduced the
+// report against KiChat's own llama.cpp runtime, copied literally. The model put the query
+// beside the name instead of under `arguments`, so the call reached the search with `{}` and
+// the card said the query was empty while the query was right there in the text.
+func TestParseTextToolCallsReadsArgumentsWrittenBesideTheName(t *testing.T) {
+	reply := "```tool_call\n" +
+		`{"name": "search_web", "query": "Nachrichten Deutschland heute 1. November 2026", "count": 8}` +
+		"\n``````tool_call\n" +
+		`{"name": "search_web", "arguments": {"query": "Nachrichten Deutschland heute", "count": 5}}` +
+		"\n```"
+	calls, visible := ParseTextToolCalls(reply)
+	if len(calls) != 2 {
+		t.Fatalf("got %d calls, want 2 (%+v)", len(calls), calls)
+	}
+	var inline searchArgs
+	if err := decodeLoose(calls[0].Arguments, &inline); err != nil {
+		t.Fatalf("decodeLoose(%s): %v", calls[0].Arguments, err)
+	}
+	if inline.Query != "Nachrichten Deutschland heute 1. November 2026" {
+		t.Errorf("the query written beside the name was lost: %s", calls[0].Arguments)
+	}
+	if got := looseInt(inline.Count, 8); got != 8 {
+		t.Errorf("count = %d, want 8", got)
+	}
+	if strings.Contains(calls[0].Arguments, `"name"`) {
+		t.Errorf("the tool's own name was passed as an argument: %s", calls[0].Arguments)
+	}
+	// The ordinary spelling beside it still works, and the protocol stays off the screen.
+	if !strings.Contains(calls[1].Arguments, "Nachrichten Deutschland heute") {
+		t.Errorf("call 1 = %s", calls[1].Arguments)
+	}
+	if strings.Contains(visible, "tool_call") {
+		t.Errorf("protocol leaked into the visible answer: %q", visible)
+	}
+}
+
 // TestParseTextToolCallsKeepsAParameterTyped pins that the one-tag-per-argument form
 // reaches the tool as the values it names: a count written as `5` is a number, so the
 // search asks for five results rather than for the word "5".
@@ -231,6 +267,25 @@ func TestArgumentsLostSeparatesALostArgumentFromAnEmptyOne(t *testing.T) {
 	}
 	if ArgumentsLost([]llm.ToolCall{{Name: "list_files", Arguments: "{}"}}, text) {
 		t.Error("a call for another tool was matched against the text's tool")
+	}
+	// A backend that half-parses the template sends the key with nothing in it, and the
+	// search refuses that with the same "query is missing" a lost argument produces. It is
+	// as lost as an empty object, so the query in the text has to win here too.
+	if !ArgumentsLost([]llm.ToolCall{{Name: "search_web", Arguments: `{"query": ""}`}}, text) {
+		t.Error("a search call whose query arrived blank was not reported as lost")
+	}
+	if !ArgumentsLost([]llm.ToolCall{{Name: "search_web", Arguments: `{"query": "  ", "freshness": ""}`}}, text) {
+		t.Error("a search call whose every field was blank was not reported as lost")
+	}
+	// One field that carries something is a call the backend really made, so it stands:
+	// a count sent alongside a blank query is still the backend's answer, not a lost one.
+	if ArgumentsLost([]llm.ToolCall{{Name: "search_web", Arguments: `{"query": "", "count": 8}`}}, text) {
+		t.Error("a call carrying a real value was overruled")
+	}
+	// The text's own copy being blank must not count as an answer to recover.
+	blank := []llm.ToolCall{{Name: "search_web", Arguments: `{"query": ""}`}}
+	if ArgumentsLost([]llm.ToolCall{{Name: "search_web", Arguments: "{}"}}, blank) {
+		t.Error("a blank call was replaced by an equally blank one")
 	}
 }
 

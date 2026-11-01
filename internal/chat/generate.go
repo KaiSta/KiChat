@@ -325,15 +325,19 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// while the query sits in the message above it.
 		//
 		// So the text is parsed whichever protocol the request used, and it wins in the two
-		// cases where it is the only complete record: no call arrived, or one arrived empty
-		// for a tool the text names. A call that came back with its arguments is the
-		// backend's answer and is left alone.
+		// cases where it is the only complete record: no call arrived, or one arrived with
+		// nothing usable in it for a tool the text names. A call that came back with real
+		// arguments is the backend's answer and is left alone.
+		//
+		// The markup is stripped either way. A backend that also emitted the same calls as
+		// tool calls leaves the template's text beside them — one real session showed the
+		// search running correctly and the raw `<tool_call>` block printed underneath it —
+		// so hiding the protocol is not conditional on which copy is executed.
 		if parsed, visible := tools.ParseTextToolCalls(text); len(parsed) > 0 {
-			switch {
-			case len(calls) == 0, tools.ArgumentsLost(calls, parsed):
+			if len(calls) == 0 || tools.ArgumentsLost(calls, parsed) {
 				calls = parsed
-				text = visible
 			}
+			text = visible
 		}
 
 		// Whatever the model named has to be a tool somebody can execute, before it is

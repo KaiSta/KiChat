@@ -413,6 +413,57 @@ func TestAToolCallTheBackendSentWithoutArgumentsTakesThemFromTheText(t *testing.
 	}
 }
 
+// TestTheProtocolIsHiddenEvenWhenTheBackendParsedTheCall is the second half of the same
+// report, from the reply that followed it: the searches ran, and the raw template was
+// printed underneath them because the block is only hidden when the text *replaces* the
+// backend's calls. A backend that understands the call leaves the text beside it, so the
+// user reads "Die Suche ist fehlgeschlagen … {"query": …}" in the chat.
+func TestTheProtocolIsHiddenEvenWhenTheBackendParsedTheCall(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	// The user's own message, copied as it appeared.
+	const reply = "Ich versuche es erneut.\n\n" +
+		"<tool_call> <function=search_web> {\"query\": \"Nachrichten Deutschland heute 01.11.2026\", \"freshness\": \"week\"} </function> </tool_call>" +
+		" <tool_call> <function=search_web> {\"query\": \"Nachrichten Europa aktuell November 2026\", \"freshness\": \"week\"} </function> </tool_call>"
+	provider := &fakeProvider{
+		model: llm.ModelInfo{
+			ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded,
+			Capabilities: []string{llm.CapTools},
+		},
+		replies: [][]llm.StreamEvent{
+			{
+				{Type: llm.EventDelta, Text: reply},
+				// The backend understood both calls, so these are the ones that run.
+				{Type: llm.EventToolCall, ToolCall: &llm.ToolCall{ID: "call_1", Name: "search_web",
+					Arguments: `{"query": "Nachrichten Deutschland heute 01.11.2026", "freshness": "week"}`}},
+				{Type: llm.EventToolCall, ToolCall: &llm.ToolCall{ID: "call_2", Name: "search_web",
+					Arguments: `{"query": "Nachrichten Europa aktuell November 2026", "freshness": "week"}`}},
+			},
+			{{Type: llm.EventDelta, Text: "Fertig."}},
+		},
+	}
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.ToolIterations = 3
+	engine := NewEngine(st, registry, &tools.Service{Store: st},
+		func() config.Settings { return settings }, (&eventLog{}).emit)
+
+	turn(t, engine, "chat-1", "Nachrichten")
+
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range messages {
+		if strings.Contains(m.Content, "tool_call") || strings.Contains(m.Content, "function=") {
+			t.Errorf("the template's markup was left in a %s message: %q", m.Role, m.Content)
+		}
+	}
+}
+
 // TestDoneEventReportsTheStoredStatus pins the status the turn ends with against
 // the status actually written to the reply row. A stream that died half-way stores
 // "failed"; the end-of-turn event used to say "complete" for it, so the event and
