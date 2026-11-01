@@ -1034,10 +1034,11 @@ but never use costs a wasted tool round every time it tries, and the model's com
 about the failure reads as a broken feature rather than as a setting that is switched off.
 
 - The native `toolDefinitions` filter drops it when `e.Tools.Images` is nil (`engine.go`).
-- The `{{tool_list}}` line of the system prompt is rendered from that **same filtered
-  slice** (`context.go`), not from `Service.Definitions()`. This is the one a later edit
-  could leak by building the prompt's tool list separately, so it is asserted rather than
-  assumed.
+- A prompt that names `{{tool_list}}` is rendered from that **same filtered slice**
+  (`context.go`), not from `Service.Definitions()`. The shipped presets no longer carry the
+  line — the request advertises its own tools — so this now covers an edited prompt, which
+  is exactly where a later edit could leak by building the list separately. It is asserted
+  rather than assumed.
 - `ImageProtocolHint` is a constant of its own that travels with the tool, instead of
   being folded into the always-present `TextProtocolHint`.
 

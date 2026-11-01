@@ -51,6 +51,13 @@ change — and why two rules are absolute.
   `small-local`, `assistant`, `coding`, `blank`) because a chat stores the one it
   was created with; the frontend translates `preset.<id>` and the `Name` field is
   only the fallback.
+- **Changing the text of a shipped prompt is not a plain edit.** The bodies double as
+  the definition of "unedited" — `LocalisePrompts` only rewrites a stored prompt that is
+  byte-identical to one — so a corrected body would leave every existing installation
+  looking hand-edited and frozen in whatever language it was saved in. Move the old body
+  into `retiredBodies` in `internal/config/prompts.go`, which is what makes
+  `isShippedPrompt` recognise it and migrate those installations forward on their next
+  load.
 - **A boolean that costs money or a request ships off.** Hosted backends and image
   servers are the precedent: enabling one by default is a probe nobody asked for.
 

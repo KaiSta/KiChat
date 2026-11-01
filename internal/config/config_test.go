@@ -439,10 +439,8 @@ func TestDefaultPresetsKeepTheShippedResearchPrompt(t *testing.T) {
 		if small == "" {
 			t.Fatalf("the %q preset ships with no prompt for %q", PresetSmallLocal, lang)
 		}
-		for _, want := range []string{"{{datetime}}", "{{tool_list}}"} {
-			if !strings.Contains(small, want) {
-				t.Errorf("the small-model preset for %q does not reference %s", lang, want)
-			}
+		if !strings.Contains(small, "{{datetime}}") {
+			t.Errorf("the small-model preset for %q does not reference {{datetime}}", lang)
 		}
 	}
 	// The exported constant stays the default language's research prompt.
@@ -467,12 +465,15 @@ func TestEveryPresetExistsInEveryLanguage(t *testing.T) {
 			if body == "" {
 				t.Fatalf("preset %q has no %q body", id, lang)
 			}
-			// Every body uses these; losing one silently drops the date or the
-			// tool list from the prompt the model receives.
-			for _, want := range []string{"{{datetime}}", "{{tool_list}}"} {
-				if !strings.Contains(body, want) {
-					t.Errorf("the %q body of %q does not reference %s", lang, id, want)
-				}
+			// Every body carries the date, and none of them names the tool list: a
+			// request advertises its tools itself — the declared schemas on a native
+			// backend, the generated hint on the text protocol — so a line repeating
+			// that list is a second copy that can only drift from the first.
+			if !strings.Contains(body, "{{datetime}}") {
+				t.Errorf("the %q body of %q does not reference {{datetime}}", lang, id)
+			}
+			if strings.Contains(body, "{{tool_list}}") {
+				t.Errorf("the %q body of %q repeats the tool list the request already advertises", lang, id)
 			}
 			bodies[lang] = body
 		}
@@ -631,6 +632,64 @@ func TestSwitchingTheLanguageKeepsEditedAndCustomPrompts(t *testing.T) {
 	// The one preset nobody touched still moved.
 	if got := byID[PresetAssistant]; got != PromptBody(PresetAssistant, LangEnglish) {
 		t.Errorf("an untouched preset did not follow the language switch: %q", got)
+	}
+}
+
+// TestACorrectedPromptStillCountsAsUnedited is why retiredBodies exists, and the half of
+// the rule that a correction can silently break. The shipped bodies are the definition of
+// "unedited", so a body this app corrects stops matching every stored prompt that still
+// holds the old text — and those installations read as though the user had edited their
+// prompt, keeping it in whatever language it was saved in for good.
+//
+// The retired bytes therefore have to be recognised, and the prompt that used them has to
+// move to the current body like any untouched one.
+func TestACorrectedPromptStillCountsAsUnedited(t *testing.T) {
+	// Every preset that has a correction recorded, not only the one this test's second
+	// half walks: a missing language or a forgotten entry is exactly the mistake the map
+	// invites, and it would only show up as a frozen prompt in the field.
+	covered := 0
+	for _, id := range []string{PresetResearch, PresetSmallLocal, PresetAssistant, PresetCoding, PresetCodingAgent} {
+		for _, lang := range shippedLanguages {
+			for _, old := range retiredBodies[id][lang] {
+				covered++
+				if old == PromptBody(id, lang) {
+					t.Fatalf("the retired %q body of %q is also the current one", lang, id)
+				}
+				if !isShippedPrompt(id, old) {
+					t.Errorf("a %q body of %q that this app shipped is no longer recognised as unedited", lang, id)
+				}
+			}
+		}
+	}
+	if covered == 0 {
+		t.Fatal("no retired body is recorded; this test would prove nothing")
+	}
+
+	// An installation that saved the old German text and then switched the interface to
+	// English: the default prompt and the preset both move, instead of freezing.
+	old := retiredBodies[PresetResearch][LangGerman][0]
+	s := Default()
+	s.Language = LangGerman
+	s.normalise()
+	s.DefaultSystemPrompt = old
+	for i := range s.PromptPresets {
+		if s.PromptPresets[i].ID == PresetResearch {
+			s.PromptPresets[i].Prompt = old
+		}
+	}
+
+	s.Language = LangEnglish
+	s.LocalisePrompts()
+	if want := PromptBody(PresetResearch, LangEnglish); s.DefaultSystemPrompt != want {
+		t.Error("a retired default prompt was left in its old language after the switch")
+	}
+	for _, p := range s.PromptPresets {
+		if p.ID != PresetResearch {
+			continue
+		}
+		if want := PromptBody(PresetResearch, LangEnglish); p.Prompt != want {
+			t.Error("a retired preset was left in its old language after the switch")
+		}
 	}
 }
 
