@@ -142,6 +142,28 @@ func TestResolveOpensTheFolderThroughItsOwnSymlinks(t *testing.T) {
 	}
 }
 
+func TestSearchClipsAMatchNearTheEndOfALongLine(t *testing.T) {
+	root, _ := project(t, map[string]string{"bundle.js": strings.Repeat("x", 400) + " needle"})
+	matches, err := root.Search("needle", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches.Hits) != 1 || !strings.Contains(matches.Hits[0].Text, "needle") {
+		t.Fatalf("matches = %+v, want the end-of-line match", matches)
+	}
+}
+
+func TestSearchReportsWhenHitLimitCutsOneFile(t *testing.T) {
+	root, _ := project(t, map[string]string{"a.txt": "needle one\nneedle two\nneedle three\n"})
+	matches, err := root.Search("needle", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches.Hits) != 1 || !matches.Stopped {
+		t.Fatalf("matches = %+v, want one hit and a stopped search", matches)
+	}
+}
+
 // TestReadReturnsAWindow is what the model gets to see: numbered, bounded, and told
 // where the window it did not get starts.
 func TestReadReturnsAWindow(t *testing.T) {

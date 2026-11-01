@@ -12,6 +12,7 @@ import (
 	"kichat/internal/config"
 	"kichat/internal/store"
 	"kichat/internal/uimsg"
+	"kichat/internal/workspace"
 )
 
 // projectService builds a store holding one project chat on a folder of files, which is
@@ -312,6 +313,22 @@ func TestSearchFilesStopsAtTheDefaultItAdvertises(t *testing.T) {
 	}
 	if hits := strings.Count(out, ":1: needle"); hits > 60 {
 		t.Errorf("the answer carries %d hits, more than the 60 it promised", hits)
+	}
+}
+
+func TestFindFilesReportsAnIncompleteScan(t *testing.T) {
+	for _, lang := range []string{config.LangEnglish, config.LangGerman} {
+		for _, paths := range [][]string{nil, {"found.go"}} {
+			result := formatFound(lang, workspace.Found{
+				Pattern: "*.go", Paths: paths, Scanned: 20000, Truncated: true, ScanLimit: true,
+			})
+			if lang == config.LangEnglish && !strings.Contains(result.Text, "stopped before reaching the end") {
+				t.Errorf("incomplete scan not reported: %q", result.Text)
+			}
+			if lang == config.LangGerman && !strings.Contains(result.Text, "vor dem Ende abgebrochen") {
+				t.Errorf("incomplete scan not reported: %q", result.Text)
+			}
+		}
 	}
 }
 

@@ -34,6 +34,8 @@ type Found struct {
 	// Truncated is "there were more matches than the limit", which the tool has to say: a
 	// list that stops at its cap without saying so reads as the whole tree.
 	Truncated bool
+	// ScanLimit means the walk stopped before all files were checked.
+	ScanLimit bool
 	// Ignored counts what a .gitignore excluded, as Search reports it.
 	Ignored int
 }
@@ -84,6 +86,7 @@ func (r Root) Find(pattern string, max int) (Found, error) {
 		}
 		if out.Scanned >= maxFindScanned {
 			out.Truncated = true
+			out.ScanLimit = true
 			return fs.SkipAll
 		}
 		out.Scanned++

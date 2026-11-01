@@ -14,6 +14,7 @@ import (
 
 	"kichat/internal/llm"
 	"kichat/internal/uimsg"
+	"kichat/internal/workspace"
 )
 
 // findFilesDefinition describes it.
@@ -87,16 +88,27 @@ func (s *Service) findFiles(chatID, argsJSON string) (Result, error) {
 			fmt.Sprintf(text(lang, "das Muster %q ließ sich nicht verwenden: %v",
 				"the pattern %q could not be used: %v"), pattern, err), pattern)
 	}
+	return formatFound(lang, found), nil
+}
+
+func formatFound(lang string, found workspace.Found) Result {
 	var sb strings.Builder
 	switch {
 	case len(found.Paths) == 0:
+		if found.ScanLimit {
+			fmt.Fprintf(&sb, text(lang,
+				"Keine Treffer für %q unter %d geprüften Dateien; die Suche wurde vor dem Ende abgebrochen.",
+				"No matches for %q among %d files checked; the search stopped before reaching the end."),
+				found.Pattern, found.Scanned)
+			return summarized(sb.String(), "tool.sum.find", "0", found.Pattern)
+		}
 		fmt.Fprintf(&sb, text(lang, "Keine Datei passt auf %q (%d Dateien geprüft).",
 			"No file matches %q (%d files checked)."), found.Pattern, found.Scanned)
 		if found.Ignored > 0 {
 			fmt.Fprintf(&sb, text(lang, " %d Einträge wurden nach .gitignore ausgelassen.",
 				" %d entries were skipped per .gitignore."), found.Ignored)
 		}
-		return summarized(sb.String(), "tool.sum.find", "0", found.Pattern), nil
+		return summarized(sb.String(), "tool.sum.find", "0", found.Pattern)
 	}
 	fmt.Fprintf(&sb, text(lang, "%d Dateien für %q:\n\n", "%d files for %q:\n\n"),
 		len(found.Paths), found.Pattern)
@@ -104,11 +116,15 @@ func (s *Service) findFiles(chatID, argsJSON string) (Result, error) {
 		sb.WriteString(path)
 		sb.WriteString("\n")
 	}
-	if found.Truncated {
+	if found.ScanLimit {
+		sb.WriteString(text(lang,
+			"\nDie Suche wurde vor dem Ende abgebrochen; weitere Treffer sind möglich.\n",
+			"\nThe search stopped before reaching the end; there may be more matches.\n"))
+	} else if found.Truncated {
 		sb.WriteString(text(lang,
 			"\nEs gibt weitere Treffer; ein engeres Muster liefert eine vollständige Liste.\n",
 			"\nThere are more matches; a narrower pattern returns a complete list.\n"))
 	}
 	return summarized(sb.String(), "tool.sum.find",
-		fmt.Sprint(len(found.Paths)), found.Pattern), nil
+		fmt.Sprint(len(found.Paths)), found.Pattern)
 }

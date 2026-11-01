@@ -582,7 +582,7 @@ func clipHit(line, needle string) string {
 	for start < end && !utf8.RuneStart(line[start]) {
 		start++
 	}
-	for end > start && !utf8.RuneStart(line[end]) {
+	for end < len(line) && end > start && !utf8.RuneStart(line[end]) {
 		end--
 	}
 	out := line[start:end]
@@ -721,7 +721,8 @@ func (r Root) searchFile(path, needle string, maxHits int, out *Matches) error {
 			continue
 		}
 		if len(out.Hits) >= maxHits {
-			return nil
+			out.Stopped = true
+			return fs.SkipAll
 		}
 		out.Hits = append(out.Hits, Hit{Path: rel, Line: line, Text: clipHit(strings.TrimSpace(text), needle)})
 	}
