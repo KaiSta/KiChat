@@ -22,11 +22,12 @@ import (
 // Measurements remember what a backend said the prompt cost, so the context
 // meter can report a real number instead of an estimate.
 type Measurement struct {
-	Backend      string
-	Model        string
-	PromptTokens int
-	Seq          int
-	At           time.Time
+	Backend             string
+	Model               string
+	PromptTokens        int
+	Seq                 int
+	ReplayToolReasoning bool
+	At                  time.Time
 }
 
 // TurnRequest asks the engine to produce one assistant reply.
@@ -572,6 +573,15 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 	measurement, hasMeasurement := e.Measurement(chat.ID)
 	measuredValid := hasMeasurement && measurement.Backend == backendID && measurement.Model == modelID
 
+	replayToolReasoning := false
+	if provider, ok := e.Registry.Provider(backendID); ok && settings.NativeTools && model.Has(llm.CapTools) && len(toolDefs) > 0 {
+		if replayer, ok := provider.(llm.ToolReasoningReplayer); ok {
+			replayToolReasoning = replayer.ReplaysToolReasoning()
+		}
+	}
+	// The old prompt did not count the same history if tool reasoning replay changed.
+	measuredValid = measuredValid && measurement.ReplayToolReasoning == replayToolReasoning
+
 	in := AssemblyInput{
 		Chat:        working,
 		Messages:    messages,
@@ -584,7 +594,8 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 		// offered list: a tool that is momentarily unavailable — search with both
 		// providers down, the index disabled — is still a tool the app can answer.
 		// The project tools are the exception: engineKnownTools explains why.
-		KnownTools: engineKnownTools(e, chat),
+		KnownTools:          engineKnownTools(e, chat),
+		ReplayToolReasoning: replayToolReasoning,
 
 		Limit:         limit,
 		LimitSource:   limitSource,

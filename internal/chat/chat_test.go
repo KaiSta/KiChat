@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -996,6 +997,31 @@ func TestAssembleMeasurementDelta(t *testing.T) {
 	}
 	if exact.Budget.DeltaSince != 0 {
 		t.Fatalf("DeltaSince = %d, want 0", exact.Budget.DeltaSince)
+	}
+}
+
+func TestAssemblePricesNewToolCallAndReplayedReasoning(t *testing.T) {
+	reasoning := strings.Repeat("thinking ", 200)
+	arguments := `{"text":"` + strings.Repeat("payload ", 300) + `"}`
+	calls, err := json.Marshal([]llm.ToolCall{{ID: "call-1", Name: "read_file", Arguments: arguments}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []store.Message{
+		msg(1, "user", "Question"),
+		{ID: "assistant", Seq: 2, Role: "assistant", Reasoning: reasoning, ToolCallsJSON: string(calls)},
+		{ID: "tool", Seq: 3, Role: "tool", ToolCallID: "call-1", Content: "Result"},
+	}
+	in := AssemblyInput{Chat: asmChat("System"), Messages: messages, Limit: 10000,
+		Measured: 100, MeasuredValid: true, MeasuredSeq: 1, ReplayToolReasoning: true}
+	assembly := Assemble(in)
+	want := llm.EstimateTokens(reasoning) + llm.EstimateTokens("read_file") +
+		llm.EstimateTokens(arguments) + 8 + llm.EstimateTokens("Result")
+	if assembly.Budget.DeltaSince != want {
+		t.Fatalf("delta = %d, want %d including tool call and full reasoning", assembly.Budget.DeltaSince, want)
+	}
+	if assembly.Budget.History < want {
+		t.Fatalf("history = %d, does not include tool call and full reasoning (%d)", assembly.Budget.History, want)
 	}
 }
 

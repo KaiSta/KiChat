@@ -900,13 +900,79 @@ func TestMeasurementIsModelScoped(t *testing.T) {
 	if m.PromptTokens != 300 || m.Backend != "fake" || m.Model != "fake-model" {
 		t.Fatalf("measurement = %+v", m)
 	}
-	if m.Seq != 2 {
-		t.Errorf("measurement seq = %d, want 2 (the assistant reply)", m.Seq)
+	if m.Seq != 1 {
+		t.Errorf("measurement seq = %d, want 1 (the last message in the measured prompt)", m.Seq)
 	}
 
 	engine.InvalidateMeasurement("chat-1")
 	if _, ok := engine.Measurement("chat-1"); ok {
 		t.Error("measurement should be gone after invalidation")
+	}
+}
+
+func TestMeasurementIncludesTheGeneratedAnswerInNextBudget(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	answer := strings.Repeat("A long answer with details. ", 500)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 10000},
+		replies: [][]llm.StreamEvent{{
+			{Type: llm.EventDelta, Text: answer},
+			{Type: llm.EventUsage, Usage: &llm.Usage{PromptTokens: 300}},
+			{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "stop"}},
+		}},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Question"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning("chat-1") })
+	budget, err := engine.PreviewBudget(context.Background(), "chat-1", "fake", "fake-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !budget.MeasuredValid || budget.DeltaSince < llm.EstimateTokens(answer) {
+		t.Fatalf("next budget omits the generated answer: %+v", budget)
+	}
+}
+
+type reasoningReplayProvider struct{ *fakeProvider }
+
+func (*reasoningReplayProvider) ReplaysToolReasoning() bool { return true }
+
+func TestMeasurementIsDiscardedWhenToolReasoningReplayChanges(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	message := msg(1, "user", "Question")
+	message.ChatID = chat.ID
+	if err := st.CreateMessage(message); err != nil {
+		t.Fatal(err)
+	}
+	model := llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 10000, Capabilities: []string{llm.CapTools}}
+	registry := llm.NewRegistry(nil)
+	registry.Register(&reasoningReplayProvider{&fakeProvider{model: model}})
+	settings := config.Default()
+	settings.NativeTools = true
+	engine := NewEngine(st, registry, &tools.Service{Store: st}, func() config.Settings { return settings }, nil)
+	engine.setMeasurement(chat.ID, Measurement{Backend: "fake", Model: "fake-model", PromptTokens: 100, Seq: 1})
+	assembly, defs, err := engine.buildAssembly(context.Background(), &chat, "fake", "fake-model", settings, model, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defs) == 0 || !assembly.ReplayToolReasoning {
+		t.Fatal("test needs a tool-enabled reasoning replay request")
+	}
+	if assembly.Budget.MeasuredValid {
+		t.Fatal("a tool-free measurement was reused for a tool-reasoning request")
+	}
+	engine.setMeasurement(chat.ID, Measurement{Backend: "fake", Model: "fake-model", PromptTokens: 100, Seq: 1, ReplayToolReasoning: true})
+	settings.NativeTools = false
+	assembly, _, err = engine.buildAssembly(context.Background(), &chat, "fake", "fake-model", settings, model, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assembly.Budget.MeasuredValid {
+		t.Fatal("a tool-reasoning measurement was reused for a tool-free request")
 	}
 }
 
@@ -1147,7 +1213,7 @@ func TestToolOutputBudgetNeverLoosens(t *testing.T) {
 func TestRoomForToolResultsIsTheRequestsOwnArithmetic(t *testing.T) {
 	// A model whose limit nobody reported has no room to report, which is not the same
 	// as zero room: the budget must stay untouched rather than withhold every result.
-	if room, bounded := roomForToolResults(ContextBudget{}, 0, "x"); bounded {
+	if room, bounded := roomForToolResults(ContextBudget{}, 0, 1); bounded {
 		t.Fatalf("a budget with no known limit reported room %d as bounded", room)
 	}
 	// A window with no ceiling beside it is still a limit: the smaller of the two is
@@ -1155,13 +1221,13 @@ func TestRoomForToolResultsIsTheRequestsOwnArithmetic(t *testing.T) {
 	// no fold can shrink.
 	if room, bounded := roomForToolResults(ContextBudget{
 		Limit: 8192, EffectiveLimit: 8192, Projected: 4000,
-	}, 0, ""); !bounded || room != 4192 {
+	}, 0, 0); !bounded || room != 4192 {
 		t.Fatalf("room = %d (bounded %v) for a window with 4192 tokens left, want 4192", room, bounded)
 	}
 
 	reply := strings.Repeat("wort ", 300)
 	budget := ContextBudget{Limit: 131072, Ceiling: 8000, EffectiveLimit: 8000, Projected: 5000}
-	room, bounded := roomForToolResults(budget, 0, reply)
+	room, bounded := roomForToolResults(budget, 0, llm.EstimateTokens(reply))
 	if !bounded {
 		t.Fatal("a budget with a ceiling reported no room")
 	}
@@ -1171,7 +1237,7 @@ func TestRoomForToolResultsIsTheRequestsOwnArithmetic(t *testing.T) {
 	// The reply can be larger than what is left; a negative room is zero room.
 	if room, _ := roomForToolResults(ContextBudget{
 		Limit: 131072, EffectiveLimit: 1000, Projected: 900,
-	}, 0, strings.Repeat("wort ", 300)); room != 0 {
+	}, 0, llm.EstimateTokens(strings.Repeat("wort ", 300))); room != 0 {
 		t.Fatalf("room = %d for a reply that does not fit, want 0", room)
 	}
 }
@@ -1189,11 +1255,11 @@ func TestRoomForToolResultsPrefersTheBackendsOwnCount(t *testing.T) {
 		Used: 400, Projected: 1424, Reserve: 1024,
 	}
 
-	estimated, bounded := roomForToolResults(budget, 0, reply)
+	estimated, bounded := roomForToolResults(budget, 0, llm.EstimateTokens(reply))
 	if !bounded {
 		t.Fatal("a budget with a ceiling reported no room")
 	}
-	measured, _ := roomForToolResults(budget, 5000, reply)
+	measured, _ := roomForToolResults(budget, 5000, llm.EstimateTokens(reply))
 	if measured >= estimated {
 		t.Fatalf("room from the backend's own count = %d, from the estimate = %d; the count has to tighten",
 			measured, estimated)

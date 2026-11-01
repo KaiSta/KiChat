@@ -125,6 +125,14 @@ Two consequences of reasoning-by-default, both measured:
 `usage` is read from **any** frame, so it does not matter whether a vendor attaches it to
 the finish frame or sends a usage-only frame after it.
 
+The [thinking-mode guide](https://api-docs.deepseek.com/guides/thinking_mode/) states that
+requests carrying tools must replay `reasoning_content` for all previous assistant turns,
+including turns without calls; missing reasoning can produce a 400. KiChat replays the stored
+reasoning only for DeepSeek requests with tools, and budgets its full estimated size. Other
+backends and tool-free DeepSeek requests do not receive the field. The offline
+`TestDeepSeekReplaysReasoningInToolRequests` checks the serialized requests; the live test
+currently does not complete a tool round.
+
 ---
 
 ## 5. The two chat paths

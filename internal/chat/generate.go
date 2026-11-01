@@ -417,11 +417,12 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 
 		if usage != nil && usage.PromptTokens > 0 {
 			e.setMeasurement(in.Chat.ID, Measurement{
-				Backend:      in.BackendID,
-				Model:        in.ModelID,
-				PromptTokens: usage.PromptTokens,
-				Seq:          row.Seq,
-				At:           time.Now(),
+				Backend:             in.BackendID,
+				Model:               in.ModelID,
+				PromptTokens:        usage.PromptTokens,
+				Seq:                 assembly.MaxIncludedSeq,
+				ReplayToolReasoning: assembly.ReplayToolReasoning,
+				At:                  time.Now(),
 			})
 		}
 
@@ -468,7 +469,10 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		if usage != nil {
 			promptTokens = usage.PromptTokens
 		}
-		if room, bounded := roomForToolResults(assembly.Budget, promptTokens, text); bounded {
+		replyTokens := historyMessageTokens(llm.Message{
+			Role: llm.RoleAssistant, Content: text, Reasoning: reasoning, ToolCalls: calls,
+		}, assembly.ReplayToolReasoning)
+		if room, bounded := roomForToolResults(assembly.Budget, promptTokens, replyTokens); bounded {
 			toolBudget.capTo(room)
 		}
 
@@ -842,7 +846,7 @@ func (b *toolOutputBudget) capTo(room int) {
 // which is also the only case in which the tool budget is left alone. There is nothing
 // to aim at then, and a bare 0 would mean "no room" rather than "nobody said", which
 // is the difference between a withheld result and an untouched budget.
-func roomForToolResults(budget ContextBudget, promptTokens int, replyText string) (room int, bounded bool) {
+func roomForToolResults(budget ContextBudget, promptTokens, replyTokens int) (room int, bounded bool) {
 	if budget.EffectiveLimit <= 0 {
 		return 0, false
 	}
@@ -850,7 +854,7 @@ func roomForToolResults(budget ContextBudget, promptTokens int, replyText string
 	if promptTokens > 0 {
 		base = promptTokens + budget.Reserve
 	}
-	room = budget.EffectiveLimit - base - llm.EstimateTokens(replyText)
+	room = budget.EffectiveLimit - base - replyTokens
 	if room < 0 {
 		room = 0
 	}

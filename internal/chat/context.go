@@ -107,6 +107,9 @@ type AssemblyInput struct {
 	// back; the engine always passes the full set.
 	KnownTools []string
 
+	// ReplayToolReasoning counts reasoning when the selected backend sends it with tools.
+	ReplayToolReasoning bool
+
 	Limit       int
 	LimitSource string
 	Reserve     int
@@ -151,7 +154,8 @@ type Assembly struct {
 	// MaxIncludedSeq is the highest stored message sequence present in the
 	// request. It lets a backend's reported prompt_tokens be tied to an exact
 	// conversation state.
-	MaxIncludedSeq int
+	MaxIncludedSeq      int
+	ReplayToolReasoning bool
 
 	// AgedReads are the files whose `read_file` result was dropped from the request's tail
 	// to keep the reply from re-sending everything it has ever read (see ageToolResults).
@@ -414,7 +418,7 @@ func Assemble(in AssemblyInput) Assembly {
 		// Priced before the attachment text is appended: inlined document text
 		// belongs to Attachments below, and counting it here as well made the
 		// meter read half again as large as the request it describes.
-		historyTokens := llm.EstimateTokens(lm.Content) + llm.EstimateTokens(lm.Reasoning)/2
+		historyTokens := historyMessageTokens(lm, in.ReplayToolReasoning)
 		if imgs := lm.Images; len(imgs) > 0 {
 			tokens := llm.EstimateImageTokens(len(imgs))
 			budget.Attachments += tokens
@@ -580,7 +584,12 @@ func Assemble(in AssemblyInput) Assembly {
 			if m.Seq <= in.MeasuredSeq || m.Seq < firstVerbatim {
 				continue
 			}
-			delta += llm.EstimateTokens(m.Content) + llm.EstimateTokens(m.Reasoning)/2
+			lm := toLLMMessage(m)
+			if lm.Role == llm.RoleAssistant && lm.Content == "" && len(lm.ToolCalls) == 0 &&
+				len(inlineByMessage[m.ID]) == 0 {
+				continue
+			}
+			delta += historyMessageTokens(lm, in.ReplayToolReasoning)
 			// Attachments of newer messages are part of the next request and no
 			// measurement can have counted them: they were added afterwards.
 			delta += llm.EstimateImageTokens(len(imagesByMessage[m.ID]))
@@ -608,14 +617,15 @@ func Assemble(in AssemblyInput) Assembly {
 	}
 
 	return Assembly{
-		Messages:           msgs,
-		Budget:             budget,
-		FirstVerbatimSeq:   firstVerbatim,
-		MemorySummary:      memorySummary,
-		MemoryCompactionID: memoryID,
-		AttachmentNotice:   notice,
-		MaxIncludedSeq:     maxIncluded,
-		AgedReads:          agedReads,
+		Messages:            msgs,
+		Budget:              budget,
+		FirstVerbatimSeq:    firstVerbatim,
+		MemorySummary:       memorySummary,
+		MemoryCompactionID:  memoryID,
+		AttachmentNotice:    notice,
+		MaxIncludedSeq:      maxIncluded,
+		ReplayToolReasoning: in.ReplayToolReasoning,
+		AgedReads:           agedReads,
 	}
 }
 
@@ -709,6 +719,20 @@ func buildAttachmentNotice(in AssemblyInput) string {
 		sb.WriteString("\n")
 	}
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+// historyMessageTokens prices tool calls and the reasoning the backend will replay.
+func historyMessageTokens(m llm.Message, replayReasoning bool) int {
+	tokens := llm.EstimateTokens(m.Content)
+	if replayReasoning && m.Role == llm.RoleAssistant {
+		tokens += llm.EstimateTokens(m.Reasoning)
+	} else {
+		tokens += llm.EstimateTokens(m.Reasoning) / 2
+	}
+	for _, call := range m.ToolCalls {
+		tokens += llm.EstimateTokens(call.Name) + llm.EstimateTokens(call.Arguments) + 8
+	}
+	return tokens
 }
 
 // toLLMMessage converts a stored message into the wire form.
