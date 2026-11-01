@@ -1139,6 +1139,10 @@ var (
 	toolCallBlock  = regexp.MustCompile(`(?s)<tool_call>.*?</tool_call>`)
 	functionCallIn = regexp.MustCompile(`(?s)<function=([A-Za-z0-9_.:\-]+)\s*>(.*?)</function>`)
 	parameterPair  = regexp.MustCompile(`(?s)<parameter=([A-Za-z0-9_.:\-]+)\s*>(.*?)</parameter>`)
+
+	// The fenced form, for the stream filter only: a complete block is removed, and the
+	// parser above keeps its own stricter match that also requires a JSON object.
+	fencedToolCallBlock = regexp.MustCompile("(?s)```tool_call.*?```")
 )
 
 type textToolCall struct {
@@ -1274,6 +1278,60 @@ func functionArguments(body string) (string, bool) {
 		return "", false
 	}
 	return string(encoded), true
+}
+
+// streamMarkers begin a tool call in the text protocol. A reply is held back from the point
+// where one of them starts: the user should never watch `<tool_call>` being typed out.
+var streamMarkers = []string{"<tool_call", "```tool_call"}
+
+// VisibleText is the part of a reply that may be shown while it is still arriving: the
+// template's tool-call markup is cut out, and an opening it has not finished writing is
+// withheld until it closes.
+//
+// The stored reply is cleaned by ParseTextToolCalls, but a delta stream is read by the window
+// as it arrives, so a local model's `<tool_call>` block was printed on screen character by
+// character and only vanished when the turn ended. Hiding the protocol is a promise for the
+// whole reply, not just for its last write.
+func VisibleText(text string) string {
+	out := text
+	for {
+		loc := toolCallBlock.FindStringIndex(out)
+		if loc == nil {
+			break
+		}
+		out = out[:loc[0]] + out[loc[1]:]
+	}
+	for {
+		loc := fencedToolCallBlock.FindStringIndex(out)
+		if loc == nil {
+			break
+		}
+		out = out[:loc[0]] + out[loc[1]:]
+	}
+	// A marker whose body has not closed yet: hold the rest back rather than print the
+	// opening and then remove it once the block is complete.
+	for _, marker := range streamMarkers {
+		if i := strings.LastIndex(out, marker); i >= 0 {
+			out = out[:i]
+		}
+	}
+	// A marker that is still being written, one character at a time.
+	for changed := true; changed; {
+		changed = false
+		for _, marker := range streamMarkers {
+			for l := len(marker) - 1; l > 0; l-- {
+				if strings.HasSuffix(out, marker[:l]) {
+					out = out[:len(out)-l]
+					changed = true
+					break
+				}
+			}
+			if changed {
+				break
+			}
+		}
+	}
+	return out
 }
 
 // ArgumentsLost reports whether a call the backend made itself arrived without the

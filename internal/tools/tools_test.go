@@ -119,6 +119,44 @@ func TestParseTextToolCallsHandlesBothProtocols(t *testing.T) {
 	}
 }
 
+// TestVisibleTextHidesTheProtocolWhileItArrives pins the stream's rule: a reply is shown as
+// it arrives, and the template's markup must never appear in it — not even as a half-written
+// opener, and not even while the block is still unclosed. Everything shown has to be a prefix
+// of the finished visible text, because the engine emits only the growth of this string.
+func TestVisibleTextHidesTheProtocolWhileItArrives(t *testing.T) {
+	reply := "Ich suche.\n\n<tool_call> <function=search_web> {\"query\": \"Nachrichten\"} </function> </tool_call>"
+	const want = "Ich suche.\n\n"
+
+	for i := 0; i <= len(reply); i++ {
+		got := VisibleText(reply[:i])
+		if strings.Contains(got, "tool_call") || strings.Contains(got, "function=") || strings.Contains(got, "<tool") {
+			t.Fatalf("after %d bytes the protocol showed: %q", i, got)
+		}
+		if !strings.HasPrefix(want, got) {
+			t.Fatalf("after %d bytes the visible text %q is not a prefix of %q", i, got, want)
+		}
+	}
+	if got := VisibleText(reply); got != want {
+		t.Errorf("finished reply = %q, want %q", got, want)
+	}
+
+	// The fenced form, and prose after a block: the sentence on either side survives.
+	fenced := "Vorher.\n\n```tool_call\n{\"name\": \"search_web\"}\n```\n\nNachher."
+	for i := 0; i <= len(fenced); i++ {
+		if got := VisibleText(fenced[:i]); strings.Contains(got, "tool_call") {
+			t.Fatalf("after %d bytes the fenced protocol showed: %q", i, got)
+		}
+	}
+	if got := VisibleText(fenced); !strings.Contains(got, "Vorher.") || !strings.Contains(got, "Nachher.") {
+		t.Errorf("visible = %q, want the prose on both sides", got)
+	}
+
+	// A plain answer is never delayed or altered by the filter.
+	if got := VisibleText("Ganz normale Antwort. < b ist kleiner"); !strings.Contains(got, "Ganz normale Antwort.") {
+		t.Errorf("plain text was altered: %q", got)
+	}
+}
+
 // TestParseTextToolCallsReadsArgumentsWrittenBesideTheName is the reply that reproduced the
 // report against KiChat's own llama.cpp runtime, copied literally. The model put the query
 // beside the name instead of under `arguments`, so the call reached the search with `{}` and

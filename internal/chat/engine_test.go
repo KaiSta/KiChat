@@ -413,6 +413,53 @@ func TestAToolCallTheBackendSentWithoutArgumentsTakesThemFromTheText(t *testing.
 	}
 }
 
+// TestTheStreamNeverCarriesTheProtocol is the half that the stored row cannot show: the
+// window renders the delta stream as it arrives, so a template block printed there is on
+// screen for as long as the round lasts — however clean the reply turns out to be once it is
+// read back from the database.
+func TestTheStreamNeverCarriesTheProtocol(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	const reply = "Ich suche.\n\n<tool_call> <function=search_web> {\"query\": \"Nachrichten\"} </function> </tool_call>"
+	// Delivered in the small pieces a local model actually streams.
+	var events []llm.StreamEvent
+	for i := 0; i < len(reply); i += 7 {
+		end := i + 7
+		if end > len(reply) {
+			end = len(reply)
+		}
+		events = append(events, llm.StreamEvent{Type: llm.EventDelta, Text: reply[i:end]})
+	}
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			events,
+			{{Type: llm.EventDelta, Text: "Fertig."}},
+		},
+	}
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.ToolIterations = 2
+	log := &eventLog{}
+	engine := NewEngine(st, registry, &tools.Service{Store: st},
+		func() config.Settings { return settings }, log.emit)
+
+	turn(t, engine, "chat-1", "Nachrichten")
+
+	for _, ev := range log.snapshot() {
+		if ev.name != "chat:delta" {
+			continue
+		}
+		text, _ := ev.payload["text"].(string)
+		if strings.Contains(text, "tool_call") || strings.Contains(text, "function=") {
+			t.Errorf("a delta carried the protocol: %q", text)
+		}
+	}
+}
+
 // TestTheProtocolIsHiddenEvenWhenTheBackendParsedTheCall is the second half of the same
 // report, from the reply that followed it: the searches ran, and the raw template was
 // printed underneath them because the block is only hidden when the text *replaces* the

@@ -1016,23 +1016,32 @@ func (e *Engine) consume(ctx context.Context, chatID, messageID string,
 	)
 
 	var (
-		textBuf      strings.Builder
+		// shown is how much of the visible answer has already been sent. The deltas carry
+		// `tools.VisibleText(text)` rather than the raw stream: a local model writes its
+		// tool call into the reply as markup, and the window used to print that template
+		// for as long as the round took, even though the stored reply never contains it.
+		shown        int
 		reasoningBuf strings.Builder
 		lastFlush    = time.Now()
 	)
 
 	flush := func(force bool) {
-		if textBuf.Len() == 0 && reasoningBuf.Len() == 0 {
+		visible := tools.VisibleText(text)
+		if shown > len(visible) {
+			shown = len(visible)
+		}
+		pending := len(visible) - shown
+		if pending == 0 && reasoningBuf.Len() == 0 {
 			return
 		}
-		if !force && textBuf.Len() < flushChars && time.Since(lastFlush) < flushInterval {
+		if !force && pending < flushChars && time.Since(lastFlush) < flushInterval {
 			return
 		}
-		if textBuf.Len() > 0 {
+		if pending > 0 {
 			e.emit(events.Delta, map[string]any{
-				"chatId": chatID, "messageId": messageID, "text": textBuf.String(),
+				"chatId": chatID, "messageId": messageID, "text": visible[shown:],
 			})
-			textBuf.Reset()
+			shown = len(visible)
 		}
 		if reasoningBuf.Len() > 0 {
 			e.emit(events.Reasoning, map[string]any{
@@ -1047,7 +1056,6 @@ func (e *Engine) consume(ctx context.Context, chatID, messageID string,
 		switch ev.Type {
 		case llm.EventDelta:
 			text += ev.Text
-			textBuf.WriteString(ev.Text)
 			flush(false)
 		case llm.EventReasoning:
 			reasoning += ev.Text
