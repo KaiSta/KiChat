@@ -220,27 +220,24 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 				extraSystem += "\n\n" + captionRule
 			}
 		}
-		// Last, so the protocol hints above cannot overwrite them: these two are the only pieces
-		// of extra system text about the conversation rather than about this request. Only the
-		// round that opens the turn carries them — a later round in the same turn already has
-		// them in the history of the request that preceded it. The revert goes first, because a
-		// file that was both put back and edited since is the revert's to explain.
-		if iteration == 0 && (revertNote != "" || diskNote != "") {
-			if extraSystem != "" {
-				extraSystem += "\n\n"
-			}
-			if revertNote != "" {
-				extraSystem += revertNote
-			}
-			if revertNote != "" && diskNote != "" {
-				extraSystem += "\n\n"
-			}
+		// The two notes about the conversation rather than about this request are not prompt text:
+		// they travel in the request's tail with the clock (Assemble). In message zero they would
+		// invalidate the cache of the whole history twice per turn, because they are sent on the
+		// round that opens it and gone from the next one. Only that round carries them; a later
+		// round already has them in the history of the request before it. The revert goes first,
+		// because a file that was both put back and edited since is the revert's to explain.
+		turnNotes := ""
+		if iteration == 0 {
+			turnNotes = revertNote
 			if diskNote != "" {
-				extraSystem += diskNote
+				if turnNotes != "" {
+					turnNotes += "\n\n"
+				}
+				turnNotes += diskNote
 			}
 		}
 		assembly, toolDefs, err := e.buildAssembly(ctx, &in.Chat,
-			in.BackendID, in.ModelID, in.Settings, in.Model, extraSystem)
+			in.BackendID, in.ModelID, in.Settings, in.Model, extraSystem, turnNotes)
 		if err != nil {
 			return result, err
 		}

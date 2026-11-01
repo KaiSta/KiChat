@@ -119,6 +119,12 @@ type AssemblyInput struct {
 	MeasuredValid bool
 	// MeasuredSeq is the newest message sequence that the measurement included.
 	MeasuredSeq int
+
+	// TurnNotes is text about the conversation rather than about this request: the revert and
+	// disk notes. It travels in the request's tail, with the clock (see the append after the
+	// history), because it is sent on the round that opens a turn and gone from the next one —
+	// in message zero that would invalidate the cache of the whole history twice per turn.
+	TurnNotes string
 }
 
 // Assembly is the result: the messages to send plus the budget breakdown.
@@ -445,10 +451,10 @@ func Assemble(in AssemblyInput) Assembly {
 	budget.History -= agedTokens
 
 	// The per-turn state rides at the very end of the request, after everything the cache is
-	// meant to keep: the exact clock, and in a project the working tree. The last message is the
-	// one that changed anyway — the user's question on the first round, the newest tool result on
-	// every round after it — so nothing in front of it shifts, where a block in the system message
-	// shifted all of it.
+	// meant to keep: the exact clock, in a project the working tree, and the turn's notes about the
+	// conversation. The last message is the one that changed anyway — the user's question on the
+	// first round, the newest tool result on every round after it — so nothing in front of it
+	// shifts, where a block in the system message shifted all of it.
 	//
 	// The clock belongs here for the same reason, and it is why `{{datetime}}` renders at day
 	// precision (prompt.go): a reply's rounds are minutes apart, so a minute-granular value in
@@ -465,17 +471,30 @@ func Assemble(in AssemblyInput) Assembly {
 	// `{{context_used}}` and `{{time}}` can still move message zero between requests. Both are the
 	// user's own text and are left alone; the shipped presets use neither.
 	turnState := turnClock(time.Now())
-	if tokens := llm.EstimateTokens(turnState); tokens > 0 {
+	notes := strings.TrimSpace(in.TurnNotes)
+	// Priced together and apart from the git block, which has a segment of its own: what the
+	// meter shows is what is sent, and the two are read for different reasons.
+	priced := turnState
+	if notes != "" {
+		priced += "\n\n" + notes
+	}
+	if tokens := llm.EstimateTokens(priced); tokens > 0 {
 		budget.Memory += tokens
 		budget.Segments = append(budget.Segments, ContextSegment{
 			Kind:   SegmentMemory,
-			Label:  "Uhrzeit",
+			Label:  "Zeit und Hinweise",
 			Tokens: tokens,
-			Detail: "Zeitpunkt der Anfrage, am Ende des Requests statt im System-Prompt",
+			Detail: "Zeitpunkt und Notizen dieses Turns, am Ende des Requests statt im System-Prompt",
 		})
 	}
 	if gitState != "" {
 		turnState += "\n\n" + gitState
+	}
+	// The notes go last so they are the newest thing the model reads: a file that was put back or
+	// changed on disk is a correction, and a correction buried under a list of paths is read as
+	// context.
+	if notes != "" {
+		turnState += "\n\n" + notes
 	}
 	if len(msgs) > 1 {
 		last := len(msgs) - 1

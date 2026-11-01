@@ -517,9 +517,14 @@ func capacitySuffix(limit int, source string) string {
 // It takes no provider, deliberately: the assembly is built from what the store
 // holds, which is what lets a budget be previewed for a backend that is not
 // configured at all — and it leaves nothing here that could dereference a nil one.
+//
+// extraSystem is prompt text for this request; turnNotes is text for the conversation — the revert
+// and disk notes — and it travels in the request's tail instead (see Assemble). The two are
+// separate parameters rather than one string because a note that moves between rounds must not sit
+// in message zero: it would invalidate the cache of the whole history behind it, twice per turn.
 func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 	backendID, modelID string, settings config.Settings, model llm.ModelInfo,
-	extraSystem string) (Assembly, []llm.ToolDefinition, error) {
+	extraSystem, turnNotes string) (Assembly, []llm.ToolDefinition, error) {
 
 	messages, err := e.Store.ListMessages(chat.ID)
 	if err != nil {
@@ -581,6 +586,7 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 		Reserve:       reserve,
 		Ceiling:       e.ceilingFor(backendID, modelID),
 		MeasuredValid: measuredValid,
+		TurnNotes:     turnNotes,
 	}
 	if measuredValid {
 		in.Measured = measurement.PromptTokens
@@ -773,7 +779,7 @@ func anyProviderAvailable(chain interface{ ProviderAvailability() map[string]boo
 func (e *Engine) emitBudget(chatID string, chat *store.Chat,
 	backendID, modelID string, settings config.Settings, model llm.ModelInfo) {
 	assembly, _, err := e.buildAssembly(context.Background(), chat,
-		backendID, modelID, settings, model, "")
+		backendID, modelID, settings, model, "", "")
 	if err != nil {
 		return
 	}

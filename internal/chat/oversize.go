@@ -178,7 +178,7 @@ func (e *Engine) foldForSize(ctx context.Context, chat *store.Chat, provider llm
 	// The failed row is already dropped, so the assembly prices the body that will be
 	// retried rather than the one that carried an empty assistant message.
 	estimated := 0
-	if assembly, _, err := e.buildAssembly(ctx, chat, backendID, modelID, settings, modelInfo, ""); err == nil {
+	if assembly, _, err := e.buildAssembly(ctx, chat, backendID, modelID, settings, modelInfo, "", ""); err == nil {
 		estimated = assembly.Budget.Estimated
 	}
 	// A refusal does not always state the limit — Groq's context-window refusal asks

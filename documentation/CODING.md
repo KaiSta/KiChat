@@ -568,8 +568,9 @@ of this — the text to put back stays the text from before the chat first touch
 the digest of the text the app last wrote, so a file whose digest has moved on was changed
 somewhere the app cannot see — an editor, a formatter in another window, a checkout that
 replaced the tree — while the transcript still says the model's text is in there. The next
-turn's prompt therefore carries a `<project_changed_on_disk>` block, built at the start of the
-turn the same way the revert note is, naming each file (and saying when one is gone). It is
+turn's request therefore carries a `<project_changed_on_disk>` block in its tail, built at the
+start of the turn the same way the revert note is, naming each file (and saying when one is gone).
+It is
 *not* the revert note with another trigger, and the wording keeps them apart: nothing was
 undone, the text on disk is the person's own, and a model told otherwise would go looking for a
 version nobody restored.
@@ -703,6 +704,15 @@ reading the file. `TestALaterRoundGetsTheSummaryAndNotTheList` pins both halves:
 with the paths, a later round names none of them, and its block stays under a quarter of the
 list's size with twenty-seven paths pending.
 
+**The turn's notes travel in the tail as well**, and for a sharper reason than the list. The
+revert note and the `<project_changed_on_disk>` block are sent on the round that opens a turn and
+absent from the next one, so as prompt text they would change message zero twice per turn — once
+when they arrive, once when they go — and each change re-prices the entire history behind it. They
+are a `TurnNotes` argument of `Assemble` rather than part of `extraSystem` (which is the prompt's
+share of the same call), and they are appended after the working tree, last in the request, because
+a correction buried under a list of paths reads as context. The two tests that carry them,
+`TestATurnAfterARevertIsToldTheFileChanged` and `TestATurnIsToldWhenAFileChangedOutsideTheApp`, now
+read the tail and assert that the system message is free of them.
 
 ## 9. Watching it without the app
 

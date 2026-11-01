@@ -76,7 +76,7 @@ func systemMessage(t *testing.T, e *Engine, c store.Chat) string {
 	t.Helper()
 	settings := config.Default()
 	assembly, _, err := e.buildAssembly(context.Background(), &c, c.Backend, c.Model,
-		settings, llm.ModelInfo{ID: c.Model, Backend: c.Backend, ContextLimit: 8192}, "")
+		settings, llm.ModelInfo{ID: c.Model, Backend: c.Backend, ContextLimit: 8192}, "", "")
 	if err != nil {
 		t.Fatalf("buildAssembly: %v", err)
 	}
@@ -91,7 +91,7 @@ func systemMessage(t *testing.T, e *Engine, c store.Chat) string {
 func requestMessages(t *testing.T, e *Engine, c store.Chat) []llm.Message {
 	t.Helper()
 	assembly, _, err := e.buildAssembly(context.Background(), &c, c.Backend, c.Model,
-		config.Default(), llm.ModelInfo{ID: c.Model, Backend: c.Backend, ContextLimit: 8192}, "")
+		config.Default(), llm.ModelInfo{ID: c.Model, Backend: c.Backend, ContextLimit: 8192}, "", "")
 	if err != nil {
 		t.Fatalf("buildAssembly: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestGuidanceCostIsOnTheMeter(t *testing.T) {
 	e, project, _ := projectEngine(t)
 	settings := config.Default()
 	assembly, _, err := e.buildAssembly(context.Background(), &project, project.Backend, project.Model,
-		settings, llm.ModelInfo{ID: project.Model, Backend: project.Backend, ContextLimit: 8192}, "")
+		settings, llm.ModelInfo{ID: project.Model, Backend: project.Backend, ContextLimit: 8192}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestAProjectsPromptCarriesItsGitState(t *testing.T) {
 	// And it is on the meter: a block nobody can account for is context that grows without
 	// anyone deciding it should.
 	assembly, _, err := engine.buildAssembly(context.Background(), &project, project.Backend, project.Model,
-		settings, llm.ModelInfo{ID: project.Model, Backend: project.Backend, ContextLimit: 8192}, "")
+		settings, llm.ModelInfo{ID: project.Model, Backend: project.Backend, ContextLimit: 8192}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,6 +606,17 @@ func systemOf(t *testing.T, req llm.ChatRequest) string {
 	return req.Messages[0].Content
 }
 
+// tailOf is the last message of a request, which is where the per-turn state lives: the clock, the
+// working tree and the notes about the conversation. It is the one message a new round rewrites
+// anyway, so it is where anything that moves between rounds belongs (DEEPSEEK.md §5).
+func tailOf(t *testing.T, req llm.ChatRequest) string {
+	t.Helper()
+	if len(req.Messages) == 0 {
+		t.Fatal("the request carries no messages")
+	}
+	return req.Messages[len(req.Messages)-1].Content
+}
+
 // turn runs one turn and waits for it, so the next read of the provider is the request that
 // turn sent rather than a race.
 func turn(t *testing.T, e *Engine, chatID, text string) {
@@ -638,17 +649,23 @@ func TestATurnAfterARevertIsToldTheFileChanged(t *testing.T) {
 	}
 
 	turn(t, e, project.ID, "Mach weiter.")
-	system := systemOf(t, provider.lastRequest())
-	if !strings.Contains(system, revertedOpen) {
-		t.Fatalf("the turn after a revert carries no note:\n%s", system)
+	tail := tailOf(t, provider.lastRequest())
+	if !strings.Contains(tail, revertedOpen) {
+		t.Fatalf("the turn after a revert carries no note:\n%s", tail)
 	}
-	if !strings.Contains(system, "internal/store/queries.go") {
-		t.Errorf("the note does not name the file that was put back:\n%s", system)
+	if !strings.Contains(tail, "internal/store/queries.go") {
+		t.Errorf("the note does not name the file that was put back:\n%s", tail)
 	}
 	// The note has to say what to do, not just what happened: a model that reads "this was
 	// reverted" and nothing else still has a false tool result in front of it.
-	if !strings.Contains(system, "Lies") || !strings.Contains(system, "erneut") {
-		t.Errorf("the note does not tell the model to read the file again:\n%s", system)
+	if !strings.Contains(tail, "Lies") || !strings.Contains(tail, "erneut") {
+		t.Errorf("the note does not tell the model to read the file again:\n%s", tail)
+	}
+	// And it is where it costs nothing: the tail. In the system message it would invalidate the
+	// cache of the whole history on the round it appears and again on the round it leaves.
+	if system := systemOf(t, provider.lastRequest()); strings.Contains(system, revertedOpen) {
+		t.Errorf("the note is in the system message again, in front of the history it invalidates:\n%s",
+			system)
 	}
 
 	// Delivered once: the marker is gone, and the next turn's prompt is the ordinary one.
@@ -658,7 +675,7 @@ func TestATurnAfterARevertIsToldTheFileChanged(t *testing.T) {
 		t.Errorf("%d notes survived the turn that carried them", len(pending))
 	}
 	turn(t, e, project.ID, "Und jetzt?")
-	if next := systemOf(t, provider.lastRequest()); strings.Contains(next, revertedOpen) {
+	if next := tailOf(t, provider.lastRequest()); strings.Contains(next, revertedOpen) {
 		t.Errorf("the note is repeated on a later turn:\n%s", next)
 	}
 }
@@ -743,8 +760,8 @@ func TestATurnIsToldWhenAFileChangedOutsideTheApp(t *testing.T) {
 	// The file still holds what the app wrote, so there is nothing to announce. This is the
 	// ordinary turn of a project, and it must stay as cheap and as quiet as it was.
 	turn(t, e, project.ID, "Alles gut?")
-	if system := systemOf(t, provider.lastRequest()); strings.Contains(system, diskOpen) {
-		t.Fatalf("a file nobody touched was announced as changed:\n%s", system)
+	if tail := tailOf(t, provider.lastRequest()); strings.Contains(tail, diskOpen) {
+		t.Fatalf("a file nobody touched was announced as changed:\n%s", tail)
 	}
 
 	// The user's own editor, which this app never sees.
@@ -753,27 +770,32 @@ func TestATurnIsToldWhenAFileChangedOutsideTheApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	turn(t, e, project.ID, "Mach weiter.")
-	system := systemOf(t, provider.lastRequest())
-	if !strings.Contains(system, diskOpen) {
-		t.Fatalf("the turn after an outside edit carries no note:\n%s", system)
+	tail := tailOf(t, provider.lastRequest())
+	if !strings.Contains(tail, diskOpen) {
+		t.Fatalf("the turn after an outside edit carries no note:\n%s", tail)
 	}
-	if !strings.Contains(system, "main.go") {
-		t.Errorf("the note does not name the file that changed:\n%s", system)
+	if !strings.Contains(tail, "main.go") {
+		t.Errorf("the note does not name the file that changed:\n%s", tail)
 	}
 	// The action, not just the news: the model's memory of the file is what is wrong.
-	if !strings.Contains(system, "Lies") || !strings.Contains(system, "erneut") {
-		t.Errorf("the note does not tell the model to read the file again:\n%s", system)
+	if !strings.Contains(tail, "Lies") || !strings.Contains(tail, "erneut") {
+		t.Errorf("the note does not tell the model to read the file again:\n%s", tail)
 	}
 	// And it is not a revert: the change on disk is the user's, and a model told it was put
 	// back would go looking for the version it never restored.
-	if strings.Contains(system, revertedOpen) {
-		t.Errorf("an outside edit was announced as a revert:\n%s", system)
+	if strings.Contains(tail, revertedOpen) {
+		t.Errorf("an outside edit was announced as a revert:\n%s", tail)
+	}
+	// In the tail, where a note that comes and goes costs only itself.
+	if system := systemOf(t, provider.lastRequest()); strings.Contains(system, diskOpen) {
+		t.Errorf("the note is in the system message, in front of the history it invalidates:\n%s",
+			system)
 	}
 
 	// Told once per outside version. The same text is not news twice, so the next turn's
 	// prompt is the ordinary one again.
 	turn(t, e, project.ID, "Und jetzt?")
-	if next := systemOf(t, provider.lastRequest()); strings.Contains(next, diskOpen) {
+	if next := tailOf(t, provider.lastRequest()); strings.Contains(next, diskOpen) {
 		t.Errorf("the same outside version was announced twice:\n%s", next)
 	}
 
@@ -783,7 +805,7 @@ func TestATurnIsToldWhenAFileChangedOutsideTheApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	turn(t, e, project.ID, "Weiter.")
-	if again := systemOf(t, provider.lastRequest()); !strings.Contains(again, diskOpen) {
+	if again := tailOf(t, provider.lastRequest()); !strings.Contains(again, diskOpen) {
 		t.Errorf("a second outside edit was not announced:\n%s", again)
 	}
 
@@ -793,7 +815,7 @@ func TestATurnIsToldWhenAFileChangedOutsideTheApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	turn(t, e, project.ID, "Noch da?")
-	gone := systemOf(t, provider.lastRequest())
+	gone := tailOf(t, provider.lastRequest())
 	if !strings.Contains(gone, diskOpen) || !strings.Contains(gone, "nicht mehr vorhanden") {
 		t.Errorf("a file removed outside the app was not reported as gone:\n%s", gone)
 	}
@@ -1014,7 +1036,7 @@ func TestAProjectChecksBetweenRoundsWithoutTheChatSwitch(t *testing.T) {
 		// The check before the turn has to stay quiet, or the fold measured below would be
 		// that one and the test would prove nothing about the mid-turn path.
 		before, _, err := engine.buildAssembly(context.Background(), &project, "fake", "fake-model",
-			settings, provider.model, tools.TextProtocolHint(config.LangEnglish))
+			settings, provider.model, tools.TextProtocolHint(config.LangEnglish), "")
 		if err != nil {
 			t.Fatalf("buildAssembly: %v", err)
 		}

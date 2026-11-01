@@ -198,7 +198,7 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings,
 	opts CompactOptions) (*store.Compaction, error) {
 
-	assembly, _, err := e.buildAssembly(ctx, chat, backendID, modelID, settings, modelInfo, "")
+	assembly, _, err := e.buildAssembly(ctx, chat, backendID, modelID, settings, modelInfo, "", "")
 	if err != nil {
 		return nil, err
 	}
