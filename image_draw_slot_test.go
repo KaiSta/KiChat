@@ -146,3 +146,79 @@ func TestTheSettingsTestDrawCanBeStopped(t *testing.T) {
 	}
 	release()
 }
+
+func TestStopKeepsDrawSlotUntilInterruptFinishes(t *testing.T) {
+	started := make(chan struct{}, 1)
+	interruptStarted := make(chan struct{}, 1)
+	releaseInterrupt := make(chan struct{})
+	releaseDraw := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sdapi/v1/txt2img":
+			started <- struct{}{}
+			select {
+			case <-r.Context().Done():
+			case <-releaseDraw:
+			}
+		case "/sdapi/v1/interrupt":
+			interruptStarted <- struct{}{}
+			<-releaseInterrupt
+			fmt.Fprint(w, `{}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(func() { close(releaseDraw); srv.Close() })
+	settings := config.Default()
+	settings.Images.Enabled = true
+	settings.Images.BaseURL = srv.URL
+	a := newSettingsTestApp(t, settings, t.TempDir())
+	a.ctx = context.Background()
+	a.rebuildServices(settings)
+	drawDone := make(chan error, 1)
+	go func() { _, err := a.TestImageBackend(); drawDone <- err }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("draw did not start")
+	}
+	stopDone := make(chan StopDrawResult, 1)
+	go func() { stopDone <- a.StopImageDraw(imageTestDrawID) }()
+	select {
+	case <-interruptStarted:
+	case <-time.After(5 * time.Second):
+		close(releaseInterrupt)
+		t.Fatal("interrupt did not start")
+	}
+	if release, ok := a.tryDraw(); ok {
+		release()
+		close(releaseInterrupt)
+		t.Fatal("another draw could start while the old interrupt was pending")
+	}
+	if second := a.StopImageDraw(imageTestDrawID); second.WasDrawing {
+		close(releaseInterrupt)
+		t.Fatal("a second stop sent another interrupt")
+	}
+	close(releaseInterrupt)
+	select {
+	case result := <-stopDone:
+		if !result.Interrupted {
+			t.Fatalf("stop = %+v", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not finish")
+	}
+	select {
+	case err := <-drawDone:
+		if !errors.Is(err, images.ErrCancelled) {
+			t.Fatalf("draw error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("draw did not finish")
+	}
+	release, ok := a.tryDraw()
+	if !ok {
+		t.Fatal("draw slot remained held")
+	}
+	release()
+}

@@ -306,6 +306,9 @@ func (n *NIM) Generate(ctx context.Context, req Request) (Result, error) {
 			return Result{}, err
 		}
 		mime, ext := SniffImage(data, MimePNG, "png")
+		if len(result.Images) == 0 && artifact.Seed > 0 {
+			result.Seed = artifact.Seed
+		}
 		result.Images = append(result.Images, Image{Data: data, Mime: mime, Ext: ext})
 	}
 	for _, item := range decoded.Data {
@@ -399,9 +402,20 @@ func (n *NIM) picture(ctx context.Context, b64, url string) ([]byte, error) {
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, &HTTPError{StatusCode: resp.StatusCode, Status: resp.Status, Body: "", URL: url}
 	}
-	// The same bound the WebUI's preview uses: a picture is a few megabytes, and an
-	// answer that is not one must not be read into memory.
-	return io.ReadAll(io.LimitReader(resp.Body, sdPreviewMaxBytes))
+	// A finished image can be much larger than a preview. Read one extra byte so an
+	// oversized response is rejected instead of silently saving a truncated picture.
+	const maxPictureBytes = 32 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxPictureBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxPictureBytes {
+		return nil, errors.New(text(n.lang(), "das Bild von NVIDIA ist größer als 32 MB", "NVIDIA's picture exceeds 32 MiB"))
+	}
+	if len(data) == 0 {
+		return nil, errors.New(text(n.lang(), "NVIDIA hat ein leeres Bild geliefert", "NVIDIA returned an empty picture"))
+	}
+	return data, nil
 }
 
 // do sends one request with the bearer token and classifies its failures.

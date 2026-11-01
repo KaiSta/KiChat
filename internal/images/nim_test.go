@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,7 @@ import (
 
 // nimArtifact is the shape the hosted route answers with: base64 under artifacts[].
 func nimArtifact() string {
-	return `{"artifacts":[{"base64":"` + base64.StdEncoding.EncodeToString(pngBytes) + `","finishReason":"SUCCESS","seed":7}]}`
+	return `{"artifacts":[{"base64":"` + base64.StdEncoding.EncodeToString(pngBytes) + `","finishReason":"SUCCESS"}]}`
 }
 
 // TestNIMGenerateUsesTheHostedModelPath pins the route that took a real 404 to find: the
@@ -371,3 +372,47 @@ func TestNIMModelsAreImageModelsOnly(t *testing.T) {
 		t.Errorf("Samplers = %v/%v, want none: the hosted route has no sampler", samplers, err)
 	}
 }
+
+func TestNIMRecordsReportedSeed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"artifacts":[{"base64":%q,"seed":17}]}`, base64.StdEncoding.EncodeToString(pngBytes))
+	}))
+	defer srv.Close()
+	seed := int64(42)
+	result, err := NewNIM("images", "NVIDIA", srv.URL, "key", "").Generate(t.Context(), Request{Prompt: "cat", Seed: &seed})
+	if err != nil || result.Seed != 17 {
+		t.Fatalf("result seed = %d, err = %v; want the seed the server reported", result.Seed, err)
+	}
+}
+
+func TestNIMFetchesFullSizedImagesAndRejectsOversizedOnes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		size      int
+		wantError bool
+	}{
+		{"larger than a preview", 5 << 20, false},
+		{"over the image limit", (32 << 20) + 1, true},
+		{"empty", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.CopyN(w, zeroReader{}, int64(tc.size))
+			}))
+			defer file.Close()
+			p := NewNIM("images", "NVIDIA", file.URL, "key", "")
+			data, err := p.picture(t.Context(), "", file.URL)
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("invalid response accepted")
+				}
+			} else if err != nil || len(data) != tc.size {
+				t.Fatalf("got %d bytes, %v; want %d bytes", len(data), err, tc.size)
+			}
+		})
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }

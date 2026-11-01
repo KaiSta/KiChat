@@ -522,10 +522,14 @@ func (a *App) StopImageDraw(drawID string) StopDrawResult {
 	}
 	a.drawsMu.Lock()
 	draw, ok := a.draws[drawID]
-	a.drawsMu.Unlock()
-	if !ok {
+	if !ok || draw.stopping != nil {
+		a.drawsMu.Unlock()
 		return result
 	}
+	draw.stopping = make(chan struct{})
+	a.draws[drawID] = draw
+	a.drawsMu.Unlock()
+	defer close(draw.stopping)
 	result.WasDrawing = true
 	draw.cancel()
 	// Cancelling is the half that always works, and for an upscale it is the whole of it:
@@ -624,11 +628,18 @@ func (a *App) registerPicture(id, chatID string, cancel context.CancelFunc, serv
 	return func() {
 		a.drawsMu.Lock()
 		wasReported := false
+		var stopping <-chan struct{}
 		if draw, ok := a.draws[id]; ok && draw.token == token {
 			wasReported = draw.reported
+			stopping = draw.stopping
 			delete(a.draws, id)
 		}
 		a.drawsMu.Unlock()
+		// The backend interrupt is global; do not release the draw slot until it
+		// finishes, or a late interrupt could stop the next picture.
+		if stopping != nil {
+			<-stopping
+		}
 		if !wasReported {
 			return
 		}

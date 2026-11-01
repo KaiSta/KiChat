@@ -260,6 +260,8 @@ type inflightDraw struct {
 	// toolSvc, and interrupting the replacement would ask a provider that never
 	// received this request — while the one that did keeps drawing.
 	service *tools.Service
+	// stopping closes after the server interrupt finishes, before the draw slot is released.
+	stopping chan struct{}
 }
 
 // NewApp creates the application.

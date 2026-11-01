@@ -1393,3 +1393,31 @@ func TestADrawWithNobodyWatchingStillDraws(t *testing.T) {
 		}
 	})
 }
+
+func TestGenerateRejectsEmptyBackendResult(t *testing.T) {
+	for _, result := range []images.Result{{}, {Images: []images.Image{{}}}} {
+		provider := &fakeImageProvider{result: result}
+		service, st, chatID := newImageService(t, provider, config.ImageSettings{})
+		if _, err := service.Execute(WithCallingMessage(t.Context(), "msg-1"), chatID, ToolGenerateImage, `{"prompt":"a fox"}`); err == nil {
+			t.Fatal("empty result reported as a successful image")
+		}
+		attachments, err := st.ListAttachments(chatID)
+		if err != nil || len(attachments) != 0 {
+			t.Fatalf("attachments = %v, err = %v", attachments, err)
+		}
+	}
+}
+
+func TestStoppedCaptionDoesNotStartDrawing(t *testing.T) {
+	provider := &fakeImageProvider{result: onePicture()}
+	service, _, chatID := newImageService(t, provider, config.ImageSettings{Captioning: images.CaptioningAuto})
+	ctx, cancel := context.WithCancel(WithCallingMessage(t.Context(), "msg-1"))
+	service.Caption = func(context.Context, images.CaptionRequest) (images.CaptionResult, error) {
+		cancel()
+		return images.CaptionResult{}, context.Canceled
+	}
+	_, err := service.Execute(ctx, chatID, ToolGenerateImage, `{"prompt":"a fox"}`)
+	if !errors.Is(err, context.Canceled) || provider.calls != 0 {
+		t.Fatalf("err = %v, draw calls = %d; want cancellation without a draw", err, provider.calls)
+	}
+}

@@ -1219,13 +1219,17 @@ Three consequences, each of which is a decision rather than an oversight:
 - **`shared.state.interrupt()` is global to the server, not per request.** A picture the
   user is drawing in their own WebUI tab stops too. KiChat itself draws one picture at a time
   (the slot above is what enforces it), so the window this app can open is its own draws; a
-  caller pressing Stop should still know that the interrupt reaches past them.
+  caller pressing Stop should still know that the interrupt reaches past them. The slot stays
+  held until the interrupt request finishes, so a late response cannot interrupt the next
+  KiChat draw. A timed-out interrupt may still be processed later by the server.
 - **The Stop result is three facts, not a bool** (`StopDrawResult`): whether a draw was in
   flight and is now over, whether the server was asked, and — separately — why it could not
   be. A 404 from a server without the route is *reported*, never raised: the wait the button
   exists for is already over, and a stable-diffusion.cpp user would otherwise get a failure
   toast every time they stopped a draw.
-- **A stopped draw is not a failure.** The backend answers with `images.ErrCancelled` rather
+- **A stopped draw is not a failure.** A cancellation during captioning stops before the
+  image backend is called, and a cancelled draw cannot save a late backend result. The backend
+  answers with `images.ErrCancelled` rather
   than the HTTP client's own `context.Canceled` wrapper, which is what lets the UI report a
   state ("draw stopped") instead of a red error for the user's own click. A cancelled
   *parent* context — the app closing — is deliberately not translated, and still reads as
@@ -1233,7 +1237,8 @@ Three consequences, each of which is a decision rather than an oversight:
 
 Nothing is stored either way: the picture exists only once the server answers with it, so a
 stopped draw leaves the transcript exactly as it was, and `image_stop_test.go` asserts the
-attachment count is unchanged.
+attachment count is unchanged. A backend returning no picture or empty bytes is refused rather
+than reported as a successful draw.
 
 `image_stop_test.go` measures both halves against a fake WebUI that draws the first picture
 and then takes forever: the cancel is *measured* (the call returns with the sentinel well

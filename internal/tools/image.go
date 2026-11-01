@@ -189,6 +189,9 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 	// because refusing a picture the user asked for over a second model's stumble is the
 	// worse answer.
 	caption, captionErr := s.caption(ctx, chatID, pipeline.CaptioningMode(cfg.Captioning), req)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if captionErr == nil {
 		req.Caption = caption.Text
 	}
@@ -706,6 +709,9 @@ func (s *Service) watchDraw(id, chatID string, cancel context.CancelFunc) func()
 // same reason the interrupt one is — so this falls back to a plain Generate and the draw is
 // simply silent. Nothing about the result depends on the reports having happened.
 func (s *Service) draw(ctx context.Context, id, chatID string, req images.Request) (images.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return images.Result{}, err
+	}
 	start := time.Now()
 	var result images.Result
 	var err error
@@ -722,6 +728,17 @@ func (s *Service) draw(ctx context.Context, id, chatID string, req images.Reques
 	result.DurationMs = time.Since(start).Milliseconds()
 	if err != nil {
 		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return images.Result{}, err
+	}
+	if len(result.Images) == 0 {
+		return images.Result{}, images.ErrNoModel
+	}
+	for _, image := range result.Kept() {
+		if len(image.Data) == 0 {
+			return images.Result{}, uimsg.Detailf("tools.emptyImage", "the image backend returned an empty picture")
+		}
 	}
 	if err := verifyHiresOutput(req, result); err != nil {
 		return result, err
