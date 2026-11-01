@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -194,6 +195,72 @@ func TestDeepSeekStreamParsesReasoningContent(t *testing.T) {
 	}
 	if gotAuth != "Bearer test-key" {
 		t.Errorf("Authorization = %q, want the configured key", gotAuth)
+	}
+}
+
+// A tool round must replay the reasoning of every earlier assistant message,
+// not just the assistant that made the most recent call.
+func TestDeepSeekReplaysReasoningInToolRequests(t *testing.T) {
+	var requests []struct {
+		Messages []map[string]any  `json:"messages"`
+		Tools    []json.RawMessage `json:"tools"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []map[string]any  `json:"messages"`
+			Tools    []json.RawMessage `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		requests = append(requests, req)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	messages := []Message{
+		{Role: RoleUser, Content: "First question"},
+		{Role: RoleAssistant, Content: "First answer", Reasoning: "Earlier reasoning"},
+		{Role: RoleUser, Content: "Use a tool"},
+		{Role: RoleAssistant, Reasoning: "Tool reasoning", ToolCalls: []ToolCall{{ID: "call_1", Name: "lookup", Arguments: `{}`}}},
+		{Role: RoleTool, ToolCallID: "call_1", Content: "Result"},
+	}
+	tool := ToolDefinition{Name: "lookup", Schema: map[string]any{"type": "object"}}
+	for _, tc := range []struct {
+		provider *openAICompatProvider
+		tools    []ToolDefinition
+	}{
+		{newDeepSeekProvider("deepseek", "DeepSeek", srv.URL, "key"), []ToolDefinition{tool}},
+		{newDeepSeekProvider("deepseek", "DeepSeek", srv.URL, "key"), nil},
+		{newCustomProvider("custom", "Custom", srv.URL, ""), []ToolDefinition{tool}},
+	} {
+		events, err := tc.provider.Chat(context.Background(), ChatRequest{Model: "model", Messages: messages, Tools: tc.tools})
+		if err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+		for event := range events {
+			if event.Type == EventError {
+				t.Fatalf("stream: %s", event.Error)
+			}
+		}
+	}
+	if len(requests) != 3 {
+		t.Fatalf("got %d requests, want 3", len(requests))
+	}
+	for _, i := range []int{1, 3} {
+		if got, want := requests[0].Messages[i]["reasoning_content"], messages[i].Reasoning; got != want {
+			t.Errorf("assistant %d reasoning = %v, want %q", i, got, want)
+		}
+	}
+	for _, r := range requests[1:] {
+		for _, msg := range r.Messages {
+			if _, ok := msg["reasoning_content"]; ok {
+				t.Errorf("reasoning leaked into a request that does not replay it: %+v", msg)
+			}
+		}
 	}
 }
 

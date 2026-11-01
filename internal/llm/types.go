@@ -213,6 +213,12 @@ type Provider interface {
 	Chat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error)
 }
 
+// ToolReasoningReplayer marks a provider that includes assistant reasoning in
+// requests carrying tools, so prompt budgets can account for the replayed text.
+type ToolReasoningReplayer interface {
+	ReplaysToolReasoning() bool
+}
+
 // CacheInvalidator is implemented by a provider that caches per-model metadata
 // beyond a single listing. An explicit re-check has to reach those caches too:
 // Ollama keeps its /api/show detail for ten minutes, so dropping only the

@@ -271,6 +271,11 @@ func newLMStudioProvider(baseURL, apiKey string) *openAICompatProvider {
 func (p *openAICompatProvider) ID() string   { return p.id }
 func (p *openAICompatProvider) Name() string { return p.name }
 
+// ReplaysToolReasoning reports whether tool requests include assistant reasoning.
+func (p *openAICompatProvider) ReplaysToolReasoning() bool {
+	return p.modelsFlavour == flavourDeepSeek
+}
+
 // CanToggleThinking reports whether this backend accepts `enable_thinking` in the
 // request body, or — for llama.cpp — as a chat template parameter.
 //
@@ -615,11 +620,12 @@ type openAIChunk struct {
 
 // wireMessage is the message shape sent to OpenAI-compatible servers.
 type wireMessage struct {
-	Role       string         `json:"role"`
-	Content    any            `json:"content"`
-	Name       string         `json:"name,omitempty"`
-	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role             string         `json:"role"`
+	Content          any            `json:"content"`
+	ReasoningContent *string        `json:"reasoning_content,omitempty"`
+	Name             string         `json:"name,omitempty"`
+	ToolCalls        []wireToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
 }
 
 type wireToolCall struct {
@@ -640,13 +646,18 @@ type wireTool struct {
 	} `json:"function"`
 }
 
-func toWireMessages(messages []Message) []wireMessage {
+func toWireMessages(messages []Message, replayReasoning bool) []wireMessage {
 	out := make([]wireMessage, 0, len(messages))
 	for _, m := range messages {
 		wm := wireMessage{
 			Role:       string(m.Role),
 			Name:       m.Name,
 			ToolCallID: m.ToolCallID,
+		}
+		// DeepSeek requires every assistant's reasoning when tools are present, even
+		// for assistant messages without a tool call. Other backends must not receive it.
+		if replayReasoning && m.Role == RoleAssistant {
+			wm.ReasoningContent = &m.Reasoning
 		}
 		// A picture is a part of a *user* turn only. The schema has no image part for
 		// an assistant message, and a strict backend refuses the whole request when it
@@ -1084,7 +1095,7 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 	}
 	body := map[string]any{
 		"model":       req.Model,
-		"messages":    toWireMessages(req.Messages),
+		"messages":    toWireMessages(req.Messages, p.ReplaysToolReasoning() && len(req.Tools) > 0),
 		"stream":      true,
 		"temperature": req.Temperature,
 		// OpenAI-compatible servers omit usage from a stream unless it is asked
