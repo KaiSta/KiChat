@@ -1330,9 +1330,13 @@ project (120 000) and 15 000 in a chat (60 000), and a cut result leaves room fo
 other results and for the rounds after it. A quarter rather than a flat figure because the
 budget it divides is already the mode's, and 30 000 sits just under the 32 000 a reply keeps
 verbatim above — one result can never be the whole of what survives a round. It bites where a
-result class has no bound of its own: measured with `llm.EstimateTokens`, a full 80 kB
-`read_file` prices at 25 886 tokens and a 64 kB command result at 22 471, both inside a
-project's share and both over a chat's. Pinned by `TestOneResultCannotTakeTheWholeBudget` (one
+result class has no bound of its own: measured with `llm.EstimateTokens`, a full 24 kB
+`read_file` prices at about 7 800 tokens and a 30 kB command result at about 10 800 (the
+app's own 64 kB command measurement, halved), both inside a project's share and both over a
+chat's. Under that share sits the absolute bound: no
+single result may exceed `tools.MaxToolResultBytes` (32 KiB, measured at 10 347 tokens of
+source), applied once where the result leaves the tool service, so a result the shares would
+have allowed is still cut. Pinned by `TestOneResultCannotTakeTheWholeBudget` (one
 result, then the next, then the total) and `TestAPerResultCeilingNeverExceedsTheRoom` (a share is
 a ceiling, not an entitlement: the room a request has left stays the smaller of the two).
 

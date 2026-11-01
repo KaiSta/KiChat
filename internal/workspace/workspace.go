@@ -45,7 +45,13 @@ const (
 	MaxReadLines = 2000
 	// MaxReadBytes bounds the same window by size, because lines are a poor unit for
 	// a file that is one minified line. Whichever bound is reached first cuts.
-	MaxReadBytes = 80 << 10
+	//
+	// It sits below tools.MaxToolResultBytes on purpose: a read is the one result that
+	// carries its own framing — the path and line range at the top, the line to continue
+	// from at the bottom — and a result cap that cut the window instead of the framing
+	// would take the continuation note away and leave the model believing it had read a
+	// range it had only seen the ends of.
+	MaxReadBytes = 24 << 10
 	// MaxListEntries is how many entries one listing returns before it says how many
 	// it left out. A folder of 40000 files is a listing nobody reads.
 	MaxListEntries = 300

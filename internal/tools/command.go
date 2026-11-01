@@ -58,8 +58,12 @@ const (
 	// belongs in a terminal the user owns rather than in a turn that blocks on it.
 	MaxCommandTimeout = 600
 	// commandHeadBytes and commandTailBytes are how much of each end is kept.
-	commandHeadBytes = 32 << 10
-	commandTailBytes = 32 << 10
+	//
+	// Their sum stays under MaxToolResultBytes, with room for the note that names what was
+	// dropped: a bound applied twice would cut a body that already says where it was cut,
+	// and the second note would count bytes the first had already removed.
+	commandHeadBytes = 15 << 10
+	commandTailBytes = 15 << 10
 )
 
 // How a running command reports itself.

@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"kichat/internal/config"
 	"kichat/internal/llm"
+	"kichat/internal/workspace"
 )
 
 // TestParseTextToolCallsHandlesBothProtocols covers the fallback used by models
@@ -256,5 +258,74 @@ func TestTextProtocolToolsListsOnlyWhatIsOffered(t *testing.T) {
 	// No tools at all: no line, so the prompt does not promise a capability it lacks.
 	if got := TextProtocolTools(config.LangEnglish, nil); got != "" {
 		t.Errorf("an empty tool set rendered %q, want no line at all", got)
+	}
+}
+
+// TestOneResultCannotExceedTheCap is the bound every tool passes through, whichever tool it
+// was: a result that is too big is paid for again in every later round of the reply and every
+// later turn of the chat, so no single call may produce one.
+func TestOneResultCannotExceedTheCap(t *testing.T) {
+	s := &Service{}
+	const head, tail = "START-OF-RESULT", "END-OF-RESULT"
+	body := head + strings.Repeat("m", 4*MaxToolResultBytes) + tail
+
+	got := s.limitResult(body)
+	if len(got) > MaxToolResultBytes {
+		t.Fatalf("a result came out at %d bytes, the cap is %d", len(got), MaxToolResultBytes)
+	}
+	// Both ends survive: they are what a model uses — a read's header and continuation note,
+	// a command's first error and its last line.
+	if !strings.HasPrefix(got, head) {
+		t.Error("the beginning of the result was cut")
+	}
+	if !strings.HasSuffix(got, tail) {
+		t.Error("the end of the result was cut")
+	}
+	// The cut says what happened at the place it happened, so a model can tell a whole result
+	// from a shortened one instead of building on what it thinks it read.
+	if !strings.Contains(got, "was left out") {
+		t.Errorf("the result does not say it was cut:\n%q", got[max(0, len(got)/2-200):len(got)/2+200])
+	}
+	// The note is the only thing between the ends: nearly the whole cap is still payload.
+	if len(got) < MaxToolResultBytes*9/10 {
+		t.Errorf("the cut kept only %d of %d bytes", len(got), MaxToolResultBytes)
+	}
+	// And the note names the amount it was given, rather than saying "truncated".
+	if note := elisionNote(config.LangEnglish, 123456); !strings.Contains(note, humanBytes(123456)) {
+		t.Errorf("the note does not name the size it was given: %q", note)
+	}
+	// A result inside the cap is untouched, byte for byte.
+	if small := strings.Repeat("x", MaxToolResultBytes); s.limitResult(small) != small {
+		t.Error("a result exactly at the cap was rewritten")
+	}
+	if small := "short enough"; s.limitResult(small) != small {
+		t.Error("a small result was rewritten")
+	}
+}
+
+// TestTheCutDoesNotBreakACharacter keeps the payload valid UTF-8: the result travels in an
+// event whose payload is a string, and a card that renders a half character shows a
+// replacement mark in the middle of a word.
+func TestTheCutDoesNotBreakACharacter(t *testing.T) {
+	s := &Service{}
+	// Every character is three bytes, so a cut at the middle of the body lands inside one.
+	body := strings.Repeat("日", MaxToolResultBytes)
+	got := s.limitResult(body)
+	if !utf8.ValidString(got) {
+		t.Error("the cut left an incomplete character in the result")
+	}
+	if len(got) > MaxToolResultBytes {
+		t.Errorf("result is %d bytes, the cap is %d", len(got), MaxToolResultBytes)
+	}
+}
+
+// TestTheReadWindowFitsUnderTheCap ties the two numbers together: a read carries a header and
+// a continuation note around its text, and a window that reached the cap itself would have
+// that framing cut off — leaving a model told to continue from a line it never saw.
+func TestTheReadWindowFitsUnderTheCap(t *testing.T) {
+	const framing = 2 << 10
+	if workspace.MaxReadBytes+framing > MaxToolResultBytes {
+		t.Fatalf("a read window of %d bytes leaves no room under the %d-byte result cap for its framing",
+			workspace.MaxReadBytes, MaxToolResultBytes)
 	}
 }

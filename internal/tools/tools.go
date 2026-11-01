@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 	"uuid"
 
 	"kichat/internal/config"
@@ -33,15 +34,34 @@ const (
 	ToolReadPages  = "read_pages"
 )
 
+// MaxToolResultBytes is the largest text one tool result may hand the model, whichever
+// tool produced it.
+//
+// The per-tool bounds are ceilings of their own — a read stops at workspace.MaxReadBytes, a
+// command keeps an end of each of its two windows — but each of them bounds what a tool
+// *looks at*, not what the result costs. A tool result is re-sent in every later round of
+// the reply and every later turn of the chat, so one that is too big is paid for many
+// times, and a tool added after this comment would have no bound at all. This is that bound,
+// applied once where the result leaves the service.
+//
+// 32 KiB of Go source prices at 10 347 tokens with `llm.EstimateTokens` (measured on a slide
+// of this package); above that a result stops being something a model reads and becomes
+// something it skips or summarises badly. The read window sits below it (24 KiB, about 7 800
+// tokens) so that a read's own header and continuation note fit inside as well, and a
+// command's two ends do too (15 KiB each).
+const MaxToolResultBytes = 32 << 10
+
 // MaxScrapeTokens is the ceiling on one scraped page's text, whichever length the model
 // asks for; ScrapeMaxTokens is only the default it gets when it asks for nothing.
 //
 // The argument has to have a ceiling, because the model writes it and nothing else bounds
 // it: a `max_tokens: 400000` on a long manual puts 400 000 tokens into the history in one
 // call, and every later round of that answer and every later turn of the chat re-sends
-// them. The other reads already have that bound — a file read stops at 80 kB whichever
-// line count it was given (workspace.MaxReadBytes), a command keeps 32 kB of each end — so
-// this is the same bound for the one result that had none.
+// them. The other reads already have that bound — a file read stops at 24 kB whichever
+// line count it was given (workspace.MaxReadBytes), a command keeps 15 kB of each end — so
+// this is the same bound for the one result that had none. A page longer than this ceiling
+// still never reaches the model whole: MaxToolResultBytes is the outer bound every result
+// passes through.
 //
 // 30 000 tokens is that read in the estimator's unit (~26 000 for source, more for prose
 // with fewer characters per token), which keeps a page and a file the same size of result.
@@ -435,6 +455,18 @@ func (s *Service) Execute(ctx context.Context, chatID, name, argsJSON string) (s
 
 // ExecuteWithSummary runs one tool call and reports both halves of what it produced.
 func (s *Service) ExecuteWithSummary(ctx context.Context, chatID, name, argsJSON string) (Result, error) {
+	result, err := s.dispatch(ctx, chatID, name, argsJSON)
+	if err != nil {
+		return result, err
+	}
+	// One bound for every result, applied here rather than in each tool: a tool added later
+	// cannot forget it, and a tool that already bounds itself is under it and untouched.
+	result.Text = s.limitResult(result.Text)
+	return result, nil
+}
+
+// dispatch runs the tool the call names.
+func (s *Service) dispatch(ctx context.Context, chatID, name, argsJSON string) (Result, error) {
 	// A name borrowed from another convention arrives with that convention's field names too
 	// (argumentAliases), so the arguments are resolved before the switch rather than inside each
 	// tool: one table, one place, and no tool that can forget it.
@@ -486,6 +518,57 @@ func (s *Service) badArguments(err error) error {
 	return uimsg.Detailf("tools.badArgs",
 		fmt.Sprintf(text(s.Language(), "die Argumente waren kein gültiges JSON: %v",
 			"the arguments were not valid JSON: %v"), err), err)
+}
+
+// limitResult cuts a result that is over MaxToolResultBytes down to it, keeping both ends.
+//
+// The middle is what goes, because the ends are the parts a model uses: a read's header and
+// continuation note, a command's first error and its last, a search's first hits. What was
+// removed is counted in the text itself, so a model can tell a whole result from a shortened
+// one and can see whether asking narrower is worth a round.
+func (s *Service) limitResult(body string) string {
+	if len(body) <= MaxToolResultBytes {
+		return body
+	}
+	head := MaxToolResultBytes / 2
+	tail := MaxToolResultBytes / 2
+	for {
+		note := elisionNote(s.Language(), len(body)-head-tail)
+		if head+tail+len(note) <= MaxToolResultBytes {
+			return trimPartialRune(body[:head], false) + note +
+				trimPartialRune(body[len(body)-tail:], true)
+		}
+		tail -= head + tail + len(note) - MaxToolResultBytes
+	}
+}
+
+// elisionNote is the sentence that stands where the middle of a result was taken out.
+//
+// It names the amount rather than saying "truncated", and it says which argument makes the
+// next call smaller, because a model that has been cut off otherwise repeats the same call
+// and pays for the same cut twice.
+func elisionNote(lang string, omitted int) string {
+	return "\n" + fmt.Sprintf(text(lang,
+		"… %s in der Mitte dieses Ergebnisses weggelassen: es war zu groß, um es ganz zu senden. "+
+			"Frage gezielter nach — eine Datei mit offset/limit oder \"outline\": true, einen Befehl "+
+			"mit engerer Ausgabe, eine Seite in Abschnitten —, statt dasselbe noch einmal zu verlangen …",
+		"… %s in the middle of this result was left out: it was too large to send whole. Ask for "+
+			"less at a time — a file with offset/limit or \"outline\": true, a command that prints "+
+			"less, a page in sections — rather than asking for the same thing again …"),
+		humanBytes(int64(omitted))) + "\n"
+}
+
+// trimPartialRune drops the bytes of a character the cut went through, so the payload stays
+// valid UTF-8: the event it travels in carries a string, and the card renders it.
+func trimPartialRune(s string, fromEnd bool) string {
+	for len(s) > 0 && !utf8.ValidString(s) {
+		if fromEnd {
+			s = s[1:]
+		} else {
+			s = s[:len(s)-1]
+		}
+	}
+	return s
 }
 
 type searchArgs struct {

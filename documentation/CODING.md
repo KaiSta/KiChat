@@ -412,7 +412,7 @@ taken *around* the match with an ellipsis on whichever side was cut (`workspace.
 line is the unit a reader thinks in, but a minified bundle or a generated JSON is one line of
 megabytes: returning it whole spends the answer's tool budget on a single hit, and cutting from
 the start hides the very text that made the line a hit. The same bound is why a `read_file`
-whose line is larger than the whole 80 kB window answers *"line 1 is longer than the window,
+whose line is larger than the whole 24 kB window answers *"line 1 is longer than the window,
 search for it"* instead of *"the file is empty"* — the window never starts, and the second
 sentence is the one reading that makes a model rewrite a file it thinks has nothing in it.
 

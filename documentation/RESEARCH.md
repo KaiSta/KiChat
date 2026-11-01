@@ -373,9 +373,12 @@ the bound on the figure the model names, and a larger one is clamped rather than
 Without it, `max_tokens: 400000` on a long manual put a whole document's worth of tokens
 into the history in a single call — and a tool result is what every later round of that
 answer and every later turn of the chat re-sends. The other two read tools have been
-bounded this way from the start (a file read stops at 80 kB whichever line count it was
-given, a command keeps 32 kB of each end), so the scrape was the one result class with no
-ceiling at all. 30,000 tokens is that 80 kB read in the estimator's unit, and the sentence
+bounded this way from the start (a file read stops at 24 kB whichever line count it was
+given, a command keeps 15 kB of each end), so the scrape was the one result class with no
+ceiling at all. 30,000 tokens is generous beside them on purpose, because prose packs fewer
+characters into a token than source does — and a page that still comes out over the ceiling
+is cut by `tools.MaxToolResultBytes` (32 KiB), the bound every result passes through before
+it reaches the model. The sentence
 `TrimToTokens` already appends names both numbers (`ca. 30000 von 69000 Tokens übernommen`),
 so a clamped request is told what bound did the cutting instead of quietly ending. The
 schema states the ceiling where the model reads the argument: a bound it does not know

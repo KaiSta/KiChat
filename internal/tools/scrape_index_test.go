@@ -153,8 +153,9 @@ func TestASmallPageStaysInline(t *testing.T) {
 // lack. The model writes that argument, and a result is what every later round of the same
 // answer and every later turn of the chat re-sends — so one `max_tokens: 400000` on a long
 // manual was a whole document's worth of tokens added to the history in a single call. A
-// file read has been bounded this way all along (80 kB whatever line count it is given) and
-// so has a command (32 kB of each end); this is the one result class that had no ceiling.
+// file read has been bounded this way all along (24 kB whatever line count it is given) and
+// so has a command (15 kB of each end); this is the one result class that had no ceiling of
+// its own — `MaxToolResultBytes` is the outer one every result passes through.
 func TestAScrapeCannotAskForMoreThanTheCeiling(t *testing.T) {
 	st, chatID := openChatStore(t)
 
