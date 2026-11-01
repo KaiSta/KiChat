@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -116,6 +117,43 @@ func TestParseTextToolCallsHandlesBothProtocols(t *testing.T) {
 				t.Errorf("visible = %q, want %q", strings.TrimSpace(visible), tc.wantVisible)
 			}
 		})
+	}
+}
+
+// TestParseTextToolCallsUnwrapsArgumentsWrittenAsAString covers the call shape a model
+// produces when it copies the wire format: the arguments are a *string* of JSON, and the
+// tool used to be handed that string — "cannot unmarshal string into Go value" — on a call
+// whose query sat right there in the reply.
+func TestParseTextToolCallsUnwrapsArgumentsWrittenAsAString(t *testing.T) {
+	reply := "```tool_call\n" +
+		`{"name": "search_web", "arguments": "{\"query\": \"Nachrichten Karlsruhe\", \"count\": 5}"}` +
+		"\n```"
+	calls, visible := ParseTextToolCalls(reply)
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1", len(calls))
+	}
+	var args searchArgs
+	if err := decodeLoose(calls[0].Arguments, &args); err != nil {
+		t.Fatalf("decodeLoose(%s): %v", calls[0].Arguments, err)
+	}
+	if args.Query != "Nachrichten Karlsruhe" {
+		t.Errorf("query = %q, from arguments %s", args.Query, calls[0].Arguments)
+	}
+	if strings.Contains(visible, "tool_call") {
+		t.Errorf("protocol leaked: %q", visible)
+	}
+}
+
+// TestAToolCallWithStringArgumentsStillRuns pins the same shape one layer down, where the
+// tool itself is asked: whatever wrote the call, a string of JSON is the arguments.
+func TestAToolCallWithStringArgumentsStillRuns(t *testing.T) {
+	service, chatID, _ := projectService(t, map[string]string{"main.go": "package main\n"})
+	out, err := service.Execute(context.Background(), chatID, ToolSearchFiles, `"{\"query\": \"main\"}"`)
+	if err != nil {
+		t.Fatalf("search_files with string arguments: %v", err)
+	}
+	if !strings.Contains(out, "main.go") {
+		t.Errorf("the hit is missing:\n%s", out)
 	}
 }
 

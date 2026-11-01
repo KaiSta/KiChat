@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -467,6 +468,11 @@ func (s *Service) ExecuteWithSummary(ctx context.Context, chatID, name, argsJSON
 
 // dispatch runs the tool the call names.
 func (s *Service) dispatch(ctx context.Context, chatID, name, argsJSON string) (Result, error) {
+	// Arguments written as a string of JSON are unwrapped here, for the same reason the
+	// aliases are resolved here: one place, and no path that can forget it. The text protocol
+	// can produce that shape (a model copying the wire format), and so can a proxy that
+	// re-encodes a backend's request.
+	argsJSON = string(unwrapArguments([]byte(argsJSON)))
 	// A name borrowed from another convention arrives with that convention's field names too
 	// (argumentAliases), so the arguments are resolved before the switch rather than inside each
 	// tool: one table, one place, and no tool that can forget it.
@@ -1168,7 +1174,7 @@ func ParseTextToolCalls(text string) ([]llm.ToolCall, string) {
 		if name == "" {
 			return
 		}
-		args := firstNonEmptyRaw(parsed.Arguments, parsed.Args, parsed.Parameters)
+		args := unwrapArguments(firstNonEmptyRaw(parsed.Arguments, parsed.Args, parsed.Parameters))
 		if len(args) == 0 || string(args) == "null" {
 			// The same model often writes the arguments beside the name instead of under
 			// them — `{"name": "search_web", "query": "…", "count": 8}` — and reading only
@@ -1247,6 +1253,31 @@ func inlineArguments(call string) []byte {
 	return encoded
 }
 
+// unwrapArguments reads the arguments of a call that was written as a *string* of JSON
+// rather than as the object itself:
+//
+//	{"name": "search_web", "arguments": "{\"query\": \"x\"}"}
+//
+// That is the shape a model writes when it copies the wire format it has seen, and it used
+// to reach the tool as a string: the decode then failed with "cannot unmarshal string into
+// Go value", on a call whose query sat right there in the reply. One layer is unwrapped and
+// only when the inner text is valid JSON, so a genuine string argument is left alone.
+func unwrapArguments(args []byte) []byte {
+	trimmed := bytes.TrimSpace(args)
+	if len(trimmed) == 0 || trimmed[0] != '"' {
+		return args
+	}
+	var inner string
+	if err := json.Unmarshal(trimmed, &inner); err != nil {
+		return args
+	}
+	inner = strings.TrimSpace(inner)
+	if !json.Valid([]byte(inner)) {
+		return args
+	}
+	return []byte(inner)
+}
+
 // functionArguments turns the body of a `<function=name>` element into the JSON object the
 // tool expects. It accepts the two forms the templates write: the arguments as an object,
 // and one `<parameter=key>` tag per argument.
@@ -1256,8 +1287,8 @@ func inlineArguments(call string) []byte {
 // only text stays text, and the tags' own whitespace is trimmed off it.
 func functionArguments(body string) (string, bool) {
 	trimmed := strings.TrimSpace(body)
-	if strings.HasPrefix(trimmed, "{") {
-		return strings.TrimSpace(body), true
+	if unwrapped := unwrapArguments([]byte(trimmed)); len(unwrapped) > 0 && unwrapped[0] == '{' {
+		return string(unwrapped), true
 	}
 	pairs := parameterPair.FindAllStringSubmatch(body, -1)
 	if len(pairs) == 0 {
