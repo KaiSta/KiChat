@@ -613,6 +613,147 @@ func TestAToolResultFromAnEarlierTurnIsNotAged(t *testing.T) {
 	}
 }
 
+// TestARepeatedReadReplacesTheOneBeforeIt pins the re-read rule: the newest read of a window is
+// the only copy of it in the request, even while the verbatim budget still has room for all of
+// them. A reply that reads one file five times otherwise carries five windows, four of them the
+// text the model has already replaced — the cost, and the wrong version standing beside the
+// right one.
+func TestARepeatedReadReplacesTheOneBeforeIt(t *testing.T) {
+	const path = "internal/chat/engine.go"
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "ändere das"}}
+	current := []bool{true}
+	for i := 0; i < 5; i++ {
+		msgs, current = appendRead(msgs, current, fmt.Sprintf("call-%d", i), path,
+			readArgs(path, 0, 0), readResult(path)+fmt.Sprintf("// runde %d\n", i))
+	}
+
+	aged, dropped, saved := ageToolResults(msgs, current)
+
+	superseded := 0
+	for _, m := range aged {
+		if m.Role == llm.RoleTool && strings.Contains(m.Content, "ältere Stand weggelassen") {
+			superseded++
+		}
+	}
+	if superseded != 4 {
+		t.Errorf("%d of the five reads were replaced, want four", superseded)
+	}
+	if got := llm.EstimateTokens(readResult(path)); saved < 3*got {
+		t.Errorf("saved %d tokens of about %d in four windows", saved, 4*got)
+	}
+	// The newest read is the file as it is, and it is what the round works from.
+	if !strings.Contains(aged[len(aged)-1].Content, "x = 1") ||
+		!strings.Contains(aged[len(aged)-1].Content, "// runde 4") {
+		t.Error("the newest read was replaced instead of the older ones")
+	}
+	// Nothing is forgotten while a copy of the file is still sent: the tool's "already read in
+	// this turn" answer is true about this request, and a re-read would cost a round to fetch
+	// text the model has.
+	if len(dropped) != 0 {
+		t.Errorf("a file whose text is still in the request was reported as dropped: %v", dropped)
+	}
+}
+
+// TestOnlyACoveringReadReplacesAnEarlierOne keeps the rule about coverage rather than paths: a
+// 2 000-line file is read in windows, and the window at line 1 001 is not a replacement for the
+// window at line 1. An outline is not a window at all — it is the way back to the text.
+func TestOnlyACoveringReadReplacesAnEarlierOne(t *testing.T) {
+	const path = "internal/chat/generate.go"
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "ändere das"}}
+	current := []bool{true}
+	msgs, current = appendRead(msgs, current, "call-1", path, readArgs(path, 1, 1000), readResult(path))
+	msgs, current = appendRead(msgs, current, "call-2", path, readArgs(path, 1001, 1000), readResult(path))
+	// An outline of the same file: a declaration list with line numbers, not a window.
+	msgs, current = appendRead(msgs, current, "call-3", path,
+		fmt.Sprintf(`{"path":%q,"outline":true}`, path), "1: func main()\n40: func run()\n")
+
+	aged, dropped, saved := ageToolResults(msgs, current)
+	if saved != 0 || len(dropped) != 0 {
+		t.Fatalf("two windows and an outline were not left alone: saved %d, dropped %v", saved, dropped)
+	}
+	for _, i := range []int{2, 4} {
+		if !strings.Contains(aged[i].Content, "x = 1") {
+			t.Errorf("message %d lost its window although nothing covered it", i)
+		}
+	}
+
+	// A read wide enough to cover the first window — but not the second — replaces only that
+	// one, and names the lines it stands in for.
+	msgs, current = appendRead(msgs, current, "call-4", path, readArgs(path, 1, 1500), readResult(path))
+	aged, dropped, saved = ageToolResults(msgs, current)
+	if saved <= 0 || len(dropped) != 0 {
+		t.Fatalf("a covering read replaced nothing: saved %d, dropped %v", saved, dropped)
+	}
+	if !strings.Contains(aged[2].Content, "Zeilen 1–1000") {
+		t.Errorf("the first window was not the one replaced:\n%s", aged[2].Content)
+	}
+	if !strings.Contains(aged[4].Content, "x = 1") {
+		t.Error("the second window was replaced by a read that does not cover it")
+	}
+	if aged[6].Content != "1: func main()\n40: func run()\n" {
+		t.Error("an outline was replaced by a window that happens to cover its lines")
+	}
+	if !strings.Contains(aged[8].Content, "x = 1") {
+		t.Error("the newest window was replaced")
+	}
+}
+
+// TestAFileIsForgottenOnlyWhenNoCopyOfItIsSent is the other half of the rule: the tool's memory
+// of what the turn has read has to follow the request. A file whose every copy is gone has to be
+// readable again, and one whose copy is still there must not be — a "read it again" there would
+// spend a round to fetch text the model was just sent.
+func TestAFileIsForgottenOnlyWhenNoCopyOfItIsSent(t *testing.T) {
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "arbeite das ab"}}
+	current := []bool{true}
+	// Two reads of one file, both long enough ago to be outside the newest windows once the rest
+	// of the reply has been read.
+	msgs, current = appendRead(msgs, current, "call-1", "alt.go", `{"path":"alt.go"}`, readResult("alt.go"))
+	msgs, current = appendRead(msgs, current, "call-2", "alt.go", `{"path":"alt.go"}`, readResult("alt.go"))
+	// Enough small results after them to spend the whole verbatim budget. Each one is under the
+	// floor, so the budget pass keeps every filler verbatim and the cut lands on the two copies
+	// of alt.go — one superseded, one aged, and no copy of the file left in the request.
+	small := strings.Repeat("x = 1\n", 200)
+	for i := 0; i < 66; i++ {
+		name := fmt.Sprintf("datei%d.go", i)
+		msgs, current = appendRead(msgs, current, fmt.Sprintf("call-%d", i+3), name,
+			readArgs(name, 0, 0), small)
+	}
+
+	_, dropped, saved := ageToolResults(msgs, current)
+	if saved <= 0 {
+		t.Fatal("nothing was left out, so the forgetting rule was not tested")
+	}
+	// Once, although both of its results were stubbed for different reasons: the caller turns
+	// this into one ForgetReads per path, and a path is a path.
+	if len(dropped) != 1 || dropped[0] != "alt.go" {
+		t.Errorf("dropped = %v, want just alt.go", dropped)
+	}
+}
+
+// appendRead adds one read_file call and the result that answers it, with the reply flags that
+// say both belong to the reply being assembled.
+func appendRead(msgs []llm.Message, current []bool, id, path, args, content string) ([]llm.Message, []bool) {
+	msgs = append(msgs,
+		llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: id,
+			Name: tools.ToolReadFile, Arguments: args}}},
+		llm.Message{Role: llm.RoleTool, Name: tools.ToolReadFile, ToolCallID: id, Content: content},
+	)
+	return msgs, append(current, false, true)
+}
+
+// readArgs is the argument JSON of one read, with an absent window left absent the way a model
+// writes it.
+func readArgs(path string, from, limit int) string {
+	args := fmt.Sprintf(`{"path":%q`, path)
+	if from > 0 {
+		args += fmt.Sprintf(`,"offset":%d`, from)
+	}
+	if limit > 0 {
+		args += fmt.Sprintf(`,"limit":%d`, limit)
+	}
+	return args + "}"
+}
+
 // TestAShortToolResultIsNeverAged is the floor: an error line or a test summary is cheap to
 // keep and is often the thing that matters, and a notice in its place would cost more
 // explanation than it saved.

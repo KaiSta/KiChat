@@ -421,6 +421,15 @@ sentence is the one reading that makes a model rewrite a file it thinks has noth
 rounds ago does not need it again. The memory is per turn and per chat, bounded, and dropped
 when the turn ends.
 
+**The request keeps one copy of what was read.** When a later read covers lines an earlier one
+covered as well, the older window is left out of the request — never out of the transcript, where
+the card still shows what was read — and a notice says which lines and that the current text is
+further down. It is the file as it was before the model's own edit, standing beside the copy that
+is the file as it is, and a model quoting the wrong one re-fixes what it has already fixed. A read
+of a *different* section is not a replacement: a long file is read in windows, so the rule is
+coverage of lines, not the path. With the ageing that runs beside it, in
+[COMPACT.md §18](COMPACT.md).
+
 **What arrives instead of a large file may be a summary.** With a condensation model chosen in
 Settings → Tool results, a `read_file` result above the threshold is condensed before the
 model reads it; the notice names the way back (`offset`/`limit`, which is never condensed) and

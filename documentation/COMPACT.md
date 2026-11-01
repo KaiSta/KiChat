@@ -1321,6 +1321,31 @@ the thing that matters, and a notice in its place would cost more explanation th
 Earlier turns are untouched — what an earlier answer was based on is compaction's to summarise,
 not this reply's to rewrite.
 
+**A re-read replaces the read before it.** Ageing alone would keep five copies of one file for
+as long as the reply stays inside the 32 000 budget, which is exactly the state a reply reaches
+when it checks its own work: read, edit, read again, edit again. `supersedeReads` therefore runs
+before the budget is counted, and leaves out every read whose lines a later read of the same
+file covered as well:
+
+> `[Tool-Ergebnis von read_file (internal/chat/engine.go, Zeilen 1–500): 4 812 Tokens. Eine
+> spätere Lesung in dieser Antwort hat denselben Bereich abgedeckt; weiter unten steht der
+> aktuelle Text, hier wurde der ältere Stand weggelassen. Brauchst du ihn doch, lies den Bereich
+> erneut.]`
+
+The rule is **coverage of lines, not the path**: a 2 000-line file is read in windows, and the
+window at line 1 001 is not a replacement for the window at line 1. The window is taken from the
+call's arguments — with the read's own resolution of a missing `offset`/`limit`, which is why
+`workspace.DefaultReadLines` is exported — and never parsed out of the result, whose header a
+window cut short by `MaxReadBytes` or by the end of the file does not carry. An `outline` is a
+window in neither direction: a declaration list must not replace the text it exists to locate,
+and a window must not replace it either. A result under `toolStubMinTokens` is left in place,
+like an aged one.
+
+**A correction, not only a saving.** The older copy is not merely redundant, it is wrong: it is
+the file as it was before the edit the model just made, standing beside the copy that is the file
+as it is. A model quoting the wrong one re-fixes what it has already fixed, which is the shape
+of failure that costs a whole round of edits to undo.
+
 **No single result may spend the answer.** Ageing bounds what a reply *re-sends*; the tool budget
 bounds what it *adds*, and `take` used to hand one result everything that was left of it — so the
 first enormous result spent the allowance the rest of the reply's rounds were going to need.
@@ -1344,9 +1369,12 @@ a ceiling, not an entitlement: the room a request has left stays the smaller of 
 the app remembers which file each turn has read, and a model asking again for a range it already
 read is answered "unchanged — use a different offset". That is true about the transcript and
 useless about the request, because the request no longer carries the text. `Engine.buildAssembly`
-therefore forgets the read for exactly the files that were dropped (`Service.ForgetReads`,
-`internal/tools/reads.go`), so the ordinary way to refresh a window works again. Every other
-read keeps the shortcut.
+therefore forgets the read for exactly the files that are in **no copy at all** — stubbed by the
+budget, replaced by a later read, or both (`Service.ForgetReads`, `internal/tools/reads.go`) — so
+the ordinary way to refresh a window works again. A file whose newer read is still in the request
+is deliberately not forgotten: there the shortcut's answer is true about this request, and a
+re-read would spend a round fetching text the model was just sent. Every other read keeps the
+shortcut as well.
 
 **What does not change.** The stored rows and the tool cards keep the full record; the rewrite
 is on the request only. The saving is taken off the history segment, so the meter keeps
@@ -1354,5 +1382,8 @@ describing what is sent.
 
 **Pinned by** `TestOldToolResultsAreAgedOutOfTheRequest` (oldest dropped, newest kept, calls
 still pair), `TestAToolResultFromAnEarlierTurnIsNotAged` (scope), `TestAShortToolResultIsNeverAged`
-(the floor) and `TestAssembleAgesTheReplyItIsAssembling` (the boundary survives the assembly
+(the floor), `TestARepeatedReadReplacesTheOneBeforeIt` (five reads of one window cost one),
+`TestOnlyACoveringReadReplacesAnEarlierOne` (coverage, not path; an outline is untouched),
+`TestAFileIsForgottenOnlyWhenNoCopyOfItIsSent` (one `ForgetReads` per path, and only then) and
+`TestAssembleAgesTheReplyItIsAssembling` (the boundary survives the assembly
 loop, which skips messages and inserts the system message at position zero).

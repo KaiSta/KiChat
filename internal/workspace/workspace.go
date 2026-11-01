@@ -43,6 +43,11 @@ const (
 	// favour: it is charged against the turn's tool budget, and a file that does not
 	// fit is better read in two calls the model chose than in one it did not.
 	MaxReadLines = 2000
+	// DefaultReadLines is the window a read with no `limit` returns. Exported for the same
+	// reason: the request assembly has to know which lines a call covered without sending
+	// it, and a second copy of 500 there would drift from the read the first time either
+	// number moved.
+	DefaultReadLines = 500
 	// MaxReadBytes bounds the same window by size, because lines are a poor unit for
 	// a file that is one minified line. Whichever bound is reached first cuts.
 	//
@@ -367,7 +372,7 @@ func (r Root) Read(rel string, offset, lines int) (File, error) {
 		return File{}, err
 	}
 	if lines <= 0 {
-		lines = 500
+		lines = DefaultReadLines
 	}
 	if lines > MaxReadLines {
 		lines = MaxReadLines

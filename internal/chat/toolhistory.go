@@ -3,11 +3,13 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"kichat/internal/llm"
 	"kichat/internal/tools"
 	"kichat/internal/uimsg"
+	"kichat/internal/workspace"
 )
 
 // A tool call has to name a tool. Two things can break that: a model that mangles
@@ -69,10 +71,10 @@ const (
 // answered: results from earlier turns are left alone, because those are what compaction folds
 // and a reply has no business rewriting a previous answer's evidence.
 //
-// droppedReads names the files whose `read_file` result was stubbed, so the caller can let the
-// model read them again; saved is the token difference, which the caller subtracts from the
-// budget so the meter describes the request that is sent rather than the one that could have
-// been.
+// droppedReads names the files whose `read_file` result no longer reaches the model in any
+// form, so the caller can let the model read them again; saved is the token difference, which
+// the caller subtracts from the budget so the meter describes the request that is sent rather
+// than the one that could have been.
 func ageToolResults(msgs []llm.Message, currentReply []bool) (aged []llm.Message,
 	droppedReads []string, saved int) {
 
@@ -86,6 +88,11 @@ func ageToolResults(msgs []llm.Message, currentReply []bool) (aged []llm.Message
 	aged = make([]llm.Message, len(msgs))
 	copy(aged, msgs)
 
+	// Re-reads go first, and before the budget is counted: the text an outdated read would
+	// otherwise spend the budget on is not the text of the file any more.
+	stubbed := map[int]bool{}
+	saved += supersedeReads(aged, currentReply, arguments, stubbed)
+
 	kept := 0
 	for i := len(aged) - 1; i >= 0; i-- {
 		if i >= len(currentReply) || !currentReply[i] || aged[i].Role != llm.RoleTool {
@@ -96,15 +103,196 @@ func ageToolResults(msgs []llm.Message, currentReply []bool) (aged []llm.Message
 			kept += size
 			continue
 		}
-		if path := readPath(aged[i].Name, arguments[aged[i].ToolCallID]); path != "" {
-			droppedReads = append(droppedReads, path)
-		}
 		stub := toolStub(aged[i].Name, size)
 		aged[i].Content = stub
+		stubbed[i] = true
 		kept += llm.EstimateTokens(stub)
 		saved += size - llm.EstimateTokens(stub)
 	}
+
+	// A file is only forgotten when no copy of it is sent at all. While an intact read of it
+	// remains, the tool's own "already read in this turn" answer is still true about this
+	// request — and re-reading the file would cost a round to fetch text the model has.
+	intact := map[string]bool{}
+	for i, m := range aged {
+		if stubbed[i] || i >= len(currentReply) || !currentReply[i] || m.Role != llm.RoleTool {
+			continue
+		}
+		if window, ok := readWindowOf(m.Name, arguments[m.ToolCallID]); ok {
+			intact[window.path] = true
+		}
+	}
+	seen := map[string]bool{}
+	for i, m := range aged {
+		if !stubbed[i] || i >= len(currentReply) || !currentReply[i] || m.Role != llm.RoleTool {
+			continue
+		}
+		window, ok := readWindowOf(m.Name, arguments[m.ToolCallID])
+		if !ok || intact[window.path] || seen[window.path] {
+			continue
+		}
+		seen[window.path] = true
+		droppedReads = append(droppedReads, window.path)
+	}
 	return aged, droppedReads, saved
+}
+
+// supersedeReads leaves out every read of a file whose lines a later read in the same reply has
+// covered as well, and says how many tokens that saved.
+//
+// A model re-reads constant-y: after an edit to check the text landed, after a failed test to
+// see the line again, after a round of thinking to be sure. Each of those is a whole window in
+// the request, and every later round re-sends all of them — so by the end of a reply that read
+// one file five times, four of those copies are the file as it *was*, sitting beside the copy
+// that is the file as it is. That is a cost, and it is also a correctness problem: a model
+// holding both versions quotes whichever it reads first, and the one it just replaced is the
+// one that says what it was about to fix.
+//
+// So the newest read of a window wins outright, without waiting for the budget to run out. A
+// re-read of a *different* section is not a replacement: a 2 000-line file is read in windows,
+// and the window read at line 900 is not the window read at line 1. The rule is therefore
+// coverage of lines, not the path alone.
+//
+// Two things keep it from being destructive. It is scoped to the reply being answered, like
+// the ageing below it — an earlier answer's evidence is compaction's to summarise. And a
+// result under toolStubMinTokens is kept: the notice would cost about what the copy does, and
+// the floor exists so that cheap results never turn into explanations.
+func supersedeReads(msgs []llm.Message, currentReply []bool, arguments map[string]string,
+	stubbed map[int]bool) (saved int) {
+
+	// Walked newest-first, so what a read has to be measured against is already collected.
+	newer := map[string][]readWindow{}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if i >= len(currentReply) || !currentReply[i] || msgs[i].Role != llm.RoleTool {
+			continue
+		}
+		window, ok := readWindowOf(msgs[i].Name, arguments[msgs[i].ToolCallID])
+		if !ok {
+			continue
+		}
+		replaced := false
+		for _, later := range newer[window.path] {
+			if later.covers(window) {
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			newer[window.path] = append(newer[window.path], window)
+			continue
+		}
+		size := llm.EstimateTokens(msgs[i].Content)
+		if size < toolStubMinTokens {
+			continue
+		}
+		stub := supersededStub(window, size)
+		msgs[i].Content = stub
+		stubbed[i] = true
+		saved += size - llm.EstimateTokens(stub)
+	}
+	return saved
+}
+
+// supersededStub is what the model reads in place of a read a later one replaced.
+//
+// It says which lines, that a newer copy is further down, and that a re-read is the way back —
+// the three things a model needs to not mistake a missing window for a file it has not seen.
+func supersededStub(window readWindow, tokens int) string {
+	return fmt.Sprintf("[Tool-Ergebnis von %s (%s): %d Tokens. Eine spätere Lesung in dieser Antwort "+
+		"hat denselben Bereich abgedeckt; weiter unten steht der aktuelle Text, hier wurde der "+
+		"ältere Stand weggelassen. Brauchst du ihn doch, lies den Bereich erneut.]",
+		tools.ToolReadFile, window.label(), tokens)
+}
+
+// readWindow is the range of a file one `read_file` call covered.
+//
+// Taken from the arguments and not from the result text: a window that was cut by MaxReadBytes
+// or by the end of the file does not carry the range its header promises, and the arguments are
+// what the call asked for either way.
+type readWindow struct {
+	path string
+	from int
+	to   int
+}
+
+// covers reports whether w read at least the lines that other read.
+func (w readWindow) covers(other readWindow) bool {
+	return other.from >= w.from && other.to <= w.to
+}
+
+// label names the range the way the read tool's own header does.
+func (w readWindow) label() string {
+	if w.from == w.to {
+		return fmt.Sprintf("%s, Zeile %d", w.path, w.from)
+	}
+	return fmt.Sprintf("%s, Zeilen %d–%d", w.path, w.from, w.to)
+}
+
+// readWindowOf is the window a read call covered, and false for any other tool.
+//
+// An `outline` call is not a window: it returns the declaration list with line numbers, and
+// using one to evict a window would drop the text the outline exists to help you find — or
+// evict the outline because a window happens to cover the same lines, which is worse.
+func readWindowOf(name, arguments string) (readWindow, bool) {
+	switch name {
+	case tools.ToolReadFile:
+	default:
+		return readWindow{}, false
+	}
+	path := readPath(name, arguments)
+	if path == "" {
+		return readWindow{}, false
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return readWindow{}, false
+	}
+	if looseTrue(args["outline"]) {
+		return readWindow{}, false
+	}
+	// The read tool's own resolution of the two arguments, so this cannot claim a window the
+	// call did not return: no limit is DefaultReadLines, no offset is line 1, and a limit over
+	// the maximum is the maximum.
+	from, limit := looseNumber(args["offset"]), looseNumber(args["limit"])
+	if limit <= 0 {
+		limit = workspace.DefaultReadLines
+	}
+	if limit > workspace.MaxReadLines {
+		limit = workspace.MaxReadLines
+	}
+	if from <= 0 {
+		from = 1
+	}
+	return readWindow{path: path, from: from, to: from + limit - 1}, true
+}
+
+// looseNumber reads a numeric argument the way a model writes one: a number, or a number in a
+// string (`"limit": "200"`), which the tool's own decoder accepts and so must not be a
+// window this file cannot see.
+func looseNumber(value any) int {
+	switch v := value.(type) {
+	case float64:
+		return int(v)
+	case string:
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// looseTrue reads a boolean argument the same way.
+func looseTrue(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "1", "yes", "ja":
+			return true
+		}
+	}
+	return false
 }
 
 // toolStub is what the model reads in place of a result it is no longer sent.
