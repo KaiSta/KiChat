@@ -1568,9 +1568,12 @@ func TestTheCutFollowsTheBackendsOwnPromptCount(t *testing.T) {
 	if carried == "" {
 		t.Fatal("the second request carried no tool result")
 	}
-	// The limit, less the count the backend gave, less the reserve for the answer.
+	// The limit, less the count the backend gave, less the reserve for the answer. The turn's
+	// clock rides on this very message and the fake backend's figure is a fixed 1200 rather than
+	// a count of the request it was sent — a real one counts the clock too, which is why the
+	// room it leaves is already that much smaller — so the result is measured as stored.
 	want := ceiling - reportedPrompt - settings.Compact.ReserveForResponse
-	if got := llm.EstimateTokens(carried); got > want {
+	if got := llm.EstimateTokens(withoutTurnState(carried)); got > want {
 		t.Fatalf("the tool result is %d tokens; with the backend's own count of %d the %d-token "+
 			"ceiling leaves %d", got, reportedPrompt, ceiling, want)
 	}

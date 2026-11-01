@@ -37,6 +37,52 @@ func TestRenderPromptSubstitutesKnownVariables(t *testing.T) {
 	}
 }
 
+// withoutTurnState is a request message as the transcript stores it. Assemble appends the
+// per-turn clock — and, in a project, the working tree — to the newest message, so a test that
+// asserts what that message *says* has to look past the block that follows it.
+func withoutTurnState(content string) string {
+	for _, marker := range []string{"\n\n<turn_clock>", "\n\n<project_git"} {
+		if i := strings.Index(content, marker); i >= 0 {
+			content = content[:i]
+		}
+	}
+	return content
+}
+
+// TestTheClockStaysOutOfTheRenderedPrompt is the cache rule at its smallest: the same template
+// rendered ninety-five minutes apart has to produce the same text, because the whole history
+// behind message zero is matched against it. A day later it may differ — the date is what the
+// variable is for — and the exact time reaches the model in the request's tail instead.
+func TestTheClockStaysOutOfTheRenderedPrompt(t *testing.T) {
+	now := time.Date(2026, 11, 1, 9, 5, 0, 0, time.UTC)
+	tmpl := "Aktuelles Datum / Zeit: {{datetime}}"
+	first := RenderPrompt(tmpl, TemplateVars{Now: now})
+	later := RenderPrompt(tmpl, TemplateVars{Now: now.Add(95 * time.Minute)})
+	if first != later {
+		t.Errorf("the rendered prompt moved with the clock, so every round of the reply is a miss"+
+			" for everything after it:\nfirst: %s\nlater: %s", first, later)
+	}
+	if strings.Contains(first, "Uhr") || strings.Contains(first, "09:05") {
+		t.Errorf("the clock is still in the rendered prompt: %q", first)
+	}
+	if !strings.Contains(first, germanWeekdays[now.Weekday()]) || !strings.Contains(first, "01.11.2026") {
+		t.Errorf("the date went missing, which is what the variable is for: %q", first)
+	}
+	if next := RenderPrompt(tmpl, TemplateVars{Now: now.Add(26 * time.Hour)}); next == first {
+		t.Errorf("the date no longer advances from one day to the next: %q", first)
+	}
+}
+
+// TestTurnClockIsISOAndToTheMinute keeps the tail's one moving value readable to a model
+// answering in any language, and keeps the seconds out of a difference no answer can act on.
+func TestTurnClockIsISOAndToTheMinute(t *testing.T) {
+	now := time.Date(2026, 11, 1, 14, 32, 44, 0, time.UTC)
+	want := "<turn_clock>2026-11-01 14:32 (UTC)</turn_clock>"
+	if got := turnClock(now); got != want {
+		t.Errorf("turnClock = %q, want %q", got, want)
+	}
+}
+
 // TestRenderPromptCoversEveryDocumentedVariable keeps the variable list and the
 // substitution map from drifting apart.
 func TestRenderPromptCoversEveryDocumentedVariable(t *testing.T) {

@@ -399,6 +399,51 @@ func TestAProjectsGitStateStaysOutOfTheCachedPrefix(t *testing.T) {
 	}
 }
 
+// TestTheClockRidesInTheTailToo is the same rule for the one value that moved without anyone
+// editing anything: the time. A coding reply is minutes of rounds, and `{{datetime}}` used to
+// render the clock into message zero, so every round that crossed a minute re-priced the whole
+// request. The date stays in the prompt; the exact time travels beside the working tree.
+func TestTheClockRidesInTheTailToo(t *testing.T) {
+	st := newTestStore(t)
+	project := store.Chat{
+		ID: "project-1", Title: "Projekt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.\nAktuelles Datum / Zeit: {{datetime}}",
+		Temperature:  0.7, TopP: 0.9, AutoCompact: false,
+		Mode: store.ModeCoding, Workspace: gitFolder(t),
+	}
+	if err := st.CreateChat(project); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	if err := st.CreateMessage(store.Message{
+		ID: "m1", ChatID: project.ID, Seq: 1, Role: "user",
+		Content: "Wie spät ist es?", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create message: %v", err)
+	}
+	settings := config.Default()
+	settings.AutoTitle = false
+	engine := NewEngine(st, llm.NewRegistry(nil), nil,
+		func() config.Settings { return settings }, (&eventLog{}).emit)
+
+	request := requestMessages(t, engine, project)
+	head := request[0].Content
+	if strings.Contains(head, "<turn_clock") {
+		t.Errorf("the clock is in the cached prefix, where it costs every round:\n%s", head)
+	}
+	if !strings.Contains(head, germanWeekdays[time.Now().Weekday()]) {
+		t.Errorf("the prompt lost the date as well:\n%s", head)
+	}
+	tail := request[len(request)-1].Content
+	if !strings.Contains(tail, "<turn_clock>") {
+		t.Errorf("the request carries no clock at all, so the model cannot answer a question"+
+			" about the time:\n%s", tail)
+	}
+	if head == tail {
+		t.Error("the clock was appended to the system message instead of the newest one")
+	}
+}
+
 // TestProjectToolsAreOfferedOnlyToAProject is the gate itself, asked of both halves:
 // what the request declares, and what the app would *execute* if the model named it.
 //

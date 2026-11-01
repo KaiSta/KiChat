@@ -181,9 +181,21 @@ What the numbers still do not add up to is **money**: KiChat carries no price ta
 Details says how many of its input tokens came from the cache and not what the round cost. A
 vendor that changes its prices would otherwise silently change what the app displays.
 
-The one thing this cannot protect is the system prompt itself: `{{context_used}}` and
-`{{datetime}}` change between requests by definition, so a prompt that uses them opts out of
-prefix caching for the whole conversation. That is the user's own text and is left alone.
+The clock is the second block that rides there, and it is the one that mattered most. The
+shipped presets all end in `Aktuelles Datum / Zeit: {{datetime}}`, and `{{datetime}}` used to
+render to the minute — so a reply whose rounds crossed a minute boundary re-priced its entire
+history on every round after it, which on a 1M-token model is the cost of a whole coding session
+without any work to show for it. `{{datetime}}` now renders the day and no clock
+(`RenderPrompt` in `internal/chat/prompt.go`); the exact time travels in the tail as
+`<turn_clock>2026-11-01 14:32 (CET)</turn_clock>`, beside the working tree, so message zero is
+byte-identical for as long as the reply lasts. `TestTheClockStaysOutOfTheRenderedPrompt` renders
+the template ninety-five minutes apart and fails if the two differ;
+`TestTheClockRidesInTheTailToo` asserts the placement on a real assembly.
+
+What this still cannot protect is the parts of the prompt that are the user's own text:
+`{{context_used}}` and `{{time}}` change between requests by definition, so a template that asks
+for either opts out of prefix caching for the whole conversation. The shipped presets use
+neither, and both are left alone.
 
 ## 6. Refusals
 

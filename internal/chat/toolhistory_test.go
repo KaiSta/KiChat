@@ -430,8 +430,9 @@ func TestAStoredMangledCallIsRepairedInTheHistory(t *testing.T) {
 	if len(names) != 1 || names[0] != "scrape_url" {
 		t.Fatalf("history carried tool calls %v, want the repaired scrape_url", names)
 	}
-	if result != "Der Seiteninhalt." {
-		t.Errorf("the tool result did not stay a tool turn: %q", result)
+	// The clock of the request rides on this message; the payload is what has to survive.
+	if got := withoutTurnState(result); got != "Der Seiteninhalt." {
+		t.Errorf("the tool result did not stay a tool turn: %q", got)
 	}
 	if resultName != "scrape_url" {
 		t.Errorf("the tool result is named %q, want the repaired scrape_url", resultName)

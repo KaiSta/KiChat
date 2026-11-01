@@ -436,27 +436,45 @@ func Assemble(in AssemblyInput) Assembly {
 	msgs, agedReads, agedTokens := ageToolResults(msgs, currentReply)
 	budget.History -= agedTokens
 
-	// The per-turn state (gitState) rides at the very end of the request, after everything the
-	// cache is meant to keep. The last message is the one that changed anyway — the user's
-	// question on the first round, the newest tool result on every round after it — so nothing
-	// in front of it shifts, where a block in the system message shifted all of it.
+	// The per-turn state rides at the very end of the request, after everything the cache is
+	// meant to keep: the exact clock, and in a project the working tree. The last message is the
+	// one that changed anyway — the user's question on the first round, the newest tool result on
+	// every round after it — so nothing in front of it shifts, where a block in the system message
+	// shifted all of it.
 	//
-	// Appended to that message rather than sent as one of its own: on the first round the
-	// newest message is the user's question, and a second user turn in a row is a shape the
-	// strict chat templates this app already works around refuse (see the note on the single
-	// system message above). Appending text changes neither the roles nor the count. A request
-	// with no history at all — a preview — has only the system message to carry it, and no
-	// cache worth protecting.
+	// The clock belongs here for the same reason, and it is why `{{datetime}}` renders at day
+	// precision (prompt.go): a reply's rounds are minutes apart, so a minute-granular value in
+	// message zero made every round a miss for the whole history behind it. After the history, a
+	// value that moves costs only its own tokens.
 	//
-	// The system prompt can still change between requests on its own: `{{context_used}}` and
-	// `{{datetime}}` are the user's own text, and rewriting what their prompt says to favour a
-	// vendor's cache is not this function's call.
+	// Appended to that message rather than sent as one of its own: on the first round the newest
+	// message is the user's question, and a second user turn in a row is a shape the strict chat
+	// templates this app already works around refuse (see the note on the single system message
+	// above). Appending text changes neither the roles nor the count. A request with no history at
+	// all — a preview — has only the system message, and no cache worth protecting, so the block
+	// is left out rather than written into message zero.
+	//
+	// `{{context_used}}` and `{{time}}` can still move message zero between requests. Both are the
+	// user's own text and are left alone; the shipped presets use neither.
+	turnState := turnClock(time.Now())
+	if tokens := llm.EstimateTokens(turnState); tokens > 0 {
+		budget.Memory += tokens
+		budget.Segments = append(budget.Segments, ContextSegment{
+			Kind:   SegmentMemory,
+			Label:  "Uhrzeit",
+			Tokens: tokens,
+			Detail: "Zeitpunkt der Anfrage, am Ende des Requests statt im System-Prompt",
+		})
+	}
 	if gitState != "" {
+		turnState += "\n\n" + gitState
+	}
+	if len(msgs) > 1 {
 		last := len(msgs) - 1
 		if msgs[last].Content == "" {
-			msgs[last].Content = gitState
+			msgs[last].Content = turnState
 		} else {
-			msgs[last].Content += "\n\n" + gitState
+			msgs[last].Content += "\n\n" + turnState
 		}
 	}
 
@@ -542,6 +560,16 @@ func Assemble(in AssemblyInput) Assembly {
 		MaxIncludedSeq:     maxIncluded,
 		AgedReads:          agedReads,
 	}
+}
+
+// turnClock is the exact time of the request being assembled, for its tail.
+//
+// ISO rather than a sentence: the tail is read by a model answering in whatever language the
+// user writes, and the block in front of it (a project's working tree) is the only other prose
+// there. Minutes, not seconds — a second is a difference no answer can act on.
+func turnClock(now time.Time) string {
+	zone, _ := now.Zone()
+	return fmt.Sprintf("<turn_clock>%s (%s)</turn_clock>", now.Format("2006-01-02 15:04"), zone)
 }
 
 // isImageAttachment reports whether an attachment's payload is an image. An

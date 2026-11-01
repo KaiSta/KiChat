@@ -49,8 +49,6 @@ func RenderPrompt(tmpl string, vars TemplateVars) string {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	zone, _ := now.Zone()
-
 	toolList := "(keine)"
 	if len(vars.Tools) > 0 {
 		toolList = strings.Join(vars.Tools, ", ")
@@ -60,8 +58,15 @@ func RenderPrompt(tmpl string, vars TemplateVars) string {
 		contextLimit = fmt.Sprintf("%d Tokens", vars.ContextLimit)
 	}
 
+	// The date, at day precision, and deliberately without the clock: this string ends up in
+	// message zero, which is where a hosted backend's prompt cache matches from (DEEPSEEK.md
+	// §5). A value that moves every minute makes every round of a reply that outlives a minute
+	// a miss for the whole history behind it, and a coding reply is minutes of rounds. The
+	// exact time is not lost — it travels in the request's tail (turnClock in context.go),
+	// where a block that changes costs only its own tokens. `{{time}}` is left as it is: a
+	// template that asks for the clock is asking to give up the cache.
 	replacements := map[string]string{
-		"datetime":      fmt.Sprintf("%s, %s Uhr (%s)", germanWeekdays[now.Weekday()], now.Format("02.01.2006 15:04"), zone),
+		"datetime":      fmt.Sprintf("%s, %s", germanWeekdays[now.Weekday()], now.Format("02.01.2006")),
 		"date":          now.Format("02.01.2006"),
 		"time":          now.Format("15:04"),
 		"weekday":       germanWeekdays[now.Weekday()],
