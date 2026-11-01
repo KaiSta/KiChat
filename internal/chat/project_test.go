@@ -76,7 +76,7 @@ func systemMessage(t *testing.T, e *Engine, c store.Chat) string {
 	t.Helper()
 	settings := config.Default()
 	assembly, _, err := e.buildAssembly(context.Background(), &c, c.Backend, c.Model,
-		settings, llm.ModelInfo{ID: c.Model, Backend: c.Backend, ContextLimit: 8192}, "", "")
+		settings, llm.ModelInfo{ID: c.Model, Backend: c.Backend, ContextLimit: 8192}, "", "", "")
 	if err != nil {
 		t.Fatalf("buildAssembly: %v", err)
 	}
@@ -91,7 +91,7 @@ func systemMessage(t *testing.T, e *Engine, c store.Chat) string {
 func requestMessages(t *testing.T, e *Engine, c store.Chat) []llm.Message {
 	t.Helper()
 	assembly, _, err := e.buildAssembly(context.Background(), &c, c.Backend, c.Model,
-		config.Default(), llm.ModelInfo{ID: c.Model, Backend: c.Backend, ContextLimit: 8192}, "", "")
+		config.Default(), llm.ModelInfo{ID: c.Model, Backend: c.Backend, ContextLimit: 8192}, "", "", "")
 	if err != nil {
 		t.Fatalf("buildAssembly: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestGuidanceCostIsOnTheMeter(t *testing.T) {
 	e, project, _ := projectEngine(t)
 	settings := config.Default()
 	assembly, _, err := e.buildAssembly(context.Background(), &project, project.Backend, project.Model,
-		settings, llm.ModelInfo{ID: project.Model, Backend: project.Backend, ContextLimit: 8192}, "", "")
+		settings, llm.ModelInfo{ID: project.Model, Backend: project.Backend, ContextLimit: 8192}, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestAProjectsPromptCarriesItsGitState(t *testing.T) {
 	// And it is on the meter: a block nobody can account for is context that grows without
 	// anyone deciding it should.
 	assembly, _, err := engine.buildAssembly(context.Background(), &project, project.Backend, project.Model,
-		settings, llm.ModelInfo{ID: project.Model, Backend: project.Backend, ContextLimit: 8192}, "", "")
+		settings, llm.ModelInfo{ID: project.Model, Backend: project.Backend, ContextLimit: 8192}, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1084,7 +1084,7 @@ func TestAProjectChecksBetweenRoundsWithoutTheChatSwitch(t *testing.T) {
 		// The check before the turn has to stay quiet, or the fold measured below would be
 		// that one and the test would prove nothing about the mid-turn path.
 		before, _, err := engine.buildAssembly(context.Background(), &project, "fake", "fake-model",
-			settings, provider.model, tools.TextProtocolHint(config.LangEnglish), "")
+			settings, provider.model, tools.TextProtocolHint(config.LangEnglish), "", "")
 		if err != nil {
 			t.Fatalf("buildAssembly: %v", err)
 		}

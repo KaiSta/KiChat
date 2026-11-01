@@ -40,7 +40,7 @@ func (e *Engine) PreviewBudget(ctx context.Context, chatID, backendID, modelID s
 
 	// No provider is needed: this is a preview, and it has to work for a backend
 	// the registry does not know.
-	assembly, _, err := e.buildAssembly(ctx, &c, backendID, modelID, settings, model, "", "")
+	assembly, _, err := e.buildAssembly(ctx, &c, backendID, modelID, settings, model, "", "", "")
 	if err != nil {
 		return ContextBudget{}, err
 	}

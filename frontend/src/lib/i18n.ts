@@ -1223,6 +1223,8 @@ const de = {
     'Die maximale Zahl an Tool-Runden ({{1}}) ist erreicht — es wurde keine abschließende Antwort erzeugt. Sende eine neue Nachricht, damit das Modell die Ergebnisse auswertet.',
   'err.chat.maxRoundsPartial':
     'Die maximale Zahl an Tool-Runden ({{1}}) ist erreicht — es wurde keine abschließende Antwort erzeugt. Der bisherige Text steht oben, ist aber möglicherweise nicht abgeschlossen. Sende eine neue Nachricht, damit das Modell die Ergebnisse auswertet.',
+  'err.chat.outputLimit':
+    'Die Antwort wurde am Ausgabelimit des Modells abgeschnitten und ließ sich auch nach {{1}} Versuchen nicht fortsetzen. Erhöhe das maximale Ausgabe-Token-Limit in den Einstellungen, oder bitte um eine kürzere Antwort.',
   'err.chat.summaryWindowUnknown':
     'das Kontextfenster des Zusammenfassungs-Modells „{{1}}“ ist unbekannt — verwendet wird das Fenster des Chat-Modells',
   'err.chat.ceilingNote': ' (höchstens {{1}} Token pro Anfrage)',
@@ -2555,6 +2557,8 @@ const en: Record<keyof typeof de, string> = {
     'The maximum number of tool rounds ({{1}}) is reached, so no concluding answer was produced. Send a new message so the model can work with the results.',
   'err.chat.maxRoundsPartial':
     'The maximum number of tool rounds ({{1}}) is reached, so no concluding answer was produced. The text so far is above, but it may be unfinished. Send a new message so the model can work with the results.',
+  'err.chat.outputLimit':
+    'The reply was cut off at the model\'s output limit and could not be continued after {{1}} attempts. Raise the maximum output token limit in the settings, or ask for a shorter answer.',
   'err.chat.summaryWindowUnknown':
     'the context window of the summarising model "{{1}}" is unknown — the chat model\'s window is used instead',
   'err.chat.ceilingNote': ' (at most {{1}} tokens per request)',
@@ -3765,6 +3769,8 @@ const zh: Record<keyof typeof de, string> = {
   'err.chat.maxRounds': '已达到最大工具轮数（{{1}}）——没有生成最终回答。请发送新消息，让模型处理这些结果。',
   'err.chat.maxRoundsPartial':
     '已达到最大工具轮数（{{1}}）——没有生成最终回答。上面的文字可能尚未完成。请发送新消息，让模型处理这些结果。',
+  'err.chat.outputLimit':
+    '回答在模型的输出上限处被截断，尝试 {{1}} 次后仍无法续写。请在设置中提高最大输出 token 上限，或要求更简短的回答。',
   'err.chat.summaryWindowUnknown': '摘要模型 “{{1}}” 的上下文窗口未知 —— 改用对话模型的窗口',
   'err.chat.ceilingNote': '（每次请求最多 {{1}} 个 token）',
   'err.chat.ceilingNoteRequested': '（每次请求最多 {{1}} 个 token，本次请求了 {{2}} 个）',

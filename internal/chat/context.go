@@ -126,6 +126,13 @@ type AssemblyInput struct {
 	// history), because it is sent on the round that opens a turn and gone from the next one —
 	// in message zero that would invalidate the cache of the whole history twice per turn.
 	TurnNotes string
+
+	// Continuation asks for the rest of a reply the output limit cut short, and is the one note
+	// sent as a turn of its own: the message before it is that reply, and a request ending on an
+	// assistant message is a shape some vendors refuse, while a user turn after it is the
+	// ordinary alternating form every backend accepts. It is a request and not a message — the
+	// transcript keeps the two replies as they arrived, and the note is gone from the next round.
+	Continuation string
 }
 
 // Assembly is the result: the messages to send plus the budget breakdown.
@@ -483,11 +490,15 @@ func Assemble(in AssemblyInput) Assembly {
 	// user's own text and are left alone; the shipped presets use neither.
 	turnState := turnClock(time.Now())
 	notes := strings.TrimSpace(in.TurnNotes)
+	continuation := strings.TrimSpace(in.Continuation)
 	// Priced together and apart from the git block, which has a segment of its own: what the
 	// meter shows is what is sent, and the two are read for different reasons.
 	priced := turnState
 	if notes != "" {
 		priced += "\n\n" + notes
+	}
+	if continuation != "" {
+		priced += "\n\n" + continuation
 	}
 	if tokens := llm.EstimateTokens(priced); tokens > 0 {
 		budget.Memory += tokens
@@ -514,6 +525,14 @@ func Assemble(in AssemblyInput) Assembly {
 		} else {
 			msgs[last].Content += "\n\n" + turnState
 		}
+	}
+	// The continuation is the one note that is a message of its own, and it goes after everything:
+	// the user turn that asks for the rest of a reply the output limit cut short. Appending it to
+	// that reply instead would leave the request ending on an assistant message, which the strict
+	// templates this app already works around refuse — and the two would then be one message in
+	// the transcript's shape without being one in the store's.
+	if continuation != "" && len(msgs) > 1 {
+		msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: continuation})
 	}
 
 	budget.ToolSchemas = toolTokens

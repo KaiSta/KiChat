@@ -129,6 +129,12 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		}()
 	}
 
+	// A reply the output limit cuts short is continued rather than left half-written. The count
+	// is for the whole reply, and nudge is the note the round after a truncation carries (see
+	// truncation.go).
+	continuations := 0
+	nudge := ""
+
 	for iteration := 0; iteration < maxIter; iteration++ {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
@@ -237,10 +243,14 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			}
 		}
 		assembly, toolDefs, err := e.buildAssembly(ctx, &in.Chat,
-			in.BackendID, in.ModelID, in.Settings, in.Model, extraSystem, turnNotes)
+			in.BackendID, in.ModelID, in.Settings, in.Model, extraSystem, turnNotes, nudge)
 		if err != nil {
 			return result, err
 		}
+		// Spent by the round it was written for: that reply either finishes the answer or is cut
+		// short again, and the next one writes a fresh note with the next attempt number. A round
+		// after a continuation (a tool round) carries nothing.
+		nudge = ""
 		e.emit(events.Budget, map[string]any{"chatId": in.Chat.ID, "budget": assembly.Budget})
 
 		row, err := e.createAssistantMessage(in.Chat.ID, in.BackendID, in.ModelID)
@@ -375,6 +385,9 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			row.Status = store.StatusFailed
 			row.StopReason = "stream_error"
 		}
+		// The model ran into its own output ceiling. The row stays complete — nothing failed —
+		// but the answer is not finished, and the round after it asks for the rest.
+		cutShort := streamErr == nil && ctx.Err() == nil && llm.Truncated(row.StopReason)
 		// Persist the reply together with its tool calls before executing them, so
 		// the transcript is replayable even if the process dies mid-tool.
 		row.ToolCallsJSON = encodeToolCalls(calls)
@@ -402,6 +415,21 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			return result, streamErr
 		}
 		if len(calls) == 0 {
+			// Ending the turn here is what leaves a sentence hanging with nothing to explain
+			// it. The reply is continued instead, and because the text it already produced
+			// stays in the history the retry costs the remainder rather than the whole answer.
+			//
+			// Only when there is text to continue from: a reasoning model that spent the whole
+			// output budget thinking has nothing to resume, and what it needs is room — which
+			// the warning names, rather than a nudge it cannot act on.
+			if cutShort && strings.TrimSpace(text) != "" && continuations < maxTruncatedRetries {
+				continuations++
+				nudge = continuationNote(continuations)
+				continue
+			}
+			if cutShort {
+				e.warn(in.Chat.ID, uimsg.Errorf("chat.outputLimit", maxTruncatedRetries).Error())
+			}
 			return result, nil
 		}
 		if ctx.Err() != nil {

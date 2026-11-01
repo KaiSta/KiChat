@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -122,6 +123,22 @@ const (
 	SourceLlamaCpp  = "llamacpp"
 	SourceEstimated = "estimated"
 )
+
+// Truncated reports whether a stop reason means the reply ran into the model's output limit
+// rather than ending on its own.
+//
+// The spellings are the vendors': every OpenAI-compatible backend in this app (LM Studio,
+// llama.cpp, Groq, DeepSeek, NVIDIA, Mistral) answers `length`, Ollama's `done_reason` is
+// `length` too, and an Anthropic-shaped API says `max_tokens`. Nothing else is guessed at — a
+// reason this function does not know is a reply that finished, because asking again on a stop
+// the app does not understand is a loop.
+func Truncated(stopReason string) bool {
+	switch strings.ToLower(strings.TrimSpace(stopReason)) {
+	case "length", "max_tokens":
+		return true
+	}
+	return false
+}
 
 // StreamEventType enumerates the events produced while streaming a reply.
 type StreamEventType string

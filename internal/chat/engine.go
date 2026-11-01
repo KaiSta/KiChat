@@ -522,9 +522,14 @@ func capacitySuffix(limit int, source string) string {
 // and disk notes — and it travels in the request's tail instead (see Assemble). The two are
 // separate parameters rather than one string because a note that moves between rounds must not sit
 // in message zero: it would invalidate the cache of the whole history behind it, twice per turn.
+//
+// continuation asks for the rest of a reply the output limit cut short. It is empty for every
+// round that is not a continuation, and it is a parameter of its own rather than more turnNotes
+// because it is sent as a user turn after the reply rather than appended to it (Assemble says
+// why).
 func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 	backendID, modelID string, settings config.Settings, model llm.ModelInfo,
-	extraSystem, turnNotes string) (Assembly, []llm.ToolDefinition, error) {
+	extraSystem, turnNotes, continuation string) (Assembly, []llm.ToolDefinition, error) {
 
 	messages, err := e.Store.ListMessages(chat.ID)
 	if err != nil {
@@ -587,6 +592,7 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 		Ceiling:       e.ceilingFor(backendID, modelID),
 		MeasuredValid: measuredValid,
 		TurnNotes:     turnNotes,
+		Continuation:  continuation,
 	}
 	if measuredValid {
 		in.Measured = measurement.PromptTokens
@@ -779,7 +785,7 @@ func anyProviderAvailable(chain interface{ ProviderAvailability() map[string]boo
 func (e *Engine) emitBudget(chatID string, chat *store.Chat,
 	backendID, modelID string, settings config.Settings, model llm.ModelInfo) {
 	assembly, _, err := e.buildAssembly(context.Background(), chat,
-		backendID, modelID, settings, model, "", "")
+		backendID, modelID, settings, model, "", "", "")
 	if err != nil {
 		return
 	}

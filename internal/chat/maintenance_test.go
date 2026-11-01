@@ -405,7 +405,7 @@ func TestManualCompactAlwaysFoldsWhenOnlyTheNewestTurnIsLeft(t *testing.T) {
 		t.Fatal(err)
 	}
 	assembly, _, err := engine.buildAssembly(context.Background(), &chat, "fake", "fake-model",
-		config.Default(), llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192}, "", "")
+		config.Default(), llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192}, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

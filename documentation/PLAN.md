@@ -140,6 +140,29 @@ usage}`.
 Turns are serialised per chat: a second `Send` while one is in flight is rejected
 rather than interleaved.
 
+### A reply that hits the output limit
+
+A backend ends a generation at the model's output ceiling and says so in its stop reason
+(`length` on every OpenAI-compatible backend and on Ollama, `max_tokens` on an
+Anthropic-shaped one; `llm.Truncated` is the one list). What the app has then is half an answer,
+and it used to end the turn there — the row was stored as complete, because nothing had failed,
+and the sentence simply stopped.
+
+It is continued instead, up to `maxTruncatedRetries` (3) per reply: the text already produced
+stays in the history, and the next round carries one note asking for the rest *from where it
+stopped* and *more briefly*, because the attempt that hit the ceiling already spent the whole
+output budget. The note rides in the request tail (`internal/chat/truncation.go`), like the clock
+and the git block, so it invalidates no cached prefix, and it is the one note sent as a message of
+its own: a user turn right after the cut-off reply, because a request whose last message is an
+assistant message is a shape some vendors refuse. A continuation is an ordinary round — it is
+counted against the turn's round budget — and it is its own assistant row, so the transcript shows
+where the first attempt stopped.
+
+Two cases are not continued. A round that asked for tools has work to do, and its calls are
+executed rather than re-asked. A reply whose whole budget went to private reasoning has no text to
+resume; that one is reported with `chat.outputLimit`, which names the output-token setting, because
+what it needs is room and not a nudge.
+
 ### Events (`internal/events`)
 
 `chat:start`, `chat:delta`, `chat:reasoning`, `chat:tool`, `chat:message`,
