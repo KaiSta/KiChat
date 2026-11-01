@@ -286,11 +286,10 @@ func (p *openAICompatProvider) enrichLlamaCpp(ctx context.Context, models []Mode
 	// answers in prose.
 	supportsTools := true
 	if raw, ok := props.ChatTemplateCaps["supports_tool_calls"]; ok {
-		var v bool
-		// A value that is not a bool is the server saying something this app does
-		// not model, which is not a "no".
-		if err := json.Unmarshal(raw, &v); err == nil {
-			supportsTools = v
+		var v *bool
+		// A null or non-boolean value is not an explicit denial.
+		if err := json.Unmarshal(raw, &v); err == nil && v != nil {
+			supportsTools = *v
 		}
 	}
 	thinking := llamaCppTemplateTogglesThinking(props.ChatTemplate)
@@ -321,13 +320,11 @@ func (p *openAICompatProvider) enrichLlamaCpp(ctx context.Context, models []Mode
 // llamaCppLoadedIndex names the listing row a /props reading belongs to, or -1
 // when it cannot be told.
 //
-// `model_path` is the file behind the loaded instance, while a row's id is that
-// path unless `--alias` replaced it, so the id is compared first and the file
-// name second. An alias therefore matches by neither and leaves the reading
-// unused: the window the app then falls back to is a conservative default rather
-// than one belonging to a different model, which is the safe way round.
+// An alias is checked first even when the server reports no model path. Otherwise,
+// `model_path` is matched by id and then by file name; a reading that cannot be
+// attributed is left unused rather than attached to the wrong model.
 func llamaCppLoadedIndex(props *llamaCppProps, models []ModelInfo) int {
-	if props == nil || props.ModelPath == "" {
+	if props == nil {
 		return -1
 	}
 	// An `--alias` is the row's own id, so it wins over the file name: the file name
@@ -339,6 +336,9 @@ func llamaCppLoadedIndex(props *llamaCppProps, models []ModelInfo) int {
 				return i
 			}
 		}
+	}
+	if props.ModelPath == "" {
+		return -1
 	}
 	for i := range models {
 		if models[i].ID == props.ModelPath {
@@ -390,6 +390,7 @@ func (p *openAICompatProvider) propsFor(ctx context.Context) *llamaCppProps {
 		p.mu.Unlock()
 		return cached
 	}
+	generation := p.propsGeneration
 	p.mu.Unlock()
 
 	var props llamaCppProps
@@ -406,6 +407,10 @@ func (p *openAICompatProvider) propsFor(ctx context.Context) *llamaCppProps {
 	}
 
 	p.mu.Lock()
+	if generation != p.propsGeneration {
+		p.mu.Unlock()
+		return nil
+	}
 	p.props = loaded
 	p.propsLoaded = true
 	p.propsAt = time.Now()

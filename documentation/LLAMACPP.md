@@ -99,11 +99,10 @@ shapes of server this kind reaches. `enrichLlamaCpp`
   refuse, so with more than one row only the row `/props` names is marked loaded and only
   that row gets the window; the rest fall back to the conservative default.
 
-`llamaCppLoadedIndex` ([internal/llm/llamacpp.go:310](../internal/llm/llamacpp.go#L310)) names
-that row: the id is compared first and the file name second, because a row's id *is* the
-model path unless `--alias` replaced it. An alias therefore matches neither and leaves the
-reading unused — a conservative default rather than one belonging to a different model.
-`modelFileBase` splits on both separators, because a server on Windows reports
+`llamaCppLoadedIndex` ([internal/llm/llamacpp.go](../internal/llm/llamacpp.go)) names that
+row: it matches `model_alias` first, even if no path was reported, then tries the model path
+and its file name. An unmatched reading stays unused rather than being attached to another
+model. `modelFileBase` splits on both separators, because a server on Windows reports
 `C:\models\x.gguf` while the same model over a network share arrives as `/models/x.gguf`.
 
 Failing to read `/props` never fails the listing: the models are what the caller asked for
@@ -118,7 +117,7 @@ silently withdraw tool support from a server that never denied it.
 
 So only an explicit `false` withholds tools:
 
-- an absent key means the server did not report on the template, and llama.cpp's own
+- an absent, null or non-boolean value means the server did not give an explicit denial, and llama.cpp's own
   default for the field is true;
 - the app answers a missing tool claim by never using the native protocol, so guessing
   **no** would cost a working model its tools silently, while guessing **yes** costs

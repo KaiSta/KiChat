@@ -111,8 +111,9 @@ type openAICompatProvider struct {
 	// starts, so the number only changes when the server behind the URL is
 	// replaced — which is precisely what an explicit re-check announces, and
 	// InvalidateCache is where it is dropped.
-	props       *llamaCppProps
-	propsLoaded bool
+	props           *llamaCppProps
+	propsLoaded     bool
+	propsGeneration uint64
 	// propsAt is when the last /props reading was taken, so a server replaced
 	// underneath the app is noticed; see propsTTL.
 	propsAt time.Time
@@ -788,6 +789,7 @@ func (p *openAICompatProvider) InvalidateCache() {
 	// the reading here is what makes the UI's re-check button do its job.
 	p.props = nil
 	p.propsLoaded = false
+	p.propsGeneration++
 }
 
 // --- reasoning control (LM Studio v1) --------------------------------------

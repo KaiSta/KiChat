@@ -137,6 +137,46 @@ func TestLlamaCppRereadsPropsWhenTheServerIsReplaced(t *testing.T) {
 	}
 }
 
+func TestLlamaCppInvalidationDiscardsAnInFlightPropsReading(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/props" {
+			http.NotFound(w, r)
+			return
+		}
+		if hits.Add(1) == 1 {
+			close(entered)
+			<-release
+			fmt.Fprint(w, `{"default_generation_settings":{"n_ctx":16384}}`)
+			return
+		}
+		fmt.Fprint(w, `{"default_generation_settings":{"n_ctx":4096}}`)
+	}))
+	defer srv.Close()
+	provider := newLlamaCppProvider("llamacpp", "llama.cpp", srv.URL, "")
+	done := make(chan *llamaCppProps, 1)
+	go func() { done <- provider.propsFor(context.Background()) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("the first props request did not arrive")
+	}
+	provider.InvalidateCache()
+	close(release)
+	if stale := <-done; stale != nil {
+		t.Fatalf("in-flight reading survived invalidation: %+v", stale)
+	}
+	current := provider.propsFor(context.Background())
+	if current == nil || current.DefaultGenerationSettings.NCtx != 4096 {
+		t.Fatalf("new window = %+v, want 4096", current)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("props requests = %d, want a fresh request after invalidation", got)
+	}
+}
+
 // TestLlamaCppReadsTheAliasedRow pins the other way a row is named. `--alias` replaces
 // the id a server lists, so comparing only `model_path` left the reading unattached and
 // the model's window unstated — which the panel shows as an unknown context size.
@@ -163,6 +203,19 @@ func TestLlamaCppReadsTheAliasedRow(t *testing.T) {
 	if models[1].State != StateNotLoaded || models[1].ContextLimit != 0 {
 		t.Errorf("the other row is %s with window %d, want unloaded and unstated",
 			models[1].State, models[1].ContextLimit)
+	}
+}
+
+func TestLlamaCppMatchesAliasWithoutModelPath(t *testing.T) {
+	listing := `{"data":[{"id":"one"},{"id":"two"}]}`
+	props := `{"model_alias":"two","default_generation_settings":{"n_ctx":4096}}`
+	srv, _ := llamaCppServer(t, listing, props, http.StatusOK)
+	models, err := newLlamaCppProvider("llamacpp", "llama.cpp", srv.URL, "").ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0].State != StateNotLoaded || models[1].State != StateLoaded || models[1].ContextLimit != 4096 {
+		t.Fatalf("models = %+v, want the aliased model loaded with its own window", models)
 	}
 }
 
@@ -349,6 +402,18 @@ func TestLlamaCppUnknownTemplateCapsStillOfferTools(t *testing.T) {
 	// not claimed for it.
 	if models[0].Has(CapThink) {
 		t.Errorf("claimed thinking for a template that never names the parameter: %v", models[0].Capabilities)
+	}
+}
+
+func TestLlamaCppNullToolCapabilityDoesNotDenyTools(t *testing.T) {
+	props := `{"default_generation_settings":{"n_ctx":4096},"chat_template_caps":{"supports_tool_calls":null}}`
+	srv, _ := llamaCppServer(t, llamaCppListing, props, http.StatusOK)
+	models, err := newLlamaCppProvider("llamacpp", "llama.cpp", srv.URL, "").ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || !models[0].Has(CapTools) {
+		t.Fatalf("models = %+v, a null tool capability is not an explicit denial", models)
 	}
 }
 
