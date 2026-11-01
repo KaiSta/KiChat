@@ -1321,6 +1321,21 @@ the thing that matters, and a notice in its place would cost more explanation th
 Earlier turns are untouched — what an earlier answer was based on is compaction's to summarise,
 not this reply's to rewrite.
 
+**No single result may spend the answer.** Ageing bounds what a reply *re-sends*; the tool budget
+bounds what it *adds*, and `take` used to hand one result everything that was left of it — so the
+first enormous result spent the allowance the rest of the reply's rounds were going to need.
+A result may now take the smaller of the remainder and `toolResultShare` of the budget the
+answer started with, and is charged what it actually used: a quarter, so 30 000 tokens in a
+project (120 000) and 15 000 in a chat (60 000), and a cut result leaves room for the round's
+other results and for the rounds after it. A quarter rather than a flat figure because the
+budget it divides is already the mode's, and 30 000 sits just under the 32 000 a reply keeps
+verbatim above — one result can never be the whole of what survives a round. It bites where a
+result class has no bound of its own: measured with `llm.EstimateTokens`, a full 80 kB
+`read_file` prices at 25 886 tokens and a 64 kB command result at 22 471, both inside a
+project's share and both over a chat's. Pinned by `TestOneResultCannotTakeTheWholeBudget` (one
+result, then the next, then the total) and `TestAPerResultCeilingNeverExceedsTheRoom` (a share is
+a ceiling, not an entitlement: the room a request has left stays the smaller of the two).
+
 **The coupling that makes it safe.** Dropping a `read_file` result would otherwise be a trap:
 the app remembers which file each turn has read, and a model asking again for a range it already
 read is answered "unchanged — use a different offset". That is true about the transcript and

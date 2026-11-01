@@ -717,11 +717,35 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 	e.finishTool(ctx, chatID, row, call, record, e.executeCall(ctx, chatID, row, call, turn), budget, turn)
 }
 
+// toolResultShare is how much of an answer's tool budget one result may take: a quarter
+// of it.
+//
+// The budget alone does not give that guarantee, because take hands a single result
+// everything that is left — so one enormous answer, a scraped page or a JSON dump read
+// back, could arrive in one call and spend the allowance that thirty later rounds of the
+// same reply were going to need, leaving them notices instead of file contents. Cline
+// caps each tool result the same way, at a fixed size a call rather than at whatever the
+// conversation has left; the model's remedy is the one a read's own caps already offer,
+// ask for less or for another slice.
+//
+// A quarter rather than Cline's flat figure because the budget it divides is already the
+// mode's: 120 000 tokens in a project gives a result 30 000, which is more than the 32 000
+// of tool text a reply keeps verbatim (internal/chat/toolhistory.go) — so one result can
+// never be the whole of what survives a round.
+const toolResultShare = 4
+
 // toolOutputBudget bounds how many tokens of tool results one answer carries into
 // its next request. The setting is per answer rather than per call, so several
 // tools cannot together exceed it. The budget is shared across the tool rounds
 // of a single generate call.
-type toolOutputBudget struct{ remaining int }
+type toolOutputBudget struct {
+	remaining int
+	// perResult is one result's own ceiling, so spending it cannot spend the next
+	// one's room. Zero means the field was never set — a hand-built literal — and
+	// then a result may use whatever is left, which is what the budget did before
+	// this field existed.
+	perResult int
+}
 
 // newToolOutputBudget starts the answer's budget from the mode's figure. A zero is read as
 // the default — a hand-edited blob or a settings literal — and the figure is tightened to
@@ -730,7 +754,7 @@ func newToolOutputBudget(tokens int) *toolOutputBudget {
 	if tokens <= 0 {
 		tokens = config.DefaultToolTokenBudget
 	}
-	return &toolOutputBudget{remaining: tokens}
+	return &toolOutputBudget{remaining: tokens, perResult: tokens / toolResultShare}
 }
 
 // capTo tightens the budget to the room one request has left for tool results.
@@ -803,23 +827,38 @@ const exhaustedNotice = "Das Token-Budget für Tool-Ergebnisse in dieser Antwort
 // against the budget. A result that does not fit is cut with the shared
 // truncation marker, so the model can tell a short result from a shortened one.
 //
+// What a result may use is the smaller of the budget's remainder and one result's share
+// of it (perResult), and what it actually used is what it is charged — not the rest of
+// the budget. A cut result therefore leaves room for the round's other results and for
+// the rounds after it, which is the point of a share: the answer keeps working with
+// slices of a large file instead of one slice and then nothing.
+//
 // The second return value says the model got none of it and the notice instead. It is
 // reported rather than left to be recognised from the text, because it is the one
 // outcome a tool card must not render as a size: "4,374 → 41 tokens" is what a spent
 // budget looked like on the card, and it reads as a summary the model wrote when in
 // fact the search results never arrived.
 func (b *toolOutputBudget) take(output string) (string, bool) {
-	if b.remaining <= 0 {
+	allowance := b.remaining
+	if b.perResult > 0 && b.perResult < allowance {
+		allowance = b.perResult
+	}
+	if allowance <= 0 {
 		return exhaustedNotice, true
 	}
-	if tokens := llm.EstimateTokens(output); tokens <= b.remaining {
+	if tokens := llm.EstimateTokens(output); tokens <= allowance {
 		b.remaining -= tokens
 		return output, false
 	}
-	cut := cutToTokens(output, b.remaining)
-	b.remaining = 0
+	cut := cutToTokens(output, allowance)
+	// Nothing came back either because the allowance is smaller than the marker, or
+	// because the cut text would have been empty. Both are "you got none of it".
 	if cut == "" {
 		return exhaustedNotice, true
+	}
+	b.remaining -= llm.EstimateTokens(cut)
+	if b.remaining < 0 {
+		b.remaining = 0
 	}
 	return cut, false
 }

@@ -851,10 +851,83 @@ func TestToolOutputBudgetCapsPerAnswer(t *testing.T) {
 	if withheld {
 		t.Error("a cut result was reported as withheld: the model reads a prefix of it")
 	}
-	// The distinction the tool card renders: a spent budget is not a short result.
+	// The distinction the tool card renders: a spent budget is not a short result. A
+	// cut result is charged what it used rather than what was left, so spending the
+	// budget takes as many results as its share allows — which is the subject of the
+	// test after this one.
+	for spent, calls := false, 0; !spent; calls++ {
+		if calls > 20 {
+			t.Fatal("the budget never ran out: a share that is charged is still charged")
+		}
+		next, withheld := budget.take(big)
+		if !withheld && next == "" {
+			t.Fatal("a result neither arrived nor was reported as withheld")
+		}
+		spent = withheld
+	}
 	if next, withheld := budget.take("kurz"); next != exhaustedNotice || !withheld {
 		t.Errorf("after the budget is spent got %q (withheld %v), want the notice and true",
 			next, withheld)
+	}
+}
+
+// TestOneResultCannotTakeTheWholeBudget is the guarantee the budget alone did not give.
+//
+// take charges a result the smaller of the budget's remainder and one result's share, and
+// charges it what it actually used. Before that, the first result bigger than the budget
+// was cut to everything that was left and the budget was over: a single scraped page or
+// JSON dump spent an answer's whole allowance in one call, and every later round of the same
+// reply read notices instead of file contents.
+func TestOneResultCannotTakeTheWholeBudget(t *testing.T) {
+	const total = 400
+	budget := newToolOutputBudget(total)
+	share := total / toolResultShare
+	huge := strings.Repeat("wort ", 5000)
+
+	first, withheld := budget.take(huge)
+	if withheld {
+		t.Fatal("a cut result was reported as withheld: the model reads a prefix of it")
+	}
+	if tokens := llm.EstimateTokens(first); tokens > share {
+		t.Errorf("one result took %d tokens of a %d-token budget, want at most its share of %d",
+			tokens, total, share)
+	}
+	// The room it did not spend is still there, which is the difference between a share
+	// and the old "cut to whatever is left".
+	if budget.remaining <= 0 {
+		t.Fatalf("one cut result spent the whole %d-token budget", total)
+	}
+	second, withheld := budget.take(huge)
+	if withheld {
+		t.Fatalf("the second result was withheld with %d tokens left", budget.remaining+llm.EstimateTokens(second))
+	}
+	if llm.EstimateTokens(second) == 0 {
+		t.Error("the second result arrived empty")
+	}
+	// And the total still holds: a share bounds each result, it does not multiply the
+	// budget.
+	spent := total - budget.remaining
+	for !withheld {
+		got, didWithhold := budget.take(huge)
+		withheld = didWithhold
+		if !withheld {
+			spent += llm.EstimateTokens(got)
+		}
+		if spent > total {
+			t.Fatalf("%d tokens were charged against a %d-token budget", spent, total)
+		}
+	}
+}
+
+// TestAPerResultCeilingNeverExceedsTheRoom pins the other direction: a share is a ceiling,
+// not an entitlement, and the room a request has left stays the smaller of the two.
+func TestAPerResultCeilingNeverExceedsTheRoom(t *testing.T) {
+	budget := newToolOutputBudget(config.DefaultToolTokenBudget)
+	budget.capTo(50)
+
+	got, _ := budget.take(strings.Repeat("wort ", 5000))
+	if tokens := llm.EstimateTokens(got); tokens > 50 {
+		t.Errorf("a result cut to the room left is %d tokens, want at most 50", tokens)
 	}
 }
 

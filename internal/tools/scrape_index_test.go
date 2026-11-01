@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"kichat/internal/llm"
 	"kichat/internal/research"
 	"kichat/internal/store"
 )
@@ -145,5 +146,44 @@ func TestASmallPageStaysInline(t *testing.T) {
 	}
 	if len(docs) != 0 {
 		t.Errorf("a small page created %d documents", len(docs))
+	}
+}
+
+// TestAScrapeCannotAskForMoreThanTheCeiling pins the bound the max_tokens argument used to
+// lack. The model writes that argument, and a result is what every later round of the same
+// answer and every later turn of the chat re-sends — so one `max_tokens: 400000` on a long
+// manual was a whole document's worth of tokens added to the history in a single call. A
+// file read has been bounded this way all along (80 kB whatever line count it is given) and
+// so has a command (32 kB of each end); this is the one result class that had no ceiling.
+func TestAScrapeCannotAskForMoreThanTheCeiling(t *testing.T) {
+	st, chatID := openChatStore(t)
+
+	// Four manuals: comfortably past the ceiling, so the cut is this bound rather than
+	// the page ending.
+	text := strings.Repeat(bigManualText(), 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<html><body><article><p>" +
+			strings.ReplaceAll(text, "\n", "</p><p>") + "</p></article></body></html>"))
+	}))
+	t.Cleanup(server.Close)
+
+	service := inGerman(New(st, nil, research.NewScraper(st, research.ScrapeOptions{
+		AllowPrivateHosts: true,
+	}, nil)))
+
+	result, err := service.Execute(context.Background(), chatID, ToolScrapeURL,
+		fmt.Sprintf(`{"url":%q,"max_tokens":400000}`, server.URL))
+	if err != nil {
+		t.Fatalf("scrape_url: %v", err)
+	}
+	// The marker names both numbers, so it says which bound did the cutting.
+	if want := fmt.Sprintf("ca. %d von", MaxScrapeTokens); !strings.Contains(result, want) {
+		t.Fatalf("a 400 000-token request was not cut to the ceiling (%q is absent):\n%.600s",
+			want, result)
+	}
+	if tokens := llm.EstimateTokens(result); tokens > MaxScrapeTokens+1500 {
+		t.Errorf("the result is %d tokens, want at most the %d ceiling plus its framing",
+			tokens, MaxScrapeTokens)
 	}
 }

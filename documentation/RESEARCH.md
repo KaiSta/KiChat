@@ -367,6 +367,20 @@ navigation, so a 20-page document is reachable end to end through `search_docume
 a paragraph that used to arrive in one would be a regression. The scraped document is
 written with its `source_url`, so the index says where the text came from.
 
+**`max_tokens` has a ceiling, because the model writes it.** `ScrapeMaxTokens` is only the
+default (12,000) the excerpt gets when the argument is absent; `MaxScrapeTokens` (30,000) is
+the bound on the figure the model names, and a larger one is clamped rather than refused.
+Without it, `max_tokens: 400000` on a long manual put a whole document's worth of tokens
+into the history in a single call — and a tool result is what every later round of that
+answer and every later turn of the chat re-sends. The other two read tools have been
+bounded this way from the start (a file read stops at 80 kB whichever line count it was
+given, a command keeps 32 kB of each end), so the scrape was the one result class with no
+ceiling at all. 30,000 tokens is that 80 kB read in the estimator's unit, and the sentence
+`TrimToTokens` already appends names both numbers (`ca. 30000 von 69000 Tokens übernommen`),
+so a clamped request is told what bound did the cutting instead of quietly ending. The
+schema states the ceiling where the model reads the argument: a bound it does not know
+about is one it keeps exceeding. Pinned by `TestAScrapeCannotAskForMoreThanTheCeiling`.
+
 What this does not fix: a PDF that genuinely arrives truncated from the server still fails
 in the parser, and the answer is still the parser's wording.
 

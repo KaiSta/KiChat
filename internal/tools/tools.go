@@ -33,6 +33,22 @@ const (
 	ToolReadPages  = "read_pages"
 )
 
+// MaxScrapeTokens is the ceiling on one scraped page's text, whichever length the model
+// asks for; ScrapeMaxTokens is only the default it gets when it asks for nothing.
+//
+// The argument has to have a ceiling, because the model writes it and nothing else bounds
+// it: a `max_tokens: 400000` on a long manual puts 400 000 tokens into the history in one
+// call, and every later round of that answer and every later turn of the chat re-sends
+// them. The other reads already have that bound — a file read stops at 80 kB whichever
+// line count it was given (workspace.MaxReadBytes), a command keeps 32 kB of each end — so
+// this is the same bound for the one result that had none.
+//
+// 30 000 tokens is that read in the estimator's unit (~26 000 for source, more for prose
+// with fewer characters per token), which keeps a page and a file the same size of result.
+// A document longer than this has its own route: past IndexThreshold it is indexed into the
+// chat, and read_pages walks the whole of it in chunks.
+const MaxScrapeTokens = 30000
+
 // Service executes tools.
 type Service struct {
 	Chain   *research.Chain
@@ -211,8 +227,12 @@ func (s *Service) Definitions() []llm.ToolDefinition {
 					},
 					"max_tokens": map[string]any{
 						"type": "integer",
-						"description": text(lang, "Maximale Länge des zurückgegebenen Textes in Tokens.",
-							"Maximum length of the returned text in tokens."),
+						// The ceiling is stated where the model reads the argument, because a
+						// bound it does not know about is one it keeps exceeding: asked for
+						// 400000 it used to get what it asked for.
+						"description": fmt.Sprintf(text(lang,
+							"Maximale Länge des zurückgegebenen Textes in Tokens (höchstens %d).",
+							"Maximum length of the returned text in tokens (at most %d)."), MaxScrapeTokens),
 					},
 				},
 				"required": []string{"url"},
@@ -581,6 +601,13 @@ func (s *Service) scrapeURL(ctx context.Context, chatID, argsJSON string) (strin
 	maxTokens := looseInt(args.MaxTokens, s.ScrapeMaxTokens)
 	if maxTokens <= 0 {
 		maxTokens = s.ScrapeMaxTokens
+	}
+	// Clamped rather than refused, and without a second sentence: a page cut to this
+	// bound ends with TrimToTokens' own marker naming how much of how much was kept, so
+	// the model already reads that it was shortened and by what. The index notice below
+	// is the route to the rest.
+	if maxTokens > MaxScrapeTokens {
+		maxTokens = MaxScrapeTokens
 	}
 	// The whole document is fetched, and the excerpt handed back is cut below. Asking
 	// the scraper for only the first maxTokens was what made the rest of a long page
