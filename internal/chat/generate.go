@@ -660,10 +660,19 @@ func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Messag
 	// with the exhausted notice, so the request would be paid for and thrown away.
 	condensed := output
 	condensedByModel := false
-	if budget.remaining > 0 {
-		condensed, condensedByModel = e.condenseToolOutput(ctx, chatID, call, output, turn)
+	if execErr == nil && budget.remaining > 0 {
+		normalized := call
+		normalized.Arguments = tools.NormalizeArguments(call.Name, call.Arguments)
+		condensed, condensedByModel = e.condenseToolOutput(ctx, chatID, normalized, output, turn, out.result.DocumentID)
 	}
 	delivered, withheld := budget.take(condensed)
+	// A withheld or truncated summary was not delivered in full, so it must not
+	// consume the page's next-read escape hatch.
+	if condensedByModel && !withheld && delivered == condensed && call.Name == tools.ToolScrapeURL {
+		normalized := call
+		normalized.Arguments = tools.NormalizeArguments(call.Name, call.Arguments)
+		e.condensations().add(condensedIdentity(chatID, normalized, output))
+	}
 	// What the result cost and what of it the model actually reads is what makes the
 	// condensation visible: without it the feature is indistinguishable from a page
 	// that happened to be short. Both numbers are measured on the strings that travel

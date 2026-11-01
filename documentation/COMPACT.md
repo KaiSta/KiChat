@@ -1028,15 +1028,14 @@ framing is how the chat reaches the parts it kept.
 **What is condensed is the document, not the excerpt.** A result over the inline
 threshold carries only the beginning of a page that was indexed whole (RESEARCH.md §6),
 and a summary of that beginning answers questions about page 1 and none about page 50.
-So `condenseToolOutput` looks the document up by the URL the call asked for
-(`Store.DocumentBySource`, newest row, source URL normalised the way the scraper does it)
-and summarises its text; a page small enough to inline has no document at all and keeps
-the old behaviour. The summariser then reads more than it did before — a 20k-token page
-entirely — and the summary covers all of it.
+So `condenseToolOutput` looks up the exact document ID returned by that scrape, and
+summarises its text. Concurrent scrapes of the same URL cannot substitute another version,
+and an unindexed page cannot accidentally reuse an older document. If the indexed document
+cannot be loaded, the excerpt is summarised and labelled partial.
 
 **A document larger than the summariser reads is said to be partial.** The text is cut to
-what the window leaves beside the summary (`limit − maxTokens − digestPromptReserve`, a
-reserve derived from the prompts rather than typed), and the notice opens with
+what the window leaves beside the summary and prompt reserve. A large output cap is reduced
+when necessary to leave space for input, and the notice opens with
 `Partial summary of … — the rest was not summarised` (`Teilzusammenfassung von … — der Rest
 wurde nicht zusammengefasst` in a German window — the notice follows the interface language,
 §17.6) instead of claiming a full summary. The rest is still reachable through the chunk range in the framing. A
@@ -1088,18 +1087,18 @@ bound that remains is the tool budget: a condensation still passes through
   fallback.
 - **The way back is the same call.** The second read of a page in one chat hands over the
   full text (a per-process ledger keys it), so a model that needs an exact quotation can
-  ask for it. Without that the escape would close: it would be answered with a
-  condensation of what it had just failed to read.
+  ask for it. The ledger is marked only when the full summary reaches the model; a tool
+  budget that withholds or truncates it must not consume the escape hatch.
 - **Cached by content.** The key is the model *reference* (backend and id, the same
   identity `llm.Ref` gives everything else), the prompt version, the cap the summary was
-  written under, and a hash of the *text that was read* — the document when one was found,
+  written under, the file path for file summaries, and a hash of the *text that was read* — the document when one was found,
   the page text otherwise, and never the whole tool result. The framing is deliberately
   out of the key: it carries a document id that is new on every scrape, so a key over the
   whole result would miss on every re-read of the same document
   (`TestTheCondensationCacheIsKeyedByThePageNotItsFraming`). Hashing the text that was
   read, rather than the document, is what stops a summariser with a narrower window from
   serving a wider summary out of the cache. The cap is in the key because it is a setting: a summary asked to fit
-  in 600 tokens is not the one the same model gives at 2000, so a changed cap must miss
+  in 600 tokens is not the one the same model gives at 2000, so a changed effective cap must miss
   the cache instead of serving the old length for up to 30 days. A page read twice in one
   chat or across chats costs one condensation; the entry expires after 30 days and the
   start-up prune removes it.

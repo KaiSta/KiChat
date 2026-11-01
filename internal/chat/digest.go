@@ -14,7 +14,6 @@ import (
 	"kichat/internal/config"
 	"kichat/internal/events"
 	"kichat/internal/llm"
-	"kichat/internal/research"
 	"kichat/internal/store"
 	"kichat/internal/tools"
 	"kichat/internal/uimsg"
@@ -369,7 +368,8 @@ const (
 
 // digestKey identifies a condensation by everything that decides its content: the job,
 // the model that writes it, the prompt that asks for it, the cap it was written under,
-// and the text it is made from. The URL is deliberately absent — a page whose text
+// and the text it is made from. File paths are included in the content argument because
+// the file prompt names them. The URL is deliberately absent — a page whose text
 // changed is a different page, and a summary of the old text must not be served for
 // the new one.
 //
@@ -454,21 +454,19 @@ func readFileDigestPrompt(path, text string) string {
 // indexedDocument is the document a scrape_url result was taken from, when the chat
 // holds one that is larger than the excerpt in the result.
 //
-// No document is the normal answer for a page small enough to inline. A lookup that
-// fails is reported and then treated the same way, because the excerpt is still a
-// correct input — merely a shorter one — and the condensation must never be the reason
-// a tool result goes missing.
-func (e *Engine) indexedDocument(chatID string, call llm.ToolCall, excerpt string) (store.Document, bool) {
-	source := research.NormaliseURL(callArgument(call.Arguments, "url"))
-	if source == "" || e.Store == nil {
+// The ID comes from this exact scrape, not a URL lookup: parallel reads and later
+// scrapes of the same URL may index different versions. If lookup fails, the excerpt
+// remains usable and the resulting summary is explicitly marked partial.
+func (e *Engine) indexedDocument(chatID, documentID string) (store.Document, bool) {
+	if documentID == "" || e.Store == nil {
 		return store.Document{}, false
 	}
-	document, ok, err := e.Store.DocumentBySource(chatID, source)
+	document, err := e.Store.GetDocument(documentID)
 	if err != nil {
-		e.condenseWarning(chatID, uimsg.Errorf("chat.indexedUnreadable", source, err.Error()).Error())
+		e.condenseWarning(chatID, uimsg.Errorf("chat.indexedUnreadable", documentID, err.Error()).Error())
 		return store.Document{}, false
 	}
-	if !ok || llm.EstimateTokens(document.Text) <= llm.EstimateTokens(excerpt) {
+	if document.ChatID != chatID || document.Text == "" {
 		return store.Document{}, false
 	}
 	return document, true
@@ -547,7 +545,7 @@ func condensedIdentity(chatID string, call llm.ToolCall, output string) string {
 // answer's token budget show the same two numbers, and only the cause tells a reader
 // which of them to do something about.
 func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm.ToolCall,
-	output string, turn tools.TurnRef) (string, bool) {
+	output string, turn tools.TurnRef, documentID string) (string, bool) {
 
 	if e == nil || e.Settings == nil || e.Registry == nil || e.Store == nil || output == "" {
 		return output, false
@@ -563,13 +561,14 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// chunks it and the tool fetches the range whose chunk numbers the model found, so a
 	// condensation there would throw away the precision retrieval was built for.
 	var (
-		job     = digestJobPage
-		framing string
-		trailer string
-		framed  bool
-		path    string
-		content = output
-		reserve = digestPromptReserve
+		job        = digestJobPage
+		framing    string
+		trailer    string
+		framed     bool
+		path       string
+		incomplete bool
+		content    = output
+		reserve    = digestPromptReserve
 	)
 	switch call.Name {
 	case tools.ToolScrapeURL:
@@ -581,8 +580,10 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 		// A page too large to inline is indexed whole, and the result carries only its
 		// beginning. Summarising that beginning would answer questions about page 1 and
 		// none about page 50, so the indexed document is what gets condensed.
-		if document, ok := e.indexedDocument(chatID, call, content); ok {
+		if document, ok := e.indexedDocument(chatID, documentID); ok {
 			content = document.Text
+		} else if documentID != "" {
+			incomplete = true
 		}
 	case tools.ToolReadFile:
 		// A read the model bounded is the one read this never touches. It is how a
@@ -664,7 +665,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// retry budget is held under it, and the page is cut short rather than left to be
 	// refused. The other model's ceiling is deliberately not applied — it was
 	// measured for the chat's model and this is a different tokenizer.
-	if ceiling := e.ceilingFor(ref.Backend, ref.Model).Tokens; ceiling > 0 && ceiling < limit {
+	if ceiling := e.ceilingFor(ref.Backend, ref.Model).Tokens; ceiling > 0 && (limit <= 0 || ceiling < limit) {
 		limit = ceiling
 	}
 	// An indexed document can be far larger than the summariser can read — a 56-page
@@ -673,12 +674,26 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// the summary, and the notice says the result is a partial one: a summary that
 	// silently covered the first third of a manual would be worse than no summary. The
 	// reserve is the one for this job: a file's prompt is a different prompt.
-	text, partial := content, false
+	text, partial := content, incomplete
 	if limit > 0 {
-		if room := limit - maxTokens - reserve; room > 0 && llm.EstimateTokens(content) > room {
-			if cut := cutToTokens(content, room); cut != "" {
-				text, partial = cut, true
+		// Leave at least half the usable window for input when the configured output
+		// cap is larger than the model can accommodate.
+		overhead := reserve
+		if job == digestJobFile {
+			overhead += llm.EstimateTokens(path)
+		}
+		available := limit - overhead
+		if available <= 2 {
+			return output, false
+		}
+		answer := min(maxTokens, available/2)
+		room := available - answer
+		if llm.EstimateTokens(content) > room {
+			cut := cutToTokens(content, room)
+			if cut == "" {
+				return output, false
 			}
+			text, partial = cut, true
 		}
 	}
 	// The key is the text that was read, not the result: a scrape's framing carries a
@@ -688,7 +703,25 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// was actually read, so a narrower summariser cannot serve a wider summary from cache.
 	// The job is in it as well (digestKey), because a page and a file can be condensed out
 	// of the same words and the answers are not interchangeable.
-	key := digestKey(job, ref, maxTokens, text)
+	keyText := text
+	system, prompt := digestSystemPrompt, digestPrompt(text)
+	if job == digestJobFile {
+		keyText = path + "\x00" + text
+		system, prompt = readFileSystemPrompt, readFileDigestPrompt(path, text)
+	}
+	cacheCap := maxTokens
+	if limit > 0 {
+		prompt += "\n\n" + noThinkTag
+		promptTokens := llm.EstimateMessagesTokens([]llm.Message{
+			{Role: llm.RoleSystem, Content: system}, {Role: llm.RoleUser, Content: prompt},
+		})
+		if room := limit - promptTokens; room <= 0 {
+			return output, false
+		} else if room < cacheCap {
+			cacheCap = room
+		}
+	}
+	key := digestKey(job, ref, cacheCap, keyText)
 	// assemble puts the condensation back where the text was. A result that was never
 	// framed is returned as before, one string with the notice on top. A file has no
 	// markers around its content — the header, the continuation line and the AGENTS.md
@@ -704,9 +737,6 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 		return framing + scrapeBodyOpen + "\n" + condensed + "\n" + trailer
 	}
 	if entry, ok := e.Store.GetDigestCache(key); ok {
-		if rereadIsEscape {
-			e.condensations().add(identity)
-		}
 		return assemble(entry.Summary), true
 	}
 	// A condensation is not a reasoning task, so thinking is switched off where the
@@ -743,9 +773,6 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 		CreatedAt:    time.Now(),
 		ExpiresAt:    time.Now().Add(digestCacheDays * 24 * time.Hour),
 	}))
-	if rereadIsEscape {
-		e.condensations().add(identity)
-	}
 	return assemble(summary), true
 }
 
