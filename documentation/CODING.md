@@ -427,7 +427,17 @@ the card still shows what was read — and a notice says which lines and that th
 further down. It is the file as it was before the model's own edit, standing beside the copy that
 is the file as it is, and a model quoting the wrong one re-fixes what it has already fixed. A read
 of a *different* section is not a replacement: a long file is read in windows, so the rule is
-coverage of lines, not the path. With the ageing that runs beside it, in
+coverage of lines, not the path.
+
+**An edit marks the read it moved past.** A model that edits a window and never looks again holds
+the file as it was, so the next thing it quotes is text it has already replaced. An `edit_file`
+puts one sentence in front of that window — this is pre-edit, the changed passage is in the result
+below, re-read for the current file — and keeps the window, because the lines around the change
+are what the next edit is copied from. A `write_file` replaces the whole file, so there the read
+is stubbed instead: the new text is already in the request as the write's own arguments. Nothing
+is marked for a `run_command`, which can rewrite anything but usually changes nothing, nor for a
+change that did not happen — a card you denied, or an edit that could not find its passage,
+leaves the read in front of it current. Details with the ageing that runs beside both rules, in
 [COMPACT.md §18](COMPACT.md).
 
 **What arrives instead of a large file may be a summary.** With a condensation model chosen in

@@ -359,6 +359,11 @@ func Assemble(in AssemblyInput) Assembly {
 	// being answered, which is what ageToolResults is scoped to. It starts with the system
 	// message's own entry, which msgs already carries.
 	currentReply := []bool{false}
+	// applied is aligned the same way and says which tool results actually ran. A card the
+	// user denied carries ToolDenied and never touched the file, and an edit that could not
+	// find its passage carries ToolError: neither may make a read look stale, because nothing
+	// changed (see markStaleReads).
+	applied := []bool{false}
 	for _, m := range in.Messages {
 		if m.Seq < firstVerbatim {
 			continue
@@ -435,6 +440,7 @@ func Assemble(in AssemblyInput) Assembly {
 		historyCount++
 		msgs = append(msgs, lm)
 		currentReply = append(currentReply, m.Seq > newestUserSeq)
+		applied = append(applied, lm.Role == llm.RoleTool && m.Status == store.ToolOK)
 	}
 
 	// A stored call can name a tool the app does not have — a model that mangled the
@@ -452,7 +458,7 @@ func Assemble(in AssemblyInput) Assembly {
 	// round re-sends all of them. The newest ones are what the round is working from; the
 	// older ones are dropped to a notice (ageToolResults) and the saving comes off the history
 	// segment, so the meter keeps describing the request that is sent.
-	msgs, agedReads, agedTokens := ageToolResults(msgs, currentReply)
+	msgs, agedReads, agedTokens := ageToolResults(msgs, currentReply, applied)
 	budget.History -= agedTokens
 
 	// The per-turn state rides at the very end of the request, after everything the cache is

@@ -1346,6 +1346,38 @@ the file as it was before the edit the model just made, standing beside the copy
 as it is. A model quoting the wrong one re-fixes what it has already fixed, which is the shape
 of failure that costs a whole round of edits to undo.
 
+**An edit moves past the read it changed.** The rule above only helps a model that re-reads. The
+shape described in the last paragraph is the other one: read a window, edit a passage in it, edit
+another below, never look again. `markStaleReads` therefore walks the reply in order and, when an
+`edit_file` or `write_file` result names a file already read in that reply, marks the window —
+differently per tool, because the two lose different amounts:
+
+- `write_file` replaces every line, so the read is stubbed like a superseded one. Nothing is lost
+  by that, because the new text is already in the request as the call's own arguments, which is
+  how the model sees its own write; the file's token cost is simply not paid twice.
+- `edit_file` replaces a passage and leaves the window around it correct. Evicting it would take
+  away the lines the *next* edit is copied from and force a re-read round — more tokens than the
+  sentence costs, spent to fetch text the model just had. So the read stays, with one line in
+  front of it naming the file that changed and pointing at the changed passage in the edit's
+  result below. In front and not behind, because a model copies the passage it is about to change
+  while it reads, and a warning after five hundred lines arrives after the mistake.
+- None for a `run_command`, although one can rewrite anything (`gofmt -w .`): it is also the tool
+  that usually changes nothing — a test run, a listing, a search — and a warning on most windows
+  of a reply is noise. Its read memory is still dropped (`Service.forgetAllReads`), so a model
+  that does re-read gets the disk.
+
+A result that did not run marks nothing and counts as no read: a card the user **denied**
+(`ToolDenied`) and an edit that could not find its passage (`ToolError`) changed no file, and a
+model told otherwise either re-reads text it still has or believes a change landed that never
+did. `Assemble` hands the pass the store's status for exactly that — a third index-aligned array
+beside `currentReply` — and only `ToolOK` counts.
+
+A marked read is not a lost one: the text is still in the request, so it is not in `AgedReads`
+and its shortcut stands. A stubbed rewrite is reported like any other dropped read. In both cases
+a re-read returns the file, because the write tools drop the turn's read memory themselves
+(`Service.forgetReads`). The sentence is charged to the history segment rather than reported as a
+saving, so the meter keeps describing what is sent.
+
 **No single result may spend the answer.** Ageing bounds what a reply *re-sends*; the tool budget
 bounds what it *adds*, and `take` used to hand one result everything that was left of it — so the
 first enormous result spent the allowance the rest of the reply's rounds were going to need.
@@ -1384,6 +1416,11 @@ describing what is sent.
 still pair), `TestAToolResultFromAnEarlierTurnIsNotAged` (scope), `TestAShortToolResultIsNeverAged`
 (the floor), `TestARepeatedReadReplacesTheOneBeforeIt` (five reads of one window cost one),
 `TestOnlyACoveringReadReplacesAnEarlierOne` (coverage, not path; an outline is untouched),
-`TestAFileIsForgottenOnlyWhenNoCopyOfItIsSent` (one `ForgetReads` per path, and only then) and
+`TestAFileIsForgottenOnlyWhenNoCopyOfItIsSent` (one `ForgetReads` per path, and only then),
+`TestAnEditMarksTheReadItMovedPast` (marked, not evicted, and only once),
+`TestAWholeFileRewriteReplacesTheRead` (the case where evicting loses nothing),
+`TestAReadAfterTheEditIsCurrent` (direction), `TestADeniedEditMarksNothing` and
+`TestAssembleMarksAReadAnEditMovedPast` (the status, and that the index-aligned flag survives
+assembly) and
 `TestAssembleAgesTheReplyItIsAssembling` (the boundary survives the assembly
 loop, which skips messages and inserts the system message at position zero).

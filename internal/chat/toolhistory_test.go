@@ -548,7 +548,7 @@ func TestOldToolResultsAreAgedOutOfTheRequest(t *testing.T) {
 		current = append(current, false, true)
 	}
 
-	aged, dropped, saved := ageToolResults(msgs, current)
+	aged, dropped, saved := ageToolResults(msgs, current, ranAll(msgs))
 
 	if len(dropped) == 0 || saved <= 0 {
 		t.Fatalf("nothing was aged out: %d dropped, %d tokens saved", len(dropped), saved)
@@ -603,7 +603,7 @@ func TestAToolResultFromAnEarlierTurnIsNotAged(t *testing.T) {
 		{Role: llm.RoleUser, Content: "zweite Frage"},
 	}
 	// Only the last message belongs to the reply being answered.
-	aged, dropped, saved := ageToolResults(msgs, []bool{false, false, false, true})
+	aged, dropped, saved := ageToolResults(msgs, []bool{false, false, false, true}, ranAll(msgs))
 
 	if len(dropped) != 0 || saved != 0 {
 		t.Errorf("an earlier turn was aged out: %v, %d tokens", dropped, saved)
@@ -627,7 +627,7 @@ func TestARepeatedReadReplacesTheOneBeforeIt(t *testing.T) {
 			readArgs(path, 0, 0), readResult(path)+fmt.Sprintf("// runde %d\n", i))
 	}
 
-	aged, dropped, saved := ageToolResults(msgs, current)
+	aged, dropped, saved := ageToolResults(msgs, current, ranAll(msgs))
 
 	superseded := 0
 	for _, m := range aged {
@@ -667,7 +667,7 @@ func TestOnlyACoveringReadReplacesAnEarlierOne(t *testing.T) {
 	msgs, current = appendRead(msgs, current, "call-3", path,
 		fmt.Sprintf(`{"path":%q,"outline":true}`, path), "1: func main()\n40: func run()\n")
 
-	aged, dropped, saved := ageToolResults(msgs, current)
+	aged, dropped, saved := ageToolResults(msgs, current, ranAll(msgs))
 	if saved != 0 || len(dropped) != 0 {
 		t.Fatalf("two windows and an outline were not left alone: saved %d, dropped %v", saved, dropped)
 	}
@@ -680,7 +680,7 @@ func TestOnlyACoveringReadReplacesAnEarlierOne(t *testing.T) {
 	// A read wide enough to cover the first window — but not the second — replaces only that
 	// one, and names the lines it stands in for.
 	msgs, current = appendRead(msgs, current, "call-4", path, readArgs(path, 1, 1500), readResult(path))
-	aged, dropped, saved = ageToolResults(msgs, current)
+	aged, dropped, saved = ageToolResults(msgs, current, ranAll(msgs))
 	if saved <= 0 || len(dropped) != 0 {
 		t.Fatalf("a covering read replaced nothing: saved %d, dropped %v", saved, dropped)
 	}
@@ -719,7 +719,7 @@ func TestAFileIsForgottenOnlyWhenNoCopyOfItIsSent(t *testing.T) {
 			readArgs(name, 0, 0), small)
 	}
 
-	_, dropped, saved := ageToolResults(msgs, current)
+	_, dropped, saved := ageToolResults(msgs, current, ranAll(msgs))
 	if saved <= 0 {
 		t.Fatal("nothing was left out, so the forgetting rule was not tested")
 	}
@@ -733,12 +733,201 @@ func TestAFileIsForgottenOnlyWhenNoCopyOfItIsSent(t *testing.T) {
 // appendRead adds one read_file call and the result that answers it, with the reply flags that
 // say both belong to the reply being assembled.
 func appendRead(msgs []llm.Message, current []bool, id, path, args, content string) ([]llm.Message, []bool) {
+	return appendTool(msgs, current, id, tools.ToolReadFile, args, content)
+}
+
+// appendTool is the same for any tool: the call the model made, then the result that answers it.
+func appendTool(msgs []llm.Message, current []bool, id, name, args, content string) ([]llm.Message, []bool) {
 	msgs = append(msgs,
 		llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: id,
-			Name: tools.ToolReadFile, Arguments: args}}},
-		llm.Message{Role: llm.RoleTool, Name: tools.ToolReadFile, ToolCallID: id, Content: content},
+			Name: name, Arguments: args}}},
+		llm.Message{Role: llm.RoleTool, Name: name, ToolCallID: id, Content: content},
 	)
 	return msgs, append(current, false, true)
+}
+
+// TestAnEditMarksTheReadItMovedPast pins the other half of the staleness rule: a model that edits
+// a window and never re-reads holds the file as it was for the rest of the reply, and the next
+// thing it quotes from there is text it has already replaced. The window stays — the lines around
+// the edit are still exactly right and are what the next edit is copied from — with one sentence
+// in front of it saying the file has moved since.
+func TestAnEditMarksTheReadItMovedPast(t *testing.T) {
+	const path = "internal/chat/engine.go"
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "ändere das"}}
+	current := []bool{true}
+	msgs, current = appendRead(msgs, current, "call-1", path, readArgs(path, 0, 0), readResult(path))
+	msgs, current = appendTool(msgs, current, "call-2", tools.ToolEditFile,
+		fmt.Sprintf(`{"path":%q,"old_string":"a","new_string":"b"}`, path), "1 Änderung.")
+	msgs, current = appendRead(msgs, current, "call-3", "ander.go", readArgs("ander.go", 0, 0),
+		readResult("ander.go"))
+
+	aged, _, saved := ageToolResults(msgs, current, ranAll(msgs))
+
+	if !strings.HasPrefix(aged[2].Content, "[Hinweis:") {
+		t.Errorf("the read was not marked as pre-edit:\n%.120s", aged[2].Content)
+	}
+	// Marked, not evicted: the lines around the change are still there to copy the next edit from.
+	if !strings.Contains(aged[2].Content, "x = 1") {
+		t.Error("the window was replaced instead of marked; the next edit has nothing to copy from")
+	}
+	if !strings.Contains(aged[2].Content, path) {
+		t.Error("the note does not name the file that changed")
+	}
+	// A read of another file, and one taken after the edit, are current.
+	if aged[6].Content != readResult("ander.go") {
+		t.Error("a read of an untouched file was marked")
+	}
+	// The note costs tokens, and the meter says so rather than reporting a saving.
+	if saved >= 0 {
+		t.Errorf("saved = %d, want the note charged", saved)
+	}
+
+	// A second edit of the same file does not stack a second note on the same window.
+	msgs, current = appendTool(msgs, current, "call-4", tools.ToolEditFile,
+		fmt.Sprintf(`{"path":%q,"old_string":"b","new_string":"c"}`, path), "1 Änderung.")
+	aged, _, _ = ageToolResults(msgs, current, ranAll(msgs))
+	notes := 0
+	for _, m := range aged {
+		notes += strings.Count(m.Content, "[Hinweis:")
+	}
+	if notes != 1 {
+		t.Errorf("%d notes on one window, want one", notes)
+	}
+}
+
+// TestAssembleMarksAReadAnEditMovedPast is the same rule through the real entry point. The
+// applied flag is a third array index-aligned with the messages, and one that drifted by a
+// position would switch the rule off without failing anything else — the same reason the ageing
+// boundary has its own assembly test.
+func TestAssembleMarksAReadAnEditMovedPast(t *testing.T) {
+	const path = "internal/chat/engine.go"
+	assemble := func(editStatus string) Assembly {
+		messages := []store.Message{
+			{ID: "m1", Seq: 1, Role: "user", Content: "ändere das", Status: store.StatusComplete},
+			{ID: "m2", Seq: 2, Role: "assistant", Status: store.StatusComplete,
+				ToolCallsJSON: fmt.Sprintf(`[{"id":"call-1","name":"read_file","arguments":%q}]`,
+					readArgs(path, 0, 0))},
+			{ID: "m3", Seq: 3, Role: "tool", Name: tools.ToolReadFile, ToolCallID: "call-1",
+				Content: readResult(path), Status: store.ToolOK},
+			{ID: "m4", Seq: 4, Role: "assistant", Status: store.StatusComplete,
+				ToolCallsJSON: fmt.Sprintf(`[{"id":"call-2","name":"edit_file","arguments":%q}]`,
+					fmt.Sprintf(`{"path":%q,"old_string":"a","new_string":"b"}`, path))},
+			{ID: "m5", Seq: 5, Role: "tool", Name: tools.ToolEditFile, ToolCallID: "call-2",
+				Content: "1 Änderung.", Status: editStatus},
+		}
+		return Assemble(AssemblyInput{
+			Chat:       asmChat("Du bist ein Assistent."),
+			Messages:   messages,
+			KnownTools: []string{tools.ToolReadFile, tools.ToolEditFile},
+			Limit:      200_000, Reserve: 1024,
+		})
+	}
+
+	marked := assemble(store.ToolOK)
+	found := false
+	for _, m := range marked.Messages {
+		if strings.Contains(m.Content, "[Hinweis:") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("an edit that ran left the read it moved past unmarked")
+	}
+	for _, m := range assemble(store.ToolDenied).Messages {
+		if strings.Contains(m.Content, "[Hinweis:") {
+			t.Error("a denied edit marked a read as stale")
+		}
+	}
+}
+
+// TestAWholeFileRewriteReplacesTheRead is the case where nothing is lost by evicting: write_file
+// replaces every line, and the new text is already in the request as the call's own arguments —
+// which is how the model sees its own write. So the old read goes, like a superseded one.
+func TestAWholeFileRewriteReplacesTheRead(t *testing.T) {
+	const path = "internal/chat/engine.go"
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "schreib das neu"}}
+	current := []bool{true}
+	msgs, current = appendRead(msgs, current, "call-1", path, readArgs(path, 0, 0), readResult(path))
+	msgs, current = appendTool(msgs, current, "call-2", tools.ToolWriteFile,
+		fmt.Sprintf(`{"path":%q,"content":"package chat\n"}`, path), "geschrieben")
+
+	aged, dropped, saved := ageToolResults(msgs, current, ranAll(msgs))
+
+	if strings.Contains(aged[2].Content, "x = 1") {
+		t.Error("a read from before a whole-file rewrite was still sent in full")
+	}
+	if !strings.Contains(aged[2].Content, tools.ToolWriteFile) ||
+		!strings.Contains(aged[2].Content, "vollständig neu geschrieben") {
+		t.Errorf("the stub does not say where the new text is:\n%s", aged[2].Content)
+	}
+	if saved <= 0 {
+		t.Errorf("saved = %d, want the window's tokens back", saved)
+	}
+	// No copy of the file is sent, so the tool must let the model read it again.
+	if len(dropped) != 1 || dropped[0] != path {
+		t.Errorf("dropped = %v, want the rewritten file", dropped)
+	}
+}
+
+// TestADeniedEditMarksNothing guards the status half of the rule. A card the user refused, or an
+// edit whose passage was not found, changed no file: the read in front of it is still the current
+// text, and marking it would tell the model that a change landed which never did.
+func TestADeniedEditMarksNothing(t *testing.T) {
+	const path = "internal/chat/engine.go"
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "ändere das"}}
+	current := []bool{true}
+	msgs, current = appendRead(msgs, current, "call-1", path, readArgs(path, 0, 0), readResult(path))
+	msgs, current = appendTool(msgs, current, "call-2", tools.ToolEditFile,
+		fmt.Sprintf(`{"path":%q,"old_string":"a","new_string":"b"}`, path), "abgelehnt")
+
+	applied := ranAll(msgs)
+	applied[4] = false // the edit result: the card was denied, nothing was written
+	aged, _, saved := ageToolResults(msgs, current, applied)
+
+	if aged[2].Content != readResult(path) {
+		t.Error("a read was marked for an edit that never ran")
+	}
+	if saved != 0 {
+		t.Errorf("saved = %d, want nothing changed for a denied edit", saved)
+	}
+}
+
+// ranAll is the applied flag for a history whose tool results all ran, which is what every test
+// but the denied-edit one wants.
+func ranAll(msgs []llm.Message) []bool {
+	ran := make([]bool, len(msgs))
+	for i := range ran {
+		ran[i] = true
+	}
+	return ran
+}
+
+// TestAReadAfterTheEditIsCurrent keeps the direction of the rule: only a read the edit has moved
+// past is marked, and when the model does re-read, the older copy is the one that goes.
+func TestAReadAfterTheEditIsCurrent(t *testing.T) {
+	const path = "internal/chat/engine.go"
+	msgs := []llm.Message{{Role: llm.RoleUser, Content: "ändere und prüfe"}}
+	current := []bool{true}
+	msgs, current = appendRead(msgs, current, "call-1", path, readArgs(path, 0, 0), readResult(path))
+	msgs, current = appendTool(msgs, current, "call-2", tools.ToolEditFile,
+		fmt.Sprintf(`{"path":%q,"old_string":"a","new_string":"b"}`, path), "1 Änderung.")
+	msgs, current = appendRead(msgs, current, "call-3", path, readArgs(path, 0, 0),
+		readResult(path)+"// nachher\n")
+
+	aged, _, _ := ageToolResults(msgs, current, ranAll(msgs))
+
+	// The re-read covers the first window, so it is gone: no note on text that is not sent, and
+	// no duplicate of the file either.
+	if strings.Contains(aged[2].Content, "x = 1") {
+		t.Error("the pre-edit window was still sent, beside the copy taken after the edit")
+	}
+	if strings.Contains(aged[2].Content, "[Hinweis:") {
+		t.Error("a stub was annotated for an edit it no longer stands in front of")
+	}
+	// The copy taken after the edit is current, so it is neither noted nor dropped.
+	if !strings.Contains(aged[6].Content, "// nachher") || strings.Contains(aged[6].Content, "[Hinweis:") {
+		t.Errorf("the re-read was not left alone:\n%.120s", aged[6].Content)
+	}
 }
 
 // readArgs is the argument JSON of one read, with an absent window left absent the way a model
@@ -776,7 +965,7 @@ func TestAShortToolResultIsNeverAged(t *testing.T) {
 		current = append(current, false, true)
 	}
 
-	aged, _, saved := ageToolResults(msgs, current)
+	aged, _, saved := ageToolResults(msgs, current, ranAll(msgs))
 	if saved <= 0 {
 		t.Fatal("nothing was aged out, so the floor was not tested")
 	}

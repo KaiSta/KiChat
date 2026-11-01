@@ -3,6 +3,8 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -75,7 +77,12 @@ const (
 // form, so the caller can let the model read them again; saved is the token difference, which
 // the caller subtracts from the budget so the meter describes the request that is sent rather
 // than the one that could have been.
-func ageToolResults(msgs []llm.Message, currentReply []bool) (aged []llm.Message,
+//
+// applied is index-aligned with msgs and says which results actually ran. It is what keeps an
+// edit that was denied or that failed from marking a read stale: the file did not change, and a
+// model told otherwise either re-reads text it already has or believes a change landed that
+// never did.
+func ageToolResults(msgs []llm.Message, currentReply, applied []bool) (aged []llm.Message,
 	droppedReads []string, saved int) {
 
 	arguments := map[string]string{}
@@ -92,6 +99,9 @@ func ageToolResults(msgs []llm.Message, currentReply []bool) (aged []llm.Message
 	// otherwise spend the budget on is not the text of the file any more.
 	stubbed := map[int]bool{}
 	saved += supersedeReads(aged, currentReply, arguments, stubbed)
+	// Then the reads an edit or a rewrite in this reply has moved past. After the re-read rule,
+	// because a read a newer one already covers is gone entirely and needs no marking.
+	saved += markStaleReads(aged, currentReply, applied, arguments, stubbed)
 
 	kept := 0
 	for i := len(aged) - 1; i >= 0; i-- {
@@ -204,6 +214,137 @@ func supersededStub(window readWindow, tokens int) string {
 		tools.ToolReadFile, window.label(), tokens)
 }
 
+// markStaleReads marks every read of a file that a later write or edit in the same reply has
+// changed, and returns the token difference in the sign the caller uses: positive for a window
+// it took out, negative for the sentence it added.
+//
+// The re-read rule only helps a model that re-reads. The other shape is the expensive one: read
+// a window, edit three lines in it, edit another passage below, and never look again — the model
+// now holds the file as it was for the rest of the reply, and the next thing it quotes from that
+// window is text it has already replaced. Cline removes the older version of a file outright;
+// what happens here depends on what the tool did, because the two are not the same amount of
+// loss:
+//
+//   - `write_file` replaces the whole file, so every line of the earlier read is gone — and the
+//     new text is already in the request, in the call's own arguments, which is how the model
+//     sees its own write. The read is therefore stubbed like a superseded one: nothing is lost
+//     that the request does not carry twice.
+//   - `edit_file` replaces a passage, and the window around it is still exactly right. Evicting
+//     it would take away the surrounding lines the next edit is copied from and force a re-read
+//     round — more tokens than the note costs, spent to fetch text the model just had. The read
+//     therefore stays, with one sentence in front of it saying which file changed since and
+//     where the new text is.
+//
+// Not marked: what a `run_command` may have rewritten. A command is the tool whose effect cannot
+// be enumerated (`gofmt -w .`, a code generator), but it is also the tool that usually changes
+// nothing — a test run, a listing, a grep — and marking every read after every command would put
+// a warning on most windows in a reply for no reason. The read memory is still dropped after one
+// (`Service.forgetAllReads`), so a model that does re-read gets the disk.
+func markStaleReads(msgs []llm.Message, currentReply, applied []bool, arguments map[string]string,
+	stubbed map[int]bool) (saved int) {
+
+	// One entry per file this reply has read, in the order it read them.
+	type readRef struct {
+		index int
+		label string
+	}
+	reads := map[string][]readRef{}
+	noted := map[int]bool{}
+	for i := range msgs {
+		if i >= len(currentReply) || !currentReply[i] || msgs[i].Role != llm.RoleTool {
+			continue
+		}
+		// A result that did not run — a denied card, a failed edit — changed nothing, so it
+		// neither counts as a read nor marks one.
+		if i < len(applied) && !applied[i] {
+			continue
+		}
+		call := arguments[msgs[i].ToolCallID]
+		switch msgs[i].Name {
+		case tools.ToolReadFile:
+			file := toolPath(call)
+			if file == "" {
+				continue
+			}
+			label := file
+			if window, ok := readWindowOf(msgs[i].Name, call); ok {
+				label = window.label()
+			}
+			reads[cleanPath(file)] = append(reads[cleanPath(file)], readRef{index: i, label: label})
+		case tools.ToolWriteFile, tools.ToolEditFile:
+			file := toolPath(call)
+			if file == "" {
+				continue
+			}
+			whole := msgs[i].Name == tools.ToolWriteFile
+			for _, ref := range reads[cleanPath(file)] {
+				if stubbed[ref.index] || noted[ref.index] {
+					continue
+				}
+				size := llm.EstimateTokens(msgs[ref.index].Content)
+				if whole {
+					msgs[ref.index].Content = rewrittenStub(ref.label, size)
+					stubbed[ref.index] = true
+				} else {
+					msgs[ref.index].Content = staleNote(file) + "\n\n" + msgs[ref.index].Content
+					noted[ref.index] = true
+				}
+				saved += size - llm.EstimateTokens(msgs[ref.index].Content)
+			}
+		}
+	}
+	return saved
+}
+
+// staleNote is the sentence a read carries once an edit has moved past it.
+//
+// In front of the window rather than behind it: a model copies the passage it is about to change
+// while it reads, so a warning at the end of five hundred lines arrives after the mistake.
+func staleNote(path string) string {
+	return fmt.Sprintf("[Hinweis: dieser Stand ist von vor einer Änderung an %s in dieser Antwort. "+
+		"Den geänderten Ausschnitt enthält das Ergebnis von %s weiter unten; für den aktuellen "+
+		"Stand der Datei lies den Bereich erneut.]", path, tools.ToolEditFile)
+}
+
+// rewrittenStub is what the model reads in place of a read a whole-file rewrite made obsolete.
+func rewrittenStub(label string, tokens int) string {
+	return fmt.Sprintf("[Tool-Ergebnis von %s (%s): %d Tokens. Die Datei wurde danach in dieser "+
+		"Antwort vollständig neu geschrieben; der neue Inhalt steht im Aufruf %s weiter unten. Der "+
+		"alte Stand wurde nicht erneut gesendet; brauchst du ihn doch, lies den Bereich erneut.]",
+		tools.ToolReadFile, label, tokens, tools.ToolWriteFile)
+}
+
+// cleanPath is how two calls' spellings of one file are compared: a model writes `./app.go` and
+// `app.go` for the same file, and a read it thinks is current must be recognised as the one the
+// edit moved past.
+func cleanPath(p string) string {
+	return path.Clean(strings.TrimPrefix(filepath.ToSlash(p), "./"))
+}
+
+// toolPath is the file a call named, by any of the spellings the app accepts.
+var pathArguments = []string{"path", "file_path", "file", "filename"}
+
+func toolPath(arguments string) string {
+	if arguments == "" {
+		return ""
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return ""
+	}
+	return firstString(args)
+}
+
+// firstString is the first of the path arguments a call actually carries.
+func firstString(args map[string]any) string {
+	for _, key := range pathArguments {
+		if value, ok := args[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 // readWindow is the range of a file one `read_file` call covered.
 //
 // Taken from the arguments and not from the result text: a window that was cut by MaxReadBytes
@@ -311,23 +452,14 @@ func toolStub(name string, tokens int) string {
 
 // readPath is the file a `read_file` call named, empty for any other tool.
 //
-// The argument names are the same three the read tool itself accepts (`path`, `file_path`,
-// `file`, `filename`): a model that spelled it one way is the model whose result can be asked
-// for again, so the alias has to be read here too or that read would be dropped for good.
+// The alias list is shared (pathArguments) rather than written out again here: a model that
+// spelled the path one way is the model whose result can be asked for again, so the aliases have
+// to be read here too or that read would be dropped for good — and two lists would drift.
 func readPath(name, arguments string) string {
-	if name != tools.ToolReadFile || arguments == "" {
+	if name != tools.ToolReadFile {
 		return ""
 	}
-	var args map[string]any
-	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
-		return ""
-	}
-	for _, key := range []string{"path", "file_path", "file", "filename"} {
-		if value, ok := args[key].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
+	return toolPath(arguments)
 }
 
 // droppedToolText is what the transcript says when no call survived, so a turn
