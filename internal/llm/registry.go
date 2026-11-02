@@ -145,6 +145,8 @@ func (r *Registry) Reconfigure(configs []BackendConfig) {
 			providers = append(providers, newGroqProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		case "llamacpp":
 			providers = append(providers, newLlamaCppProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
+		case "mlx":
+			providers = append(providers, newMLXProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		}
 	}
 	r.mu.Lock()
@@ -427,6 +429,19 @@ func DefaultBackendConfigs() []BackendConfig {
 			Name:    "llama.cpp",
 			Kind:    "llamacpp",
 			BaseURL: LlamaCppDefaultBaseURL,
+			Enabled: false,
+		},
+		{
+			// MLX ships disabled for the same reason llama.cpp does: 8080 is
+			// mlx_lm.server's default, not a port the program owns, so the entry is
+			// offered rather than probed. It is also the only kind whose server
+			// KiChat can install and run itself on Apple silicon (Settings →
+			// Backends), and that start would otherwise win the loaded-model race
+			// on every launch.
+			ID:      "mlx",
+			Name:    "MLX",
+			Kind:    "mlx",
+			BaseURL: MLXDefaultBaseURL,
 			Enabled: false,
 		},
 		{

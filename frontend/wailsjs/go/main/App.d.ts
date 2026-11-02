@@ -78,6 +78,8 @@ export function ImportBackup(arg1:Array<string>):Promise<main.BackupImportResult
 
 export function InstallLlamaRuntime(arg1:string,arg2:string):Promise<void>;
 
+export function InstallMLXRuntime():Promise<void>;
+
 export function InstallUpscaler():Promise<void>;
 
 export function ListChats(arg1:boolean):Promise<Array<store.Chat>>;
@@ -103,6 +105,8 @@ export function PickFiles():Promise<Array<string>>;
 export function PickImageFile(arg1:string,arg2:Array<string>):Promise<string>;
 
 export function PickImageFolder(arg1:string):Promise<string>;
+
+export function PickMLXModelFolder(arg1:string):Promise<string>;
 
 export function PickManagedModelFile(arg1:string):Promise<string>;
 

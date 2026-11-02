@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"sort"
@@ -21,6 +22,9 @@ import (
 // ManagedStatus is one model KiChat runs itself, as the UI reads it.
 type ManagedStatus struct {
 	BackendID string `json:"backendId"`
+	// Kind is the backend's kind, so a row can be read without looking the entry up
+	// again in a settings snapshot that may have moved on.
+	Kind      string `json:"kind,omitempty"`
 	Enabled   bool   `json:"enabled"`
 	ModelPath string `json:"modelPath"`
 	// LoadedModel is the GGUF the running server was started with — what is
@@ -144,6 +148,19 @@ type RuntimeStatus struct {
 	// build. It is what makes the "restart the model" line survive the update it
 	// refers to; a managed start clears it.
 	RestartPending bool `json:"restartPending"`
+	// MLX is the mlx-lm environment KiChat installs on Apple silicon. It is a
+	// second, independent install with its own fields, because a pip run and a
+	// llama.cpp download must not overwrite each other's phase or error.
+	MLXSupported bool   `json:"mlxSupported"`
+	MLXInstalled bool   `json:"mlxInstalled"`
+	MLXVersion   string `json:"mlxVersion,omitempty"`
+	// MLXPython is the interpreter inside the environment the app made.
+	MLXPython string `json:"mlxPython,omitempty"`
+	// MLXServer is a launcher the user supplied instead.
+	MLXServer string `json:"mlxServer,omitempty"`
+	MLXBusy   bool   `json:"mlxBusy"`
+	MLXPhase  string `json:"mlxPhase,omitempty"`
+	MLXError  string `json:"mlxError,omitempty"`
 	// Models carries one entry per id in the settings, so a row with no model
 	// configured still appears with the state to explain it.
 	Models []ManagedStatus `json:"models"`
@@ -474,7 +491,7 @@ func runtimeStatusBase(settings config.Settings, goos, goarch string) RuntimeSta
 		mm := settings.Runtime.Models[id]
 		projector, detected := projectorReading(mm)
 		status.Models = append(status.Models, ManagedStatus{
-			BackendID: id, Enabled: mm.Enabled, ModelPath: mm.ModelPath,
+			BackendID: id, Kind: backendKind(settings, id), Enabled: mm.Enabled, ModelPath: mm.ModelPath,
 			CtxSize: mm.CtxSize, ExtraArgs: mm.ExtraArgs, State: rt.StateStopped,
 			MMProj: projector, MMProjDetected: detected,
 		})
@@ -615,6 +632,20 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 	status.RestartPending = a.installCompleted && status.CustomBinary == ""
 	a.installMu.Unlock()
 
+	// The MLX environment is the other install this app can own. It is reported on
+	// every status call rather than only when its card is open, because the card is
+	// what reads it and the card polls this method.
+	status.MLXSupported = rt.MLXSupported(goruntime.GOOS, goruntime.GOARCH)
+	status.MLXVersion = settings.Runtime.MLX.Version
+	status.MLXServer = settings.Runtime.MLX.ServerPath
+	if python, ok := rt.MLXVenvPython(rt.MLXVenvDir(a.dataDir)); ok {
+		status.MLXPython = python
+	}
+	status.MLXInstalled = status.MLXServer != "" || status.MLXPython != ""
+	a.mlxMu.Lock()
+	status.MLXBusy, status.MLXPhase, status.MLXError = a.mlxBusy, a.mlxPhase, a.mlxErr
+	a.mlxMu.Unlock()
+
 	// The live state is filled into the rows the base already laid out, rather
 	// than appended a second time.
 	for i := range status.Models {
@@ -708,6 +739,109 @@ func installDistribution(picked, stored string) string {
 		return picked
 	}
 	return stored
+}
+
+// InstallMLXRuntime creates the mlx-lm environment KiChat runs, or upgrades the
+// package in the one it made before. It returns as soon as the work is under way:
+// pip takes minutes, and GetRuntimeStatus reports the phase and the outcome.
+//
+// This is a separate environment from anything the user has: no system package is
+// touched, no administrator password is asked for, and removing the directory is a
+// complete uninstall.
+func (a *App) InstallMLXRuntime() error {
+	if err := a.ensure(); err != nil {
+		return err
+	}
+	if !rt.MLXSupported(goruntime.GOOS, goruntime.GOARCH) {
+		return uimsg.Errorf("runtime.mlxPlatform")
+	}
+	a.mlxMu.Lock()
+	if a.mlxBusy {
+		a.mlxMu.Unlock()
+		return uimsg.Errorf("download.running")
+	}
+	a.mlxBusy, a.mlxPhase, a.mlxErr = true, "python", ""
+	a.mlxMu.Unlock()
+	go a.installMLX()
+	return nil
+}
+
+// setMLXPhase is the installer's progress callback.
+func (a *App) setMLXPhase(phase string) {
+	a.mlxMu.Lock()
+	a.mlxPhase = phase
+	a.mlxMu.Unlock()
+}
+
+// installMLX is the install itself, on its own goroutine.
+//
+// The interpreter is looked for among the names a Mac actually has, and one older
+// than the package supports is passed over rather than tried: pip would spend a
+// minute resolving wheels and then fail with a version error whose cause is the
+// interpreter, not the package.
+func (a *App) installMLX() {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+
+	python := ""
+	for _, candidate := range rt.MLXPythonCandidates() {
+		path, err := exec.LookPath(candidate)
+		if err != nil {
+			continue
+		}
+		major, minor, err := rt.MLXPythonVersion(ctx, path)
+		if err == nil && (major > 3 || (major == 3 && minor >= 11)) {
+			python = path
+			break
+		}
+	}
+	if python == "" {
+		a.finishMLX(uimsg.Errorf("runtime.mlxPythonMissing", "python3"))
+		return
+	}
+
+	version, err := rt.MLXInstall(ctx, python, rt.MLXVenvDir(a.dataDir), a.setMLXPhase)
+	if err != nil {
+		a.finishMLX(err)
+		return
+	}
+	a.settingsMu.Lock()
+	a.settings.Runtime.MLX.Version = version
+	updated := a.settings.Clone()
+	a.settingsMu.Unlock()
+	if err := a.sanitize(updated).Save(a.store); err != nil {
+		a.finishMLX(err)
+		return
+	}
+	runtime.LogInfof(a.ctx, "mlx-lm %s installiert: %s", version, rt.MLXVenvDir(a.dataDir))
+	a.finishMLX(nil)
+}
+
+// finishMLX ends an install, successfully or not.
+func (a *App) finishMLX(err error) {
+	a.mlxMu.Lock()
+	a.mlxBusy = false
+	if err != nil {
+		a.mlxErr = err.Error()
+		a.mlxPhase = ""
+	} else {
+		a.mlxErr = ""
+		a.mlxPhase = "done"
+	}
+	a.mlxMu.Unlock()
+}
+
+// PickMLXModelFolder asks for an MLX snapshot directory: a folder holding
+// config.json and the weights, which is what `mlx_lm.server --model` takes.
+func (a *App) PickMLXModelFolder(title string) (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
 }
 
 // installRuntime is the download itself, on its own goroutine.
@@ -920,6 +1054,10 @@ func (a *App) SetManagedModel(backendID string, mm config.ManagedModel) error {
 	mm.ModelPath = strings.TrimSpace(mm.ModelPath)
 	mm.MMProj = strings.TrimSpace(mm.MMProj)
 	mm.ExtraArgs = strings.TrimSpace(mm.ExtraArgs)
+	// Repaired here as well as on load: a start builds its command line from this
+	// value, and a width the server refuses is a model that exits rather than a
+	// setting that looks odd.
+	mm.MLX = config.NormaliseMLX(mm.MLX)
 	if mm.CtxSize != 0 && mm.CtxSize < config.MinCtxSize {
 		mm.CtxSize = config.MinCtxSize
 	}
@@ -1004,12 +1142,16 @@ func (a *App) StartManagedModelWith(backendID string, mm config.ManagedModel) er
 	if !found {
 		return fmt.Errorf("unbekanntes Backend: %s", backendID)
 	}
-	// The kind `internal/llm`'s registry builds a llama.cpp provider for: the one kind
-	// whose server this app starts, stops and configures itself.
-	if entry.Kind != "llamacpp" {
+	// The kinds whose server this app starts, stops and configures itself:
+	// llama.cpp everywhere, and MLX on Apple silicon.
+	if !llm.ManagedKind(entry.Kind) {
 		return uimsg.Errorf("runtime.notManaged", entry.Name)
 	}
-	if info, err := os.Stat(mm.ModelPath); err != nil || info.IsDir() {
+	// The two shapes differ: a llama.cpp model is a file, an MLX model is the
+	// snapshot directory holding config.json and the weights. Checking the shape
+	// here is what keeps a GGUF out of an MLX start and a folder out of a
+	// llama-server one, each of which fails later and less clearly.
+	if info, err := os.Stat(mm.ModelPath); err != nil || (entry.Kind == "mlx" && !info.IsDir()) || (entry.Kind != "mlx" && info.IsDir()) {
 		return uimsg.Errorf("model.notFound", mm.ModelPath)
 	}
 

@@ -29,7 +29,12 @@ func settingsWithEveryContainerFilled() Settings {
 	}
 	s.Search.ProviderOrder = []string{"brave", "duckduckgo"}
 	s.Runtime.ModelDirs = []string{"/models", "/more"}
-	s.Runtime.Models = map[string]ManagedModel{"one": {Enabled: true, ModelPath: "/models/a.gguf"}}
+	s.Runtime.Models = map[string]ManagedModel{"one": {
+		Enabled: true, ModelPath: "/models/a.gguf",
+		// The MLX section is the one pointer in the schema; it is filled so the walk
+		// below proves Clone copied the value rather than the address.
+		MLX: &MLXOptions{KVBits: 4, DraftModel: "/models/draft"},
+	}}
 	return s
 }
 
@@ -75,12 +80,19 @@ func TestCloneSharesNothingWithTheOriginal(t *testing.T) {
 				}
 			}
 		case reflect.Pointer, reflect.Interface:
-			// Nothing in this schema holds one today, and a field that started to would need
-			// a decision about what a snapshot of it is. Saying so beats a silent pass.
-			if !live.IsNil() {
-				t.Errorf("%s is a %s, which Clone() does not copy: decide what a snapshot of it means",
-					path, live.Kind())
+			// A pointer is a container like any other: the snapshot has to own what it
+			// points at. The address comparison catches a shallow copy, and the walk
+			// into the element catches a value that was copied but whose own fields
+			// were not.
+			if live.IsNil() {
+				return
 			}
+			walked++
+			if live.UnsafePointer() == copy.UnsafePointer() {
+				t.Errorf("%s is the same pointer in the clone and in the live settings", path)
+				return
+			}
+			walk(path+" ->", live.Elem(), copy.Elem())
 		case reflect.Struct:
 			for i := 0; i < live.NumField(); i++ {
 				field := live.Type().Field(i)
@@ -96,7 +108,7 @@ func TestCloneSharesNothingWithTheOriginal(t *testing.T) {
 	// The number of containers the value holds, counted: a walk that stopped matching — a
 	// renamed field, a struct that is no longer reached — would otherwise pass without
 	// having looked at anything. Move it together with the fixture when the schema gains one.
-	const containers = 9
+	const containers = 10
 	if walked != containers {
 		t.Errorf("walked %d containers, want %d: the fixture, this number and Clone() have to "+
 			"move together when the schema gains a map or a slice", walked, containers)

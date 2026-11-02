@@ -46,6 +46,11 @@ type Options struct {
 	// program it is the primary file of the set the command line names, because this
 	// is what a start checks for and what the row shows.
 	Model string
+	// ModelDir says Model is a directory rather than a file, which is what
+	// mlx_lm.server's `--model` takes: an MLX model is a snapshot folder holding
+	// config.json and the weights, not a single archive. Without this the folder
+	// check below would reject the only shape MLX has.
+	ModelDir bool
 	// MMProj is the multimodal projector to load beside the model, `--mmproj`, and
 	// empty for a text-only server. A vision model is two files: without the
 	// projector llama.cpp has no vision tower to hand an image to, so it answers the
@@ -213,7 +218,7 @@ func (s *Server) Start(opts Options) error {
 	if err != nil {
 		return uimsg.Errorf("model.notFound", err)
 	}
-	if model.IsDir() {
+	if model.IsDir() && !opts.ModelDir {
 		return uimsg.Errorf("runtime.modelIsFolder", opts.Model)
 	}
 

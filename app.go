@@ -11,6 +11,8 @@ import (
 	"time"
 	"uuid"
 
+	goruntime "runtime"
+
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"kichat/internal/backup"
@@ -191,6 +193,13 @@ type App struct {
 	installDone  int64
 	installTotal int64
 	installErr   string
+	// mlx tracks the mlx-lm environment install. It is separate from installMu for
+	// the reason upscalerMu is: two downloads must not overwrite each other's phase
+	// or error, and this one is not an archive at all but a virtual environment.
+	mlxMu    sync.Mutex
+	mlxBusy  bool
+	mlxPhase string
+	mlxErr   string
 	// check tracks a model availability sweep. Like a download it is read by the
 	// UI through a bound method rather than pushed: it outlives the call that asked
 	// for it, and polling cannot miss the end of one. checkHidden is how many
@@ -493,6 +502,12 @@ func (a *App) startManagedModel(backendID string) (err error) {
 	if !ok {
 		return uimsg.Errorf("model.notConfigured", backendID)
 	}
+	// MLX is not llama.cpp: its launcher is a Python environment and its model is
+	// a directory, so the command line is a different program's. The two halves
+	// meet at the supervisor, which is the same one for both.
+	if backendKind(settings, backendID) == "mlx" {
+		return a.startManagedMLX(backendID, settings, mm)
+	}
 	binary, err := a.llamaServerPath(settings)
 	if err != nil {
 		return err
@@ -539,6 +554,88 @@ func (a *App) startManagedModel(backendID string) (err error) {
 	}
 	return err
 }
+
+// startManagedMLX starts the mlx_lm.server of one backend.
+//
+// The port is chosen here rather than inside Start because the argument list has
+// to carry it: `mlx_lm.server` reads `--port`, unlike llama-server's supervisor-
+// built list where the number is appended after Start has one. FreePort can lose
+// the race between releasing the socket and the server binding it, and the
+// readiness probe reports that as a failed start rather than a silent one.
+func (a *App) startManagedMLX(backendID string, settings config.Settings, mm config.ManagedModel) error {
+	if !mlxAvailable() {
+		return uimsg.Errorf("runtime.mlxPlatform")
+	}
+	if strings.TrimSpace(mm.ModelPath) == "" {
+		return uimsg.Errorf("model.noneSelected")
+	}
+	port, err := rt.FreePort()
+	if err != nil {
+		return uimsg.Errorf("runtime.freePort", err)
+	}
+	binary, args, err := a.mlxLauncher(settings, mm, port)
+	if err != nil {
+		return err
+	}
+	srv := a.serverFor(backendID, settings)
+	err = srv.Start(rt.Options{
+		Binary:   binary,
+		Args:     args,
+		Model:    strings.TrimSpace(mm.ModelPath),
+		ModelDir: true,
+		// The server's own health route: it answers 200 once the generation
+		// thread is alive, which is before the weights are resident. A start
+		// therefore means "the process answers", and the first request pays the
+		// load — which is the server's design, not something a probe can see past.
+		ReadyPath: "/health",
+		Label:     rt.MLXLabel,
+		Port:      port,
+	})
+	if err == nil {
+		a.invalidateModels()
+	}
+	return err
+}
+
+// mlxLauncher resolves the program and its argument list: the user's own
+// mlx_lm.server when they named one, otherwise the Python inside the environment
+// KiChat installed. An absent environment is a refusal, not a fallback to a system
+// package: installing a different mlx-lm behind the user's back is the one thing a
+// managed runtime must not do.
+func (a *App) mlxLauncher(settings config.Settings, mm config.ManagedModel, port int) (string, []string, error) {
+	opts := rt.MLXOptions{ModelDir: strings.TrimSpace(mm.ModelPath), Port: port}
+	if mm.MLX != nil {
+		opts.KVBits = mm.MLX.KVBits
+		opts.PrefillStep = mm.MLX.PrefillStep
+		opts.MaxTokens = mm.MLX.MaxTokens
+		opts.DraftModel = mm.MLX.DraftModel
+		opts.ChatTemplate = mm.MLX.ChatTemplate
+		opts.TrustRemoteCode = mm.MLX.TrustRemoteCode
+	}
+	opts.Extra = rt.SplitArgs(mm.ExtraArgs)
+	if server := strings.TrimSpace(settings.Runtime.MLX.ServerPath); server != "" {
+		return server, rt.MLXArgs(opts), nil
+	}
+	python, ok := rt.MLXVenvPython(rt.MLXVenvDir(a.dataDir))
+	if !ok {
+		return "", nil, uimsg.Errorf("runtime.mlxNotInstalled")
+	}
+	return python, rt.MLXModuleArgs(opts), nil
+}
+
+// backendKind names the kind of one configured backend, empty when the id is not
+// configured. It is the question the start path and the status rows both ask.
+func backendKind(settings config.Settings, id string) string {
+	for _, b := range settings.Backends {
+		if b.ID == id {
+			return b.Kind
+		}
+	}
+	return ""
+}
+
+// mlxAvailable reports whether this build runs on a machine MLX supports at all.
+func mlxAvailable() bool { return rt.MLXSupported(goruntime.GOOS, goruntime.GOARCH) }
 
 // invalidateModels drops the model catalogue and every provider's cached metadata, so the
 // next listing describes the server that is running now. It is a no-op before the services

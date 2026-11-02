@@ -138,6 +138,10 @@ export function InstallLlamaRuntime(arg1, arg2) {
   return window['go']['main']['App']['InstallLlamaRuntime'](arg1, arg2);
 }
 
+export function InstallMLXRuntime() {
+  return window['go']['main']['App']['InstallMLXRuntime']();
+}
+
 export function InstallUpscaler() {
   return window['go']['main']['App']['InstallUpscaler']();
 }
@@ -188,6 +192,10 @@ export function PickImageFile(arg1, arg2) {
 
 export function PickImageFolder(arg1) {
   return window['go']['main']['App']['PickImageFolder'](arg1);
+}
+
+export function PickMLXModelFolder(arg1) {
+  return window['go']['main']['App']['PickMLXModelFolder'](arg1);
 }
 
 export function PickManagedModelFile(arg1) {

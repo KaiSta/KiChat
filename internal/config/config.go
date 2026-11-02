@@ -741,6 +741,10 @@ type RuntimeSettings struct {
 	// the first is the walk through the dialog this row exists to save. Bounded by
 	// MaxRememberedModelDirs, the oldest falling off the end.
 	ModelDirs []string `json:"modelDirs"`
+	// MLX is the one mlx-lm environment KiChat can install and run on Apple
+	// silicon. It sits beside the llama.cpp fields rather than inside one of them
+	// because the two programs share a directory layout and nothing else.
+	MLX MLXRuntime `json:"mlx"`
 	// Models is one entry per backend KiChat starts itself.
 	Models map[string]ManagedModel `json:"models"`
 }
@@ -785,6 +789,55 @@ type ManagedModel struct {
 	// ExtraArgs is the rest of the command line, for the flags this app has no
 	// field for (--n-gpu-layers 24, a chat template).
 	ExtraArgs string `json:"extraArgs"`
+	// MLX carries the options only an Apple-silicon run has, because the program
+	// is not llama.cpp and its flags are not llama.cpp's. Nil for every other
+	// kind, which is what keeps a llama.cpp entry from growing a section of
+	// fields that mean nothing to it.
+	MLX *MLXOptions `json:"mlx,omitempty"`
+}
+
+// MLXOptions is how mlx_lm.server is started for one model.
+//
+// The model itself is ManagedModel.ModelPath: a directory holding config.json
+// and the weights, because that is what `--model` takes. A Hugging Face repo id
+// is deliberately not accepted here — the server would download it on the first
+// request, which is a multi-gigabyte side effect of pressing Start — so the
+// folder picker is the way in and an existing snapshot is what it points at.
+type MLXOptions struct {
+	// KVBits quantises the KV cache, `--kv-bits`; 0 leaves it unquantised, which
+	// is the server's default and the only mode that batches. The server's
+	// documentation warns that a quantised cache is not fused and can need more
+	// memory than it saves at a large prefill step, which is why PrefillStep is
+	// beside it rather than buried in ExtraArgs.
+	KVBits int `json:"kvBits,omitempty"`
+	// PrefillStep is `--prefill-step-size`; 0 leaves the server's default alone.
+	PrefillStep int `json:"prefillStep,omitempty"`
+	// DraftModel is `--draft-model`, a smaller local model used for speculative
+	// decoding. Empty means none.
+	DraftModel string `json:"draftModel,omitempty"`
+	// MaxTokens is `--max-tokens`, the server's default output cap for a request
+	// that names none. 0 leaves its own default (512) in place.
+	MaxTokens int `json:"maxTokens,omitempty"`
+	// ChatTemplate overrides the template baked into the tokenizer,
+	// `--chat-template`; empty uses the model's own.
+	ChatTemplate string `json:"chatTemplate,omitempty"`
+	// TrustRemoteCode passes `--trust-remote-code`, which some repositories need
+	// to load their own modelling code. It stays off unless the user says so.
+	TrustRemoteCode bool `json:"trustRemoteCode,omitempty"`
+}
+
+// MLXRuntime is the one mlx-lm installation KiChat can own. It is a section of
+// its own rather than an entry in Models because there is one Python environment
+// for every model, exactly as there is one runtime directory for llama.cpp.
+type MLXRuntime struct {
+	// Version is the mlx-lm version in the environment KiChat installed, empty
+	// when it has not installed one. It is read back from the package rather than
+	// assumed, because pip resolves what it resolves.
+	Version string `json:"version"`
+	// ServerPath is a launcher the user supplied instead — a conda environment's
+	// mlx_lm.server, or a checkout. An absolute path to an executable that speaks
+	// the same CLI.
+	ServerPath string `json:"serverPath"`
 }
 
 // The llama.cpp release sources the app can install from. Like the family names
@@ -942,6 +995,31 @@ func IsOffload(value string) bool {
 		}
 	}
 	return false
+}
+
+// NormaliseMLX repairs the MLX-only section: a number the server would refuse is
+// dropped back to "its own default" rather than passed on, because an unknown
+// `--kv-bits` is a server that exits instead of a setting that looks odd. The
+// accepted widths are the ones mlx-lm documents (2, 3, 4, 6 and 8 bits).
+func NormaliseMLX(in *MLXOptions) *MLXOptions {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	switch out.KVBits {
+	case 2, 3, 4, 6, 8:
+	default:
+		out.KVBits = 0
+	}
+	if out.PrefillStep < 0 {
+		out.PrefillStep = 0
+	}
+	if out.MaxTokens < 0 {
+		out.MaxTokens = 0
+	}
+	out.DraftModel = strings.TrimSpace(out.DraftModel)
+	out.ChatTemplate = strings.TrimSpace(out.ChatTemplate)
+	return &out
 }
 
 // normaliseOffload maps an absent or unrecognised value onto the server's own
@@ -1441,6 +1519,12 @@ func (s Settings) Clone() Settings {
 	if s.Runtime.Models != nil {
 		out.Runtime.Models = make(map[string]ManagedModel, len(s.Runtime.Models))
 		for id, mm := range s.Runtime.Models {
+			// The MLX section is a pointer, so the element copy above would leave
+			// two settings values sharing one MLXOptions. Copy it as well.
+			if mm.MLX != nil {
+				mlx := *mm.MLX
+				mm.MLX = &mlx
+			}
 			out.Runtime.Models[id] = mm
 		}
 	}
@@ -1552,6 +1636,10 @@ func (s *Settings) normalise() {
 				// Same reason as DeepSeek: 9931 is llama-server's documented
 				// default, and an empty field would otherwise hide it.
 				s.Backends[i].BaseURL = llm.LlamaCppDefaultBaseURL
+			case "mlx":
+				// And 8080 is mlx_lm.server's. A managed start replaces this with
+				// the port it really landed on.
+				s.Backends[i].BaseURL = llm.MLXDefaultBaseURL
 			}
 		}
 		if s.Backends[i].Name == "" {
@@ -1618,6 +1706,7 @@ func (s *Settings) normalise() {
 		mm.CacheTypeK = normaliseCacheType(mm.CacheTypeK)
 		mm.CacheTypeV = normaliseCacheType(mm.CacheTypeV)
 		mm.Offload = normaliseOffload(mm.Offload)
+		mm.MLX = NormaliseMLX(mm.MLX)
 		s.Runtime.Models[id] = mm
 	}
 	if len(s.Search.ProviderOrder) == 0 {

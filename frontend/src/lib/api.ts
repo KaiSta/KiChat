@@ -38,6 +38,8 @@ export namespace config {
   /** The llama.cpp KiChat installs and runs itself. */
   export type RuntimeSettings = Plain<Gen.config.RuntimeSettings>
   export type ManagedModel = Plain<Gen.config.ManagedModel>
+  /** The MLX-only half of a managed model: flags that are not llama.cpp's. */
+  export type MLXOptions = Plain<Gen.config.MLXOptions>
   /** The picture server generate_image draws through. */
   export type ImageSettings = Plain<Gen.config.ImageSettings>
   /** A named, saved picture configuration: what the image section's dropdown applies. */
@@ -176,6 +178,11 @@ export const App = {
   ExportBackup: (req: main.BackupExportRequest) =>
     WailsApp.ExportBackup(Gen.main.BackupExportRequest.createFrom(req)),
   UpdateChat: (c: store.Chat) => WailsApp.UpdateChat(Gen.store.Chat.createFrom(c)),
+  // The generated class gained a `convertValues` helper with the nested MLX section,
+  // so a plain draft can no longer be passed to the raw binding. The same conversion
+  // StartManagedModelWith already does applies here for the same reason.
+  SetManagedModel: (backendID: string, mm: config.ManagedModel) =>
+    WailsApp.SetManagedModel(backendID, Gen.config.ManagedModel.createFrom(mm)),
   StartManagedModelWith: (backendID: string, mm: config.ManagedModel) =>
     WailsApp.StartManagedModelWith(backendID, Gen.config.ManagedModel.createFrom(mm)),
 }
@@ -203,7 +210,27 @@ export function defaultManagedModel(): config.ManagedModel {
     cacheTypeV: 'f16',
     offload: 'auto',
     extraArgs: '',
+    // The MLX-only section. Its zeros mean "the server's own default", and the
+    // field is present for every entry because the bridge's JSON carries it; only
+    // a kind that reads it acts on it.
+    mlx: {
+      kvBits: 0,
+      prefillStep: 0,
+      maxTokens: 0,
+      draftModel: '',
+      chatTemplate: '',
+      trustRemoteCode: false,
+    },
   }
+}
+
+/**
+ * Whether this machine can run MLX at all. It is exactly Apple silicon: the
+ * framework does not run on Intel Macs, and the card and the chat's local-model
+ * picker both ask this one question rather than spelling the string twice.
+ */
+export function isAppleSilicon(platform?: string): boolean {
+  return platform === 'darwin/arm64'
 }
 
 /* --------------------------------------------------------------------------

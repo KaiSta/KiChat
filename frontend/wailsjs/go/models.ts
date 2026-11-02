@@ -338,6 +338,42 @@ export namespace config {
 		}
 	}
 	
+	export class MLXOptions {
+	    kvBits?: number;
+	    prefillStep?: number;
+	    draftModel?: string;
+	    maxTokens?: number;
+	    chatTemplate?: string;
+	    trustRemoteCode?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new MLXOptions(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kvBits = source["kvBits"];
+	        this.prefillStep = source["prefillStep"];
+	        this.draftModel = source["draftModel"];
+	        this.maxTokens = source["maxTokens"];
+	        this.chatTemplate = source["chatTemplate"];
+	        this.trustRemoteCode = source["trustRemoteCode"];
+	    }
+	}
+	export class MLXRuntime {
+	    version: string;
+	    serverPath: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MLXRuntime(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.serverPath = source["serverPath"];
+	    }
+	}
 	export class ManagedModel {
 	    enabled: boolean;
 	    modelPath: string;
@@ -348,6 +384,7 @@ export namespace config {
 	    cacheTypeV: string;
 	    offload: string;
 	    extraArgs: string;
+	    mlx?: MLXOptions;
 	
 	    static createFrom(source: any = {}) {
 	        return new ManagedModel(source);
@@ -364,7 +401,26 @@ export namespace config {
 	        this.cacheTypeV = source["cacheTypeV"];
 	        this.offload = source["offload"];
 	        this.extraArgs = source["extraArgs"];
+	        this.mlx = this.convertValues(source["mlx"], MLXOptions);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class PromptPreset {
 	    id: string;
@@ -392,6 +448,7 @@ export namespace config {
 	    readySeconds: number;
 	    modelDir: string;
 	    modelDirs: string[];
+	    mlx: MLXRuntime;
 	    models: Record<string, ManagedModel>;
 	
 	    static createFrom(source: any = {}) {
@@ -407,6 +464,7 @@ export namespace config {
 	        this.readySeconds = source["readySeconds"];
 	        this.modelDir = source["modelDir"];
 	        this.modelDirs = source["modelDirs"];
+	        this.mlx = this.convertValues(source["mlx"], MLXRuntime);
 	        this.models = this.convertValues(source["models"], ManagedModel, true);
 	    }
 	
@@ -1215,6 +1273,7 @@ export namespace main {
 	}
 	export class ManagedStatus {
 	    backendId: string;
+	    kind?: string;
 	    enabled: boolean;
 	    modelPath: string;
 	    loadedModel?: string;
@@ -1239,6 +1298,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.backendId = source["backendId"];
+	        this.kind = source["kind"];
 	        this.enabled = source["enabled"];
 	        this.modelPath = source["modelPath"];
 	        this.loadedModel = source["loadedModel"];
@@ -1350,6 +1410,14 @@ export namespace main {
 	    offloadModes: string[];
 	    update: RuntimeUpdate;
 	    restartPending: boolean;
+	    mlxSupported: boolean;
+	    mlxInstalled: boolean;
+	    mlxVersion?: string;
+	    mlxPython?: string;
+	    mlxServer?: string;
+	    mlxBusy: boolean;
+	    mlxPhase?: string;
+	    mlxError?: string;
 	    models: ManagedStatus[];
 	
 	    static createFrom(source: any = {}) {
@@ -1382,6 +1450,14 @@ export namespace main {
 	        this.offloadModes = source["offloadModes"];
 	        this.update = this.convertValues(source["update"], RuntimeUpdate);
 	        this.restartPending = source["restartPending"];
+	        this.mlxSupported = source["mlxSupported"];
+	        this.mlxInstalled = source["mlxInstalled"];
+	        this.mlxVersion = source["mlxVersion"];
+	        this.mlxPython = source["mlxPython"];
+	        this.mlxServer = source["mlxServer"];
+	        this.mlxBusy = source["mlxBusy"];
+	        this.mlxPhase = source["mlxPhase"];
+	        this.mlxError = source["mlxError"];
 	        this.models = this.convertValues(source["models"], ManagedStatus);
 	    }
 	

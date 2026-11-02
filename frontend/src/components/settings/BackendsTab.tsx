@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { App, defaultManagedModel, folderName, formatBytes, formatNumber, modelLabel, timeAgo, type config, type llm, type main, type runtime } from '../../lib/api'
+import { App, defaultManagedModel, folderName, formatBytes, formatNumber, isAppleSilicon, modelLabel, timeAgo, type config, type llm, type main, type runtime } from '../../lib/api'
 import { errText, useStore } from '../../store'
 import { ModelPicker, type ModelRef } from '../ModelPicker'
 import { Section, Field } from './shared'
@@ -1127,6 +1127,312 @@ function LocalModelSection({
 }
 
 /* -------------------------------------------------------------------------
+ * MLX
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The managed MLX section: a card whose program is not llama.cpp.
+ *
+ * It is a sibling of LocalModelSection rather than a branch inside it, because
+ * almost nothing it shows has an MLX equivalent: there is no GGUF to scan, no
+ * projector, no flash attention and no `--gpu-layers`. What it shares with the
+ * llama.cpp card is the shell around it (enable, name, address, state badge) and
+ * the supervisor behind it, which is the same one.
+ *
+ * The one behaviour worth stating out loud: MLX's `/health` answers 200 before the
+ * weights are loaded, so "running" means the process answers and the first message
+ * pays the load. The note under the buttons says so rather than letting a first
+ * reply that takes minutes look like a fault.
+ */
+function MLXModelSection({
+  backend,
+  draft,
+  patch,
+}: {
+  backend: llm.BackendConfig
+  draft: config.Settings
+  patch: (c: Partial<config.Settings>) => void
+}) {
+  const t = useStore((s) => s.t)
+  const tDynamic = useStore((s) => s.tDynamic)
+  const [status, setStatus] = useState<main.RuntimeStatus | null>(null)
+  const [error, setError] = useState('')
+  const saved = draft.runtime?.models?.[backend.id]
+  const [model, setModel] = useState<config.ManagedModel>(() => ({
+    ...defaultManagedModel(),
+    ...saved,
+  }))
+  const mine = (status?.models ?? []).find((m) => m.backendId === backend.id)
+  const state = mine?.state ?? 'stopped'
+  const working = !!status?.mlxBusy || state === 'starting'
+  const mlx = model.mlx ?? {}
+
+  const refresh = async () => {
+    try {
+      setStatus(await App.GetRuntimeStatus())
+      setError('')
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Only while something is moving: the install and the load are both minutes
+  // long, and an idle card asking twice a second for the rest of the session is
+  // the poll LocalModelSection exists to avoid.
+  useEffect(() => {
+    if (!working) return
+    const id = window.setInterval(() => void refresh(), 1200)
+    return () => window.clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [working])
+
+  const update = (changes: Partial<config.ManagedModel>) => {
+    const next: config.ManagedModel = { ...model, ...changes }
+    setModel(next)
+    const models = { ...(draft.runtime?.models ?? {}), [backend.id]: next }
+    patch({ runtime: { ...draft.runtime, models } })
+    return next
+  }
+
+  const updateMLX = (changes: Partial<config.MLXOptions>) => update({ mlx: { ...mlx, ...changes } })
+
+  const commit = async (next: config.ManagedModel) => {
+    setError('')
+    try {
+      await App.SetManagedModel(backend.id, next)
+    } catch (e) {
+      setError(String(e))
+    }
+    await refresh()
+  }
+
+  const install = async () => {
+    setError('')
+    try {
+      await App.InstallMLXRuntime()
+    } catch (e) {
+      setError(String(e))
+    }
+    await refresh()
+  }
+
+  const pick = async () => {
+    setError('')
+    try {
+      const picked = await App.PickMLXModelFolder(t('settings.mlx.pickTitle'))
+      if (picked) await commit(update({ modelPath: picked }))
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+
+  const start = async () => {
+    setError('')
+    try {
+      const next = update({})
+      await App.SetManagedModel(backend.id, next)
+      await App.StartManagedModel(backend.id)
+    } catch (e) {
+      setError(String(e))
+    }
+    await refresh()
+  }
+
+  const stop = async () => {
+    setError('')
+    try {
+      await App.StopManagedModel(backend.id)
+    } catch (e) {
+      setError(String(e))
+    }
+    await refresh()
+  }
+
+  return (
+    <div className="mt-3 border-t pt-3" style={{ borderColor: 'var(--line)' }}>
+      <div className="mb-2 text-[13px] font-medium">{t('settings.mlx.title')}</div>
+      <p className="faint mb-2 text-[11px]">{t('settings.mlx.hint')}</p>
+
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
+        <span className={`badge ${status?.mlxInstalled ? 'badge-ok' : 'badge-warn'}`}>
+          {status?.mlxInstalled
+            ? t('settings.mlx.installed', { version: status?.mlxVersion || t('settings.managed.versionUnknown') })
+            : t('settings.mlx.notInstalled')}
+        </span>
+        {status?.mlxPython && (
+          <span className="mono min-w-0 truncate faint">
+            {t('settings.mlx.python')}: {status.mlxPython}
+          </span>
+        )}
+      </div>
+      {status?.mlxBusy && (
+        <div className="mb-2 text-[11px] faint">
+          {t('settings.mlx.installing')}
+          {status.mlxPhase ? ` · ${t('settings.mlx.phase', { phase: status.mlxPhase })}` : ''}
+        </div>
+      )}
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <button type="button" className="btn btn-sm" disabled={!!status?.mlxBusy} onClick={() => void install()}>
+          {status?.mlxInstalled ? t('settings.mlx.upgrade') : t('settings.mlx.install')}
+        </button>
+      </div>
+
+      <label className="mb-1 block text-[12px]">{t('settings.mlx.model')}</label>
+      <div className="flex gap-2">
+        <input
+          className="input mono"
+          value={model.modelPath}
+          placeholder={t('settings.mlx.modelPlaceholder')}
+          onChange={(e) => update({ modelPath: e.target.value })}
+          onBlur={(e) => void commit(update({ modelPath: e.target.value }))}
+        />
+        <button type="button" className="btn btn-sm shrink-0" onClick={() => void pick()}>
+          {t('settings.mlx.pick')}
+        </button>
+      </div>
+
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <div>
+          <label className="mb-1 block text-[12px]">{t('settings.mlx.kv')}</label>
+          <select
+            className="input"
+            value={mlx.kvBits ?? 0}
+            onChange={(e) => void commit(updateMLX({ kvBits: Number(e.target.value) }))}
+          >
+            <option value={0}>{t('settings.mlx.kvOff')}</option>
+            {[2, 3, 4, 6, 8].map((bits) => (
+              <option key={bits} value={bits}>
+                {bits} bit
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="mb-1 block text-[12px]">{t('settings.mlx.prefill')}</label>
+          <input
+            className="input"
+            type="number"
+            min={0}
+            value={mlx.prefillStep ?? 0}
+            onChange={(e) => updateMLX({ prefillStep: Number(e.target.value) })}
+            onBlur={(e) => void commit(updateMLX({ prefillStep: Number(e.target.value) }))}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-[12px]">{t('settings.mlx.maxTokens')}</label>
+          <input
+            className="input"
+            type="number"
+            min={0}
+            value={mlx.maxTokens ?? 0}
+            onChange={(e) => updateMLX({ maxTokens: Number(e.target.value) })}
+            onBlur={(e) => void commit(updateMLX({ maxTokens: Number(e.target.value) }))}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-[12px]">{t('settings.mlx.draft')}</label>
+          <input
+            className="input mono"
+            value={mlx.draftModel ?? ''}
+            placeholder={t('settings.mlx.draftPlaceholder')}
+            onChange={(e) => updateMLX({ draftModel: e.target.value })}
+            onBlur={(e) => void commit(updateMLX({ draftModel: e.target.value }))}
+          />
+        </div>
+      </div>
+      <p className="faint mt-1 text-[11px]">{t('settings.mlx.kvHint')}</p>
+
+      <div className="mt-2">
+        <label className="mb-1 block text-[12px]">{t('settings.mlx.chatTemplate')}</label>
+        <input
+          className="input mono"
+          value={mlx.chatTemplate ?? ''}
+          placeholder={t('settings.mlx.chatTemplatePlaceholder')}
+          onChange={(e) => updateMLX({ chatTemplate: e.target.value })}
+          onBlur={(e) => void commit(updateMLX({ chatTemplate: e.target.value }))}
+        />
+      </div>
+
+      <label className="mt-2 flex items-center gap-2 text-[13px]">
+        <input
+          type="checkbox"
+          checked={mlx.trustRemoteCode ?? false}
+          onChange={(e) => void commit(updateMLX({ trustRemoteCode: e.target.checked }))}
+        />
+        {t('settings.mlx.trust')}
+      </label>
+      <p className="faint mt-1 text-[11px]">{t('settings.mlx.trustHint')}</p>
+
+      <div className="mt-2">
+        <label className="mb-1 block text-[12px]">{t('settings.mlx.extra')}</label>
+        <input
+          className="input mono"
+          value={model.extraArgs}
+          onChange={(e) => update({ extraArgs: e.target.value })}
+          onBlur={(e) => void commit(update({ extraArgs: e.target.value }))}
+        />
+      </div>
+
+      {/* The same switch llama.cpp's card has, and for the same reason: a managed
+          model starts at launch only when somebody said so. `enabled` here is the
+          model entry's, not the backend's — the header checkbox above is whether the
+          address is contacted at all. */}
+      <label className="mt-2 flex items-center gap-2 text-[13px]">
+        <input
+          type="checkbox"
+          checked={model.enabled}
+          onChange={(e) => void commit(update({ enabled: e.target.checked }))}
+        />
+        {t('settings.managed.enable')}
+      </label>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="btn btn-sm"
+          disabled={!status?.mlxInstalled || !model.modelPath}
+          onClick={() => void start()}
+        >
+          {t('settings.mlx.start')}
+        </button>
+        <button type="button" className="btn btn-sm" disabled={state === 'stopped'} onClick={() => void stop()}>
+          {t('settings.mlx.stop')}
+        </button>
+        <span className={`badge ${state === 'running' ? 'badge-ok' : state === 'failed' ? 'badge-danger' : ''}`}>
+          {tDynamic(`settings.managed.state.${state}`)}
+        </span>
+        {mine?.url && <span className="mono min-w-0 flex-1 truncate text-[11px] faint">{mine.url}</span>}
+      </div>
+      <p className="faint mt-1 text-[11px]">{t('settings.mlx.loadNote')}</p>
+
+      {mine?.error && (
+        <div className="mt-2 whitespace-pre-wrap text-[11px]" style={{ color: 'var(--danger)' }}>
+          {errText(mine.error)}
+        </div>
+      )}
+      {error && (
+        <div className="mt-2 text-[11px]" style={{ color: 'var(--danger)' }}>
+          {error}
+        </div>
+      )}
+      {status?.mlxError && (
+        <div className="mt-2 whitespace-pre-wrap text-[11px]" style={{ color: 'var(--danger)' }}>
+          {errText(status.mlxError)}
+        </div>
+      )}
+      {state === 'starting' && mine?.log?.length ? (
+        <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap text-[10px] faint">{mine.log.join('\n')}</pre>
+      ) : null}
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------
  * Backends
  * ---------------------------------------------------------------------- */
 
@@ -1149,6 +1455,14 @@ export function BackendsTab({
   const health = useStore((s) => s.health)
   const models = useStore((s) => s.models)
   const [secrets, setSecrets] = useState<main.SecretStatus | null>(null)
+  // The platform this window is running on. MLX is Apple-silicon only, and its
+  // card is not shown anywhere else; the chat's picker asks the same question.
+  const [apple, setApple] = useState(false)
+  useEffect(() => {
+    void App.GetAppInfo()
+      .then((info) => setApple(isAppleSilicon(info.platform)))
+      .catch(() => undefined)
+  }, [])
 
   // Re-read with the health report: a save is what puts a key in the store, and
   // the flag saying which entries have one would otherwise stay stale for the
@@ -1170,6 +1484,11 @@ export function BackendsTab({
         hint={t('settings.backendsHint')}
       >
         {draft.backends.map((backend, index) => {
+          // MLX is not shown on a machine that cannot run it. The entry is still in
+          // the settings blob — settings travel, and dropping it would throw away a
+          // Mac user's configuration on the first save from a Linux box — so this is
+          // a render decision, not a schema one.
+          if (backend.kind === 'mlx' && !apple) return null
           const status = health.find((h) => h.id === backend.id)
           const modelCount = models.filter((m) => m.backend === backend.id).length
           // The state the running app reported, not the checkbox: an entry that is
@@ -1288,6 +1607,9 @@ export function BackendsTab({
                   controls; every other entry stays an address it contacts. */}
               {backend.kind === 'llamacpp' && (
                 <LocalModelSection backend={backend} draft={draft} patch={patch} />
+              )}
+              {backend.kind === 'mlx' && (
+                <MLXModelSection backend={backend} draft={draft} patch={patch} />
               )}
             </div>
           )

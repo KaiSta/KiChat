@@ -157,6 +157,7 @@ check are [`verify-ui`](.claude/skills/verify-ui/SKILL.md).
 | [`IMAGES-CLOUD.md`](documentation/IMAGES-CLOUD.md) | hosted picture backends: the free tiers and their cost |
 | [`UPSCALING.md`](documentation/UPSCALING.md) | enlarging: the resampler, Real-ESRGAN, the Enlarge panel |
 | [`LLAMACPP.md`](documentation/LLAMACPP.md) | the llama.cpp provider and runtime, projectors, ternary models |
+| [`MLX.md`](documentation/MLX.md) | the MLX provider and the mlx-lm environment KiChat installs on Apple silicon |
 | [`GROQ.md`](documentation/GROQ.md), [`NVIDIA.md`](documentation/NVIDIA.md), [`MISTRAL.md`](documentation/MISTRAL.md), [`DEEPSEEK.md`](documentation/DEEPSEEK.md) | a hosted backend each: listing, window, ceiling, pacing, refusals |
 | [`ENCRYPTION.md`](documentation/ENCRYPTION.md) | the encrypted database: page encryption, the key and its recovery copy |
 | [`CODE_MAP.md`](documentation/CODE_MAP.md) | where the code is, and the extension points |

@@ -260,6 +260,7 @@ paste a key.
 | LM Studio | `127.0.0.1:1234` | none | enabled | the easiest way to run a GGUF locally |
 | Ollama | `127.0.0.1:11434` | none | enabled | the models you already pulled |
 | llama.cpp | local, or managed by KiChat | none | disabled | KiChat downloads `llama-server`, starts it on a free port, stops it with the app |
+| MLX | local, managed by KiChat on Apple silicon | none | disabled | KiChat installs `mlx-lm` in a private Python environment and runs `mlx_lm.server` against a snapshot folder |
 | Groq | `api.groq.com` | yes, free tier | disabled | very fast inference on a smaller free allowance |
 | NVIDIA | `build.nvidia.com` | yes, free to create | disabled | one catalogue spanning several model vendors |
 | Mistral | `api.mistral.ai` | yes | disabled | a European host whose small models are cheap enough to leave on |
