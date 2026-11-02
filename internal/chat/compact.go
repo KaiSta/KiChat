@@ -643,6 +643,7 @@ func Summarize(ctx context.Context, p llm.Provider, model string, opts Summarize
 			FailureCode:     "chat.summaryFailed",
 			EmptyCode:       "chat.summaryEmpty",
 			BudgetCode:      "chat.summaryBudgetSpent",
+			RejectTruncated: true,
 		})
 }
 
@@ -662,8 +663,9 @@ type extractionOptions struct {
 	// They differ per caller because the advice does: a compaction has a settings
 	// field to raise, a condensation can also be had from a model that does not
 	// think first.
-	EmptyCode  string
-	BudgetCode string
+	EmptyCode       string
+	BudgetCode      string
+	RejectTruncated bool
 }
 
 // extractWithBudget runs one prompted extraction and retries it when a reasoning
@@ -735,6 +737,9 @@ func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt,
 		// that is what it is.
 		summary, thought := stripThinking(out.text)
 		if summary != "" {
+			if opts.RejectTruncated && strings.EqualFold(out.stopReason, "length") {
+				return "", uimsg.Errorf("chat.summaryTruncated")
+			}
 			return summary, nil
 		}
 		if thought != "" {

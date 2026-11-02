@@ -159,7 +159,7 @@ and therefore on every turn of every one of its chats. The condition stays visib
   so this is a backstop against a stuck backend, not a budget the work has to fit in.
 - a `Focus` string and a `Target` ratio (0 = "as much as possible", 0.6 from the
   "→ 60 %" and "Compact to fit" buttons, 0.4 from "→ 40 %").
-- optional `FromSeq`/`ToSeq` to pin the range explicitly (`maintenance.go:221`).
+- optional `FromSeq`/`ToSeq` to pin the range explicitly. The start must follow the active memory, and the end must be the end of a complete turn (or the end of the chat).
 
 It emits `events.ChatsChanged` only when `Created` is true.
 
@@ -555,6 +555,8 @@ motivated the cap; the unit tests pin the bound, the figure itself is not re-mea
 
 ## 8. The transcript: what the summariser actually reads
 
+Before rendering, inline text documents in the folded range are loaded into the transcript. A fold is refused if a document cannot be read or does not fit in full; inline images are also refused because a text-only summary cannot describe them faithfully. An empty transcript is refused rather than stored as a memory of unread messages. Ordinary conversation text remains subject to the deliberate trimming described below.
+
 `RenderTranscript` (`compact.go:632`) flattens the folded messages into plain text, bounded
 at **two levels**: every message is cut to `Block`, and the finished transcript is cut to
 `Total` (both cut with the `…[gekürzt]` marker). Two levels because a per-message cap
@@ -707,7 +709,8 @@ Pinned by `TestCompactStripsInlineThinkingFromASummary`,
 
 | condition | outcome |
 | --- | --- |
-| `summary != ""` | done — the memory is returned |
+| `summary != ""` and stop reason is `length` | refuse the incomplete memory |
+| `summary != ""` otherwise | done — the memory is returned |
 | thinking was found | counted as reasoning, so the retry can size against it |
 | no reasoning **and** `stop_reason != "length"` | **break** — a model that said nothing will say nothing again |
 | `grown <= budget` | **break** — no progress, so retrying is pointless (`compact.go:507`) |
@@ -825,7 +828,7 @@ window.
 
 ### 11.4 Undo
 
-`DeleteCompaction` (`api.go:376`) removes the compaction and restores the folded messages
+`DeleteCompaction` claims the chat like a turn before it removes the compaction and restores the folded messages
 to the live context. Because the originals were never deleted this is complete, not
 approximate. Two things happen with it:
 

@@ -900,3 +900,141 @@ func TestCompactReportsAnUnconfiguredSummaryBackend(t *testing.T) {
 		t.Errorf("the compaction ran on the chat's model anyway: %d generations", n)
 	}
 }
+
+func TestCompactionRejectsIncompleteSummary(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedTurns(t, st)
+	p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 32768},
+		replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Partial memory"}, {Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "length"}}}}}
+	e, _ := newTestEngine(t, st, p)
+	result, err := e.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
+	message, ok := uimsg.Parse(fmt.Sprint(err))
+	if !ok || message.Code != "chat.summaryTruncated" || result.Created || len(summariesOf(t, st)) != 0 {
+		t.Fatalf("partial memory accepted: result=%+v error=%v", result, err)
+	}
+}
+
+func TestCompactionRejectsMissingTranscript(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedTurns(t, st)
+	p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 4096}}
+	e, _ := newTestEngine(t, st, p)
+	_, err := e.Compact(context.Background(), "chat-1", CompactOptions{Force: true, Focus: strings.Repeat("focus ", 10000)})
+	message, ok := uimsg.Parse(fmt.Sprint(err))
+	if !ok || message.Code != "chat.compactionNoTranscript" || p.requestCount() != 0 || len(summariesOf(t, st)) != 0 {
+		t.Fatalf("empty transcript was not refused: %v", err)
+	}
+}
+
+func TestCompactionPreservesInlineDocumentAndRefusesImage(t *testing.T) {
+	for _, image := range []bool{false, true} {
+		t.Run(fmt.Sprintf("image=%v", image), func(t *testing.T) {
+			st := newTestStore(t)
+			makeChat(t, st)
+			if err := st.CreateMessage(store.Message{ID: "m1", ChatID: "chat-1", Seq: 1, Role: "user", Content: "Read this"}); err != nil {
+				t.Fatal(err)
+			}
+			a := store.Attachment{ID: "a1", ChatID: "chat-1", MessageID: "m1", Filename: "facts.txt", Placement: store.PlacementInline, DocumentID: "d1"}
+			if image {
+				a.Kind = "image"
+				a.Mime = "image/png"
+			}
+			if err := st.CreateAttachment(a); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.CreateDocument(store.Document{ID: "d1", AttachmentID: "a1", ChatID: "chat-1", Title: "facts.txt", Text: "The secret fact is 42."}); err != nil {
+				t.Fatal(err)
+			}
+			p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 32768}, replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "The fact is 42."}}}}
+			e, _ := newTestEngine(t, st, p)
+			result, err := e.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
+			if image {
+				message, ok := uimsg.Parse(fmt.Sprint(err))
+				if !ok || message.Code != "chat.compactionImage" || result.Created || p.requestCount() != 0 {
+					t.Fatalf("image folded: %+v %v", result, err)
+				}
+				return
+			}
+			if err != nil || !result.Created {
+				t.Fatalf("document fold: %+v %v", result, err)
+			}
+			if !strings.Contains(p.lastRequest().Messages[1].Content, "The secret fact is 42.") {
+				t.Fatal("document content was not sent to summariser")
+			}
+		})
+	}
+}
+
+func TestCompactionRangeMustBeContiguousAndEndAtTurnBoundary(t *testing.T) {
+	for _, opts := range []CompactOptions{{Force: true, FromSeq: 2}, {Force: true, ToSeq: 1}, {Force: true, ToSeq: 999}} {
+		st := newTestStore(t)
+		makeChat(t, st)
+		seedTurns(t, st)
+		p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 32768}}
+		e, _ := newTestEngine(t, st, p)
+		_, err := e.Compact(context.Background(), "chat-1", opts)
+		message, ok := uimsg.Parse(fmt.Sprint(err))
+		if !ok || message.Code != "chat.compactionRange" || p.requestCount() != 0 {
+			t.Fatalf("range %+v accepted: %v", opts, err)
+		}
+	}
+}
+
+func TestUndoCannotRaceCompaction(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedTurns(t, st)
+	if err := st.CreateMessage(store.Message{ID: "m3", ChatID: "chat-1", Seq: 3, Role: "user", Content: "next question"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateCompaction(store.Compaction{ID: "old", ChatID: "chat-1", FromSeq: 1, ToSeq: 2, Summary: "old memory"}); err != nil {
+		t.Fatal(err)
+	}
+	p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 32768}, started: make(chan struct{}), blockAfter: 1, replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "partial"}, {Type: llm.EventDelta, Text: "more"}}}}
+	e, _ := newTestEngine(t, st, p)
+	done := make(chan error, 1)
+	go func() { _, err := e.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); done <- err }()
+	select {
+	case <-p.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("compaction did not start")
+	}
+	if err := e.DeleteCompaction("chat-1", "old"); err == nil {
+		t.Error("undo succeeded while compaction was running")
+	}
+	if len(summariesOf(t, st)) != 1 {
+		t.Error("undo removed the existing memory")
+	}
+	e.Stop("chat-1")
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("compaction did not stop")
+	}
+	if err := e.DeleteCompaction("chat-1", "old"); err != nil {
+		t.Fatalf("undo after compaction: %v", err)
+	}
+}
+
+func TestCompactionRefusesDocumentCutFromTranscript(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	if err := st.CreateMessage(store.Message{ID: "m1", ChatID: "chat-1", Seq: 1, Role: "user", Content: "Read this"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateAttachment(store.Attachment{ID: "a1", ChatID: "chat-1", MessageID: "m1", Filename: "long.txt", Placement: store.PlacementInline, DocumentID: "d1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateDocument(store.Document{ID: "d1", AttachmentID: "a1", ChatID: "chat-1", Title: "long.txt", Text: strings.Repeat("important facts ", 4000)}); err != nil {
+		t.Fatal(err)
+	}
+	p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192}}
+	e, _ := newTestEngine(t, st, p)
+	_, err := e.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
+	message, ok := uimsg.Parse(fmt.Sprint(err))
+	if !ok || message.Code != "chat.compactionAttachmentTooLarge" || p.requestCount() != 0 || len(summariesOf(t, st)) != 0 {
+		t.Fatalf("cut attachment accepted: %v", err)
+	}
+}

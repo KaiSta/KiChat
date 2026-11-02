@@ -117,6 +117,32 @@ func (e *Engine) Compact(ctx context.Context, chatID string, opts CompactOptions
 	return CompactResult{Created: true, Compaction: *created}, nil
 }
 
+// DeleteCompaction restores the folded history while holding the same chat claim as
+// generation and compaction, so a summary cannot be saved on top of deleted memory.
+func (e *Engine) DeleteCompaction(chatID, compactionID string) error {
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handle := &turnHandle{cancel: cancel, chatID: chatID}
+	if !e.turns.claim(chatID, handle) {
+		return uimsg.Errorf("chat.compactionWhileRunning")
+	}
+	defer e.turns.release(chatID, handle)
+	compactions, err := e.Store.ListCompactions(chatID)
+	if err != nil {
+		return err
+	}
+	for _, c := range compactions {
+		if c.ID == compactionID {
+			if err := e.Store.DeleteCompactionsFrom(chatID, c.ToSeq); err != nil {
+				return err
+			}
+			e.InvalidateMeasurement(chatID)
+			return nil
+		}
+	}
+	return uimsg.Errorf("compaction.gone", compactionID)
+}
+
 // autoFold folds a chat's history *before* the request goes out, which is the one place a
 // turn decides to fold without anybody pressing anything. Both of the reasons that can
 // happen are the planner's, not this function's: the user's threshold and a backend's
@@ -231,13 +257,28 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	if !plan.Needed {
 		return nil, nil
 	}
-	// A manual call may pin the range explicitly.
-	if opts.ToSeq > 0 && opts.ToSeq > plan.FromSeq {
+	// The active memory covers a contiguous prefix. A requested range may end
+	// only before another user turn (or at the end), and cannot skip its start.
+	if opts.FromSeq < 0 || opts.ToSeq < 0 || (opts.FromSeq != 0 && opts.FromSeq != plan.FromSeq) {
+		return nil, uimsg.Errorf("chat.compactionRange")
+	}
+	if opts.ToSeq != 0 {
+		valid := false
+		for i, m := range messages {
+			if m.Seq != opts.ToSeq || m.Seq < plan.FromSeq {
+				continue
+			}
+			valid = i == len(messages)-1 || messages[i+1].Role == "user"
+			break
+		}
+		if start, streaming := runningTurn(messages); streaming && (start == 0 || opts.ToSeq >= start) {
+			valid = false
+		}
+		if !valid {
+			return nil, uimsg.Errorf("chat.compactionRange")
+		}
 		plan.ToSeq = opts.ToSeq
 		plan.KeepFromSeq = opts.ToSeq + 1
-	}
-	if opts.FromSeq > 0 {
-		plan.FromSeq = opts.FromSeq
 	}
 
 	var toFold []store.Message
@@ -331,15 +372,61 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	if configured := settings.Compact.MaxSummaryTokens; configured > outputTokens {
 		outputTokens = configured
 	}
-	if room := limit - overhead - summaryMinTranscriptTokens; outputTokens > room {
+	margin := limit / 16
+	if room := limit - overhead - margin - summaryMinTranscriptTokens; outputTokens > room {
 		outputTokens = room
 	}
 	if outputTokens < 1 {
 		outputTokens = 1
 	}
-	margin := limit / 16
 	budget := PlanTranscriptBudget(limit, outputTokens+margin, overhead)
-	transcript := RenderTranscript(toFold, budget)
+	transcriptMessages := append([]store.Message(nil), toFold...)
+	type documentBlock struct{ filename, text string }
+	var documents []documentBlock
+	for i := range transcriptMessages {
+		m := &transcriptMessages[i]
+		for _, a := range m.Attachments {
+			if a.Placement != store.PlacementInline {
+				continue
+			}
+			// A text-only summary cannot see an image. Keep that turn verbatim
+			// rather than replace the picture with an invented description.
+			if isImageAttachment(a) {
+				return nil, uimsg.Errorf("chat.compactionImage")
+			}
+			if a.DocumentID == "" {
+				return nil, uimsg.Errorf("chat.compactionAttachmentMissing", a.Filename)
+			}
+			d, err := e.Store.GetDocument(a.DocumentID)
+			if err != nil {
+				return nil, uimsg.Errorf("chat.compactionAttachment", a.Filename, uimsg.Sentence(err))
+			}
+			block := "<attachment id=\"" + a.ID + "\">\n" + renderDocumentBlock(d, a) + "\n</attachment>"
+			documents = append(documents, documentBlock{a.Filename, block})
+			m.Content += "\n\n" + block
+		}
+	}
+	// Leave room for the actual transcript, not merely its role headings.
+	if budget.Total <= 0 || budget.Block <= llm.EstimateTokens(truncationMarker) {
+		return nil, uimsg.Errorf("chat.compactionNoTranscript")
+	}
+	transcript := RenderTranscript(transcriptMessages, budget)
+	usable := false
+	for _, line := range strings.Split(transcript, "\n") {
+		switch strings.TrimSpace(line) {
+		case "", "…[gekürzt]", "### Nutzer", "### Assistent", "### Tool-Ergebnis", "### Websuche":
+		default:
+			usable = true
+		}
+	}
+	if !usable {
+		return nil, uimsg.Errorf("chat.compactionNoTranscript")
+	}
+	for _, document := range documents {
+		if !strings.Contains(transcript, document.text) {
+			return nil, uimsg.Errorf("chat.compactionAttachmentTooLarge", document.filename)
+		}
+	}
 
 	// A cap, not a target: the model is told to be terse, so it stops far short of
 	// it. The cap only stops a runaway generation from filling the window — the

@@ -76,25 +76,7 @@ func (a *App) DeleteCompaction(chatID, compactionID string) error {
 	if err := a.ensure(); err != nil {
 		return err
 	}
-	compactions, err := a.store.ListCompactions(chatID)
-	if err != nil {
-		return err
-	}
-	target, found := 0, false
-	for _, c := range compactions {
-		if c.ID == compactionID {
-			target, found = c.ToSeq, true
-			break
-		}
-	}
-	if !found {
-		return uimsg.Errorf("compaction.gone", compactionID)
-	}
-	if err := a.store.DeleteCompactionsFrom(chatID, target); err != nil {
-		return err
-	}
-	a.currentEngine().InvalidateMeasurement(chatID)
-	return nil
+	return a.currentEngine().DeleteCompaction(chatID, compactionID)
 }
 
 // --- attachments and documents --------------------------------------------
