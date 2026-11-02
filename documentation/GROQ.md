@@ -289,8 +289,9 @@ Two exceptions are worth knowing about because the app maps them:
   ([internal/llm/httpclient.go:94](../internal/llm/httpclient.go#L94)) reads `Retry-After` and, when
   that is missing or unparseable, the refusal's own sentence — the envelope above is why, since
   the number the vendor commits to is the one in prose — and `retryWait`
-  ([internal/llm/httpclient.go:133](../internal/llm/httpclient.go#L133)) waits it out, up to one
-  minute, which is the window these limits are defined over. The fixed 250 ms/500 ms backoff
+  ([internal/llm/httpclient.go:133](../internal/llm/httpclient.go#L133)) waits it out when the hint is at most one
+  minute. A longer hint is returned to the caller without a premature retry; it may describe a daily limit.
+  The fixed 250 ms/500 ms backoff
   this replaced spent every attempt inside the minute that had just been refused, so a request
   the vendor had said to retry in ten seconds arrived at the user as a failure.
 
@@ -586,8 +587,8 @@ whole shape of this section:
 
     The sentence names `requests per minute (RPM)` where the token throttle names input or
     output tokens (ITPM/OTPM), and `type` says `requests` where the token one says `tokens`;
-    both are read, because the `code` is `rate_limit_exceeded` for all of them
-    (`requestsPerMinuteLimit`). The number may only ever **tighten**, for the reason the ceiling
+    the period must explicitly say requests per minute or RPM: `type: requests` alone can also
+    mean a daily quota (`requestsPerMinuteLimit`). The number may only ever **tighten**, for the reason the ceiling
     does: a plan that fits the smaller of two statements about one limit fits both. What it must
     not do is touch the count, which is a measurement rather than a statement.
   - **The spend** is the app's own: every response this provider receives for the model, counted
@@ -601,7 +602,8 @@ whole shape of this section:
     and a connection that never got an answer is none.
 
   A rate of 30 with 30 counted is a full minute, so the next request waits for the oldest of
-  those 30 to fall out of the window — up to a minute, and by construction never more. The count
+  those 30 to fall out. If the window holds more than 30 responses, it waits until enough have
+  expired to leave a slot. This is at most a minute. The count
   is per model, because the limit is: the same account has 30 for `openai/gpt-oss-20b` and 3 for
   a guard classifier.
 

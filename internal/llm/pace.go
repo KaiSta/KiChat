@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -234,7 +235,9 @@ func (r *requestRate) roomIn(now time.Time) time.Duration {
 	if !a.Known() || a.Room() > 0 || len(a.Free) == 0 {
 		return 0
 	}
-	return a.Free[0]
+	// If more than Limit requests are already in the window, one expiry is
+	// insufficient: wait until enough have left for the next request to fit.
+	return a.Free[a.Spent-a.Limit]
 }
 
 // allowance is this rate as a reading rather than a duration: the limit, the count inside
@@ -297,7 +300,13 @@ func (p *openAICompatProvider) noteRequestSpent(model string, now time.Time) {
 	p.rateMu.Lock()
 	defer p.rateMu.Unlock()
 	r := p.rateFor(model)
-	r.At = append(r.At, now)
+	r.spentIn(now)
+	// Responses from concurrent requests can acquire the lock out of timestamp
+	// order; keep the expiry list ordered for roomIn and Spread.
+	index := sort.Search(len(r.At), func(i int) bool { return r.At[i].After(now) })
+	r.At = append(r.At, time.Time{})
+	copy(r.At[index+1:], r.At[index:])
+	r.At[index] = now
 }
 
 // requestWait is how long the minute's request rate needs before it can pay for one

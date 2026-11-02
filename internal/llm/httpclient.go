@@ -303,6 +303,13 @@ func withRetry[T any](ctx context.Context, attempt func() (T, error)) (T, error)
 		if !retryable(err) || i == maxAttempts-1 {
 			break
 		}
+		// A long Retry-After is commonly a daily quota, not a minute's
+		// throttle. Retrying at the one-minute cap would ignore the server's
+		// instruction and spend more requests before the quota resets.
+		var he *HTTPError
+		if errors.As(err, &he) && he.RetryAfter > retryHintCeiling {
+			break
+		}
 		if !waitBeforeRetry(ctx, err, i) {
 			break
 		}

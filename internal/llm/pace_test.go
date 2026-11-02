@@ -954,3 +954,50 @@ func TestTheAllowanceIsNotReadFromAnotherVendor(t *testing.T) {
 		t.Errorf("another vendor's numbers became a plan: %+v", got)
 	}
 }
+
+func TestRequestWindowWaitsUntilThereIsActuallyRoom(t *testing.T) {
+	now := time.Now()
+	r := &requestRate{Limit: 2, At: []time.Time{now.Add(-50 * time.Second), now.Add(-40 * time.Second), now.Add(-30 * time.Second), now.Add(-20 * time.Second)}}
+	if got := r.roomIn(now); got != 30*time.Second {
+		t.Fatalf("overfull minute waits %v, want 30s until three requests expire", got)
+	}
+}
+
+func TestDailyRequestLimitDoesNotBecomeMinuteRate(t *testing.T) {
+	cases := []struct {
+		body string
+		want int
+	}{
+		{`{"error":{"message":"Rate limit reached on requests per day (RPD): Limit 2, Used 2, Requested 1","type":"requests"}}`, 0},
+		{`{"error":{"message":"Rate limit reached on requests per minute (RPM): Limit 30, Used 30, Requested 1","type":"requests"}}`, 30},
+		{`{"error":{"message":"Rate limit reached on requests per minute: Limit 4, Used 4, Requested 1","type":"requests"}}`, 4},
+		{`{"error":{"message":"Rate limit reached: Limit 2, Used 2, Requested 1","type":"requests"}}`, 0},
+	}
+	for _, tc := range cases {
+		got, ok := requestsPerMinuteLimit(&HTTPError{StatusCode: 429, Body: tc.body})
+		if got != tc.want || ok != (tc.want > 0) {
+			t.Errorf("body %s: got %d, %v, want %d", tc.body, got, ok, tc.want)
+		}
+	}
+}
+
+func TestRequestHistoryIsPrunedWhileRecording(t *testing.T) {
+	p := &openAICompatProvider{}
+	now := time.Now()
+	p.noteRequestSpent("model", now.Add(-2*time.Minute))
+	p.noteRequestSpent("model", now)
+	if got := rateOf(t, p, "model"); len(got.At) != 1 {
+		t.Fatalf("request history has %d entries, want only the current minute", len(got.At))
+	}
+}
+
+func TestConcurrentResponsesKeepExpiryTimesInOrder(t *testing.T) {
+	p := &openAICompatProvider{}
+	now := time.Now()
+	p.noteRequestRate("model", 1)
+	p.noteRequestSpent("model", now.Add(-10*time.Second))
+	p.noteRequestSpent("model", now.Add(-20*time.Second))
+	if got := p.requestWait("model", now); got != 50*time.Second {
+		t.Fatalf("wait = %v, want 50s after both requests expire", got)
+	}
+}

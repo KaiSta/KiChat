@@ -172,19 +172,14 @@ func classifyRequestTooLarge(err error) error {
 //	"code":"rate_limit_exceeded"}}
 //
 // against the token throttle, which says `type: "tokens"` and names input or output
-// tokens per minute instead. Two things tell them apart and both are read, because one
-// of them is a word and the other a field: the sentence spells out `requests per minute
-// (RPM)`, and `type` says `requests`. The `code` is `rate_limit_exceeded` for all of
-// them, which is why nothing here reads it.
+// tokens per minute instead. The period must be explicit: `type: requests` can
+// also describe a daily limit, which is not a requests-per-minute allowance.
 var (
 	// "… on requests per minute (RPM): Limit 30 …". The period and the parenthesised
 	// unit are what keep it off the token shapes — `input tokens per minute (ITPM)` and
 	// `output tokens per minute (OTPM)` both contain "per minute" and neither contains
 	// this phrase.
-	requestRatePhrase = regexp.MustCompile(`(?i)\brequests? per minute\s*\(RPM\)`)
-	// The envelope's own name for the same limit, so a vendor that rewords its sentence
-	// still teaches the number.
-	requestRateType = regexp.MustCompile(`(?i)"type"\s*:\s*"requests"`)
+	requestRatePhrase = regexp.MustCompile(`(?i)\brequests? per minute\b|\bRPM\b`)
 )
 
 // requestsPerMinuteLimit reads the requests-per-minute allowance out of a refusal that
@@ -201,7 +196,7 @@ func requestsPerMinuteLimit(err error) (int, bool) {
 		return 0, false
 	}
 	body := he.Body
-	if !requestRatePhrase.MatchString(body) && !requestRateType.MatchString(body) {
+	if !requestRatePhrase.MatchString(body) {
 		return 0, false
 	}
 	limit := firstNumber(limitInBody, body)

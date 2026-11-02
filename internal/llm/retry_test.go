@@ -550,3 +550,14 @@ func TestAPlainBackoffIsNotReportedToTheWatcher(t *testing.T) {
 		t.Errorf("the watcher was told about %v (%d retractions), want silence for a guessed backoff", waits, waited)
 	}
 }
+
+func TestRetryDoesNotIgnoreAWaitLongerThanOneMinute(t *testing.T) {
+	attempts := 0
+	_, err := withRetry(context.Background(), func() (struct{}, error) {
+		attempts++
+		return struct{}{}, &HTTPError{StatusCode: 429, RetryAfter: 2 * time.Minute}
+	})
+	if err == nil || attempts != 1 {
+		t.Fatalf("got %d attempts and error %v, want one refusal without a premature retry", attempts, err)
+	}
+}
