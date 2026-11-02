@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { App, defaultManagedModel, folderName, formatBytes, formatNumber, isAppleSilicon, modelLabel, timeAgo, type config, type llm, type main, type runtime } from '../../lib/api'
 import { errText, useStore } from '../../store'
 import { ModelPicker, type ModelRef } from '../ModelPicker'
@@ -8,15 +8,20 @@ function LocalModelSection({
   backend,
   draft,
   patch,
+  status,
+  onRefresh,
 }: {
   backend: llm.BackendConfig
   draft: config.Settings
   patch: (c: Partial<config.Settings>) => void
+  // Shared with the whole tab: one status call serves every summary row and the
+  // expanded card, so eight collapsed backends do not each mount a poll.
+  status: main.RuntimeStatus | null
+  onRefresh: () => Promise<void>
 }) {
   const t = useStore((s) => s.t)
   // Keys built from a value the backend reports, rather than written out here.
   const tDynamic = useStore((s) => s.tDynamic)
-  const [status, setStatus] = useState<main.RuntimeStatus | null>(null)
   const [error, setError] = useState('')
   // Where models may already be, and what was found in the folder in use. The
   // folder itself is a setting; which folders exist is a question asked of the
@@ -52,7 +57,7 @@ function LocalModelSection({
 
   const refresh = async () => {
     try {
-      setStatus(await App.GetRuntimeStatus())
+      await onRefresh()
       setError('')
     } catch (e) {
       setError(String(e))
@@ -64,6 +69,14 @@ function LocalModelSection({
       setError(String(e))
     }
   }
+
+  // The tab owns the status poll, but this card still refreshes once when it opens:
+  // the installed-build list is its own question, and a model may have been started
+  // or an install may have finished while the card was closed.
+  useEffect(() => {
+    void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const removeBuild = async (dir: string) => {
     setCleaning(dir)
@@ -89,11 +102,6 @@ function LocalModelSection({
     await refresh()
   }
 
-  useEffect(() => {
-    void refresh()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
   // Read as an array even though the backend sends one: a nil Go slice marshals to
   // JSON `null`, and a null here threw inside this section's render and took the
   // whole Settings view down to the error boundary. The backend no longer sends it
@@ -101,21 +109,11 @@ function LocalModelSection({
   // shape mistake should cost one row, not the window.
   const mine = (status?.models ?? []).find((m) => m.backendId === backend.id)
   const state = mine?.state ?? 'stopped'
-  const working = !!status?.busy || state === 'starting'
   // What the *running* server is serving, which is not the selection: picking another
   // file moves `model.modelPath` at once, while the process in memory keeps the model
   // it loaded until it is started again. The backend sends this only while a server is
   // up, so empty means "nothing is loaded" rather than "nothing to say".
   const loadedModel = mine?.loadedModel ?? ''
-
-  // Only poll while something is actually moving: an idle window should not ask
-  // the backend for status twice a second for the rest of the session.
-  useEffect(() => {
-    if (!working) return
-    const id = window.setInterval(() => void refresh(), 1200)
-    return () => window.clearInterval(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [working])
 
   // Ask once, when the card first sees an installed build — not on every poll. A
   // reading is only shown for the build it was made for, so a save that switches the
@@ -1148,14 +1146,17 @@ function MLXModelSection({
   backend,
   draft,
   patch,
+  status,
+  onRefresh,
 }: {
   backend: llm.BackendConfig
   draft: config.Settings
   patch: (c: Partial<config.Settings>) => void
+  status: main.RuntimeStatus | null
+  onRefresh: () => Promise<void>
 }) {
   const t = useStore((s) => s.t)
   const tDynamic = useStore((s) => s.tDynamic)
-  const [status, setStatus] = useState<main.RuntimeStatus | null>(null)
   const [error, setError] = useState('')
   const saved = draft.runtime?.models?.[backend.id]
   const [model, setModel] = useState<config.ManagedModel>(() => ({
@@ -1164,32 +1165,23 @@ function MLXModelSection({
   }))
   const mine = (status?.models ?? []).find((m) => m.backendId === backend.id)
   const state = mine?.state ?? 'stopped'
-  const working = !!status?.mlxBusy || state === 'starting'
   const mlx = model.mlx ?? {}
 
   const refresh = async () => {
     try {
-      setStatus(await App.GetRuntimeStatus())
+      await onRefresh()
       setError('')
     } catch (e) {
       setError(String(e))
     }
   }
 
+  // Ask once when the card opens: the shared status may predate an install or a load
+  // that finished while this card was closed.
   useEffect(() => {
     void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  // Only while something is moving: the install and the load are both minutes
-  // long, and an idle card asking twice a second for the rest of the session is
-  // the poll LocalModelSection exists to avoid.
-  useEffect(() => {
-    if (!working) return
-    const id = window.setInterval(() => void refresh(), 1200)
-    return () => window.clearInterval(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [working])
 
   const update = (changes: Partial<config.ManagedModel>) => {
     const next: config.ManagedModel = { ...model, ...changes }
@@ -1478,6 +1470,7 @@ export function BackendsTab({
   onApply: (next?: config.Settings) => Promise<void>
 }) {
   const t = useStore((s) => s.t)
+  const tDynamic = useStore((s) => s.tDynamic)
   const health = useStore((s) => s.health)
   const models = useStore((s) => s.models)
   const [secrets, setSecrets] = useState<main.SecretStatus | null>(null)
@@ -1489,6 +1482,38 @@ export function BackendsTab({
       .then((info) => setApple(isAppleSilicon(info.platform)))
       .catch(() => undefined)
   }, [])
+
+  // One status call for the whole tab. A collapsed row still has to say whether a
+  // managed model is running or failed, and the expanded card reads the same value,
+  // so the poll lives here rather than inside every managed section.
+  const [runtimeStatus, setRuntimeStatus] = useState<main.RuntimeStatus | null>(null)
+  const refreshRuntime = useCallback(async () => {
+    setRuntimeStatus(await App.GetRuntimeStatus())
+  }, [])
+  useEffect(() => {
+    void refreshRuntime().catch(() => undefined)
+  }, [refreshRuntime])
+  const runtimeMoving = useMemo(() => {
+    const st = runtimeStatus
+    if (!st) return false
+    if (st.busy || st.mlxBusy) return true
+    return (st.models ?? []).some((m) => m.state === 'starting')
+  }, [runtimeStatus])
+  // Only while something is actually moving: an install and a model load are both
+  // minutes long, and an idle tab should not ask twice a second for the session.
+  useEffect(() => {
+    if (!runtimeMoving) return
+    const id = window.setInterval(() => void refreshRuntime().catch(() => undefined), 1200)
+    return () => window.clearInterval(id)
+  }, [runtimeMoving, refreshRuntime])
+
+  // The cards the user opened, not the closed ones: a newly added backend starts
+  // closed like the rest. A failure is on the summary line, so closing a card never
+  // hides the reason to open it.
+  const [openCards, setOpenCards] = useState<Record<string, boolean>>({})
+  const [filter, setFilter] = useState('')
+  const [enabledOnly, setEnabledOnly] = useState(false)
+  const [errorsOnly, setErrorsOnly] = useState(false)
 
   // Re-read with the health report: a save is what puts a key in the store, and
   // the flag saying which entries have one would otherwise stay stale for the
@@ -1503,18 +1528,110 @@ export function BackendsTab({
     patch({ backends })
   }
 
+  const kindLabel = (kind: string) => {
+    const key = `settings.backends.kind.${kind}`
+    const label = tDynamic(key)
+    // translate() echoes the key when it has no entry; a kind this build does not
+    // name yet should still read as something rather than as "settings.backends.kind.x".
+    return label === key ? kind : label
+  }
+  const groupOf = (kind: string): 'local' | 'hosted' | 'custom' =>
+    ['lmstudio', 'ollama', 'llamacpp', 'mlx'].includes(kind)
+      ? 'local'
+      : ['deepseek', 'mistral', 'nvidia', 'groq'].includes(kind)
+        ? 'hosted'
+        : 'custom'
+  const query = filter.trim().toLowerCase()
+  const matching = draft.backends
+    .map((backend, index) => ({ backend, index }))
+    .filter(({ backend }) => {
+      if (backend.kind === 'mlx' && !apple) return false
+      if (enabledOnly && !backend.enabled) return false
+      const status = health.find((h) => h.id === backend.id)
+      if (errorsOnly && !(status && status.enabled && !status.ok)) return false
+      if (!query) return true
+      const mine = (runtimeStatus?.models ?? []).find((m) => m.backendId === backend.id)
+      return [
+        backend.name,
+        backend.id,
+        kindLabel(backend.kind),
+        backend.baseUrl,
+        status?.error ?? '',
+        mine?.url ?? '',
+      ]
+        .join(' ')
+        .toLowerCase()
+        .includes(query)
+    })
+  // Grouped and stable: rows do not move while a probe changes state, and the order
+  // inside a group is the order the backends are saved in.
+  const groupOrder: ('local' | 'hosted' | 'custom')[] = ['local', 'hosted', 'custom']
+  const ordered = matching
+    .map((row) => ({ ...row, group: groupOf(row.backend.kind) }))
+    .sort((a, b) => groupOrder.indexOf(a.group) - groupOrder.indexOf(b.group))
+  const errorCount = matching.filter(({ backend }) => {
+    const status = health.find((h) => h.id === backend.id)
+    return !!status && status.enabled && !status.ok
+  }).length
+  const onCount = matching.filter(({ backend }) => backend.enabled).length
+  const offCount = matching.length - onCount
+
   return (
     <>
       <Section
         title={t('settings.backends')}
         hint={t('settings.backendsHint')}
       >
-        {draft.backends.map((backend, index) => {
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <input
+            className="input min-w-[180px] flex-1"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder={t('settings.backends.filter')}
+            aria-label={t('settings.backends.filter')}
+          />
+          <label className="flex items-center gap-1 text-[12px]">
+            <input
+              type="checkbox"
+              checked={enabledOnly}
+              onChange={(e) => setEnabledOnly(e.target.checked)}
+            />
+            {t('settings.backends.enabledOnly')}
+          </label>
+          <button
+            type="button"
+            className={`btn btn-sm ${errorsOnly ? 'btn-primary' : 'btn-ghost'}`}
+            disabled={errorCount === 0 && !errorsOnly}
+            aria-pressed={errorsOnly}
+            onClick={() => setErrorsOnly((v) => !v)}
+          >
+            {t('settings.backends.errors', { count: errorCount })}
+          </button>
+          <span className="faint text-[11px]">
+            {t('settings.backends.summary', { on: onCount, off: offCount })}
+          </span>
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            onClick={() =>
+              setOpenCards(
+                matching.some(({ backend }) => openCards[backend.id])
+                  ? {}
+                  : Object.fromEntries(matching.map(({ backend }) => [backend.id, true])),
+              )
+            }
+          >
+            {matching.some(({ backend }) => openCards[backend.id])
+              ? t('settings.backends.collapseAll')
+              : t('settings.backends.expandAll')}
+          </button>
+        </div>
+        {ordered.map(({ backend, index, group }, position) => {
           // MLX is not shown on a machine that cannot run it. The entry is still in
           // the settings blob — settings travel, and dropping it would throw away a
           // Mac user's configuration on the first save from a Linux box — so this is
-          // a render decision, not a schema one.
-          if (backend.kind === 'mlx' && !apple) return null
+          // a render decision, not a schema one (the filter above already dropped it).
+          const groupStart = position === 0 || ordered[position - 1].group !== group
           const status = health.find((h) => h.id === backend.id)
           const modelCount = models.filter((m) => m.backend === backend.id).length
           // The state the running app reported, not the checkbox: an entry that is
@@ -1523,16 +1640,31 @@ export function BackendsTab({
           // A key counts as present whether it was just typed or is already in the
           // secret store. The stored one cannot be read back — that is what being a
           // secret means here — so the backend reports only which entries have one.
-          const keyPresent =
-            (backend.apiKey ?? '').trim() !== '' || (secrets?.backendKeys?.[backend.id] ?? false)
+          const typedKey = (backend.apiKey ?? '').trim() !== ''
+          const keySaved = secrets?.backendKeys?.[backend.id] ?? false
+          const keyPresent = typedKey || keySaved
+          const usesKey = ['custom', 'deepseek', 'mistral', 'nvidia', 'groq', 'llamacpp'].includes(
+            backend.kind,
+          )
+          const open = !!openCards[backend.id]
+          const mine = (runtimeStatus?.models ?? []).find((m) => m.backendId === backend.id)
           const enableAndApply = () => {
             const backends = draft.backends.map((b, i) => (i === index ? { ...b, enabled: true } : b))
             patch({ backends })
             void onApply({ ...draft, backends })
           }
           return (
-            <div key={backend.id} className="mb-3 rounded-md p-3" style={{ background: 'var(--surface-2)' }}>
-              <div className="mb-2 flex items-center gap-2">
+            <Fragment key={backend.id}>
+              {groupStart && (
+                <div className="faint mb-1 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider">
+                  {t(`settings.backends.group.${group}`)}
+                  <span className="badge">
+                    {ordered.filter((row) => row.group === group).length}
+                  </span>
+                </div>
+              )}
+            <div className="mb-2 rounded-md" style={{ background: 'var(--surface-2)' }}>
+              <div className="flex items-center gap-2 p-2">
                 <input
                   type="checkbox"
                   checked={backend.enabled}
@@ -1540,11 +1672,19 @@ export function BackendsTab({
                   title={t('settings.enabled')}
                   onChange={(e) => updateBackend(index, { enabled: e.target.checked })}
                 />
-                <input
-                  className="input flex-1"
-                  value={backend.name}
-                  onChange={(e) => updateBackend(index, { name: e.target.value })}
-                />
+                <button
+                  type="button"
+                  className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-left"
+                  aria-expanded={open}
+                  aria-controls={`backend-body-${backend.id}`}
+                  onClick={() =>
+                    setOpenCards((prev) => ({ ...prev, [backend.id]: !prev[backend.id] }))
+                  }
+                >
+                  <span className="min-w-0 truncate text-[13px] font-medium">
+                    {backend.name || backend.id}
+                  </span>
+                  <span className="badge">{kindLabel(backend.kind)}</span>
                 {/* Three states, not two. A backend that is switched off was
                     never contacted, so it is not "unreachable" — that label sent
                     a user who had just pasted a key to fix an address nothing
@@ -1559,10 +1699,71 @@ export function BackendsTab({
                   <span className="badge">{t('settings.disabled')}</span>
                 ) : (
                   <span className={`badge ${status.ok ? 'badge-ok' : 'badge-danger'}`}>
-                    {status.ok ? `${t('settings.ok')} · ${modelCount} ${t('settings.modelsFound')}` : t('settings.fail')}
+                    {status.ok ? t('settings.ok') : t('settings.fail')}
+                  </span>
+                )}
+                {mine && mine.state !== 'stopped' && (
+                  <span
+                    className={`badge ${
+                      mine.state === 'running'
+                        ? 'badge-ok'
+                        : mine.state === 'failed'
+                          ? 'badge-danger'
+                          : ''
+                    }`}
+                  >
+                    {tDynamic(`settings.managed.state.${mine.state}`)}
+                  </span>
+                )}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-ghost"
+                  aria-label={open ? t('settings.backends.collapse') : t('settings.backends.expand')}
+                  aria-expanded={open}
+                  aria-controls={`backend-body-${backend.id}`}
+                  onClick={() =>
+                    setOpenCards((prev) => ({ ...prev, [backend.id]: !prev[backend.id] }))
+                  }
+                >
+                  {open ? '▾' : '▸'}
+                </button>
+              </div>
+              <div className="faint flex flex-wrap items-center gap-x-3 gap-y-1 px-2 pb-2 text-[11px]">
+                <span className="mono min-w-0 max-w-full truncate">{backend.baseUrl}</span>
+                {modelCount > 0 && (
+                  <span>
+                    {modelCount} {t('settings.modelsFound')}
+                  </span>
+                )}
+                {usesKey && (typedKey || keySaved || secrets) && (
+                  <span>
+                    {keySaved
+                      ? t('settings.backends.keyStored')
+                      : typedKey
+                        ? t('settings.backends.keyTyped')
+                        : t('settings.backends.noKey')}
                   </span>
                 )}
               </div>
+              {open && (
+                <div
+                  id={`backend-body-${backend.id}`}
+                  className="border-t p-2"
+                  style={{ borderColor: 'var(--line)' }}
+                >
+                  <label
+                    className="mb-1 block text-[12px]"
+                    htmlFor={`backend-name-${backend.id}`}
+                  >
+                    {t('settings.backends.name')}
+                  </label>
+                  <input
+                    id={`backend-name-${backend.id}`}
+                    className="input mb-2 w-full"
+                    value={backend.name}
+                    onChange={(e) => updateBackend(index, { name: e.target.value })}
+                  />
               <input
                 className="input mono"
                 value={backend.baseUrl}
@@ -1594,7 +1795,7 @@ export function BackendsTab({
                 />
               )}
               {status && status.enabled && !status.ok && (
-                <div className="mt-2 text-[11px]" style={{ color: 'var(--danger)' }}>
+                <div className="px-2 pb-2 text-[11px]" style={{ color: 'var(--danger)' }}>
                   {errText(status.error)}
                 </div>
               )}
@@ -1632,14 +1833,32 @@ export function BackendsTab({
               {/* Only the kind that KiChat knows how to run itself gets the
                   controls; every other entry stays an address it contacts. */}
               {backend.kind === 'llamacpp' && (
-                <LocalModelSection backend={backend} draft={draft} patch={patch} />
+                <LocalModelSection
+                  backend={backend}
+                  draft={draft}
+                  patch={patch}
+                  status={runtimeStatus}
+                  onRefresh={refreshRuntime}
+                />
               )}
               {backend.kind === 'mlx' && (
-                <MLXModelSection backend={backend} draft={draft} patch={patch} />
+                <MLXModelSection
+                  backend={backend}
+                  draft={draft}
+                  patch={patch}
+                  status={runtimeStatus}
+                  onRefresh={refreshRuntime}
+                />
+              )}
+                </div>
               )}
             </div>
+            </Fragment>
           )
         })}
+        {ordered.length === 0 && (
+          <p className="faint mb-2 text-[12px]">{t('settings.backends.noMatches')}</p>
+        )}
         <div className="flex gap-2">
           <button
             type="button"
@@ -1651,12 +1870,19 @@ export function BackendsTab({
           <button
             type="button"
             className="btn btn-sm"
-            onClick={() =>
+            onClick={() => {
+              const id = `custom-${Date.now().toString(36)}`
+              // The row would otherwise be invisible behind an active filter and
+              // closed, which reads as "nothing was added".
+              setFilter('')
+              setEnabledOnly(false)
+              setErrorsOnly(false)
+              setOpenCards({ [id]: true })
               patch({
                 backends: [
                   ...draft.backends,
                   {
-                    id: `custom-${Date.now().toString(36)}`,
+                    id,
                     name: 'Custom',
                     kind: 'custom',
                     baseUrl: 'http://127.0.0.1:8080',
@@ -1665,7 +1891,7 @@ export function BackendsTab({
                   } as llm.BackendConfig,
                 ],
               })
-            }
+            }}
           >
             + {t('settings.addCustom')}
           </button>
@@ -1727,6 +1953,10 @@ function ModelOverridesTab({
   const [ceilingValue, setCeilingValue] = useState('')
   const [onlyMissing, setOnlyMissing] = useState(false)
   const [saving, setSaving] = useState(false)
+  // Closed by default: the backend list is the tab's subject, and the overrides are
+  // a second, longer form underneath it. The count on the button is what says there
+  // is anything in there worth opening.
+  const [open, setOpen] = useState(false)
 
   // Groq is the one backend whose per-request budget cannot be fetched before the
   // first request: the listing publishes windows only, the Rate Limits and Models
@@ -1866,7 +2096,22 @@ function ModelOverridesTab({
         <span className="faint">
           {t('model.overridesSummary', { missing: missing.length, total: models.length })}
         </span>
-        <label className="ml-auto flex items-center gap-2">
+        <button
+          type="button"
+          className="btn btn-sm ml-auto"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open
+            ? t('settings.overrides.hide')
+            : t('settings.overrides.show', { count: Object.keys(overrides).length })}
+        </button>
+      </div>
+
+      {open && (
+        <>
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-[12px]">
+        <label className="flex items-center gap-2">
           <input
             type="checkbox"
             checked={onlyMissing}
@@ -1875,7 +2120,6 @@ function ModelOverridesTab({
           {t('model.overridesOnlyMissing')}
         </label>
       </div>
-
       <Field label={t('model.overridesPick')} labelledBy="override-model-label">
         <ModelPicker
           id="override-model"
@@ -1976,6 +2220,8 @@ function ModelOverridesTab({
             </div>
           ))}
         </div>
+      )}
+        </>
       )}
     </Section>
   )
