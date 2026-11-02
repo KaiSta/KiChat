@@ -164,6 +164,26 @@ func MLXPythonVersion(ctx context.Context, python string) (int, int, error) {
 	return major, minor, nil
 }
 
+// mlxFailure is the one line of a venv or pip failure worth showing.
+//
+// CombinedOutput can be megabytes — pip prints every wheel it considers — and the
+// message crosses the bridge into a settings row. The last line is usually the
+// error itself ("No matching distribution found…"), so it is preferred; the whole
+// output is the fallback when there is only one line, bounded either way.
+func mlxFailure(out []byte, err error) string {
+	text := strings.TrimSpace(string(out))
+	if text == "" {
+		return err.Error()
+	}
+	if i := strings.LastIndexByte(text, '\n'); i >= 0 {
+		text = strings.TrimSpace(text[i+1:])
+	}
+	if len(text) > 400 {
+		text = text[:400] + "…"
+	}
+	return text
+}
+
 // MLXPythonCandidates is what to look for when the user has not named an
 // interpreter. `python3` first because a macOS with the developer tools has it,
 // then the versioned names Homebrew and python.org install.
@@ -191,7 +211,7 @@ func MLXInstall(ctx context.Context, python, venvDir string, onPhase func(string
 	onPhase("venv")
 	cmd := exec.CommandContext(ctx, python, "-m", "venv", venvDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", uimsg.Errorf("runtime.mlxInstall", strings.TrimSpace(string(out)))
+		return "", uimsg.Errorf("runtime.mlxInstall", mlxFailure(out, err))
 	}
 	py, ok := MLXVenvPython(venvDir)
 	if !ok {
@@ -201,11 +221,11 @@ func MLXInstall(ctx context.Context, python, venvDir string, onPhase func(string
 	onPhase("pip")
 	cmd = exec.CommandContext(ctx, py, "-m", "pip", "install", "--upgrade", "pip")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", uimsg.Errorf("runtime.mlxInstall", strings.TrimSpace(string(out)))
+		return "", uimsg.Errorf("runtime.mlxInstall", mlxFailure(out, err))
 	}
 	cmd = exec.CommandContext(ctx, py, "-m", "pip", "install", "--upgrade", MLXPackage)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", uimsg.Errorf("runtime.mlxInstall", strings.TrimSpace(string(out)))
+		return "", uimsg.Errorf("runtime.mlxInstall", mlxFailure(out, err))
 	}
 
 	onPhase("version")

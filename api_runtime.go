@@ -489,9 +489,16 @@ func runtimeStatusBase(settings config.Settings, goos, goarch string) RuntimeSta
 	}
 	for _, id := range sortedRuntimeIDs(settings) {
 		mm := settings.Runtime.Models[id]
-		projector, detected := projectorReading(mm)
+		kind := backendKind(settings, id)
+		// Projector pairing is a llama.cpp question: an MLX model is a folder, has no
+		// mmproj, and scanning its snapshot for one would be a second wrong answer on
+		// a row that has no field to show it.
+		projector, detected := "", false
+		if kind != "mlx" {
+			projector, detected = projectorReading(mm)
+		}
 		status.Models = append(status.Models, ManagedStatus{
-			BackendID: id, Kind: backendKind(settings, id), Enabled: mm.Enabled, ModelPath: mm.ModelPath,
+			BackendID: id, Kind: kind, Enabled: mm.Enabled, ModelPath: mm.ModelPath,
 			CtxSize: mm.CtxSize, ExtraArgs: mm.ExtraArgs, State: rt.StateStopped,
 			MMProj: projector, MMProjDetected: detected,
 		})
@@ -638,10 +645,25 @@ func (a *App) GetRuntimeStatus() (RuntimeStatus, error) {
 	status.MLXSupported = rt.MLXSupported(goruntime.GOOS, goruntime.GOARCH)
 	status.MLXVersion = settings.Runtime.MLX.Version
 	status.MLXServer = settings.Runtime.MLX.ServerPath
+	if strings.TrimSpace(status.MLXServer) != "" {
+		// The recorded version describes the environment this app made. A launcher
+		// the user supplied is a different program, and this app has no verified way
+		// to ask it (there is no `--version` contract to rely on), so saying nothing
+		// is the honest answer rather than showing another environment's number.
+		status.MLXVersion = ""
+	}
 	if python, ok := rt.MLXVenvPython(rt.MLXVenvDir(a.dataDir)); ok {
 		status.MLXPython = python
 	}
-	status.MLXInstalled = status.MLXServer != "" || status.MLXPython != ""
+	// A supplied launcher counts only when it is really there: the field is a path the
+	// user typed, and a typo must not make the card offer a Start that cannot work.
+	if server := strings.TrimSpace(status.MLXServer); server != "" {
+		if info, err := os.Stat(server); err == nil && !info.IsDir() {
+			status.MLXInstalled = true
+		}
+	} else if status.MLXPython != "" {
+		status.MLXInstalled = true
+	}
 	a.mlxMu.Lock()
 	status.MLXBusy, status.MLXPhase, status.MLXError = a.mlxBusy, a.mlxPhase, a.mlxErr
 	a.mlxMu.Unlock()

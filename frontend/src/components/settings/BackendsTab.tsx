@@ -1260,9 +1260,11 @@ function MLXModelSection({
 
       <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
         <span className={`badge ${status?.mlxInstalled ? 'badge-ok' : 'badge-warn'}`}>
-          {status?.mlxInstalled
-            ? t('settings.mlx.installed', { version: status?.mlxVersion || t('settings.managed.versionUnknown') })
-            : t('settings.mlx.notInstalled')}
+          {status?.mlxServer
+            ? t('settings.mlx.customInstalled')
+            : status?.mlxInstalled
+              ? t('settings.mlx.installed', { version: status?.mlxVersion || t('settings.managed.versionUnknown') })
+              : t('settings.mlx.notInstalled')}
         </span>
         {status?.mlxPython && (
           <span className="mono min-w-0 truncate faint">
@@ -1276,11 +1278,35 @@ function MLXModelSection({
           {status.mlxPhase ? ` · ${t('settings.mlx.phase', { phase: status.mlxPhase })}` : ''}
         </div>
       )}
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <button type="button" className="btn btn-sm" disabled={!!status?.mlxBusy} onClick={() => void install()}>
-          {status?.mlxInstalled ? t('settings.mlx.upgrade') : t('settings.mlx.install')}
-        </button>
-      </div>
+      {/* A supplied launcher owns its own environment; installing into the app's
+          venv would build something the start never runs. The row explains which
+          program is in charge instead of offering that dead end. */}
+      {!status?.mlxServer && (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <button type="button" className="btn btn-sm" disabled={!!status?.mlxBusy} onClick={() => void install()}>
+            {status?.mlxInstalled ? t('settings.mlx.upgrade') : t('settings.mlx.install')}
+          </button>
+        </div>
+      )}
+
+      {/* A launcher you already have — a conda environment, a checkout — skips the
+          venv entirely. It is a runtime-wide setting, so it lives in the draft and is
+          persisted by the panel's Save, like llama.cpp's own binary path. */}
+      <label className="mb-1 block text-[12px]">{t('settings.mlx.serverPath')}</label>
+      <input
+        className="input mono"
+        value={draft.runtime?.mlx?.serverPath ?? ''}
+        placeholder={t('settings.mlx.serverPlaceholder')}
+        onChange={(e) =>
+          patch({
+            runtime: {
+              ...draft.runtime,
+              mlx: { ...(draft.runtime?.mlx ?? { version: '' }), serverPath: e.target.value },
+            },
+          })
+        }
+      />
+      <p className="faint mt-1 text-[11px]">{t('settings.mlx.serverHint')}</p>
 
       <label className="mb-1 block text-[12px]">{t('settings.mlx.model')}</label>
       <div className="flex gap-2">

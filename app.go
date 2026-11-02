@@ -440,8 +440,15 @@ func (a *App) finishInit() error {
 // what makes "the app runs the model" true across restarts: nothing else has to
 // be started by hand.
 func (a *App) startEnabledModels() {
-	for id, mm := range a.Settings().Runtime.Models {
+	settings := a.Settings()
+	for id, mm := range settings.Runtime.Models {
 		if !mm.Enabled || mm.ModelPath == "" {
+			continue
+		}
+		// A blob restored from a Mac can name an MLX model on a machine that cannot
+		// run one. Skipping it keeps the launch log free of a failure for a card that
+		// is not even shown; a manual start still reports the reason.
+		if backendKind(settings, id) == "mlx" && !mlxAvailable() {
 			continue
 		}
 		if err := a.startManagedModel(id); err != nil {

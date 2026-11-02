@@ -528,6 +528,11 @@ const de = {
   'settings.mlx.title': 'MLX — KiChat startet mlx_lm.server selbst',
   'settings.mlx.hint':
     'MLX läuft nur auf Apple Silicon. KiChat legt eine eigene Python-Umgebung an, installiert mlx-lm und startet damit ein Modell aus einem lokalen Snapshot-Ordner. Das Modell selbst wird nicht mitgeladen: den Ordner wählst du unten.',
+  'settings.mlx.serverPath': 'Eigener mlx_lm.server (optional)',
+  'settings.mlx.serverPlaceholder': '/opt/homebrew/bin/mlx_lm.server',
+  'settings.mlx.serverHint':
+    'Ein Pfad hier ersetzt die Umgebung, die KiChat anlegt — zum Beispiel aus einem Conda-Env. Feld leer lassen, um die eigene Umgebung zu benutzen.',
+  'settings.mlx.customInstalled': 'eigener mlx_lm.server',
   'settings.mlx.installed': 'mlx-lm {{version}} vorhanden',
   'settings.mlx.notInstalled': 'mlx-lm ist noch nicht installiert',
   'settings.mlx.python': 'Python',
@@ -1922,6 +1927,11 @@ const en: Record<keyof typeof de, string> = {
   'settings.mlx.title': 'MLX — KiChat runs mlx_lm.server itself',
   'settings.mlx.hint':
     'MLX runs only on Apple silicon. KiChat creates its own Python environment, installs mlx-lm, and starts a model from a local snapshot folder with it. The weights are not downloaded here: you pick the folder below.',
+  'settings.mlx.serverPath': 'Your own mlx_lm.server (optional)',
+  'settings.mlx.serverPlaceholder': '/opt/homebrew/bin/mlx_lm.server',
+  'settings.mlx.serverHint':
+    'A path here replaces the environment KiChat creates — a conda env, for instance. Leave it empty to use the one this app installs.',
+  'settings.mlx.customInstalled': 'using your own mlx_lm.server',
   'settings.mlx.installed': 'mlx-lm {{version}} installed',
   'settings.mlx.notInstalled': 'mlx-lm is not installed yet',
   'settings.mlx.python': 'Python',
@@ -3245,6 +3255,11 @@ const zh: Record<keyof typeof de, string> = {
   'settings.mlx.title': 'MLX —— KiChat 自行启动 mlx_lm.server',
   'settings.mlx.hint':
     'MLX 只在 Apple 芯片上运行。KiChat 会创建独立的 Python 环境、安装 mlx-lm，并用它启动本地快照文件夹里的模型。这里不会下载权重：请在下方选择文件夹。',
+  'settings.mlx.serverPath': '自备 mlx_lm.server（可选）',
+  'settings.mlx.serverPlaceholder': '/opt/homebrew/bin/mlx_lm.server',
+  'settings.mlx.serverHint':
+    '填写路径会替代 KiChat 创建的 Python 环境，例如来自 conda 的环境。留空则使用本应用安装的环境。',
+  'settings.mlx.customInstalled': '使用自备的 mlx_lm.server',
   'settings.mlx.installed': '已安装 mlx-lm {{version}}',
   'settings.mlx.notInstalled': '尚未安装 mlx-lm',
   'settings.mlx.python': 'Python',

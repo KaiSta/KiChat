@@ -80,6 +80,10 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 		s.Runtime.Accelerator = recorded.Runtime.Accelerator
 	}
 	s.Runtime.Tag = recorded.Runtime.Tag
+	// The mlx-lm version is the installer's record in the same way the build tag is:
+	// no control edits it, and a draft read before the pip run would otherwise put
+	// the previous version — or none at all — back over the one that just landed.
+	s.Runtime.MLX.Version = recorded.Runtime.MLX.Version
 	// The folders the model row remembers are repaired here as well as on the next
 	// load, because this save is what the row reads back: a draft that arrived with a
 	// duplicate or an over-long list would otherwise be shown exactly as it came in,

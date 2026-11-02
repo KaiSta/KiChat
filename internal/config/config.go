@@ -1019,6 +1019,13 @@ func NormaliseMLX(in *MLXOptions) *MLXOptions {
 	}
 	out.DraftModel = strings.TrimSpace(out.DraftModel)
 	out.ChatTemplate = strings.TrimSpace(out.ChatTemplate)
+	// An all-default section is the same thing as no section. Keeping it would write
+	// `"mlx": {}` into every llama.cpp entry the panel saves, which is noise in the
+	// blob and one more shape a reader has to know is meaningless.
+	if out.KVBits == 0 && out.PrefillStep == 0 && out.MaxTokens == 0 &&
+		out.DraftModel == "" && out.ChatTemplate == "" && !out.TrustRemoteCode {
+		return nil
+	}
 	return &out
 }
 
@@ -1672,6 +1679,8 @@ func (s *Settings) normalise() {
 		// carries, and it has to mean upstream rather than something else.
 		s.Runtime.Distribution = DistLlamaCPP
 	}
+	s.Runtime.MLX.ServerPath = strings.TrimSpace(s.Runtime.MLX.ServerPath)
+	s.Runtime.MLX.Version = strings.TrimSpace(s.Runtime.MLX.Version)
 	if !IsAccelerator(s.Runtime.Accelerator) {
 		// Anything unrecognised falls back to the build that needs no GPU
 		// toolkit: shipping a stored value straight into a download URL would

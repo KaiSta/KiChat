@@ -86,6 +86,12 @@ The interpreter is looked for among `python3`, `python3.13`, `python3.12`,
 would spend a minute resolving wheels and then fail with an error whose cause is
 the interpreter.
 
+A launcher you already have — a conda environment, a checkout — can be named in
+the card instead. That path replaces the venv entirely: the install button is not
+offered, and the version line says nothing, because the recorded version belongs
+to the app's own environment and there is no `--version` contract this app can
+rely on to ask the other program.
+
 ### 3.2 What is started
 
 ```
@@ -202,6 +208,10 @@ and a runnable `mlx_lm.server`, and skip with its reason on every other machine.
   cancel, which the app has for archives but not for Hugging Face snapshots.
 - **No removal.** The environment has no counterpart to the llama.cpp cleanup
   list yet; deleting `runtime/mlx` by hand is a complete uninstall.
+- **An upgrade does not restart a running server.** pip replaces files in the
+  environment while the process keeps the modules it already imported, so a model
+  started before an update keeps running the old code until it is started again.
+  There is no `restartPending` flag for MLX yet, unlike llama.cpp's.
 - **No update check.** The version is read from the package, but nothing asks
   PyPI whether a newer one exists.
 - **One resident model.** The server loads a model per request and drops the
