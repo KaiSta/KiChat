@@ -379,7 +379,6 @@ export function ModelSwitcher() {
   const chatState = useStore((s) => s.chatState)
   const running = useStore((s) => (s.activeChatId ? s.running[s.activeChatId] : false))
   const refreshModels = useStore((s) => s.refreshModels)
-  const updateChat = useStore((s) => s.updateChat)
   const refreshHealth = useStore((s) => s.refreshHealth)
   const setNextModel = useStore((s) => s.setNextModel)
   const settings = useStore((s) => s.settings)
@@ -390,7 +389,12 @@ export function ModelSwitcher() {
   const [activeIndex, setActiveIndex] = useState(0)
   const [nextOnly, setNextOnly] = useState(false)
   const [preview, setPreview] = useState<chat.ContextBudget | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState('')
+  const [candidateChatId, setCandidateChatId] = useState('')
+  const [switchingModel, setSwitchingModel] = useState(false)
   const [candidate, setCandidate] = useState<llm.ModelInfo | null>(null)
+  const [contextSize, setContextSize] = useState('0')
   // The availability sweep: which backend is being asked, how far it has got, and
   // how many models the last one hid. Read through a bound method rather than
   // pushed, because a sweep of eighty models outlives any call it could be
@@ -405,7 +409,11 @@ export function ModelSwitcher() {
   const [statusError, setStatusError] = useState('')
   // The start that is being waited for, and the failure of one that is over. Per
   // backend, because more than one managed entry can be configured.
-  const [localStart, setLocalStart] = useState<{ backend: string; path: string } | null>(null)
+  const [localStart, setLocalStart] = useState<{ backend: string; path: string; chatId: string; nextOnly: boolean; accepted: boolean } | null>(null)
+  const [localScan, setLocalScan] = useState<runtime.ModelFolderScan | null>(null)
+  const [localScanError, setLocalScanError] = useState('')
+  const [scanRevision, setScanRevision] = useState(0)
+  const [localScanning, setLocalScanning] = useState(false)
   // The stop that is in flight, by backend id: the button that asked for it says so and
   // cannot be pressed twice, because a second stop of a server that is on its way down
   // is a click with nothing left to do.
@@ -413,6 +421,9 @@ export function ModelSwitcher() {
   const [localErrors, setLocalErrors] = useState<Record<string, string>>({})
   const boxRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const startPending = useRef(false)
+  const finishPending = useRef(false)
+  const choiceSequence = useRef(0)
 
   const current = useMemo(
     () => models.find((m) => m.backend === chatState?.chat.backend && m.id === chatState?.chat.model),
@@ -424,8 +435,10 @@ export function ModelSwitcher() {
     if (!open) return
     const handler = (event: MouseEvent) => {
       if (boxRef.current && !boxRef.current.contains(event.target as Node)) {
+        choiceSequence.current++
         setOpen(false)
         setCandidate(null)
+        setPreview(null)
       }
     }
     document.addEventListener('mousedown', handler)
@@ -508,10 +521,37 @@ export function ModelSwitcher() {
   // The catalogue is indexed once per listing rather than once per keystroke: the
   // listing changes when a backend is refreshed, while the query changes on every
   // character typed.
-  const index = useMemo(() => buildModelSearchIndex(models), [models])
-  const results = useMemo(() => searchModels(index, filter), [index, filter])
-  const grouped = useMemo(() => groupEntries(results), [results])
-  const qualifiers = useMemo(() => modelQualifiers(models), [models])
+  const localBackends = (settings?.backends ?? []).filter((b) =>
+    b.kind === 'llamacpp' || (b.kind === 'mlx' && runtimeStatus?.mlxSupported),
+  )
+  const localFiles = useMemo(() => {
+    const files = new Map<string, runtime.ModelFile>()
+    for (const backend of settings?.backends ?? []) {
+      if (backend.kind !== 'llamacpp') continue
+      for (const file of localScan?.files ?? []) files.set(`${backend.id}/${file.path}`, file)
+      const savedPath = settings?.runtime?.models?.[backend.id]?.modelPath
+      if (savedPath && !files.has(`${backend.id}/${savedPath}`)) {
+        files.set(`${backend.id}/${savedPath}`, { path: savedPath, name: folderName(savedPath), model: '', size: 0 })
+      }
+    }
+    return files
+  }, [settings?.backends, settings?.runtime?.models, localScan])
+  const searchableModels = useMemo(() => {
+    const listed = new Set(models.map((m) => `${m.backend}/${m.id}`))
+    const available = [...models]
+    for (const [key, file] of localFiles) {
+      if (listed.has(key)) continue
+      const backend = key.slice(0, key.length - file.path.length - 1)
+      available.push({ backend, id: file.path, state: 'not-loaded' } as llm.ModelInfo)
+    }
+    return available
+  }, [models, localFiles])
+  const index = useMemo(() => buildModelSearchIndex(searchableModels), [searchableModels])
+  const matches = useMemo(() => searchModels(index, filter), [index, filter])
+  const grouped = useMemo(() => groupEntries(matches), [matches])
+  // Keyboard order must match the grouped rows the user sees.
+  const results = useMemo(() => grouped.flatMap(([, entries]) => entries), [grouped])
+  const qualifiers = useMemo(() => modelQualifiers(searchableModels), [searchableModels])
 
   /** Where each match sits in the flattened result list, for the keyboard cursor. */
   const resultIndex = useMemo(() => {
@@ -567,41 +607,77 @@ export function ModelSwitcher() {
     if (event.key === 'Enter') {
       event.preventDefault()
       const entry = results[activeIndex]
-      if (entry) void choose(entry.model)
+      if (entry) selectResult(entry.model)
       return
     }
     if (event.key === 'Escape') {
       event.preventDefault()
+      choiceSequence.current++
       setOpen(false)
       setCandidate(null)
       setPreview(null)
     }
   }
 
-  const choose = async (model: llm.ModelInfo) => {
+  const managedCandidate = !!candidate && localFiles.has(`${candidate.backend}/${candidate.id}`) && settings?.backends?.some((b) => b.id === candidate.backend && b.kind === 'llamacpp')
+  const ollamaCandidate = !!candidate && settings?.backends?.some((b) => b.id === candidate.backend && b.kind === 'ollama')
+  const contextNumber = Number(contextSize)
+  const contextArgsOverride = managedCandidate && /(?:^|\s)(?:-c|--ctx-size|--context-size)(?:\s|=|$)/.test(settings?.runtime?.models?.[candidate!.backend]?.extraArgs ?? '')
+  const contextValid = Number.isSafeInteger(contextNumber) && (managedCandidate ? contextNumber >= 2048 : contextNumber >= 0) && contextSize.trim() !== ''
+
+  const choose = (model: llm.ModelInfo) => {
     const chatId = chatState?.chat.id
     if (!chatId) return
+    choiceSequence.current++
+    const managed = localFiles.has(`${model.backend}/${model.id}`) && settings?.backends?.some((b) => b.id === model.backend && b.kind === 'llamacpp')
+    const isCurrent = model.backend === chatState?.chat.backend && model.id === chatState?.chat.model
+    const initial = managed ? (model.contextLimit || settings?.runtime?.models?.[model.backend]?.ctxSize || 8192) : isCurrent ? chatState.chat.numCtx : 0
+    setContextSize(String(initial))
     setCandidate(model)
-    try {
-      const budget = await App.GetBudget(chatId, model.backend, model.id)
-      setPreview(budget)
-    } catch {
-      setPreview(null)
-    }
+    setCandidateChatId(chatId)
+    setPreview(null)
+    setPreviewError('')
+    setPreviewLoading(true)
   }
 
-  const commit = async (model: llm.ModelInfo, compactFirst: boolean) => {
+  useEffect(() => {
+    if (!candidate || candidateChatId !== chatState?.chat.id || !contextValid) return
+    const sequence = ++choiceSequence.current
+    setPreview(null)
+    setPreviewLoading(true)
+    setPreviewError('')
+    App.GetBudgetWithContext(candidateChatId, candidate.backend, candidate.id, contextNumber)
+      .then((budget) => { if (sequence === choiceSequence.current && useStore.getState().activeChatId === candidateChatId) setPreview(budget) })
+      .catch((err) => { if (sequence === choiceSequence.current) setPreviewError(errText(err)) })
+      .finally(() => { if (sequence === choiceSequence.current) setPreviewLoading(false) })
+    return () => { choiceSequence.current++ }
+  }, [candidate, candidateChatId, chatState?.chat.id, contextNumber, contextValid])
+
+  const commit = async (model: llm.ModelInfo, compactFirst: boolean, applyNextOnly = nextOnly, chosenContext = contextNumber) => {
     const chatId = chatState?.chat.id
-    if (!chatId) return
+    if (!chatId || switchingModel) return
+    setSwitchingModel(true)
     try {
-      if (nextOnly) {
-        setNextModel({ backend: model.backend, model: model.id })
-      } else {
-        await updateChat({ backend: model.backend, model: model.id })
-      }
       if (compactFirst) {
-        // Target roughly 60% of the new window so there is room to work.
-        await App.CompactNow({ chatId, focus: '', target: 0.6, fromSeq: 0, toSeq: 0 })
+        await App.CompactNow({ chatId, focus: '', target: 0, fromSeq: 0, toSeq: 0 })
+        if (useStore.getState().activeChatId !== chatId) return
+        const budget = await App.GetBudgetWithContext(chatId, model.backend, model.id, chosenContext)
+        setPreview(budget)
+        if (budget.overLimit) return
+      }
+      if (useStore.getState().activeChatId !== chatId) return
+      if (managedCandidate) {
+        if (!runtimeStatus || statusError || !runtimeStatus.installed || !localStatus(model.backend) || localStatus(model.backend)?.state === 'starting') return
+        await startLocal(model.backend, model.id, chosenContext)
+        return
+      }
+      if (applyNextOnly) {
+        setNextModel({ chatId, backend: model.backend, model: model.id, numCtx: chosenContext })
+      } else {
+        const currentChat = useStore.getState().chatState?.chat
+        if (!currentChat || currentChat.id !== chatId) return
+        await App.UpdateChat({ ...currentChat, backend: model.backend, model: model.id, numCtx: chosenContext })
+        await useStore.getState().refreshChatState()
       }
       setOpen(false)
       setCandidate(null)
@@ -609,6 +685,8 @@ export function ModelSwitcher() {
       setNextOnly(false)
     } catch (err) {
       useStore.getState().toast('error', errText(err))
+    } finally {
+      setSwitchingModel(false)
     }
   }
 
@@ -629,7 +707,20 @@ export function ModelSwitcher() {
    * Every other kind is addressed over HTTP: there is no server to start and no folder
    * to list.
    */
-  const localBackends = (settings?.backends ?? []).filter((b) => b.kind === 'llamacpp')
+  // Scan once per opening, so local files participate in the same search as
+  // reachable models. The backend bounds the walk and supplies the chosen folder.
+  useEffect(() => {
+    if (!open || !(settings?.backends ?? []).some((b) => b.kind === 'llamacpp')) return
+    let live = true
+    setLocalScanning(true)
+    setLocalScan(null)
+    setLocalScanError('')
+    App.ScanModelFolder('')
+      .then((scan) => { if (live) setLocalScan({ ...scan, files: scan?.files ?? [] }) })
+      .catch((err) => { if (live) { setLocalScan(null); setLocalScanError(errText(err)) } })
+      .finally(() => { if (live) setLocalScanning(false) })
+    return () => { live = false }
+  }, [open, settings?.runtime?.modelDir, settings?.backends, scanRevision])
 
   /** The runtime's row for one entry, or undefined while the status has not answered. */
   const localStatus = (backendID: string) =>
@@ -643,7 +734,7 @@ export function ModelSwitcher() {
   const localStarting = (runtimeStatus?.models ?? []).some((m) => m.state === 'starting')
 
   useEffect(() => {
-    if (!open) return
+    if (!open && !localStart) return
     let live = true
     const read = () =>
       App.GetRuntimeStatus()
@@ -663,7 +754,7 @@ export function ModelSwitcher() {
     // event of its own to arrive on, while an idle picker asking twice a second for the
     // rest of the session would be a request per second to learn something that changed
     // when the user pressed a button.
-    if (!localStart?.backend && !localStarting) return
+    if (!localStart?.backend && !localStarting) return () => { live = false }
     const id = window.setInterval(() => void read(), 1200)
     return () => {
       live = false
@@ -682,7 +773,7 @@ export function ModelSwitcher() {
    * straight away (the user has already said which file they want by clicking it), and
    * one that does not is left as a decision with the numbers in front of it.
    */
-  const finishLocalStart = async (backendID: string, path: string) => {
+  const finishLocalStart = async (backendID: string, path: string, chatId: string, applyNextOnly: boolean) => {
     try {
       await refreshModels(true)
       await refreshHealth()
@@ -693,21 +784,36 @@ export function ModelSwitcher() {
       // address back on a server that is answering at the new one.
       await useStore.getState().refreshSettings()
       const model = { backend: backendID, id: path } as llm.ModelInfo
-      const chatId = chatState?.chat.id
-      let budget: chat.ContextBudget | null = null
-      if (chatId) {
-        budget = await App.GetBudget(chatId, backendID, path).catch(() => null)
-      }
+      if (useStore.getState().activeChatId !== chatId) return
+      const budget = await App.GetBudgetWithContext(chatId, backendID, path, 0)
+      if (useStore.getState().activeChatId !== chatId) return
       // overLimit is the server's own verdict, which is measured against whatever the
       // next request really has to fit under — the window, or a backend's smaller
       // per-request limit — so a start is not committed on a reading the numbers on
       // screen would contradict.
       if (budget && budget.overLimit) {
+        setNextOnly(applyNextOnly)
+        setOpen(true)
+        setContextSize(String(useStore.getState().models.find((m) => m.backend === backendID && m.id === path)?.contextLimit || useStore.getState().settings?.runtime?.models?.[backendID]?.ctxSize || 8192))
+        setCandidateChatId(chatId)
         setCandidate(model)
+        setPreviewError('')
+        setPreviewLoading(false)
         setPreview(budget)
         return
       }
-      await commit(model, false)
+      if (applyNextOnly) {
+        setNextModel({ chatId, backend: backendID, model: path, numCtx: 0 })
+      } else {
+        const currentChat = useStore.getState().chatState?.chat
+        if (!currentChat || currentChat.id !== chatId) return
+        await App.UpdateChat({ ...currentChat, backend: backendID, model: path, numCtx: 0 })
+        await useStore.getState().refreshChatState()
+      }
+      setOpen(false)
+      setCandidate(null)
+      setPreview(null)
+      setNextOnly(false)
     } catch (err) {
       useStore.getState().toast('error', errText(err))
     }
@@ -722,16 +828,16 @@ export function ModelSwitcher() {
    * on the section that asked for it, where the file is still one click away.
    */
   useEffect(() => {
-    if (!localStart) return
+    if (!localStart?.accepted || statusError) return
     const row = localStatus(localStart.backend)
     if (!row) return
-    if (row.state === 'running') {
+    if (row.state === 'running' && row.loadedModel === localStart.path) {
       const started = localStart
       setLocalStart(null)
-      void finishLocalStart(started.backend, started.path)
+      void finishLocalStart(started.backend, started.path, started.chatId, started.nextOnly)
       return
     }
-    if (row.state === 'failed') {
+    if (row.state === 'failed' && (!row.modelPath || row.modelPath === localStart.path)) {
       const failed = localStart
       setLocalStart(null)
       setLocalErrors((prev) => ({
@@ -739,7 +845,7 @@ export function ModelSwitcher() {
         [failed.backend]: row.error || t('model.localFailed'),
       }))
     }
-  }, [runtimeStatus, localStart])
+  }, [runtimeStatus, localStart, statusError])
 
   /**
    * Loads one file into the managed server and remembers it as the entry's model.
@@ -748,15 +854,24 @@ export function ModelSwitcher() {
    * the stored choice: the panel and the chat cannot end up naming different files, and
    * an entry that is switched on starts this model on the next launch too.
    */
-  const startLocal = async (backendID: string, path: string) => {
-    setLocalErrors((prev) => ({ ...prev, [backendID]: '' }))
+  const startLocal = async (backendID: string, path: string, ctxSize?: number) => {
+    const chatId = useStore.getState().activeChatId
+    if (!chatId || startPending.current || finishPending.current || localStart || localStop || !runtimeStatus || statusError) return
     const row = localStatus(backendID)
-    if (row?.state === 'running' && row.loadedModel === path) {
-      // Already in memory: this is a selection, not a start. Reloading a model that is
-      // up would be minutes of loading for a file the server is already serving.
-      await finishLocalStart(backendID, path)
+    if (!row || row.state === 'starting') return
+    const applyNextOnly = nextOnly
+    setLocalErrors((prev) => ({ ...prev, [backendID]: '' }))
+    if (row.state === 'running' && row.loadedModel === path && (ctxSize === undefined || ctxSize === (models.find((m) => m.backend === backendID && m.id === path)?.contextLimit || -1))) {
+      finishPending.current = true
+      try {
+        await finishLocalStart(backendID, path, chatId, applyNextOnly)
+      } finally {
+        finishPending.current = false
+      }
       return
     }
+    startPending.current = true
+    setLocalStart({ backend: backendID, path, chatId, nextOnly: applyNextOnly, accepted: false })
     try {
       const stored = settings?.runtime?.models?.[backendID]
       // The entry's own values are kept and only the file moves: a start from the picker
@@ -766,6 +881,7 @@ export function ModelSwitcher() {
         ...defaultManagedModel(),
         ...stored,
         modelPath: path,
+        ...(ctxSize !== undefined ? { ctxSize } : {}),
       })
       // The backend wrote the entry, so the store's copy of the settings is stale by
       // definition — and the Settings panel reads that copy, where its Save would write
@@ -774,11 +890,43 @@ export function ModelSwitcher() {
       await useStore.getState().refreshSettings()
       // Read once right away so the row says "loading" rather than keeping the file
       // looking idle until the first poll comes back.
-      setRuntimeStatus(await App.GetRuntimeStatus())
-      setLocalStart({ backend: backendID, path })
+      try {
+        setRuntimeStatus(await App.GetRuntimeStatus())
+        setStatusError('')
+      } catch (err) {
+        setStatusError(errText(err))
+      }
+      setLocalStart((current) => current?.backend === backendID && current.path === path ? { ...current, accepted: true } : current)
+    } catch (err) {
+      setLocalStart(null)
+      setLocalErrors((prev) => ({ ...prev, [backendID]: errText(err) }))
+    } finally {
+      startPending.current = false
+    }
+  }
+
+  const pickMLX = async (backendID: string) => {
+    try {
+      const path = await App.PickMLXModelFolder(t('settings.mlx.pickTitle'))
+      if (path) await startLocal(backendID, path)
     } catch (err) {
       setLocalErrors((prev) => ({ ...prev, [backendID]: errText(err) }))
     }
+  }
+
+  const isLocalStartResult = (model: llm.ModelInfo) => {
+    const row = localStatus(model.backend)
+    const listed = models.some((m) => m.backend === model.backend && m.id === model.id)
+    return localFiles.has(`${model.backend}/${model.id}`) && (!listed || (row?.state === 'running' && row.loadedModel === model.id))
+  }
+
+  const selectResult = (model: llm.ModelInfo) => {
+    if (isLocalStartResult(model)) {
+      if (!runtimeStatus?.installed || !localStatus(model.backend)) return
+      void choose(model)
+      return
+    }
+    void choose(model)
   }
 
   /**
@@ -836,6 +984,11 @@ export function ModelSwitcher() {
         type="button"
         className="btn btn-sm"
         onClick={() => {
+          if (open) {
+            choiceSequence.current++
+            setCandidate(null)
+            setPreview(null)
+          }
           setOpen((v) => !v)
           setActiveIndex(0)
         }}
@@ -905,6 +1058,7 @@ export function ModelSwitcher() {
               onClick={() => {
                 void refreshModels(true)
                 void refreshHealth()
+                setScanRevision((v) => v + 1)
               }}
             >
               {modelsLoading ? '…' : t('settings.refresh')}
@@ -926,22 +1080,29 @@ export function ModelSwitcher() {
                 key={b.id}
                 backend={b}
                 status={localStatus(b.id)}
-                installed={!!runtimeStatus?.installed}
+                installed={b.kind === 'mlx' ? !!runtimeStatus?.mlxInstalled : !!runtimeStatus?.installed}
                 statusError={statusError}
-                busyPath={localStart?.backend === b.id ? localStart.path : ''}
-                stopping={localStop === b.id}
+                busy={!!localStart || !!localStop}
+                loadingPath={localStart?.backend === b.id ? localStart.path : ''}
+                stopping={localStop === b.id || (localStart?.backend === b.id && !localStart.accepted)}
                 error={localErrors[b.id] ?? ''}
                 onStart={(path) => void startLocal(b.id, path)}
+                onPick={() => void pickMLX(b.id)}
                 onStop={() => void stopLocal(b.id)}
               />
             ))}
             {/* A search miss and an empty catalogue are different answers. Saying
                 "is LM Studio running?" because the query was `qwen` sent the user to
                 check a server that was answering fine. */}
-            {grouped.length === 0 && (
+            {localScanning && <div className="px-2 py-1 text-[11px] faint">{t('settings.managed.folderScanning')}</div>}
+            {localScanError && <div className="px-2 py-1 text-[11px]" style={{ color: 'var(--danger)' }}>{localScanError}</div>}
+            {localScan && !localScan.dir && <div className="px-2 py-1 text-[11px] faint">{t('model.localNoFolder')}</div>}
+            {localScan?.dir && <div className="px-2 py-1 text-[11px] faint truncate" title={localScan.dir}>{localScan.dir}</div>}
+            {localScan?.truncated && <div className="px-2 py-1 text-[11px] faint">{t('settings.managed.folderTruncated')}</div>}
+            {grouped.length === 0 && !localScanning && (
               <div className="p-3 text-center faint">
-                {models.length === 0 ? (
-                  t('model.noModels')
+                {searchableModels.length === 0 && !filter.trim() ? (
+                  t(localBackends.length > 0 ? 'model.noAvailable' : 'model.noModels')
                 ) : (
                   <>
                     <div>{t('model.noMatches', { query: filter.trim() })}</div>
@@ -966,17 +1127,19 @@ export function ModelSwitcher() {
                   {/* Per backend, because the answer is per backend: one
                       vendor's catalogue needs this and a local server's does
                       not, and a sweep costs one request per model. */}
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-ghost ml-auto text-[11px]"
-                    disabled={!!check?.busy}
-                    title={t('model.checkTitle')}
-                    onClick={() => void runCheck(backend)}
-                  >
-                    {check?.busy && check.backend === backend
-                      ? t('model.checkProgress', { done: check.done, total: check.total })
-                      : t('model.check')}
-                  </button>
+                  {!localBackends.some((b) => b.id === backend) && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-ghost ml-auto text-[11px]"
+                      disabled={!!check?.busy}
+                      title={t('model.checkTitle')}
+                      onClick={() => void runCheck(backend)}
+                    >
+                      {check?.busy && check.backend === backend
+                        ? t('model.checkProgress', { done: check.done, total: check.total })
+                        : t('model.check')}
+                    </button>
+                  )}
                 </div>
                 {list.map((entry) => {
                   const m = entry.model
@@ -990,7 +1153,9 @@ export function ModelSwitcher() {
                       qualifier={qualifierFor(m)}
                       selected={m.backend === chatState?.chat.backend && m.id === chatState?.chat.model}
                       active={activeIndex === at}
-                      onClick={() => void choose(m)}
+                      onClick={() => selectResult(m)}
+                      localFile={localFiles.has(key) ? localFiles.get(key) : undefined}
+                      disabled={isLocalStartResult(m) && (!!localStart || !!localStop || !runtimeStatus || !!statusError || !runtimeStatus.installed || !localStatus(m.backend) || localStatus(m.backend)?.state === 'starting')}
                     />
                   )
                 })}
@@ -998,9 +1163,9 @@ export function ModelSwitcher() {
             ))}
           </div>
 
-          {models.length > 0 && (
+          {searchableModels.length > 0 && (
             <div className="faint mt-1 px-1 text-[10px]">
-              {t('model.resultCount', { shown: results.length, total: models.length })}
+              {t('model.resultCount', { shown: results.length, total: searchableModels.length })}
             </div>
           )}
 
@@ -1029,7 +1194,7 @@ export function ModelSwitcher() {
             </div>
           )}
 
-          {candidate && (
+          {candidate && candidateChatId === chatState?.chat.id && (
             <div className="mt-2 rounded p-2 text-[12px]" style={{ background: 'var(--surface-2)' }}>
               <div className="mb-1 flex items-baseline gap-2" title={candidate.id}>
                 <span className="font-semibold mono truncate">{labelFor(candidate)}</span>
@@ -1037,12 +1202,30 @@ export function ModelSwitcher() {
                   <span className="faint shrink-0">{qualifierFor(candidate)}</span>
                 )}
               </div>
-              {preview && preview.limit > 0 ? (
+              {(managedCandidate || ollamaCandidate) && (
+                <div className="mb-2">
+                  <label className="flex items-center gap-2">{t('model.contextSize')}
+                    <input className="input mono" type="number" min={managedCandidate ? 2048 : 0} step={1024} value={contextSize} onChange={(e) => { setPreview(null); setContextSize(e.target.value) }} />
+                  </label>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {[8192, 16384, 32768, 65536].map((n) => <button key={n} type="button" className="btn btn-sm btn-ghost" onClick={() => { if (n !== contextNumber) { setPreview(null); setContextSize(String(n)) } }}>{n / 1024}K</button>)}
+                    {ollamaCandidate && <button type="button" className="btn btn-sm btn-ghost" onClick={() => { if (contextNumber !== 0) { setPreview(null); setContextSize('0') } }}>{t('model.contextDefault')}</button>}
+                  </div>
+                  <div className="faint">{t(managedCandidate ? 'model.contextManagedHint' : 'model.contextOllamaHint')}</div>
+                  {managedCandidate && <div className="faint">{t('model.contextSharedHint')}</div>}
+                  {contextArgsOverride && <div style={{ color: 'var(--warn)' }}>{t('model.contextArgsOverride')}</div>}
+                  {managedCandidate && candidate.contextLimit > 0 && <div className="faint">{t('model.windowCurrent', { tokens: formatNumber(candidate.contextLimit) })}</div>}
+                  {!contextValid && <div style={{ color: 'var(--danger)' }}>{t('model.contextInvalid')}</div>}
+                </div>
+              )}
+              {previewLoading ? <div className="faint">{t('model.budgetLoading')}</div> : previewError ? (
+                <div style={{ color: 'var(--danger)' }}>{previewError}</div>
+              ) : preview && preview.limit > 0 && (managedCandidate || ollamaCandidate || candidate.contextLimit > 0) ? (
                 <>
                   <div className="muted">
                     {formatNumber(preview.used)} /{' '}
                     {formatNumber(preview.effectiveLimit > 0 ? preview.effectiveLimit : preview.limit)}{' '}
-                    {t('metrics.tokens')} ({formatPercentSafe(preview.percent)})
+                    {t('metrics.tokens')} ({formatPercentSafe(preview.percent)}) · {t('model.projectedWithReserve', { tokens: formatNumber(preview.projected) })}
                   </div>
                   {preview.overLimit ? (
                     <div className="mt-2" style={{ color: 'var(--warn)' }}>
@@ -1051,22 +1234,23 @@ export function ModelSwitcher() {
                   ) : null}
                 </>
               ) : (
-                <div className="faint">{t('model.overrideHint')}</div>
+                <div className="faint">{t('model.windowUnknown')}</div>
               )}
               <div className="mt-2 flex flex-wrap gap-2">
                 {preview && preview.overLimit ? (
-                  <button type="button" className="btn btn-sm btn-primary" onClick={() => void commit(candidate, true)}>
-                    {t('model.switchAndCompact')}
+                  <button type="button" className="btn btn-sm btn-primary" disabled={switchingModel || previewLoading || !!previewError || !preview || !contextValid || contextArgsOverride || !!localStart || !!localStop || (managedCandidate && (!runtimeStatus?.installed || !!statusError || !localStatus(candidate.backend) || localStatus(candidate.backend)?.state === 'starting'))} onClick={() => void commit(candidate, true)}>
+                    {t('model.compactBeforeSwitch')}
                   </button>
                 ) : (
-                  <button type="button" className="btn btn-sm btn-primary" onClick={() => void commit(candidate, false)}>
-                    {t('model.switch')}
+                  <button type="button" className="btn btn-sm btn-primary" disabled={switchingModel || previewLoading || !!previewError || !preview || !contextValid || contextArgsOverride || !!localStart || !!localStop || (managedCandidate && (!runtimeStatus?.installed || !!statusError || !localStatus(candidate.backend) || localStatus(candidate.backend)?.state === 'starting'))} onClick={() => void commit(candidate, false)}>
+                    {t(managedCandidate ? 'model.startAndSwitch' : 'model.switch')}
                   </button>
                 )}
                 <button
                   type="button"
                   className="btn btn-sm btn-ghost"
                   onClick={() => {
+                    choiceSequence.current++
                     setCandidate(null)
                     setPreview(null)
                   }}
@@ -1082,208 +1266,50 @@ export function ModelSwitcher() {
   )
 }
 
-/**
- * The managed server's own models, startable from the picker.
- *
- * Collapsed until it is wanted: the list above is what a chat is chosen from, and a folder
- * of dozens of GGUFs shown open would bury it. The header carries the two facts that
- * decide whether the click is worth making — which folder is in use and how many files are
- * in it — plus the current state while a load runs, so a user looking at this panel is not
- * left wondering whether their last click did anything.
- */
-function LocalModelStart({
-  backend,
-  status,
-  installed,
-  statusError,
-  busyPath,
-  stopping,
-  error,
-  onStart,
-  onStop,
-}: {
+/** Managed server controls stay visible even when its catalogue is offline. */
+function LocalModelStart({ backend, status, installed, statusError, busy, loadingPath, stopping, error, onStart, onPick, onStop }: {
   backend: llm.BackendConfig
-  /** The runtime's row for this entry; undefined while the status has not answered. */
   status: main.ManagedStatus | undefined
   installed: boolean
-  /** Why the runtime status could not be read, empty when there is no such failure. */
   statusError: string
-  /** The file whose load is being waited for, empty when none is. */
-  busyPath: string
-  /** A stop of this entry is in flight. */
+  busy: boolean
+  loadingPath: string
   stopping: boolean
-  /** The last failed start on this entry, empty when there is none. */
   error: string
   onStart: (path: string) => void
+  onPick: () => void
   onStop: () => void
 }) {
   const t = useStore((s) => s.t)
   const tDynamic = useStore((s) => s.tDynamic)
-  const [open, setOpen] = useState(false)
-  const [scan, setScan] = useState<runtime.ModelFolderScan | null>(null)
-  const [scanning, setScanning] = useState(false)
-  const [scanError, setScanError] = useState('')
-
-  // Read when it is opened rather than when the panel is: a folder with hundreds of GGUFs
-  // in it is a walk of the disk, and most visits to this panel are about choosing between
-  // models that are already reachable. The empty folder asks the backend for the one
-  // KiChat would use — the same folder Settings lists, and the one a start from here keeps
-  // using.
-  useEffect(() => {
-    if (!open) return
-    let live = true
-    setScanning(true)
-    App.ScanModelFolder('')
-      .then((found) => {
-        if (!live) return
-        // `files` is read as an array the moment it arrives: a null one would blank the
-        // view instead of reporting "no models here".
-        setScan({ ...found, files: found?.files ?? [] })
-        setScanError('')
-      })
-      .catch(() => {
-        // "That folder is not there" is the useful half of this failure; which syscall
-        // said so is not, and the Go error for it is not a sentence in three languages.
-        if (!live) return
-        setScan(null)
-        setScanError(t('settings.managed.folderMissing'))
-      })
-      .finally(() => {
-        if (live) setScanning(false)
-      })
-    return () => {
-      live = false
-    }
-  }, [open])
-
-  const files = scan?.files ?? []
-  const loaded = status?.loadedModel ?? ''
-  /** The three states the header and the state line share a word for. */
   const state = status?.state ?? 'stopped'
-
+  const mlx = backend.kind === 'mlx'
+  const path = status?.modelPath ?? ''
   return (
-    <div className="mb-2">
-      <button
-        type="button"
-        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] hover:bg-[var(--surface-2)]"
-        title={t('model.localHint')}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span className="faint shrink-0">{open ? '▾' : '▸'}</span>
-        <span className="shrink-0">{t('model.local')}</span>
-        {/* The entry the files would be started on, since more than one managed entry
-            can be configured and they need not share a build or a port. */}
-        <span className="min-w-0 flex-1 truncate faint">{backend.name}</span>
-        {scan?.dir && (
-          <span className="faint shrink-0" title={scan.dir}>
-            {folderName(scan.dir)}
-          </span>
+    <div className="mb-2 rounded p-2 text-[12px]" style={{ background: 'var(--surface-2)' }}>
+      <div className="flex flex-wrap items-center gap-2">
+        <strong className="min-w-0 truncate">{backend.name}</strong>
+        {status && <span className={`badge ${state === 'running' ? 'badge-ok' : state === 'failed' ? 'badge-danger' : ''}`} title={status.error || undefined}>{tDynamic(`settings.managed.state.${state}`)}</span>}
+        {(state === 'starting' || state === 'running' || state === 'failed') && (
+          <button type="button" className="btn btn-sm ml-auto" disabled={stopping} onClick={onStop} title={t('model.localStopHint')}>
+            {stopping ? '…' : t('settings.managed.stop')}
+          </button>
         )}
-        {files.length > 0 && (
-          <span className="faint shrink-0">
-            {formatNumber(files.length)}{' '}
-            {t(files.length === 1 ? 'settings.managed.folderModel' : 'settings.managed.folderModels')}
-          </span>
-        )}
-        {/* Collapsed or open, the section says whether the server is up: a file list
-            alone would read the same whether the model is in memory or not, and this
-            row is the only place outside Settings that knows about the process at all. */}
-        {state !== 'stopped' && (
-          <span
-            className={`badge shrink-0 ${state === 'running' ? 'badge-ok' : state === 'failed' ? 'badge-danger' : ''}`}
-            title={status?.error || undefined}
-          >
-            {tDynamic(`settings.managed.state.${state}`)}
-          </span>
-        )}
-      </button>
-
-      {open && (
-        <div className="rounded p-1" style={{ background: 'var(--surface-2)' }}>
-          {/* The state line, and the one button that changes it. A load can be called
-              off and a model can be released without leaving the picker — the same
-              argument the start above rests on: the section that began it is where it
-              has to be undoable. `stopped` offers nothing here, because there is
-              nothing left to stop. */}
-          {state !== 'stopped' && (
-            <div className="mb-1 flex items-center gap-2 px-2 py-1.5">
-              <span
-                className={`badge shrink-0 ${state === 'running' ? 'badge-ok' : state === 'failed' ? 'badge-danger' : ''}`}
-                title={status?.error || undefined}
-              >
-                {tDynamic(`settings.managed.state.${state}`)}
-              </span>
-              <span className="mono min-w-0 flex-1 truncate text-[11px] faint" title={loaded || undefined}>
-                {loaded ? folderName(loaded) : ''}
-              </span>
-              <button
-                type="button"
-                className="btn btn-sm shrink-0"
-                disabled={stopping}
-                title={t('model.localStopHint')}
-                onClick={onStop}
-              >
-                {stopping ? '…' : t('settings.managed.stop')}
-              </button>
-            </div>
-          )}
-          {statusError ? (
-            <div className="px-1 py-1 text-[11px]" style={{ color: 'var(--danger)' }}>
-              {statusError}
-            </div>
-          ) : !installed ? (
-            <div className="px-1 py-1 text-[11px] faint">{t('settings.managed.noBinary')}</div>
-          ) : scanning ? (
-            <div className="px-1 py-1 text-[11px] faint">{t('settings.managed.folderScanning')}</div>
-          ) : scanError ? (
-            <div className="px-1 py-1 text-[11px] faint">{scanError}</div>
-          ) : files.length === 0 ? (
-            <div className="px-1 py-1 text-[11px] faint">
-              {/* A folder that is known and empty and one that was never chosen are
-                  different answers, and the first one is the common case on a machine
-                  whose models live somewhere KiChat does not know about. */}
-              {scan?.dir ? t('settings.managed.folderEmpty') : t('model.localNoFolder')}
-            </div>
-          ) : (
-            <>
-              {busyPath && <div className="px-1 py-1 text-[11px] faint">{t('model.localLoading')}</div>}
-              {files.map((f) => (
-                <button
-                  key={f.path}
-                  type="button"
-                  // One at a time: a second start would stop the first load and begin
-                  // another, which is minutes of the user's time spent twice.
-                  disabled={!!busyPath}
-                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] hover:bg-[var(--surface-3)] disabled:opacity-60"
-                  title={t('model.localRowHint')}
-                  onClick={() => onStart(f.path)}
-                >
-                  <span className="min-w-0 flex-1 truncate mono" title={f.path}>
-                    {f.name}
-                  </span>
-                  {busyPath === f.path && (
-                    <span className="badge shrink-0">{t('settings.managed.state.starting')}</span>
-                  )}
-                  {busyPath !== f.path && f.path === loaded && (
-                    <span className="badge badge-ok shrink-0">{t('settings.managed.folderLoaded')}</span>
-                  )}
-                  <span className="faint shrink-0">{formatBytes(f.size)}</span>
-                </button>
-              ))}
-              {scan?.truncated && (
-                <div className="px-1 py-1 text-[11px] faint">
-                  {t('settings.managed.folderTruncated')}
-                </div>
-              )}
-            </>
-          )}
-          {error && (
-            <div className="px-1 py-1 text-[11px]" style={{ color: 'var(--danger)' }}>
-              {error}
-            </div>
-          )}
+      </div>
+      {loadingPath && <div className="mt-1 faint" title={loadingPath}>{t('settings.managed.state.starting')}: {folderName(loadingPath)}</div>}
+      {status?.loadedModel && !loadingPath && <div className="mono mt-1 truncate faint" title={status.loadedModel}>{folderName(status.loadedModel)}</div>}
+      {mlx && state === 'running' && <div className="mt-1 faint">{t('model.mlxFirstRequest')}</div>}
+      {statusError ? <div className="mt-1" style={{ color: 'var(--danger)' }}>{statusError}</div> : !status ? (
+        <div className="mt-1 faint">{t('model.localStatusLoading')}</div>
+      ) : !installed ? (
+        <div className="mt-1 faint">{mlx ? t('model.mlxNoRuntime') : t('settings.managed.noBinary')}</div>
+      ) : mlx && (
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          {path && <button type="button" className="btn btn-sm" disabled={busy || state === 'starting'} onClick={() => onStart(path)} title={path}>{t('model.localStartSaved', { model: folderName(path) })}</button>}
+          <button type="button" className="btn btn-sm btn-ghost" disabled={busy || state === 'starting'} onClick={onPick}>{t('model.mlxChoose')}</button>
         </div>
       )}
+      {error && <div className="mt-1" style={{ color: 'var(--danger)' }}>{error}</div>}
     </div>
   )
 }
@@ -1380,6 +1406,8 @@ function ModelRow({
   selected,
   active,
   onClick,
+  localFile,
+  disabled,
 }: {
   model: llm.ModelInfo
   /** The model's name, without its path; the full id is the tooltip. */
@@ -1391,14 +1419,17 @@ function ModelRow({
   /** Where the keyboard cursor is, which is not the same thing. */
   active: boolean
   onClick: () => void
+  localFile?: runtime.ModelFile
+  disabled?: boolean
 }) {
   const t = useStore((s) => s.t)
   return (
     <button
       type="button"
       data-active={active ? 'true' : undefined}
+      disabled={disabled}
       onClick={onClick}
-      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] hover:bg-[var(--surface-2)]"
+      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] hover:bg-[var(--surface-2)] disabled:opacity-50"
       style={
         selected
           ? { background: 'color-mix(in srgb, var(--accent) 14%, transparent)' }
@@ -1416,6 +1447,7 @@ function ModelRow({
         {label}
       </span>
       {qualifier && <span className="faint shrink-0">{qualifier}</span>}
+      {localFile && <span className="faint shrink-0">{model.state === 'loaded' ? t('model.loaded') : t('model.localStart')}{localFile.size > 0 ? ` · ${formatBytes(localFile.size)}` : ''}</span>}
       {model.quantization && <span className="faint shrink-0">{model.quantization}</span>}
       {model.contextLimit > 0 && (
         <span className="faint shrink-0" title={t('model.context')}>

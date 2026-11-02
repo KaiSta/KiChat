@@ -42,6 +42,8 @@ export function GetAttachmentImage(arg1:string):Promise<string>;
 
 export function GetBudget(arg1:string,arg2:string,arg3:string):Promise<chat.ContextBudget>;
 
+export function GetBudgetWithContext(arg1:string,arg2:string,arg3:string,arg4:number):Promise<chat.ContextBudget>;
+
 export function GetChat(arg1:string):Promise<store.Chat>;
 
 export function GetChatState(arg1:string):Promise<main.ChatState>;

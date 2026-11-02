@@ -1530,6 +1530,7 @@ export namespace main {
 	    attachmentIds: string[];
 	    backend: string;
 	    model: string;
+	    numCtx?: number;
 	    regenerate: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -1543,6 +1544,7 @@ export namespace main {
 	        this.attachmentIds = source["attachmentIds"];
 	        this.backend = source["backend"];
 	        this.model = source["model"];
+	        this.numCtx = source["numCtx"];
 	        this.regenerate = source["regenerate"];
 	    }
 	}

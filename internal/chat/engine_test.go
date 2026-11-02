@@ -1017,6 +1017,42 @@ func TestBudgetReflectsTheModelSwitchRisk(t *testing.T) {
 	}
 }
 
+func TestProposedContextPreviewAndOneTurnOverride(t *testing.T) {
+	st := newTestStore(t)
+	c := makeChat(t, st)
+	c.NumCtx = 4096
+	if err := st.UpdateChat(c); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 32768}, ceiling: 12000}
+	engine, _ := newTestEngine(t, st, provider)
+	for _, tc := range []struct{ proposed, limit, effective int }{{8192, 8192, 8192}, {16384, 16384, 12000}, {0, 32768, 12000}} {
+		b, err := engine.PreviewBudgetWithContext(context.Background(), c.ID, c.Backend, c.Model, tc.proposed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Limit != tc.limit || b.EffectiveLimit != tc.effective {
+			t.Fatalf("proposed %d: budget = %+v", tc.proposed, b)
+		}
+	}
+	for _, size := range []int{8192, 0} {
+		if err := engine.Send(TurnRequest{ChatID: c.ID, Text: "Question", NumCtx: &size}); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning(c.ID) })
+		provider.mu.Lock()
+		got := provider.requests[len(provider.requests)-1].NumCtx
+		provider.mu.Unlock()
+		if got != size {
+			t.Fatalf("turn requested %d, got %d", size, got)
+		}
+	}
+	saved, err := st.GetChat(c.ID)
+	if err != nil || saved.NumCtx != 4096 {
+		t.Fatalf("one-turn choice changed saved chat: %+v, %v", saved, err)
+	}
+}
+
 // TestToolProtocolFollowsAdvertisedCapabilities pins the negotiation between
 // native tool calling and the text protocol. Native `tools` are used only when
 // the model advertises tool support; a model that advertises nothing at all — an

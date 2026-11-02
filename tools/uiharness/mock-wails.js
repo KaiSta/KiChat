@@ -3704,6 +3704,17 @@ Available tools: {{tool_list}}`,
     GetChat: (id) => Promise.resolve(chats.find((c) => c.id === id)),
     GetChatState: (id) => chatState(id),
     GetBudget: () => Promise.resolve(budget(1713)),
+    GetBudgetWithContext: (_chatId, backend, model, numCtx) => {
+      const result = budget(1713)
+      const listed = models.find((m) => m.backend === backend && m.id === model)
+      const limit = numCtx || listed?.contextLimit || 8192
+      result.limit = limit
+      result.effectiveLimit = budgetCeiling > 0 ? Math.min(limit, budgetCeiling) : limit
+      result.percent = result.used / result.effectiveLimit * 100
+      result.projectedRatio = result.projected / result.effectiveLimit
+      result.overLimit = result.projected > result.effectiveLimit
+      return Promise.resolve(result)
+    },
     ActiveGenerations: () => Promise.resolve([...timers.keys()]),
 
     CreateChat: (backend, model) => {

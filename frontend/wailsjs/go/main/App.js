@@ -66,6 +66,10 @@ export function GetBudget(arg1, arg2, arg3) {
   return window['go']['main']['App']['GetBudget'](arg1, arg2, arg3);
 }
 
+export function GetBudgetWithContext(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['GetBudgetWithContext'](arg1, arg2, arg3, arg4);
+}
+
 export function GetChat(arg1) {
   return window['go']['main']['App']['GetChat'](arg1);
 }

@@ -188,8 +188,8 @@ interface State {
    * Model to use for the *next* message only, leaving the chat's default
    * untouched. Cleared as soon as it is used.
    */
-  nextModel: { backend: string; model: string } | null
-  setNextModel: (value: { backend: string; model: string } | null) => void
+  nextModel: { chatId: string; backend: string; model: string; numCtx?: number } | null
+  setNextModel: (value: { chatId: string; backend: string; model: string; numCtx?: number } | null) => void
 
   /** Re-read a chat's changed files after a change, a revert, or a switch to it. */
   loadFileChanges: (chatId: string) => Promise<void>
@@ -657,8 +657,8 @@ export const useStore = create<State>((set, get) => {
         .filter((a) => !a.messageId)
         .map((a) => a.id)
 
-      const override = state.nextModel
-      set({ running: { ...state.running, [chatId]: true }, nextModel: null })
+      const override = state.nextModel?.chatId === chatId ? state.nextModel : null
+      set({ running: { ...state.running, [chatId]: true }, nextModel: override ? null : state.nextModel })
       try {
         await App.SendMessage({
           chatId,
@@ -666,6 +666,7 @@ export const useStore = create<State>((set, get) => {
           attachmentIds,
           backend: override?.backend ?? '',
           model: override?.model ?? '',
+          numCtx: override?.numCtx,
           regenerate: false,
         })
       } catch (err) {

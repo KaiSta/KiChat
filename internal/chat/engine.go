@@ -41,6 +41,8 @@ type TurnRequest struct {
 	// makes "try this prompt on another model" safe.
 	Backend string
 	Model   string
+	// NumCtx, including zero, replaces the chat context for this turn only.
+	NumCtx *int
 	// Regenerate drops the trailing assistant reply before running.
 	Regenerate bool
 }
@@ -256,6 +258,9 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		return
 	}
 
+	if req.NumCtx != nil {
+		chat.NumCtx = *req.NumCtx
+	}
 	backendID, modelID := chat.Backend, chat.Model
 	if req.Backend != "" {
 		backendID = req.Backend

@@ -1498,6 +1498,7 @@ type SendMessageRequest struct {
 	AttachmentIDs []string `json:"attachmentIds"`
 	Backend       string   `json:"backend"`
 	Model         string   `json:"model"`
+	NumCtx        *int     `json:"numCtx,omitempty"`
 	Regenerate    bool     `json:"regenerate"`
 }
 
@@ -1515,6 +1516,7 @@ func (a *App) SendMessage(req SendMessageRequest) error {
 		AttachmentIDs: req.AttachmentIDs,
 		Backend:       req.Backend,
 		Model:         req.Model,
+		NumCtx:        req.NumCtx,
 	})
 }
 
@@ -2079,6 +2081,14 @@ func (a *App) GetBudget(chatID, backend, model string) (chat.ContextBudget, erro
 		return chat.ContextBudget{}, err
 	}
 	return a.currentEngine().PreviewBudget(context.Background(), chatID, backend, model)
+}
+
+// GetBudgetWithContext previews the proposed context window without saving it.
+func (a *App) GetBudgetWithContext(chatID, backend, model string, numCtx int) (chat.ContextBudget, error) {
+	if err := a.ensure(); err != nil {
+		return chat.ContextBudget{}, err
+	}
+	return a.currentEngine().PreviewBudgetWithContext(context.Background(), chatID, backend, model, numCtx)
 }
 
 // newID returns a fresh identifier.
