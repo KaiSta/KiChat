@@ -915,6 +915,20 @@ func TestCompactionRejectsIncompleteSummary(t *testing.T) {
 	}
 }
 
+func TestCompactionRejectsMaxTokensStop(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedTurns(t, st)
+	p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 32768},
+		replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Partial memory"}, {Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "max_tokens"}}}}}
+	e, _ := newTestEngine(t, st, p)
+	result, err := e.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
+	message, ok := uimsg.Parse(fmt.Sprint(err))
+	if !ok || message.Code != "chat.summaryTruncated" || result.Created || len(summariesOf(t, st)) != 0 {
+		t.Fatalf("partial memory accepted: result=%+v error=%v", result, err)
+	}
+}
+
 func TestCompactionRejectsMissingTranscript(t *testing.T) {
 	st := newTestStore(t)
 	makeChat(t, st)

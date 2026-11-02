@@ -643,7 +643,7 @@ func Summarize(ctx context.Context, p llm.Provider, model string, opts Summarize
 			FailureCode:     "chat.summaryFailed",
 			EmptyCode:       "chat.summaryEmpty",
 			BudgetCode:      "chat.summaryBudgetSpent",
-			RejectTruncated: true,
+			TruncatedError:  uimsg.Errorf("chat.summaryTruncated"),
 		})
 }
 
@@ -663,9 +663,10 @@ type extractionOptions struct {
 	// They differ per caller because the advice does: a compaction has a settings
 	// field to raise, a condensation can also be had from a model that does not
 	// think first.
-	EmptyCode       string
-	BudgetCode      string
-	RejectTruncated bool
+	EmptyCode  string
+	BudgetCode string
+	// TruncatedError rejects an answer that stopped at the output limit.
+	TruncatedError error
 }
 
 // extractWithBudget runs one prompted extraction and retries it when a reasoning
@@ -737,8 +738,8 @@ func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt,
 		// that is what it is.
 		summary, thought := stripThinking(out.text)
 		if summary != "" {
-			if opts.RejectTruncated && strings.EqualFold(out.stopReason, "length") {
-				return "", uimsg.Errorf("chat.summaryTruncated")
+			if opts.TruncatedError != nil && llm.Truncated(out.stopReason) {
+				return "", opts.TruncatedError
 			}
 			return summary, nil
 		}
@@ -748,7 +749,7 @@ func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt,
 		last = out
 		// Only a model that reasoned and ran out of budget is worth another look;
 		// one that simply said nothing will say nothing again.
-		if out.reasoning == "" && !strings.EqualFold(out.stopReason, "length") {
+		if out.reasoning == "" && !llm.Truncated(out.stopReason) {
 			break
 		}
 		grown := llm.EstimateTokens(out.reasoning) + answer
@@ -772,7 +773,7 @@ func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt,
 // advice, per caller — instead of leaving an empty answer to be read as a model that
 // refused to answer.
 func emptyExtractionError(out completion, emptyCode, budgetCode string) error {
-	if out.reasoning != "" || strings.EqualFold(out.stopReason, "length") {
+	if out.reasoning != "" || llm.Truncated(out.stopReason) {
 		stop := out.stopReason
 		if stop == "" {
 			// A word rather than an empty argument, because it lands inside the

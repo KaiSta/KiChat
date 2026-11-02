@@ -1270,6 +1270,7 @@ const de = {
     'das Modell hat sein Ausgabebudget beim Reasoning aufgebraucht und keine Zusammenfassung geschrieben (stop_reason {{1}}, {{2}} Zeichen Reasoning) — erhöhe „Max. Zusammenfassung (Tokens)“ in den Einstellungen',
   'err.chat.digestFailed': 'Kürzung des Tool-Ergebnisses fehlgeschlagen: {{1}}',
   'err.chat.digestEmpty': 'das Modell hat eine leere gekürzte Fassung geliefert',
+  'err.chat.digestTruncated': 'die gekürzte Fassung wurde abgeschnitten — erhöhe das Ausgabebudget oder wähle ein Modell mit größerem Kontext',
   'err.chat.digestBudgetSpent':
     'das Modell hat sein Ausgabebudget beim Reasoning aufgebraucht und keine gekürzte Fassung geschrieben (stop_reason {{1}}, {{2}} Zeichen Reasoning) — erhöhe „Max. Länge der Kürzung (Tokens)“ in den Einstellungen oder wähle ein Modell, das nicht zuerst denkt',
   'err.chat.compactionWhileRunning':
@@ -2698,6 +2699,7 @@ const en: Record<keyof typeof de, string> = {
     'the model spent its output budget thinking and wrote no summary (stop_reason {{1}}, {{2}} characters of reasoning) — raise “Max summary (tokens)” in Settings',
   'err.chat.digestFailed': 'condensing the tool result failed: {{1}}',
   'err.chat.digestEmpty': 'the model returned an empty condensation',
+  'err.chat.digestTruncated': 'the condensation was cut off — increase the output budget or choose a model with a larger context',
   'err.chat.digestBudgetSpent':
     'the model spent its output budget thinking and wrote no condensation (stop_reason {{1}}, {{2}} characters of reasoning) — raise “Max condensed length (tokens)” in Settings or pick a model that does not think first',
   'err.chat.compactionWhileRunning':
@@ -4015,6 +4017,7 @@ const zh: Record<keyof typeof de, string> = {
     '模型把输出预算用于推理，没有写出摘要（stop_reason {{1}}，{{2}} 个字符的推理）——请在设置中提高“摘要最大 token”',
   'err.chat.digestFailed': '压缩工具结果失败：{{1}}',
   'err.chat.digestEmpty': '模型返回了空的压缩结果',
+  'err.chat.digestTruncated': '压缩结果被截断——请增加输出预算或选择上下文更大的模型',
   'err.chat.digestBudgetSpent':
     '模型把输出预算用于推理，没有写出压缩结果（stop_reason {{1}}，{{2}} 个字符的推理）——请在设置中提高“压缩最大长度 token”，或选择不先推理的模型',
   'err.chat.compactionWhileRunning': '该对话仍在生成——生成结束后才能压缩',

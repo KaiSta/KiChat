@@ -74,7 +74,7 @@ Antworte ausschließlich mit der Zusammenfassung.`
 // the first read of a page or a file after that change missed the cache. That is the
 // harmless direction: a miss costs one request, while a shared entry would answer a
 // question about a source file with a summary of a web page.
-const digestPromptVersion = 1
+const digestPromptVersion = 2
 
 // digestCacheDays bounds how long a condensation is reused. Content is the key, so
 // the entry cannot go stale in the way a URL-keyed cache can; the expiry only stops
@@ -426,8 +426,9 @@ func DigestToolOutput(ctx context.Context, p llm.Provider, model string, opts Di
 			FailureCode:     "chat.digestFailed",
 			// Two fixes, named in the order that costs less: the cap is a setting now,
 			// and a model that thinks first is the other half of the same failure.
-			EmptyCode:  "chat.digestEmpty",
-			BudgetCode: "chat.digestBudgetSpent",
+			EmptyCode:      "chat.digestEmpty",
+			BudgetCode:     "chat.digestBudgetSpent",
+			TruncatedError: uimsg.Errorf("chat.digestTruncated"),
 		})
 }
 

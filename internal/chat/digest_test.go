@@ -470,6 +470,38 @@ func TestAFailedCondensationStillDeliversTheResult(t *testing.T) {
 	}
 }
 
+func TestTruncatedCondensationKeepsOriginalAndIsNotCached(t *testing.T) {
+	for _, reason := range []string{"length", "max_tokens"} {
+		t.Run(reason, func(t *testing.T) {
+			st := newTestStore(t)
+			digester := newDigester(
+				[]llm.StreamEvent{{Type: llm.EventDelta, Text: "partial"}, {Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: reason}}},
+				[]llm.StreamEvent{{Type: llm.EventDelta, Text: "complete"}, {Type: llm.EventDone}},
+			)
+			engine, log := newDigestEngine(t, st, digestSettings(), digester)
+			call := scrapeCall("https://example.com/a")
+			page := bigPage()
+			out, condensed := engine.condenseToolOutput(context.Background(), "chat-1", call, page, tools.TurnRef{BackendID: "fake"}, "")
+			if out != page || condensed {
+				t.Fatal("truncated summary replaced the original")
+			}
+			warned := false
+			for _, ev := range log.snapshot() {
+				if msg, ok := uimsg.Parse(fmt.Sprint(ev.payload["warning"])); ok && ev.name == "chat:warning" && msg.Code == "chat.digestKeptWhole" {
+					warned = true
+				}
+			}
+			if !warned {
+				t.Fatal("missing warning for truncated summary")
+			}
+			out, condensed = engine.condenseToolOutput(context.Background(), "chat-1", call, page, tools.TurnRef{BackendID: "fake"}, "")
+			if !condensed || !strings.Contains(out, "complete") || digester.requestCount() != 2 {
+				t.Fatalf("truncated summary was cached: condensed=%v calls=%d", condensed, digester.requestCount())
+			}
+		})
+	}
+}
+
 // TestTheSecondReadIsTheEscapeHatch pins the way back to the full text. A summary is
 // lossy, so a model that needs a quotation asks for the same page again — and that
 // request must hand over the page, not the same summary, or the escape closes and the
