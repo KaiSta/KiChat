@@ -184,11 +184,97 @@ func mlxFailure(out []byte, err error) string {
 	return text
 }
 
-// MLXPythonCandidates is what to look for when the user has not named an
-// interpreter. `python3` first because a macOS with the developer tools has it,
-// then the versioned names Homebrew and python.org install.
-func MLXPythonCandidates() []string {
-	return []string{"python3", "python3.13", "python3.12", "python3.11", "python"}
+// mlxPythonVersions is the interpreter versions worth trying, newest first. They
+// name both the `python3.x` files and the python.org framework directories.
+//
+// A version newer than the newest entry is not lost: `python3` is tried in every
+// directory below, and that is the name Homebrew, python.org and pyenv all link.
+// The list is for the machine where `python3` resolves to Apple's 3.9 while a
+// newer interpreter sits beside it under its own name.
+var mlxPythonVersions = []string{"3.15", "3.14", "3.13", "3.12", "3.11"}
+
+// mlxPythonNames is the file names an interpreter may have in one directory,
+// in the order one of them is preferred.
+func mlxPythonNames() []string {
+	names := []string{"python3"}
+	for _, version := range mlxPythonVersions {
+		names = append(names, "python"+version)
+	}
+	return append(names, "python")
+}
+
+// MLXPythonSearch is every place an interpreter may be, in the order it is tried:
+// first the bare names, which are resolved the way the shell would resolve them,
+// and then the absolute locations the shell would find through a PATH the app
+// does not have.
+//
+// That second half is not belt and braces. A macOS app opened from the Finder or
+// the Dock inherits launchd's environment, whose PATH is
+// /usr/bin:/bin:/usr/sbin:/sbin: none of .zprofile, Homebrew, pyenv or a
+// python.org install is in it, and the `python3` that is there is Apple's Command
+// Line Tools 3.9. So a machine whose Terminal has 3.15 answered "no Python 3.11
+// or newer" until these directories were named directly.
+//
+// home may be empty, which only drops the interpreters that live under it.
+func MLXPythonSearch(home string) []string {
+	search := mlxPythonNames()
+	dirs := []string{
+		"/opt/homebrew/bin", // Homebrew on Apple silicon
+		"/usr/local/bin",    // Homebrew on Intel, and python.org's own links
+	}
+	if home != "" {
+		dirs = append(dirs,
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, ".pyenv", "shims"),
+			filepath.Join(home, ".local", "share", "mise", "shims"),
+			filepath.Join(home, ".asdf", "shims"),
+		)
+	}
+	// python.org's installer links into /usr/local/bin only when that directory
+	// was its own idea, so the framework versions are named as well.
+	for _, version := range mlxPythonVersions {
+		dirs = append(dirs, filepath.Join("/Library/Frameworks/Python.framework/Versions", version, "bin"))
+	}
+	for _, dir := range dirs {
+		for _, name := range mlxPythonNames() {
+			search = append(search, filepath.Join(dir, name))
+		}
+	}
+	return search
+}
+
+// MLXFindPython walks the search and returns the first interpreter that reports a
+// version mlx-lm can be installed into, with the version it reported.
+//
+// A bare name is resolved with the same lookup a shell would do; an entry that
+// names a place is taken as that path, on every platform — `IsLocal` is what tells
+// the two apart, because a rooted path is not absolute to Windows, and a name typed
+// here must never be stat'ed as if it were one.
+//
+// One that cannot be started, or that is older than the package supports, is passed
+// over rather than tried: pip would spend a minute resolving wheels and then fail
+// with a version error whose cause is the interpreter, not the package.
+func MLXFindPython(ctx context.Context, search []string) (string, int, int, bool) {
+	for _, entry := range search {
+		path := entry
+		if filepath.IsLocal(entry) {
+			found, err := exec.LookPath(entry)
+			if err != nil {
+				continue
+			}
+			path = found
+		} else if info, err := os.Stat(entry); err != nil || info.IsDir() {
+			continue
+		}
+		major, minor, err := MLXPythonVersion(ctx, path)
+		if err != nil {
+			continue
+		}
+		if major > 3 || (major == 3 && minor >= 11) {
+			return path, major, minor, true
+		}
+	}
+	return "", 0, 0, false
 }
 
 // MLXInstall builds the environment and installs the package. It returns the

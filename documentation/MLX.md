@@ -81,10 +81,29 @@ macOS version, and a pin is the build that stops installing the day the machine'
 Python moves. The trade is reproducibility for installability, and the version
 line in the card is what makes the difference visible.
 
-The interpreter is looked for among `python3`, `python3.13`, `python3.12`,
-`python3.11`, `python`. One older than 3.11 is passed over rather than tried: pip
-would spend a minute resolving wheels and then fail with an error whose cause is
-the interpreter.
+The interpreter is looked for along a fixed order, not on `PATH` alone
+(`MLXPythonSearch`):
+
+1. the bare names `python3`, `python3.15` … `python3.11`, `python`, resolved the
+   way a shell resolves them;
+2. then the absolute places a shell would reach through a `PATH` the app does not
+   have — `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, the pyenv, mise
+   and asdf shim directories, and
+   `/Library/Frameworks/Python.framework/Versions/3.x/bin`.
+
+The second half is the fix for a real refusal: a macOS app opened from the Finder
+or the Dock inherits launchd's environment, whose `PATH` is
+`/usr/bin:/bin:/usr/sbin:/sbin`. Nothing from `.zprofile`, Homebrew or python.org
+is in it, and the `python3` that is there is Apple's Command Line Tools Python
+(3.9). So a Mac whose Terminal reported 3.15 was told no 3.11 or newer existed;
+naming the directories directly is what makes the two agree. A version newer than
+3.15 needs no entry of its own: Homebrew and pyenv link `python3` to whichever one
+they have, and python.org's installer leaves its link in `/usr/local/bin` — all
+three are searched.
+
+One older than 3.11 is passed over rather than tried, and so is one that cannot
+start: pip would spend a minute resolving wheels and then fail with an error whose
+cause is the interpreter.
 
 A launcher you already have — a conda environment, a checkout — can be named in
 the card instead. That path replaces the venv entirely: the install button is not
@@ -176,7 +195,10 @@ offering an MLX entry there would propose files the start rejects (§7).
   capability), a stream carrying `reasoning`, a split tool call and cached usage,
   and a 404 load failure whose sentence survives.
 - `internal/runtime/mlx_test.go` pins the command line (only chosen flags, no
-  unaccepted `--kv-bits`), the platform predicate and the interpreter lookup.
+  unaccepted `--kv-bits`), the platform predicate, the venv interpreter lookup, and
+  the interpreter search order: that a too-old, missing or unstartable `python3`
+  does not stop the walk, and that the Homebrew, python.org and shim directories
+  are in it even though no GUI `PATH` contains them.
 - `internal/config/clone_test.go` proves the `MLX` pointer is copied, not shared.
 - `make check` covers gofmt, vet on linux/windows/darwin and both arm64 halves,
   the Go tests and `tsc`.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"sort"
@@ -797,10 +796,10 @@ func (a *App) setMLXPhase(phase string) {
 
 // installMLX is the install itself, on its own goroutine.
 //
-// The interpreter is looked for among the names a Mac actually has, and one older
-// than the package supports is passed over rather than tried: pip would spend a
-// minute resolving wheels and then fail with a version error whose cause is the
-// interpreter, not the package.
+// The interpreter is looked for in the places a Mac actually keeps one — not only
+// on the PATH the app was started with. Opened from the Finder, this process has
+// launchd's PATH, where `python3` is Apple's 3.9, so a search that stopped there
+// refused machines whose Terminal had 3.15.
 func (a *App) installMLX() {
 	ctx := a.ctx
 	if ctx == nil {
@@ -809,22 +808,18 @@ func (a *App) installMLX() {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 
-	python := ""
-	for _, candidate := range rt.MLXPythonCandidates() {
-		path, err := exec.LookPath(candidate)
-		if err != nil {
-			continue
-		}
-		major, minor, err := rt.MLXPythonVersion(ctx, path)
-		if err == nil && (major > 3 || (major == 3 && minor >= 11)) {
-			python = path
-			break
-		}
+	// An unreadable home directory only removes the interpreters that live under
+	// it; the system-wide ones are still searched, so this is not a failure.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
 	}
-	if python == "" {
+	python, major, minor, found := rt.MLXFindPython(ctx, rt.MLXPythonSearch(home))
+	if !found {
 		a.finishMLX(uimsg.Errorf("runtime.mlxPythonMissing", "python3"))
 		return
 	}
+	runtime.LogInfof(a.ctx, "mlx-lm: Python %d.%d aus %s", major, minor, python)
 
 	version, err := rt.MLXInstall(ctx, python, rt.MLXVenvDir(a.dataDir), a.setMLXPhase)
 	if err != nil {
