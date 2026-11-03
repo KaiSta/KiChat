@@ -1166,6 +1166,9 @@ function MLXModelSection({
   const mine = (status?.models ?? []).find((m) => m.backendId === backend.id)
   const state = mine?.state ?? 'stopped'
   const mlx = model.mlx ?? {}
+  // What the folder holds. A scan answers "is this a model at all" and "which one",
+  // which is what a start used to answer by failing in Python's words.
+  const [scan, setScan] = useState<runtime.MLXScan | null>(null)
 
   const refresh = async () => {
     try {
@@ -1182,6 +1185,24 @@ function MLXModelSection({
     void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Read as the path changes rather than on Start: a GGUF folder, or a folder of
+  // snapshots with the model one level down, is visible immediately. It is a couple
+  // of directory reads per keystroke, so it needs no debounce.
+  useEffect(() => {
+    const dir = model.modelPath.trim()
+    if (!dir) {
+      setScan(null)
+      return
+    }
+    let live = true
+    void App.ScanMLXModelFolder(dir).then((result) => {
+      if (live) setScan(result)
+    })
+    return () => {
+      live = false
+    }
+  }, [model.modelPath])
 
   const update = (changes: Partial<config.ManagedModel>) => {
     const next: config.ManagedModel = { ...model, ...changes }
@@ -1313,6 +1334,65 @@ function MLXModelSection({
           {t('settings.mlx.pick')}
         </button>
       </div>
+
+      {/* The same question the llama.cpp card answers with its GGUF list. A GGUF is
+          llama.cpp's model and this server cannot open one, so the card says that
+          here instead of letting Start fail; and a folder that holds several
+          snapshots is not itself a model, because `--model` takes the snapshot. */}
+      {scan && scan.ggufs > 0 && scan.snapshots.length === 0 && (
+        <p className="mt-1 text-[11px]" style={{ color: 'var(--danger)' }}>
+          {t('settings.mlx.ggufNote', { count: scan.ggufs })}
+        </p>
+      )}
+      {scan && scan.snapshots.length > 0 && (
+        <div className="mt-2">
+          <div className="faint mb-1 text-[11px]">{t('settings.mlx.snapshotPick')}</div>
+          <div
+            className="max-h-40 overflow-auto rounded-md"
+            style={{ border: '1px solid var(--border)' }}
+          >
+            {scan.snapshots.map((snapshot) => {
+              const picked = snapshot.path === model.modelPath
+              return (
+                <button
+                  key={snapshot.path}
+                  type="button"
+                  aria-current={picked ? 'true' : undefined}
+                  className="flex w-full items-center gap-2 px-2 py-1 text-left text-[11px] transition-colors hover:bg-[var(--surface-3)]"
+                  // A tint rather than a surface colour, for the reason the GGUF list
+                  // records: `--surface-2` is the colour of the box it sits in.
+                  style={
+                    picked
+                      ? { background: 'color-mix(in srgb, var(--accent) 16%, transparent)' }
+                      : undefined
+                  }
+                  title={snapshot.path}
+                  onClick={() => void commit(update({ modelPath: snapshot.path }))}
+                >
+                  <span
+                    className="shrink-0"
+                    style={{ width: '0.75rem', color: 'var(--accent)' }}
+                    aria-hidden="true"
+                  >
+                    {picked ? '✓' : ''}
+                  </span>
+                  <span className={`mono min-w-0 flex-1 truncate ${picked ? 'font-semibold' : ''}`}>
+                    {snapshot.name}
+                  </span>
+                  {!snapshot.complete && (
+                    <span className="badge badge-warn shrink-0">
+                      {t('settings.mlx.snapshotIncomplete')}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+      {scan && model.modelPath.trim() !== '' && scan.snapshots.length === 0 && scan.ggufs === 0 && (
+        <p className="faint mt-1 text-[11px]">{t('settings.mlx.snapshotNone')}</p>
+      )}
 
       <div className="mt-2 grid grid-cols-2 gap-2">
         <div>

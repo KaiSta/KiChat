@@ -277,6 +277,160 @@ func MLXFindPython(ctx context.Context, search []string) (string, int, int, bool
 	return "", 0, 0, false
 }
 
+// MLXSnapshot is one folder mlx_lm.server can load: a Hugging Face snapshot, which
+// is a config.json and the weights beside it.
+type MLXSnapshot struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
+	// Complete is false for a folder that has its config.json but no weights yet —
+	// a download still running, or a snapshot someone tidied up. It is reported
+	// rather than hidden: a card that silently drops the folder the user picked is
+	// worse than one that says what is missing from it.
+	Complete bool `json:"complete"`
+}
+
+// MLXScan is what one folder holds, as the MLX card reads it.
+type MLXScan struct {
+	Dir string `json:"dir"`
+	// Snapshots is every snapshot in Dir itself, in its immediate children, or in
+	// its snapshots/ directory — the three layouts a model ends up in: the snapshot
+	// somebody unpacked, a folder of snapshots, and the Hugging Face cache's
+	// models--org--name/snapshots/<hash>. Never nil: a null would be a second empty
+	// case for the card to render.
+	Snapshots []MLXSnapshot `json:"snapshots"`
+	// Ggufs counts the .gguf files in Dir itself. Such a folder is llama.cpp's
+	// model and mlx_lm.server cannot open it at all, so the card has to say that
+	// rather than let Start fail on a model the server never names.
+	Ggufs int `json:"ggufs"`
+}
+
+// mlxSnapshotAt reports whether dir is a snapshot, and whether its weights are
+// there. A config.json alone is enough to be one: that is the file the server
+// reads, so a folder it would try is worth naming even while the weights are still
+// coming in.
+func mlxSnapshotAt(dir string) (snapshot, complete bool) {
+	if !IsDir(dir) || !mlxIsFile(filepath.Join(dir, "config.json")) {
+		return false, false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true, false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(entry.Name())) {
+		case ".safetensors", ".npz":
+			return true, true
+		}
+	}
+	return true, false
+}
+
+func mlxIsFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// mlxSubdirs lists the immediate children of dir that are directories.
+func mlxSubdirs(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	dirs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dirs = append(dirs, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return dirs
+}
+
+func countMLXGgufs(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".gguf") {
+			count++
+		}
+	}
+	return count
+}
+
+// MLXScanFolder reports what one folder holds: the snapshots mlx_lm.server could
+// load from it, and whether it is a GGUF folder instead.
+//
+// It reads a path the user is typing, so it asks the filesystem and nothing else: a
+// folder that is not there is an empty scan, not an error the card would have to
+// render beside every keystroke.
+func MLXScanFolder(dir string) MLXScan {
+	scan := MLXScan{Dir: strings.TrimSpace(dir), Snapshots: []MLXSnapshot{}}
+	if scan.Dir == "" {
+		return scan
+	}
+	add := func(candidate string) {
+		snapshot, complete := mlxSnapshotAt(candidate)
+		if !snapshot {
+			return
+		}
+		for _, have := range scan.Snapshots {
+			if have.Path == candidate {
+				return
+			}
+		}
+		scan.Snapshots = append(scan.Snapshots, MLXSnapshot{
+			Path:     candidate,
+			Name:     filepath.Base(candidate),
+			Complete: complete,
+		})
+	}
+	add(scan.Dir)
+	for _, child := range mlxSubdirs(scan.Dir) {
+		add(child)
+	}
+	for _, child := range mlxSubdirs(filepath.Join(scan.Dir, "snapshots")) {
+		add(child)
+	}
+	scan.Ggufs = countMLXGgufs(scan.Dir)
+	return scan
+}
+
+// MLXModelRefusal is why mlx_lm.server cannot load this folder, and nil when it
+// can.
+//
+// It runs before a start, so the answer is a sentence about the folder instead of a
+// process that exits on a model it cannot open — which is how a GGUF picked here
+// used to fail, minutes later and in Python's words.
+func MLXModelRefusal(dir string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return uimsg.Errorf("model.noneSelected")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return uimsg.Errorf("model.notFound", err)
+	}
+	if !info.IsDir() {
+		return uimsg.Errorf("runtime.mlxNotSnapshot", dir)
+	}
+	snapshot, complete := mlxSnapshotAt(dir)
+	if !snapshot {
+		if ggufs := countMLXGgufs(dir); ggufs > 0 {
+			return uimsg.Errorf("runtime.mlxGgufFolder", strconv.Itoa(ggufs))
+		}
+		return uimsg.Errorf("runtime.mlxNotSnapshot", dir)
+	}
+	if !complete {
+		return uimsg.Errorf("runtime.mlxNoWeights", dir)
+	}
+	return nil
+}
+
 // MLXInstall builds the environment and installs the package. It returns the
 // version that landed.
 //

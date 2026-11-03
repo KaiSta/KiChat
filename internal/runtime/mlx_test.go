@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"kichat/internal/uimsg"
 )
 
 func TestMLXArgsCarryOnlyWhatWasChosen(t *testing.T) {
@@ -174,6 +176,117 @@ func TestMLXPythonSearchReachesPastTheLaunchersPath(t *testing.T) {
 				t.Errorf("an entry from the home directory survived an empty home: %q", entry)
 			}
 		}
+	}
+}
+
+// writeSnapshot builds the shapes a model folder comes in: a config.json and, when
+// asked, one weight file beside it.
+func writeSnapshot(t *testing.T, dir string, config, weights bool) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if config {
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if weights {
+		if err := os.WriteFile(filepath.Join(dir, "model.safetensors"), []byte("w"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// refusalCode is the uimsg code a refusal carries, so a test pins what the user is
+// told without pinning the sentence.
+func refusalCode(t *testing.T, err error) string {
+	t.Helper()
+	if err == nil {
+		return ""
+	}
+	msg, ok := uimsg.Parse(err.Error())
+	if !ok {
+		t.Fatalf("the refusal is not a user message: %v", err)
+	}
+	return msg.Code
+}
+
+// The reported failure: a folder holding a GGUF and its projector, picked as an MLX
+// model. mlx_lm.server cannot open one, and a start that found that out by exiting
+// said nothing about the folder.
+func TestMLXStartRefusesAFolderTheServerCannotLoad(t *testing.T) {
+	ggufDir := t.TempDir()
+	for _, name := range []string{"model-Q4_K_M.gguf", "mmproj-model.gguf"} {
+		if err := os.WriteFile(filepath.Join(ggufDir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	halfway := writeSnapshot(t, t.TempDir(), true, false)
+	whole := writeSnapshot(t, t.TempDir(), true, true)
+
+	cases := []struct {
+		name string
+		dir  string
+		want string
+	}{
+		{"nothing picked", "", "model.noneSelected"},
+		{"a folder that is not there", filepath.Join(t.TempDir(), "nope"), "model.notFound"},
+		{"an empty folder", t.TempDir(), "runtime.mlxNotSnapshot"},
+		{"a GGUF folder", ggufDir, "runtime.mlxGgufFolder"},
+		{"a snapshot without weights", halfway, "runtime.mlxNoWeights"},
+		{"a whole snapshot", whole, ""},
+	}
+	for _, c := range cases {
+		if got := refusalCode(t, MLXModelRefusal(c.dir)); got != c.want {
+			t.Errorf("%s: refusal = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestMLXScanFolderFindsTheSnapshotsAndTheGgufs(t *testing.T) {
+	// An unpacked snapshot is one row, and the folder itself is the model.
+	single := writeSnapshot(t, t.TempDir(), true, true)
+	scan := MLXScanFolder(single)
+	if len(scan.Snapshots) != 1 || scan.Snapshots[0].Path != single || !scan.Snapshots[0].Complete {
+		t.Fatalf("a snapshot folder scanned as %+v", scan.Snapshots)
+	}
+
+	// A folder of snapshots: the rows are the exact model, because `--model` takes the
+	// snapshot and not the folder above it.
+	parent := t.TempDir()
+	writeSnapshot(t, filepath.Join(parent, "qwen-8b-4bit"), true, true)
+	writeSnapshot(t, filepath.Join(parent, "llama-3-8b"), true, false)
+	if err := os.WriteFile(filepath.Join(parent, "extra.gguf"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scan = MLXScanFolder(parent)
+	if len(scan.Snapshots) != 2 {
+		t.Fatalf("two snapshots scanned as %+v", scan.Snapshots)
+	}
+	if scan.Ggufs != 1 {
+		t.Errorf("ggufs = %d, want the one file in the folder", scan.Ggufs)
+	}
+	for _, snapshot := range scan.Snapshots {
+		if snapshot.Name == "llama-3-8b" && snapshot.Complete {
+			t.Error("a snapshot without weights was reported complete")
+		}
+	}
+
+	// The Hugging Face cache keeps the snapshot two levels down, and the repository
+	// directory is what a person picks, so the snapshot has to be found from it.
+	cache := t.TempDir()
+	writeSnapshot(t, filepath.Join(cache, "models--org--name", "snapshots", "abc123"), true, true)
+	scan = MLXScanFolder(filepath.Join(cache, "models--org--name"))
+	if len(scan.Snapshots) != 1 || filepath.Base(scan.Snapshots[0].Path) != "abc123" {
+		t.Fatalf("the cache layout scanned as %+v", scan.Snapshots)
+	}
+
+	// An empty answer is an empty list rather than null: a null is a second empty
+	// case the card would have to render, and the one it has crashed on before.
+	if empty := MLXScanFolder(t.TempDir()); empty.Snapshots == nil || len(empty.Snapshots) != 0 {
+		t.Fatalf("an empty folder scanned as %+v, want an empty list", empty.Snapshots)
 	}
 }
 

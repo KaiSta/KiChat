@@ -560,6 +560,12 @@ const de = {
   'settings.mlx.phase': 'Phase: {{phase}}',
   'settings.mlx.model': 'MLX-Modellordner',
   'settings.mlx.modelPlaceholder': '/pfad/zum/snapshot-ordner',
+  'settings.mlx.snapshotPick': 'Gefundene Snapshots',
+  'settings.mlx.snapshotIncomplete': 'ohne Gewichte',
+  'settings.mlx.snapshotNone':
+    'Kein Snapshot mit config.json gefunden — MLX braucht einen Ordner mit config.json und Safetensors.',
+  'settings.mlx.ggufNote':
+    '{{count}} GGUF-Datei(en) in diesem Ordner: das ist llama.cpps Format, MLX kann es nicht laden. Nimm für GGUF die llama.cpp-Karte.',
   'settings.mlx.pick': 'Ordner wählen …',
   'settings.mlx.pickTitle': 'MLX-Modellordner auswählen',
   'settings.mlx.kv': 'KV-Cache-Quantisierung (--kv-bits)',
@@ -1361,6 +1367,12 @@ const de = {
     'Kein Python 3.11 oder neuer gefunden ({{1}}) — bitte Python installieren.',
   'err.runtime.mlxNotInstalled': 'mlx-lm ist noch nicht installiert.',
   'err.runtime.mlxInstall': 'mlx-lm ließ sich nicht installieren: {{1}}',
+  'err.runtime.mlxGgufFolder':
+    'Dieser Ordner enthält {{1}} GGUF-Datei(en) — das ist llama.cpps Format, MLX kann es nicht laden. Nutze für GGUF die llama.cpp-Karte; MLX braucht einen Snapshot-Ordner mit config.json und Safetensors.',
+  'err.runtime.mlxNotSnapshot':
+    'Kein MLX-Snapshot: in {{1}} liegt keine config.json. MLX lädt einen Snapshot-Ordner (config.json plus Gewichte), keine einzelne Datei.',
+  'err.runtime.mlxNoWeights':
+    '{{1}} hat eine config.json, aber keine Gewichte — der Snapshot ist unvollständig.',
   'err.runtime.mlxVersion': 'Die Version von mlx-lm ist nicht lesbar: {{1}}',
   'err.runtime.platformUnpublished': 'für {{1}} auf {{2}} wird llama.cpp nicht veröffentlicht',
   'err.runtime.platformUnpublishedOS': 'für {{1}} wird llama.cpp nicht veröffentlicht',
@@ -2013,6 +2025,12 @@ const en: Record<keyof typeof de, string> = {
   'settings.mlx.model': 'MLX model folder',
   'settings.mlx.modelPlaceholder': '/path/to/snapshot-folder',
   'settings.mlx.pick': 'Choose folder …',
+  'settings.mlx.snapshotPick': 'Snapshots found',
+  'settings.mlx.snapshotIncomplete': 'no weights',
+  'settings.mlx.snapshotNone':
+    'No snapshot with a config.json was found — MLX needs a folder holding config.json and safetensors.',
+  'settings.mlx.ggufNote':
+    '{{count}} GGUF file(s) in this folder: that is llama.cpp\u2019s format and MLX cannot load it. Use the llama.cpp card for a GGUF.',
   'settings.mlx.pickTitle': 'Choose an MLX model folder',
   'settings.mlx.kv': 'KV cache quantisation (--kv-bits)',
   'settings.mlx.kvOff': 'Off (the default, batched)',
@@ -2788,6 +2806,12 @@ const en: Record<keyof typeof de, string> = {
   'err.runtime.mlxPythonMissing': 'No Python 3.11 or newer was found ({{1}}) — install Python first.',
   'err.runtime.mlxNotInstalled': 'mlx-lm is not installed yet.',
   'err.runtime.mlxInstall': 'mlx-lm could not be installed: {{1}}',
+  'err.runtime.mlxGgufFolder':
+    'This folder holds {{1}} GGUF file(s) — that is llama.cpp\u2019s format and MLX cannot load it. Use the llama.cpp card for a GGUF; MLX needs a snapshot folder with config.json and safetensors.',
+  'err.runtime.mlxNotSnapshot':
+    'Not an MLX snapshot: there is no config.json in {{1}}. MLX loads a snapshot folder (config.json and the weights), not a single file.',
+  'err.runtime.mlxNoWeights':
+    '{{1}} has a config.json but no weights — the snapshot is incomplete.',
   'err.runtime.mlxVersion': 'mlx-lm did not report its version: {{1}}',
   'err.runtime.platformUnpublished': 'llama.cpp publishes nothing for {{1}} on {{2}}',
   'err.runtime.platformUnpublishedOS': 'llama.cpp publishes nothing for {{1}}',
@@ -3394,6 +3418,12 @@ const zh: Record<keyof typeof de, string> = {
   'settings.mlx.model': 'MLX 模型文件夹',
   'settings.mlx.modelPlaceholder': '/path/to/snapshot-folder',
   'settings.mlx.pick': '选择文件夹……',
+  'settings.mlx.snapshotPick': '找到的快照',
+  'settings.mlx.snapshotIncomplete': '缺少权重',
+  'settings.mlx.snapshotNone':
+    '未找到含 config.json 的快照——MLX 需要包含 config.json 与 safetensors 的文件夹。',
+  'settings.mlx.ggufNote':
+    '此文件夹中有 {{count}} 个 GGUF 文件：这是 llama.cpp 的格式，MLX 无法加载。GGUF 请使用 llama.cpp 卡片。',
   'settings.mlx.pickTitle': '选择 MLX 模型文件夹',
   'settings.mlx.kv': 'KV 缓存量化（--kv-bits）',
   'settings.mlx.kvOff': '关闭（默认，可批处理）',
@@ -4087,6 +4117,11 @@ const zh: Record<keyof typeof de, string> = {
   'err.runtime.mlxPythonMissing': '未找到 Python 3.11 或更新版本（{{1}}）——请先安装 Python。',
   'err.runtime.mlxNotInstalled': '尚未安装 mlx-lm。',
   'err.runtime.mlxInstall': '无法安装 mlx-lm：{{1}}',
+  'err.runtime.mlxGgufFolder':
+    '此文件夹包含 {{1}} 个 GGUF 文件——这是 llama.cpp 的格式，MLX 无法加载。GGUF 请使用 llama.cpp 卡片；MLX 需要含 config.json 与 safetensors 的快照文件夹。',
+  'err.runtime.mlxNotSnapshot':
+    '不是 MLX 快照：{{1}} 中没有 config.json。MLX 加载的是快照文件夹（config.json 加权重），不是单个文件。',
+  'err.runtime.mlxNoWeights': '{{1}} 有 config.json，但没有权重——快照不完整。',
   'err.runtime.mlxVersion': '无法读取 mlx-lm 的版本：{{1}}',
   'err.runtime.platformUnpublished': 'llama.cpp 没有为 {{1}} 的 {{2}} 发布构建',
   'err.runtime.platformUnpublishedOS': 'llama.cpp 没有为 {{1}} 发布构建',

@@ -861,6 +861,17 @@ func (a *App) PickMLXModelFolder(title string) (string, error) {
 	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
 }
 
+// ScanMLXModelFolder reports what one folder holds: the snapshots mlx_lm.server
+// could load from it, and whether it is a GGUF folder instead.
+//
+// The card asks while the path is being typed, because the two mistakes that make
+// an MLX start fail are both visible in the folder — a GGUF, which this server
+// cannot open, and a folder of snapshots, where the model is one level down. The
+// snapshot rows are also how the exact model is chosen when there are several.
+func (a *App) ScanMLXModelFolder(dir string) rt.MLXScan {
+	return rt.MLXScanFolder(dir)
+}
+
 // installRuntime is the download itself, on its own goroutine.
 func (a *App) installRuntime(dist rt.Distribution, accelerator string) {
 	asset, err := a.installer.Latest(a.ctx, dist, goruntime.GOOS, goruntime.GOARCH, accelerator)

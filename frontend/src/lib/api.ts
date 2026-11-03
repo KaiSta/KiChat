@@ -81,6 +81,10 @@ export namespace runtime {
   export type ModelFolder = Plain<Gen.runtime.ModelFolder>
   export type ModelFile = Plain<Gen.runtime.ModelFile>
   export type ModelFolderScan = Plain<Gen.runtime.ModelFolderScan>
+  /** One folder `mlx_lm.server` can load: a Hugging Face snapshot. */
+  export type MLXSnapshot = Plain<Gen.runtime.MLXSnapshot>
+  /** What a folder holds, for the MLX card's snapshot list. */
+  export type MLXScan = Plain<Gen.runtime.MLXScan>
 }
 
 export namespace main {

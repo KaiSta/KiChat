@@ -154,6 +154,8 @@ export function SaveAttachmentAs(arg1:string):Promise<string>;
 
 export function SaveSettings(arg1:config.Settings):Promise<config.Settings>;
 
+export function ScanMLXModelFolder(arg1:string):Promise<runtime.MLXScan>;
+
 export function ScanModelFolder(arg1:string):Promise<runtime.ModelFolderScan>;
 
 export function Scrape(arg1:string,arg2:number):Promise<research.ScrapeResult>;

@@ -573,8 +573,11 @@ func (a *App) startManagedMLX(backendID string, settings config.Settings, mm con
 	if !mlxAvailable() {
 		return uimsg.Errorf("runtime.mlxPlatform")
 	}
-	if strings.TrimSpace(mm.ModelPath) == "" {
-		return uimsg.Errorf("model.noneSelected")
+	// What mlx_lm.server can load is a snapshot folder, and a GGUF it cannot open at
+	// all. Asked before the process exists, so the wrong folder is a sentence about
+	// the folder rather than a start that fails in Python's words.
+	if err := rt.MLXModelRefusal(mm.ModelPath); err != nil {
+		return err
 	}
 	port, err := rt.FreePort()
 	if err != nil {

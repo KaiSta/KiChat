@@ -290,6 +290,10 @@ export function SaveSettings(arg1) {
   return window['go']['main']['App']['SaveSettings'](arg1);
 }
 
+export function ScanMLXModelFolder(arg1) {
+  return window['go']['main']['App']['ScanMLXModelFolder'](arg1);
+}
+
 export function ScanModelFolder(arg1) {
   return window['go']['main']['App']['ScanModelFolder'](arg1);
 }

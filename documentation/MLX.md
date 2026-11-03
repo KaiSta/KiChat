@@ -131,6 +131,21 @@ download it on the first request — a multi-gigabyte side effect of pressing
 Start. Downloading is a decision, not a side effect, and the folder picker is
 the way in.
 
+**A GGUF is refused before Start.** `mlx_lm.server` opens a snapshot, so a folder
+holding `.gguf` files — llama.cpp's model and its projector — cannot be loaded by
+it at all. A start that tried exited inside Python, minutes later, with the
+model's config error. `MLXModelRefusal` answers first, and the two sentences are
+different problems: a GGUF folder names the count and points at the llama.cpp
+card, a folder without `config.json` says what a snapshot is, and one with a
+`config.json` but no weights says the snapshot is incomplete.
+
+**The card lists what the folder holds.** `MLXScanFolder` reports the snapshots
+in the chosen folder, in its immediate children, or in its `snapshots/`
+directory — the snapshot someone unpacked, a folder of models, and the Hugging
+Face cache's `models--org--name/snapshots/<hash>`. Each is a row the user clicks,
+because `--model` takes the snapshot and not the folder above it; a snapshot with
+a config and no weights is listed with that stated rather than silently dropped.
+
 ### 3.3 `/health` is not a load
 
 This is the one behaviour that differs from llama.cpp in a way a user notices.
@@ -198,7 +213,9 @@ offering an MLX entry there would propose files the start rejects (§7).
   unaccepted `--kv-bits`), the platform predicate, the venv interpreter lookup, and
   the interpreter search order: that a too-old, missing or unstartable `python3`
   does not stop the walk, and that the Homebrew, python.org and shim directories
-  are in it even though no GUI `PATH` contains them.
+  are in it even though no GUI `PATH` contains them. It also pins the folder
+  refused before a start — a GGUF folder, one without `config.json`, one whose
+  weights are missing — and the snapshot scan over the three layouts above.
 - `internal/config/clone_test.go` proves the `MLX` pointer is copied, not shared.
 - `make check` covers gofmt, vet on linux/windows/darwin and both arm64 halves,
   the Go tests and `tsc`.
