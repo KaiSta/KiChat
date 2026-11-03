@@ -106,3 +106,62 @@ func TestAConfiguredModelThatVanishedFallsBack(t *testing.T) {
 			created.Model)
 	}
 }
+
+// countingProvider is a backend that counts how often its catalogue was asked for, which
+// is what makes "opening a chat does not list the backends" checkable instead of a claim
+// about code nobody exercises.
+type countingProvider struct {
+	models []llm.ModelInfo
+	calls  int
+}
+
+func (p *countingProvider) ID() string                   { return "stub" }
+func (p *countingProvider) Name() string                 { return "Stub" }
+func (p *countingProvider) Health(context.Context) error { return nil }
+func (p *countingProvider) Chat(context.Context, llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+	events := make(chan llm.StreamEvent)
+	close(events)
+	return events, nil
+}
+
+func (p *countingProvider) ListModels(context.Context) ([]llm.ModelInfo, error) {
+	p.calls++
+	return p.models, nil
+}
+
+// TestANewChatDoesNotAskTheBackendsAgain pins what starting a chat costs. The default
+// model is resolved against the catalogue the process already holds: a fresh listing
+// waits on every configured backend, and pressing "new chat" used to run one as soon as
+// the registry's thirty-second window had passed.
+func TestANewChatDoesNotAskTheBackendsAgain(t *testing.T) {
+	a := newDefaultModelTestApp(t, defaultModelCatalogue(), llm.Ref{Backend: "stub", Model: "small"})
+	// Registered after the app is built, so the catalogue starts empty and the first chat
+	// is the one listing that is still worth asking for.
+	counted := &countingProvider{models: defaultModelCatalogue()}
+	a.currentEngine().Registry.Register(counted)
+
+	first, err := a.CreateChat("", "")
+	if err != nil {
+		t.Fatalf("CreateChat: %v", err)
+	}
+	if first.Model != "small" {
+		t.Errorf("the first chat started on %q, want the configured stub/small", first.Model)
+	}
+	if counted.calls != 1 {
+		t.Fatalf("%d listings for the first chat, want the one an empty catalogue needs", counted.calls)
+	}
+
+	for i := 0; i < 3; i++ {
+		next, err := a.CreateChat("", "")
+		if err != nil {
+			t.Fatalf("CreateChat %d: %v", i, err)
+		}
+		if next.Model != "small" {
+			t.Errorf("chat %d started on %q, want the configured stub/small", i, next.Model)
+		}
+	}
+	if counted.calls != 1 {
+		t.Errorf("the backends were listed %d times for four chats, want the catalogue in hand to answer it",
+			counted.calls)
+	}
+}

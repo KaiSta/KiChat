@@ -1832,10 +1832,20 @@ func (a *App) OpenProjectTerminal(chatID string) error {
 // availability check hides it. A chat created on a ref nothing serves would answer
 // its first message with an error and put a name in the picker that is not in the
 // list; the fallback is the behaviour every older install already had.
+//
+// The catalogue *in hand* answers this, not a fresh listing. Pressing "new chat" is a
+// local act and used to wait on every configured backend (20 s each) before the row was
+// even written, because the default was resolved by asking them all — the same mistake
+// chat.Engine.resolveModelCached names for the budget preview. The one exception is a
+// process that has listed nothing yet, a chat created before the first refresh finished,
+// where one bounded listing is still cheaper than opening on no model at all.
 func (a *App) defaultChatModel(preferred llm.Ref) (string, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	models := a.visibleModels(ctx)
+	models := a.visibleModelsCached()
+	if len(models) == 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		models = a.visibleModels(ctx)
+	}
 	if preferred.Backend != "" && preferred.Model != "" {
 		for _, m := range models {
 			if m.Backend == preferred.Backend && m.ID == preferred.Model {
@@ -1859,20 +1869,39 @@ func (a *App) defaultChatModel(preferred llm.Ref) (string, string) {
 // visibleModels is the merged catalogue with user overrides applied and
 // embedding-only models filtered out of the picker.
 //
-// It also drops the blacklist the availability check wrote. That filtering
-// happens here rather than in the provider on purpose: every listing path — the
-// picker, the budget preview, the default model of a new chat — comes through
-// this function, so one filter covers all of them, and a backend keeps reporting
-// the models it really publishes. A chat that is already pinned to a hidden model
-// still resolves it, because resolving goes to the registry; hiding is a
-// statement about the picker, not a revocation.
+// It lists the backends when the catalogue is older than the registry's TTL. That is
+// right for a picker the user asked for and wrong for anything the window is waiting
+// on, which is what visibleModelsCached is for.
 func (a *App) visibleModels(ctx context.Context) []llm.ModelInfo {
+	return a.pickerModels(a.currentRegistry().ListModels(ctx, false))
+}
+
+// visibleModelsCached is visibleModels over the catalogue already listed this run,
+// without a request, and empty when nothing has been listed yet.
+//
+// A stale catalogue is the right answer for deciding a *starting* model: which model a
+// new chat opens on does not have to be the one a backend published a minute ago, and
+// the alternative is opening no chat at all until every backend has answered.
+func (a *App) visibleModelsCached() []llm.ModelInfo {
+	return a.pickerModels(a.currentRegistry().Snapshot())
+}
+
+// pickerModels is the filtering both entry points share, so a cached answer cannot
+// disagree with a listed one.
+//
+// It drops the blacklist the availability check wrote. That filtering happens here
+// rather than in the provider on purpose: every listing path — the picker, the budget
+// preview, the default model of a new chat — comes through this function, so one filter
+// covers all of them, and a backend keeps reporting the models it really publishes. A
+// chat that is already pinned to a hidden model still resolves it, because resolving
+// goes to the registry; hiding is a statement about the picker, not a revocation.
+func (a *App) pickerModels(listed []llm.ModelInfo) []llm.ModelInfo {
 	settings := a.Settings()
 	hidden := make(map[string]bool, len(settings.HiddenModels))
 	for _, key := range settings.HiddenModels {
 		hidden[key] = true
 	}
-	models := llm.MergeOverrides(a.currentRegistry().ListModels(ctx, false), settings.ModelOverrides)
+	models := llm.MergeOverrides(listed, settings.ModelOverrides)
 	out := make([]llm.ModelInfo, 0, len(models))
 	for _, m := range models {
 		if m.Type == "embeddings" {
