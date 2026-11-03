@@ -20,10 +20,13 @@ import (
 // are covered by fixture tests so layout drift is caught immediately, and the
 // lite endpoint is tried as a second shape. What is not a layout change is the
 // anti-bot interstitial, which is reported as what it is.
+//
+// Requests go out as a browser (browserclient.go) because that is what the host judges: measured
+// on 2026-11-03, the same query from the same machine was answered with the interstitial over
+// net/http and with ten results over a Chrome handshake, in the same minute.
 const (
-	ddgHTMLEndpoint  = "https://html.duckduckgo.com/html/"
-	ddgLiteEndpoint  = "https://lite.duckduckgo.com/lite/"
-	browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+	ddgHTMLEndpoint = "https://html.duckduckgo.com/html/"
+	ddgLiteEndpoint = "https://lite.duckduckgo.com/lite/"
 )
 
 // ddgChallengeMarkers are strings only the interstitial carries: the challenge
@@ -140,23 +143,40 @@ func newDDGPacer(base, max time.Duration) *ddgPacer {
 // would spend the turn to learn the same thing. A declined slot is not consumed: a caller that
 // is turned away must not push everyone behind it further out, which is how a busy pacer used
 // to keep making itself busier.
+//
+// The slot is claimed when the caller actually fires, not when it asks to: the sleep is
+// followed by another look at the queue, because a refusal during it moves the cooldown and
+// the caller has to wait that out. Booking at ask time made the cooldown apply to nobody who
+// was already waiting — a burst of four reserved four slots two seconds apart and then fired
+// three of them inside the cooldown the first refusal had just created, which is the same
+// failure the pacer exists to prevent. Pinned by TestDDGPacerHoldsACallerThatIsAlreadyWaiting.
 func (p *ddgPacer) Wait(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	p.mu.Lock()
-	start := p.next
-	if now := time.Now(); start.Before(now) {
-		start = now
-	}
-	if start.After(time.Now().Add(ddgMaxWait)) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		p.mu.Lock()
+		now := time.Now()
+		start := p.next
+		if start.Before(now) {
+			start = now
+		}
+		if start.Sub(now) > ddgMaxWait {
+			p.mu.Unlock()
+			return errDDGBusy
+		}
+		if !start.After(now) {
+			// The slot is free now: claim it and go.
+			p.next = now.Add(p.gap)
+			p.mu.Unlock()
+			return nil
+		}
 		p.mu.Unlock()
-		return errDDGBusy
-	}
-	p.next = start.Add(p.gap)
-	p.mu.Unlock()
 
-	return sleepContext(ctx, time.Until(start))
+		if err := sleepContext(ctx, time.Until(start)); err != nil {
+			return err
+		}
+	}
 }
 
 // Blocked records a refusal: the gap doubles up to the ceiling, and no request goes out for
@@ -235,8 +255,19 @@ type DuckDuckGoProvider struct {
 	LiteURL  string
 	// pacer spaces the requests, and one pacer is shared by every caller of this provider:
 	// that is what keeps a round of parallel tool calls from arriving as a burst.
-	pacer  *ddgPacer
-	client *http.Client
+	pacer *ddgPacer
+	// gate holds one search at a time, so a round of parallel search_web calls is served in
+	// sequence rather than interleaved. Spacing alone was not enough: two searches started
+	// together reserved their slots at the same instant, two seconds apart, and the host
+	// refuses a second request two seconds after the first. Run one after the other, the same
+	// pair is separated by the first search's own duration plus the pacing gap — four to five
+	// seconds in the measurement that matters — and the second one is asked only after the
+	// first has reported whether the client is being refused at all.
+	gate chan struct{}
+	// client is the browser identity the requests go out as. It matters more than the
+	// request does: measured on 2026-11-03, the same query from the same machine was answered
+	// with the anti-bot interstitial over net/http and with ten results over this client.
+	client *browserClient
 
 	// The retry policy lives on the struct rather than in the constants alone, so a test can
 	// make a retry instantaneous instead of a second of sleeping (newTestDDGProvider).
@@ -256,7 +287,8 @@ func NewDuckDuckGoProvider(endpoint string) *DuckDuckGoProvider {
 		Endpoint:   endpoint,
 		LiteURL:    ddgLiteEndpoint,
 		pacer:      newDDGPacer(ddgBaseGap, ddgMaxGap),
-		client:     &http.Client{Timeout: 25 * time.Second},
+		gate:       make(chan struct{}, 1),
+		client:     newBrowserClient(chromeWindows),
 		attempts:   ddgAttempts,
 		blockTries: ddgBlockTries,
 		retryBase:  ddgRetryBase,
@@ -294,7 +326,42 @@ func (d *DuckDuckGoProvider) RequiresKey() bool { return false }
 // amount, is what turns that round from three failures into a queue that fills in over a few
 // seconds. Transient failures (a dropped connection, a 5xx, an empty page) are retried by the
 // same loop, and a 4xx is not: that is the request being wrong.
+
+// enter claims the provider for one search, or reports that the line is too long to stand in.
+//
+// The wait is bounded like the pacer's, for the same reason: a turn spent queueing behind a
+// search that is itself waiting out a refusal learns nothing the queue could not have said
+// immediately. Nothing about the caller's own context is shortened by waiting here — the
+// search's budget starts once the search actually starts.
+func (d *DuckDuckGoProvider) enter(ctx context.Context) (func(), error) {
+	if d.gate == nil {
+		return func() {}, nil
+	}
+	timer := time.NewTimer(ddgMaxWait)
+	defer timer.Stop()
+	select {
+	case d.gate <- struct{}{}:
+		return func() { <-d.gate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, errDDGBusy
+	}
+}
+
+// Search asks for one query, retrying the failures that can clear by themselves. The gate is
+// taken first, so a round of parallel calls is served one search at a time and the budget below
+// starts when the search does rather than while it stands in line.
 func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]SearchResult, error) {
+	release, err := d.enter(ctx)
+	if err != nil {
+		if errors.Is(err, errDDGBusy) {
+			return nil, ddgBusyErr(req.Lang)
+		}
+		return nil, err
+	}
+	defer release()
+
 	searchCtx := ctx
 	if d.budget > 0 {
 		var cancel context.CancelFunc
@@ -396,10 +463,15 @@ func (d *DuckDuckGoProvider) searchOnce(ctx context.Context, req SearchRequest) 
 }
 
 func (d *DuckDuckGoProvider) searchHTML(ctx context.Context, req SearchRequest) ([]SearchResult, error) {
+	// The fields are the ones the endpoint's own form posts: q, the empty page cursor b and
+	// the region l. kl is not a field of this form at all — it is the setting the site stores
+	// in a cookie for duckduckgo.com, and a submitted form carrying it is a form no browser
+	// sends.
 	form := url.Values{}
 	form.Set("q", req.Query)
-	if req.Country != "" {
-		form.Set("kl", strings.ToLower(req.Country)+"-"+defaultLang(req.SearchLang))
+	form.Set("b", "")
+	if region := ddgRegion(req); region != "" {
+		form.Set("l", region)
 	}
 	if req.Freshness != "" {
 		if df := ddgFreshness(req.Freshness); df != "" {
@@ -409,16 +481,7 @@ func (d *DuckDuckGoProvider) searchHTML(ctx context.Context, req SearchRequest) 
 
 	// POST is the more reliable form for this endpoint; some networks block the
 	// GET variant.
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.Endpoint,
-		strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	httpReq.Header.Set("User-Agent", browserUserAgent)
-	httpReq.Header.Set("Accept", "text/html,application/xhtml+xml")
-
-	resp, err := d.client.Do(httpReq)
+	resp, err := d.client.postForm(ctx, d.Endpoint, form, req.SearchLang)
 	if err != nil {
 		return nil, err
 	}
@@ -478,17 +541,12 @@ func parseDDGHtml(body string, limit int) ([]SearchResult, error) {
 }
 
 func (d *DuckDuckGoProvider) searchLite(ctx context.Context, req SearchRequest) ([]SearchResult, error) {
+	// The lite page's form posts the query alone; the region and freshness fields belong to
+	// the html endpoint and are not read here.
 	form := url.Values{}
 	form.Set("q", req.Query)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.LiteURL,
-		strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	httpReq.Header.Set("User-Agent", browserUserAgent)
 
-	resp, err := d.client.Do(httpReq)
+	resp, err := d.client.postForm(ctx, d.LiteURL, form, req.SearchLang)
 	if err != nil {
 		return nil, err
 	}
@@ -545,6 +603,16 @@ func parseDDGLite(body string, limit int) ([]SearchResult, error) {
 		return nil, nil
 	}
 	return out, nil
+}
+
+// ddgRegion renders the l parameter: the country and language, lower case, hyphenated, the
+// form the endpoint's own region selector submits (de-de). An empty country leaves it out
+// rather than guessing one, since the host then applies the request's own default.
+func ddgRegion(req SearchRequest) string {
+	if req.Country == "" {
+		return ""
+	}
+	return strings.ToLower(req.Country) + "-" + defaultLang(req.SearchLang)
 }
 
 // unwrapDDGLink reverses DuckDuckGo's /l/?uddg= redirect wrapper.

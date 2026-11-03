@@ -7,6 +7,7 @@ import (
 	"kichat/internal/config"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -251,6 +252,73 @@ func TestDuckDuckGoOutlastsARefusalThatRefusesTheSecondSearch(t *testing.T) {
 	}
 }
 
+// TestDuckDuckGoRunsParallelSearchesOneAtATime is the shape the model actually produces:
+// two search_web calls in one round, which run in parallel goroutines. Spacing them two
+// seconds apart is not enough — the host refuses a second request that soon — so the provider
+// serves them in sequence, and the second request cannot start before the first has answered.
+func TestDuckDuckGoRunsParallelSearchesOneAtATime(t *testing.T) {
+	var mu sync.Mutex
+	var inFlight, peak, hits int
+	var firstDone, secondStart time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		hits++
+		n := hits
+		if n == 2 {
+			secondStart = time.Now()
+		}
+		mu.Unlock()
+
+		// A search takes a moment; without that, two requests could overlap without a test
+		// noticing, because the handler would finish before the next one arrived.
+		time.Sleep(60 * time.Millisecond)
+
+		mu.Lock()
+		inFlight--
+		if n == 1 {
+			firstDone = time.Now()
+		}
+		mu.Unlock()
+		_, _ = w.Write([]byte(ddgFixture))
+	}))
+	defer srv.Close()
+
+	p := newTestDDGProvider(srv.URL, srv.URL)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_, errs[n] = p.Search(context.Background(), SearchRequest{
+				Query: fmt.Sprintf("Anfrage %d", n), Count: 3})
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("parallel search %d failed: %v", i, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if peak != 1 {
+		t.Errorf("%d requests were in flight at once, want them one at a time", peak)
+	}
+	if firstDone.IsZero() || secondStart.IsZero() {
+		t.Fatalf("expected both searches to reach the host, got %d requests", hits)
+	}
+	if secondStart.Before(firstDone) {
+		t.Errorf("the second search started %v before the first had answered", firstDone.Sub(secondStart))
+	}
+}
+
 // TestDDGPacerGrowsTheGapAndPutsItBack: a refusal doubles the gap up to the ceiling and
 // holds the next slot one whole gap away; a real answer restores the base, so one bad
 // burst does not slow every later search.
@@ -282,6 +350,42 @@ func TestDDGPacerGrowsTheGapAndPutsItBack(t *testing.T) {
 	p.Succeeded()
 	if p.gap != 20*time.Millisecond {
 		t.Errorf("gap after a success = %v, want the base back", p.gap)
+	}
+}
+
+// TestDDGPacerHoldsACallerThatIsAlreadyWaiting is the half of the cooldown that was
+// missing: a caller asleep on its reserved slot has to be pushed back when another
+// caller's refusal moves the queue, or the burst it belongs to fires inside the
+// cooldown anyway. Booking the slot when it was asked for, rather than when it is
+// used, made the grown gap apply only to searches that had not started yet.
+func TestDDGPacerHoldsACallerThatIsAlreadyWaiting(t *testing.T) {
+	p := newDDGPacer(100*time.Millisecond, 400*time.Millisecond)
+	// The first search takes the first slot; the second is asleep on the next one.
+	if err := p.Wait(context.Background()); err != nil {
+		t.Fatalf("first Wait: %v", err)
+	}
+	fired := make(chan time.Time, 1)
+	go func() {
+		if err := p.Wait(context.Background()); err == nil {
+			fired <- time.Now()
+		}
+	}()
+	// Give the second caller time to reach its sleep: this is the state the old code
+	// could not recover from.
+	time.Sleep(30 * time.Millisecond)
+	refused := time.Now()
+	p.Blocked()
+
+	select {
+	case at := <-fired:
+		// The refusal doubles the gap to 200 ms and holds the next slot one whole
+		// gap out. Firing at the pre-booked 100 ms would be 70 ms after the refusal,
+		// inside the cooldown it just created.
+		if waited := at.Sub(refused); waited < 150*time.Millisecond {
+			t.Errorf("the waiting caller fired %v after the refusal, want the grown 200ms cooldown", waited)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the waiting caller never fired")
 	}
 }
 
@@ -365,5 +469,39 @@ func TestIsDDGChallengeOnRealResultMarkup(t *testing.T) {
 	}
 	if !isDDGChallenge(ddgChallengeFixture) {
 		t.Error("the recorded challenge page was not detected")
+	}
+}
+
+// TestDuckDuckGoPostsTheEndpointsOwnFields pins the form the endpoint's own page submits: q,
+// the empty page cursor b, and the region as l. kl — which this provider used to send — is the
+// site's stored setting, not a field of this form, and a form carrying it is one no browser
+// posts. The field is checked for presence rather than for a value: b is empty on a first page
+// and its presence is the point.
+func TestDuckDuckGoPostsTheEndpointsOwnFields(t *testing.T) {
+	var posted url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		posted = r.PostForm
+		_, _ = w.Write([]byte(ddgFixture))
+	}))
+	defer srv.Close()
+
+	p := newTestDDGProvider(srv.URL, srv.URL)
+	if _, err := p.Search(context.Background(), SearchRequest{
+		Query: "Mietrecht", Country: "DE", SearchLang: "de", Count: 10}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	if posted.Get("q") != "Mietrecht" {
+		t.Errorf("q = %q, want Mietrecht", posted.Get("q"))
+	}
+	if !posted.Has("b") {
+		t.Errorf("the page cursor b is missing from %v", posted)
+	}
+	if got := posted.Get("l"); got != "de-de" {
+		t.Errorf("l = %q, want de-de", got)
+	}
+	if posted.Has("kl") {
+		t.Errorf("kl is not a field of this form, but was sent: %v", posted)
 	}
 }

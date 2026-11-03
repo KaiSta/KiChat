@@ -24,6 +24,12 @@ import (
 	"kichat/internal/uimsg"
 )
 
+// browserUserAgent is what the page fetcher presents to an arbitrary site: a browser name over
+// Go's own TLS identity. The DuckDuckGo provider cannot do that, because the host judges the
+// handshake (browserclient.go); a page fetched for its text is judged by its robots rules and
+// its size instead, so the cheaper client is what it uses.
+const browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+
 // ScrapeOptions configures the scraper.
 type ScrapeOptions struct {
 	// MaxBytes bounds an HTML (or plain-text, or JSON) download. It exists because

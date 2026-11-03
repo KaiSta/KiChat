@@ -213,8 +213,42 @@ tried as a second, differently-shaped layout.
 
 - **POST, not GET.** The comment records the measurement: POST is the more reliable form,
   because some networks block the GET variant.
-- **A browser user agent** (Firefox 128 on Linux) is sent on both, along with
-  `Accept: text/html,application/xhtml+xml`.
+- **It presents a browser's identity, not a browser's user agent.** The connection is a
+  Chrome 133 ClientHello — cipher list, extension order, ALPN — from
+  `github.com/refraction-networking/utls`, and `net/http` only parses the response
+  ([internal/research/browserclient.go](../internal/research/browserclient.go)). This is the
+  single measure that works. Measured on **2026-11-03**, from one machine inside one minute:
+  `net/http` and `curl` were both answered **HTTP 202** with the interstitial, while the same
+  query over a Chrome ClientHello was answered **HTTP 200 with ten results**. The address was
+  not blocked; one client identity was. The same day the Python `ddgs` package answered from
+  that address for the same reason — it sends every request through `primp` with
+  `impersonate="random"`, a `curl-impersonate` fork — and forced onto DuckDuckGo alone it
+  managed one answer and then drew the challenge, which is why the identity is paired with
+  the pacing below rather than used instead of it.
+- **The request is written by hand, in Chrome's order.** `net/http` sorts header names, so the
+  request is rendered — `Host`, `Content-Length`, `Cache-Control`, `sec-ch-ua`,
+  `sec-ch-ua-mobile`, `sec-ch-ua-platform`, `Upgrade-Insecure-Requests`, `Origin`,
+  `Content-Type`, `User-Agent`, `Accept`, the four `Sec-Fetch-*`, `Referer`,
+  `Accept-Encoding`, `Accept-Language` — and read back with `http.ReadResponse`, which keeps
+  chunking and lengths the standard library's job. The profile and the headers have to agree:
+  a Firefox user agent sending `sec-ch-ua` is a fingerprint of its own, and the `Accept-Language`
+  follows the search language so a German search does not arrive from an en-US client. Pinned by
+  `TestBrowserClientWritesABrowserRequest` (the order, not only the presence).
+- **The ALPN offers `http/1.1` only.** The preset offers h2 first, and a server that picks it
+  would then be spoken to in HTTP/1.1; the alternative is HTTP/2 announcing Go's SETTINGS frame,
+  which is the fingerprint this exists to avoid. One protocol step behind a browser is a smaller
+  tell than a ClientHello that offers h2 and cannot speak it. Pinned by
+  `TestBrowserClientHandshakesAsTheProfile`, which asserts the negotiated protocol server-side.
+- **One request per connection**, closed with the body: a search is one navigation, and a
+  connection that sat idle through an 8 s pacing gap is stranger than a fresh one. The client
+  advertises `gzip, deflate, br, zstd` — what Chrome advertises — and decodes all four, because
+  advertising an encoding it cannot read would turn a correct answer into a parse failure
+  (`TestBrowserClientDecodesWhatItAdvertises`).
+- **The form is the endpoint's own.** `q`, an empty page cursor `b`, and the region as `l`
+  (`de-de`). `kl` is not a field of this form — it is the setting the site stores in a cookie
+  for `duckduckgo.com` — so the provider no longer sends it
+  (`TestDuckDuckGoPostsTheEndpointsOwnFields`); `requestText` also carries the `Origin` and
+  `Referer` a submitted form has.
 - **The pacing is adaptive, and every caller shares it** (`ddgPacer`). The gap starts at
   **2 s** — 0.5/s, half of Brave's, because a scrape is far more likely to be punished than an
   API call — and a refusal doubles it to a ceiling of **8 s**, with a cooldown of one whole gap
@@ -224,6 +258,35 @@ tried as a second, differently-shaped layout.
   already spaced by it. Reported in use: of four searches started together, the first was
   answered and the others drew the interstitial. With the pacer they queue instead, one grown
   gap apart.
+- **A slot is claimed when the request fires, not when it is asked for.** The cooldown is only
+  real if it reaches callers that are already waiting: `Wait` books a slot, sleeps, and then
+  looks at the queue again, so a refusal that lands during that sleep pushes the waiter out to
+  the grown gap. Booking at ask time was the last version of "the pacer does not help a burst" —
+  four searches reserved four slots 2 s apart at the same instant, and the three after the first
+  fired inside the cooldown the first refusal had just created, which is the same refusal a
+  fixed gap produced. Pinned by `TestDDGPacerHoldsACallerThatIsAlreadyWaiting` (70 ms into a
+  200 ms cooldown before the fix).
+- **Searches run one at a time, not merely spaced.** A model's round of `search_web` calls runs in
+  parallel goroutines (`runRound`, `readParallelism`), and spacing alone kept the second request
+  two seconds behind the first — which the measurement below shows is refused. So the provider
+  holds a gate for the length of one search: the second search starts only after the first has
+  answered, and its request is then one pacing gap further out. A pair that used to be 2 s apart
+  is 4–5 s apart, and the second is only asked once the first has said whether the client is
+  being refused at all. A caller that cannot get the gate within 20 s is answered as a throttle
+  instead of queueing, on the same rule as the pacer's, and the search's own 30 s budget starts
+  when the search does rather than while it stands in line. Pinned by
+  `TestDuckDuckGoRunsParallelSearchesOneAtATime` (two requests in flight at once without the
+  gate).
+- **A flag belongs to the client identity that earned it.** Measured on 2026-11-03: a first
+  request from `net/http` returned ten results, a second one **3 s later** was answered `202`
+  with the interstitial, and it stayed served for **at least 135 s**, on `html` and on `lite`
+  alike — while a Chrome ClientHello from the same address was answered with results throughout
+  the same period, and `ddgs` likewise. So the earlier reading of that measurement — "the
+  address is flagged" — was wrong: the *identity* is, and only for its own, which is why the
+  fix is the identity above. What still holds is the rest: once a given identity is refused, no
+  spacing inside a single search's 30 s budget recovers it, so the honest outcome is the block
+  being reported, and the chain's fallback to another provider is the answer rather than more
+  retries.
 - **The first refusal doubles the gap too** — 2 s, 4 s, 8 s. It used to leave the gap at the
   base, which put the retry one base gap behind the request it repeated: inside the same
   window, so a search refused once was refused again and gave up. A caller turned away
@@ -251,8 +314,9 @@ tried as a second, differently-shaped layout.
   without the host being asked at all. It is still well under the 30 s search budget, so a
   queue cannot outlast the search it belongs to.
 - **Freshness maps onto `df`**: `pd`→`d`, `pw`→`w`, `pm`→`m`, `py`→`y`, anything else
-  omitted; the regional parameter is `kl=<country>-<lang>`, with the language defaulting to
-  `de`.
+  omitted; the region is `l=<country>-<lang>`, lower case, with the language defaulting to `de`.
+  The lite fallback sends `q` alone, because the region and freshness fields belong to the html
+  endpoint's form.
 - **Redirect links are unwrapped.** DuckDuckGo hands back `/l/?uddg=<encoded target>`, so
   the target is extracted and unescaped; `//host` becomes `https://host`, and a bare path
   is resolved against `duckduckgo.com`.
@@ -317,7 +381,11 @@ genuine zero-result page looks like from the outside
 ([internal/research/duckduckgo.go:28](../internal/research/duckduckgo.go#L28)). Both endpoints
 were tried, with GET and POST, with a Firefox and a Chrome user agent, and with referer and
 language headers set, and **nothing in the request shape changed it**: the check is on the
-client, so pacing or a HEAD/GET variation is not a workaround. The interstitial identifies
+client, so pacing or a HEAD/GET variation is not a workaround. Corrected on **2026-11-03**:
+nothing in the *request* changed it, but the *handshake* does — a Chrome ClientHello from the
+same address was answered `200` with results while `net/http` was still drawing `202`, so the
+check is on the client's TLS identity and the headers are only the half of it that matches it
+(§4). The interstitial identifies
 itself — "Unfortunately, bots use DuckDuckGo too… Select all squares containing a duck" —
 and the markup markers below are what that recognition is actually made of. Hence:
 
