@@ -206,7 +206,7 @@ func (l *eventLog) snapshot() []capturedEvent {
 	return append([]capturedEvent(nil), l.events...)
 }
 
-func newTestEngine(t *testing.T, st *store.Store, provider *fakeProvider) (*Engine, *eventLog) {
+func newTestEngine(t *testing.T, st *store.Store, provider llm.Provider) (*Engine, *eventLog) {
 	t.Helper()
 	settings := config.Default()
 	settings.AutoTitle = false
@@ -218,6 +218,137 @@ func newTestEngine(t *testing.T, st *store.Store, provider *fakeProvider) (*Engi
 	log := &eventLog{}
 	engine := NewEngine(st, registry, nil, func() config.Settings { return settings }, log.emit)
 	return engine, log
+}
+
+// gatedProvider is a backend whose model list is held open by the test. The listing every turn
+// asks for is its slowest opening step, and only a listing stopped mid-flight shows what the
+// window has to draw meanwhile.
+type gatedProvider struct {
+	*fakeProvider
+	asked    chan struct{}
+	release  chan struct{}
+	askOnce  sync.Once
+	goneOnce sync.Once
+}
+
+func (g *gatedProvider) ListModels(ctx context.Context) ([]llm.ModelInfo, error) {
+	g.askOnce.Do(func() { close(g.asked) })
+	<-g.release
+	return g.fakeProvider.ListModels(ctx)
+}
+
+// release once, however often the test asks: a turn left waiting on the gate would hold the
+// store open past the end of the test.
+func (g *gatedProvider) open() { g.goneOnce.Do(func() { close(g.release) }) }
+
+// TestTheUsersOwnMessageIsStoredBeforeTheBackendIsAsked pins the order the window depends on:
+// the message is in the transcript while the backends are still being asked for their models.
+//
+// The bug was that order. The turn wrote the row itself, as its fourth step — after opening the
+// chat and after a fresh listing of every configured backend — so on a machine where that listing
+// is slow the composer turned into Stop and the person's own sentence was missing from the
+// transcript until the model began to answer.
+func TestTheUsersOwnMessageIsStoredBeforeTheBackendIsAsked(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+
+	provider := &gatedProvider{
+		fakeProvider: &fakeProvider{
+			model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+			replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Antwort"}, {Type: llm.EventDone}}},
+		},
+		asked:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	engine, captured := newTestEngine(t, st, provider)
+	t.Cleanup(provider.open)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Hallo"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 3*time.Second, func() bool {
+		select {
+		case <-provider.asked:
+			return true
+		default:
+			return false
+		}
+	}) {
+		t.Fatal("the turn never asked the backend for its models")
+	}
+
+	// The listing is still waiting at this point, which is exactly the moment the message has to
+	// be on screen: the window draws what the store holds once the backend has published it.
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Content != "Hallo" || messages[0].Role != string(llm.RoleUser) {
+		t.Fatalf("stored while the backend is still being asked = %+v, want the user's own message", messages)
+	}
+	var published bool
+	for _, ev := range captured.snapshot() {
+		if ev.name != events.Message {
+			continue
+		}
+		if msg, ok := ev.payload["message"].(store.Message); ok && msg.Content == "Hallo" {
+			published = true
+		}
+	}
+	if !published {
+		t.Fatal("the user's message was stored but never emitted")
+	}
+
+	provider.open()
+	if !waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the turn did not finish")
+	}
+}
+
+// TestASendIntoAGoneBackendStoresNothing pins what the early write must not do. The turn refuses a
+// backend that is no longer configured before it reaches the model, and it used to refuse before
+// the message was written; because the row is now written first, the two had to be kept in step.
+// Otherwise the transcript would keep a message the app never answered and never offered to resend.
+func TestASendIntoAGoneBackendStoresNothing(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	gone := store.Chat{
+		ID: "chat-2", Title: "Gone", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "gone", Model: "gone-model", SystemPrompt: "Du bist ein Assistent.",
+		Temperature: 0.7, TopP: 0.9, AutoCompact: false,
+	}
+	if err := st.CreateChat(gone); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+	}
+	engine, captured := newTestEngine(t, st, provider)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-2", Text: "Hallo"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning("chat-2") }) {
+		t.Fatal("the turn did not finish")
+	}
+
+	messages, err := st.ListMessages("chat-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("stored %+v for a send the turn refused", messages)
+	}
+	// The refusal itself still reaches the window, which is the only thing that explains it.
+	var told bool
+	for _, ev := range captured.snapshot() {
+		if ev.name == events.Error && ev.payload["chatId"] == "chat-2" && ev.payload["error"] != "" {
+			told = true
+		}
+	}
+	if !told {
+		t.Fatal("the refusal was never reported")
+	}
 }
 
 func makeChat(t *testing.T, st *store.Store) store.Chat {

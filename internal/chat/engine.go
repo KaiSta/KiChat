@@ -183,6 +183,21 @@ func (e *Engine) Send(req TurnRequest) error {
 		return uimsg.Errorf("chat.turnRunning")
 	}
 
+	// What the user just wrote is stored here, before the turn's goroutine starts — not
+	// inside it.
+	//
+	// It is the only thing the window has to draw about this click, and the turn's opening
+	// is slow: it reads the chat, then asks every configured backend for its model list
+	// (`resolveModel`, because the capabilities it reports decide whether native tool calling
+	// is used). Written in there, the message stayed invisible for as long as that took while
+	// the composer had already turned into Stop, and the window showed nothing at all about a
+	// message the person had just sent.
+	if err := e.beginUserTurn(req); err != nil {
+		cancel()
+		e.turns.release(req.ChatID, handle)
+		return err
+	}
+
 	go func() {
 		defer func() {
 			cancel()
@@ -261,13 +276,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	if req.NumCtx != nil {
 		chat.NumCtx = *req.NumCtx
 	}
-	backendID, modelID := chat.Backend, chat.Model
-	if req.Backend != "" {
-		backendID = req.Backend
-	}
-	if req.Model != "" {
-		modelID = req.Model
-	}
+	backendID, modelID := turnModel(chat, req)
 	if backendID == "" || modelID == "" {
 		err := uimsg.Errorf("chat.noModelInChat")
 		fail(err)
@@ -302,14 +311,9 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 		}
 	}
 
-	// Persist the user message before generating, so a crash never loses it.
-	if strings.TrimSpace(req.Text) != "" || len(req.AttachmentIDs) > 0 {
-		if err := e.appendUserMessage(req, backendID, modelID); err != nil {
-			fail(err)
-			e.emit(events.Error, map[string]any{"chatId": req.ChatID, "error": err.Error()})
-			return
-		}
-	}
+	// The user's turn is already stored: Send writes it before this goroutine starts, so the
+	// window can draw it while the model listing below is still running. A crash still cannot
+	// lose it, and a turn that never gets this far was never announced to the chat.
 
 	// One numbering for the whole turn. The pre-flight search and every tool call that
 	// follows it number their results from this one list, so [7] in the answer is one
@@ -809,6 +813,57 @@ func (e *Engine) emitBudget(chatID string, chat *store.Chat,
 		"chatId": chatID,
 		"budget": assembly.Budget,
 	})
+}
+
+// turnModel is the backend and model a turn runs on: the chat's own, or the pair this send
+// names (the per-chat model switch).
+//
+// One function rather than the same six lines twice, because the row Send writes and the turn
+// that follows it must not be able to record different models.
+func turnModel(chat store.Chat, req TurnRequest) (backendID, modelID string) {
+	backendID, modelID = chat.Backend, chat.Model
+	if req.Backend != "" {
+		backendID = req.Backend
+	}
+	if req.Model != "" {
+		modelID = req.Model
+	}
+	return backendID, modelID
+}
+
+// beginUserTurn stores what the user just sent, before the turn starts.
+//
+// It is the row the window draws the moment the message is sent, and it may not wait for
+// anything the turn does — see the call site in Send for what it was waiting for.
+//
+// Four sends write nothing, each for its own reason: a regenerate re-runs a turn that is already
+// in the chat; an empty one has nothing to store; and a chat with no model, or with a backend
+// that is no longer configured, is refused by the turn itself — where a row would be a message
+// the app never answered and never offered to resend.
+//
+// A failure is returned rather than emitted: nothing was started, so the send simply did not
+// happen, and the window takes its Stop away and shows the sentence.
+func (e *Engine) beginUserTurn(req TurnRequest) error {
+	if req.Regenerate || (strings.TrimSpace(req.Text) == "" && len(req.AttachmentIDs) == 0) {
+		return nil
+	}
+	chat, err := e.Store.GetChat(req.ChatID)
+	if err != nil {
+		// The turn reports an unreadable chat with the event it already uses; answering the
+		// send from here would report the same failure twice.
+		return nil
+	}
+	backendID, modelID := turnModel(chat, req)
+	if backendID == "" || modelID == "" {
+		return nil
+	}
+	// The same two refusals the turn makes right after this point, checked here too so that a
+	// send which cannot run leaves nothing behind. The lookup only scans the registered
+	// providers, so it costs no request.
+	if _, ok := e.Registry.Provider(backendID); !ok {
+		return nil
+	}
+	return e.appendUserMessage(req, backendID, modelID)
 }
 
 // appendUserMessage persists the user's turn and links any attachments.
