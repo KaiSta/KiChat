@@ -13,8 +13,8 @@
   "info": {
     "companyName": "Kai Stadtmueller",
     "productName": "KiChat",
-    "productVersion": "0.7.11",
+    "productVersion": "0.7.12",
     "copyright": "Copyright 2026 Kai Stadtmueller",
-    "comments": "KiChat 0.7.11 - local-first AI workspace, Apache-2.0"
+    "comments": "KiChat 0.7.12 - local-first AI workspace, Apache-2.0"
   }
 }
