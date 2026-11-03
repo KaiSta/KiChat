@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -144,7 +145,11 @@ func (c *Chain) Search(ctx context.Context, query string, req SearchRequest) (Se
 	cacheKey := hashKey(fmt.Sprintf("v1|%s|%d|%s|%s|%s|%d",
 		strings.ToLower(query), req.Count, req.Freshness, req.Country, req.SearchLang, req.Offset))
 	if c.store != nil {
-		if entry, ok := c.store.GetSearchCache(cacheKey); ok {
+		// A cached answer is only used while the provider that produced it is still one the
+		// user asked for. Serving a DuckDuckGo result after DuckDuckGo was switched off reads
+		// as the setting not having been applied, which is exactly what it looks like when the
+		// same query comes back with the same provider for the rest of the cache window.
+		if entry, ok := c.store.GetSearchCache(cacheKey); ok && slices.Contains(order, entry.Provider) {
 			var cached []SearchResult
 			if err := jsonUnmarshalResults(entry.ResponseJSON, &cached); err == nil && len(cached) > 0 {
 				return SearchOutcome{Results: cached, Provider: entry.Provider, Cached: true}, nil

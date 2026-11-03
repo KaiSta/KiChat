@@ -3,6 +3,10 @@ import { App, formatNumber, type config, type main } from '../../lib/api'
 import { errText, useStore } from '../../store'
 import { Section, Field } from './shared'
 
+// The search providers this build knows. Keeping the list here means the panel can show a
+// provider that is currently disabled — the old buttons could only show the enabled ones.
+const PROVIDERS = ['brave', 'duckduckgo']
+
 export function ResearchTab({
   draft,
   patch,
@@ -24,31 +28,83 @@ export function ResearchTab({
 
   const search = draft.search
 
+  // The list is the order the chain walks: the first enabled provider answers, the rest are
+  // fallbacks. It used to be drawn as two independent on/off buttons in a fixed order and
+  // enabling appended to the end, so turning Brave back on quietly made DuckDuckGo the first
+  // choice while the panel still read "Brave" first. Showing the stored order, and letting it
+  // be moved, is the whole fix.
+  const order = search.providerOrder
+  const providerName = (name: string) =>
+    name === 'brave'
+      ? t('search.brave')
+      : name === 'duckduckgo'
+        ? t('search.duckduckgo')
+        : name
+  const setOrder = (next: string[]) => patch({ search: { ...search, providerOrder: next } })
+  const moveProvider = (from: number, to: number) => {
+    if (to < 0 || to >= order.length) return
+    const next = [...order]
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    setOrder(next)
+  }
+
   return (
     <>
       <Section title={t('settings.research')}>
         <Field label={t('search.providers')} hint={t('settings.providerOrderHint')}>
-          <div className="flex gap-2">
-            {['brave', 'duckduckgo'].map((name) => {
-              const enabled = search.providerOrder.includes(name)
-              return (
+          <ol className="flex flex-col gap-2">
+            {order.map((name, index) => (
+              <li key={name} className="flex items-center gap-2">
+                <span className="mono faint w-4 text-[12px]">{index + 1}.</span>
+                <span className="text-[13px]">{providerName(name)}</span>
+                <span className="flex-1" />
                 <button
-                  key={name}
                   type="button"
-                  className={`btn btn-sm ${enabled ? 'btn-primary' : ''}`}
-                  onClick={() => {
-                    const order = enabled
-                      ? search.providerOrder.filter((p) => p !== name)
-                      : [...search.providerOrder, name]
-                    patch({ search: { ...search, providerOrder: order } })
-                  }}
+                  className="btn btn-sm"
+                  title={t('settings.providerMoveUp')}
+                  aria-label={t('settings.providerMoveUp')}
+                  disabled={index === 0}
+                  onClick={() => moveProvider(index, index - 1)}
                 >
-                  {enabled ? '✓ ' : ''}
-                  {name === 'brave' ? t('search.brave') : t('search.duckduckgo')}
+                  ↑
                 </button>
-              )
-            })}
-          </div>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  title={t('settings.providerMoveDown')}
+                  aria-label={t('settings.providerMoveDown')}
+                  disabled={index === order.length - 1}
+                  onClick={() => moveProvider(index, index + 1)}
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={order.length === 1}
+                  title={order.length === 1 ? t('settings.providerLastEnabled') : undefined}
+                  onClick={() => setOrder(order.filter((p) => p !== name))}
+                >
+                  {t('settings.providerDisable')}
+                </button>
+              </li>
+            ))}
+            {PROVIDERS.filter((name) => !order.includes(name)).map((name) => (
+              <li key={name} className="flex items-center gap-2">
+                <span className="mono faint w-4 text-[12px]">–</span>
+                <span className="faint text-[13px]">{providerName(name)}</span>
+                <span className="flex-1" />
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => setOrder([...order, name])}
+                >
+                  {t('settings.providerEnable')}
+                </button>
+              </li>
+            ))}
+          </ol>
         </Field>
 
         <Field

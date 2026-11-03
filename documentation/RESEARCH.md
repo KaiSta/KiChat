@@ -59,6 +59,13 @@ Things the chain does that are easy to miss:
   ([internal/research/chain.go:136](../internal/research/chain.go#L136)) — and a cached entry is
   only served when it actually contains results: an empty cached list is treated as a miss,
   so a bad day at a provider does not become a permanent one.
+- **A cached answer is only served while its provider is still in the order.** The key does not
+  include the provider, so without that rule the same query keeps returning DuckDuckGo's
+  results for the whole cache window after Brave was moved to the front — which reads as the
+  priority setting having done nothing. A miss then goes out to the providers in the order they
+  are set, and the new answer replaces the entry
+  (`TestChainIgnoresACachedAnswerFromADemotedProvider`, whose control half proves the cache is
+  still used while the provider is asked).
 - **The grounded cache is a separate namespace** (`ctx1|` against `v1|`), because the same
   query yields page chunks through one path and result listings through the other, and
   confusing them would put headlines where the model asked for text.
