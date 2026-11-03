@@ -85,49 +85,77 @@ func TestDuckDuckGoReportsBotChallenge(t *testing.T) {
 		t.Errorf("err = %v, want it to name the challenge", err)
 	}
 	// The challenge is handed out per client, so the second layout cannot
-	// succeed where the first was refused: asking would only spend the pacing
-	// delay on a request that is known to fail. The retries are the first
-	// layout's, and they are bounded.
+	// succeed where the first was refused. Nor is a refusal retried: measured on
+	// 2026-11-03, the flag outlives any retry by minutes, so a second look is a
+	// request sent into a host that has already answered.
 	if n := atomic.LoadInt32(&liteHits); n != 0 {
 		t.Errorf("lite requests = %d, want 0", n)
 	}
-	if n := atomic.LoadInt32(&htmlHits); n != ddgBlockTries {
-		t.Errorf("html requests = %d, want %d (one look and two retries)", n, ddgBlockTries)
+	if n := atomic.LoadInt32(&htmlHits); n != 1 {
+		t.Errorf("html requests = %d, want 1 (a refusal is not retried)", n)
 	}
 }
 
-// TestDuckDuckGoRetriesABlockWithBackoff pins what the retry is for: a refusal is
-// usually the burst the host has just seen rather than a verdict about this client,
-// so the next look — after the backoff, and after the cooldown the pacer took —
-// answers with results instead of the same challenge.
-func TestDuckDuckGoRetriesABlockWithBackoff(t *testing.T) {
+// TestDuckDuckGoPausesAfterABlock pins the cooldown a refusal starts: the searches that
+// follow must not reach the host at all, and must say how long the pause has left rather
+// than failing with a refusal they never received.
+func TestDuckDuckGoPausesAfterABlock(t *testing.T) {
 	var hits int32
-	var first, second time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(ddgChallengeFixture))
+	}))
+	defer srv.Close()
+
+	p := newTestDDGProvider(srv.URL, srv.URL)
+	p.cooldown = time.Minute
+
+	if _, err := p.Search(context.Background(), SearchRequest{Query: "Mietvertrag", Count: 10}); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("first err = %v, want ErrBlocked", err)
+	}
+	_, err := p.Search(context.Background(), SearchRequest{Query: "Mietvertrag", Count: 10})
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("second err = %v, want ErrRateLimited, so the chain can try another provider", err)
+	}
+	if !strings.Contains(err.Error(), "paused") {
+		t.Errorf("err = %v, want it to say the provider is paused", err)
+	}
+	if n := atomic.LoadInt32(&hits); n != 1 {
+		t.Errorf("requests = %d, want 1: the pause is a request not sent", n)
+	}
+}
+
+// TestDuckDuckGoResumesAfterTheCooldown is the other half: the pause ends by itself, so a
+// provider that was refused is asked again rather than staying silent for the rest of the run.
+func TestDuckDuckGoResumesAfterTheCooldown(t *testing.T) {
+	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if atomic.AddInt32(&hits, 1) == 1 {
-			first = time.Now()
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(ddgChallengeFixture))
 			return
 		}
-		second = time.Now()
 		_, _ = w.Write([]byte(ddgFixture))
 	}))
 	defer srv.Close()
 
 	p := newTestDDGProvider(srv.URL, srv.URL)
+	p.cooldown = 20 * time.Millisecond
+
+	if _, err := p.Search(context.Background(), SearchRequest{Query: "Mietvertrag", Count: 10}); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("first err = %v, want ErrBlocked", err)
+	}
+	time.Sleep(40 * time.Millisecond)
 	results, err := p.Search(context.Background(), SearchRequest{Query: "Mietvertrag", Count: 10})
 	if err != nil {
-		t.Fatalf("err = %v, want the retry to return the results", err)
+		t.Fatalf("second err = %v, want the results once the pause is over", err)
 	}
 	if len(results) != 2 {
 		t.Fatalf("got %d results, want 2", len(results))
 	}
 	if n := atomic.LoadInt32(&hits); n != 2 {
-		t.Fatalf("requests = %d, want 2", n)
-	}
-	if wait := second.Sub(first); wait < p.retryBase {
-		t.Errorf("retry after %v, want at least the backoff %v", wait, p.retryBase)
+		t.Errorf("requests = %d, want 2", n)
 	}
 }
 
@@ -207,36 +235,32 @@ func TestDuckDuckGoSpacesAParallelBurst(t *testing.T) {
 	}
 }
 
-// TestDuckDuckGoOutlastsARefusalThatRefusesTheSecondSearch is the report this policy was
-// fixed against: two searches started together, the first answered and the second refused —
-// and it stayed refused, so one of two parallel calls failed every time. The host here refuses
-// anything arriving within 400 ms of the previous request, which is the shape of the real
-// burst refusal, and both searches have to come back with results.
-func TestDuckDuckGoOutlastsARefusalThatRefusesTheSecondSearch(t *testing.T) {
-	var mu sync.Mutex
-	var last time.Time
+// TestDuckDuckGoStopsAskingAfterARefusal is the report this policy was fixed against: four
+// searches started together, two of them failing. Measured on 2026-11-03, a refused search was
+// refused again 4 s and 8 s later and only worked about three minutes after that - so the retry
+// that used to follow a refusal could not succeed, and spent 18 s of the turn proving it while
+// sending two more requests into a host that had already answered.
+//
+// The contract now: one refusal is answered once, by silence, and the searches behind it say so
+// at once. They still fail - nothing can rescue this identity for minutes - but they fail in
+// milliseconds, so the chain can use another provider instead of stalling the turn.
+func TestDuckDuckGoStopsAskingAfterARefusal(t *testing.T) {
+	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		mu.Lock()
-		now := time.Now()
-		tooSoon := !last.IsZero() && now.Sub(last) < 400*time.Millisecond
-		last = now
-		mu.Unlock()
-		if tooSoon {
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(ddgChallengeFixture))
-			return
-		}
-		_, _ = w.Write([]byte(ddgFixture))
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(ddgChallengeFixture))
 	}))
 	defer srv.Close()
 
 	p := newTestDDGProvider(srv.URL, srv.URL)
-	// Pacing on, at a scale a test can afford: 150 ms apart, growing to 600 ms.
-	p.pacer = newDDGPacer(150*time.Millisecond, 600*time.Millisecond)
+	p.cooldown = time.Minute
 
+	const searches = 4
 	var wg sync.WaitGroup
-	errs := make([]error, 2)
-	for i := 0; i < 2; i++ {
+	errs := make([]error, searches)
+	start := time.Now()
+	for i := 0; i < searches; i++ {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -245,10 +269,17 @@ func TestDuckDuckGoOutlastsARefusalThatRefusesTheSecondSearch(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+
 	for i, err := range errs {
-		if err != nil {
-			t.Errorf("parallel search %d was refused: %v", i, err)
+		if !errors.Is(err, ErrBlocked) && !errors.Is(err, ErrRateLimited) {
+			t.Errorf("search %d err = %v, want the refusal or the pause", i, err)
 		}
+	}
+	if n := atomic.LoadInt32(&hits); n != 1 {
+		t.Errorf("requests = %d, want 1: a refused host is not asked again", n)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("the round took %v, want the refusal reported at once", elapsed)
 	}
 }
 

@@ -297,18 +297,31 @@ tried as a second, differently-shaped layout.
   window, so a search refused once was refused again and gave up. A caller turned away
   altogether (the queue is further out than `ddgMaxWait`) leaves the queue where it found it,
   so being busy is not a reason for the next search to be busier.
-- **One search retries, at most twice** (`Search`): **1 s**, then **2 s**, doubled and capped
-  at 6 s, with ±20 % jitter so two searches refused in the same round do not come back in
-  lockstep. A dropped connection, a 5xx, a 429 and an empty page are all retried, because all
-  of them clear by themselves; a 4xx is not, because that is the request being wrong. An
-  interstitial is retried **twice** — once at the 4 s cooldown the first refusal grows, once at
-  the 8 s the second does — and then reported, because a host that refuses a third look is
-  refusing the client rather than pacing it. It used to be retried once, one base gap out, which
-  is what made a second parallel search fail every time: measured in the reproduction harness
-  on 2026-11-03 against a host that answers the first request and refuses the next two, two
-  searches started together left one answered and the other refused twice, 2 s apart. The whole
-  search is bounded to **30 s**, retries and pacing included, so a retry cannot cost a turn more
-  than saying what happened would.
+- **One search retries a transient failure, at most twice** (`Search`): **1 s**, then **2 s**,
+  doubled and capped at 6 s, with ±20 % jitter so two searches refused in the same round do not
+  come back in lockstep. A dropped connection, a 5xx, a 429 and an empty page are all retried,
+  because all of them clear by themselves; a 4xx is not, because that is the request being
+  wrong. The whole search is bounded to **30 s**, retries and pacing included, so a retry cannot
+  cost a turn more than saying what happened would.
+- **An interstitial is not retried at all.** It used to be, twice, at the 4 s and 8 s the pacer
+  had grown to — on the theory that a refusal is the burst the host has just seen rather than a
+  verdict. Measured on **2026-11-03**, that theory is wrong: a refused search was refused again
+  at +4 s and at +8 s, and the identity was only answered again about three minutes after the
+  refusal (22:19:30 refused, 22:22:46 answered). So the retry could not succeed, and cost the
+  turn 18 s while sending two more requests into a host that had already answered. A refusal now
+  ends the search: `ErrBlocked`, once.
+- **A refusal starts a three-minute pause, shared by every caller** (`ddgCooldown`,
+  `blockedUntil`). Nothing is asked of the host until it is over: a search that arrives during
+  it is answered `ErrRateLimited` with the time left, without a request and without waiting for
+  the gate, so the chain can fall through to another provider immediately. The pause is the
+  measured three minutes rather than a guess, and it ends by itself — the provider is never
+  permanently disabled, and `Available()` stays true because the provider is configured and the
+  problem is the host, not the settings. Measured end to end on 2026-11-03 against a genuinely
+  refused identity: four searches started together made **one** request and were all answered in
+  **96 ms**, where the retrying version made up to twelve requests and took 18 s per search;
+  three minutes later the same four returned results in 6.5 s. Pinned by
+  `TestDuckDuckGoPausesAfterABlock`, `TestDuckDuckGoResumesAfterTheCooldown` and
+  `TestDuckDuckGoStopsAskingAfterARefusal`.
 - **A slot further away than 20 s is not queued for.** The search then answers
   `ErrRateLimited` ("zu viele DuckDuckGo-Anfragen gleichzeitig – kurz warten und erneut
   versuchen") rather than waiting: somebody was just refused, and queueing behind that spends
@@ -332,9 +345,9 @@ handed out per *client* rather than per layout, so the second shape cannot succe
 the first was refused — trying it would only buy a second identical failure plus the pacing
 time the turn does not have. And a block explains itself better on its own than nested under
 whichever other failure came first, so `ErrBlocked` is returned directly from either
-endpoint. What *is* retried is the same layout, once, after the backoff and the cooldown: the
-refusal that costs a model three of its four parallel searches is the burst rather than a
-verdict, and the second look usually answers.
+endpoint. Nothing is retried after it at all: the pause above is the answer, and the searches
+behind the refused one fail in milliseconds instead of spending their turn learning what the
+first one already said.
 
 ---
 
@@ -347,7 +360,7 @@ The sentinels exist because the *responses* are not distinguishable by status
 | --- | --- | --- |
 | `ErrNoProvider` | every configured provider was unavailable | tell the user to configure one |
 | `ErrEmptyQuery` | nothing usable left to search for | a caller bug, not a config problem |
-| `ErrRateLimited` | throttled *for now* — a provider's 429, or DuckDuckGo's own queue declining a slot (§4) | retrying is worth it |
+| `ErrRateLimited` | throttled *for now* — a provider's 429, DuckDuckGo's queue declining a slot, or its post-refusal pause (§4) | retrying is worth it, and another provider is worth trying now |
 | `ErrQuotaExhausted` | the plan or credit balance is used up | waiting will not help; fall through and say why |
 | `ErrInvalidKey` | the credential was rejected | the user has to fix the key |
 | `ErrBlocked` | an anti-bot interstitial instead of results | a different client, provider or network |

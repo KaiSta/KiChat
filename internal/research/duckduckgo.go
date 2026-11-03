@@ -46,9 +46,21 @@ var ddgChallengeMarkers = []string{"anomaly.js", "challenge-form", "anomaly-moda
 func ddgBlockedErr(lang string) error {
 	return fmt.Errorf("%w: %s", ErrBlocked, text(lang,
 		"DuckDuckGo verlangt eine Bot-Prüfung (Captcha) statt Suchergebnissen – im Browser "+
-			"lösen oder einen anderen Suchanbieter konfigurieren",
+			"lösen oder einen anderen Suchanbieter konfigurieren; weitere Anfragen werden für "+
+			"einige Minuten übersprungen",
 		"DuckDuckGo served a bot check (captcha) instead of results — solve it in a browser, "+
-			"or configure another search provider"))
+			"or configure another search provider; further requests are skipped for a few minutes"))
+}
+
+// ddgCoolingErr is the refusal of a search that was not sent: the provider is in its cooldown,
+// so nothing is asked of the host. ErrRateLimited, because it is a throttle rather than a
+// verdict — the chain's next provider is the thing to try, and DuckDuckGo will be asked again
+// once the cooldown is over.
+func ddgCoolingErr(lang string, remaining time.Duration) error {
+	message := text(lang,
+		"DuckDuckGo nimmt nach einer Bot-Prüfung noch %s lang keine Anfragen an",
+		"DuckDuckGo is paused after a bot check for another %s")
+	return fmt.Errorf("%w: "+message, ErrRateLimited, remaining.Round(time.Second))
 }
 
 // isDDGChallenge reports whether a response body is the interstitial rather than
@@ -87,12 +99,16 @@ const (
 	// ddgAttempts is how many times one search asks before it reports the failure: one look,
 	// then retries for a connection that dropped or a page that arrived empty.
 	ddgAttempts = 3
-	// ddgBlockTries caps how often a search asks after the interstitial: one look and two
-	// retries, the second at the 8 s ceiling. The retry exists because a burst's later calls
-	// are often refused while the first was not, and the cooldown is what it waits out — so it
-	// is worth asking while the cooldown is still growing. A host that refuses that third look
-	// is refusing the client rather than pacing it, and saying so is cheaper than asking again.
-	ddgBlockTries = 3
+	// ddgCooldown is how long the provider stops asking after the interstitial.
+	//
+	// Measured on 2026-11-03: refused at 22:19:30, and the first request that was answered
+	// again went out at 22:22:46 — about three minutes, which agrees with the earlier reading
+	// that the flag outlives 135 s. That is the point of the cooldown: a refusal is answered by
+	// silence for minutes, not by asking again a few seconds later, which is what the retry
+	// this replaces did. It also keeps a round of parallel searches from spending its turn on a
+	// host that has already said no — the search fails at once and the chain can use another
+	// provider.
+	ddgCooldown = 3 * time.Minute
 	// ddgRetryBase is the first retry delay: 1 s, doubling, capped at ddgRetryMax.
 	ddgRetryBase = 1 * time.Second
 	ddgRetryMax  = 6 * time.Second
@@ -264,6 +280,13 @@ type DuckDuckGoProvider struct {
 	// seconds in the measurement that matters — and the second one is asked only after the
 	// first has reported whether the client is being refused at all.
 	gate chan struct{}
+	// cooldown is how long the provider stays silent after the interstitial, and blockedUntil
+	// is when that silence ends. It is state rather than a constant alone so that the pause is
+	// shared by every caller — the whole point is that the searches after the refused one do not
+	// ask at all.
+	cooldown     time.Duration
+	cooldownMu   sync.Mutex
+	blockedUntil time.Time
 	// client is the browser identity the requests go out as. It matters more than the
 	// request does: measured on 2026-11-03, the same query from the same machine was answered
 	// with the anti-bot interstitial over net/http and with ten results over this client.
@@ -284,16 +307,16 @@ func NewDuckDuckGoProvider(endpoint string) *DuckDuckGoProvider {
 		endpoint = ddgHTMLEndpoint
 	}
 	return &DuckDuckGoProvider{
-		Endpoint:   endpoint,
-		LiteURL:    ddgLiteEndpoint,
-		pacer:      newDDGPacer(ddgBaseGap, ddgMaxGap),
-		gate:       make(chan struct{}, 1),
-		client:     newBrowserClient(chromeWindows),
-		attempts:   ddgAttempts,
-		blockTries: ddgBlockTries,
-		retryBase:  ddgRetryBase,
-		budget:     ddgSearchBudget,
-		jitter:     ddgJitter,
+		Endpoint:  endpoint,
+		LiteURL:   ddgLiteEndpoint,
+		pacer:     newDDGPacer(ddgBaseGap, ddgMaxGap),
+		gate:      make(chan struct{}, 1),
+		client:    newBrowserClient(chromeWindows),
+		attempts:  ddgAttempts,
+		cooldown:  ddgCooldown,
+		retryBase: ddgRetryBase,
+		budget:    ddgSearchBudget,
+		jitter:    ddgJitter,
 	}
 }
 
@@ -313,9 +336,39 @@ func (d *DuckDuckGoProvider) retryDelay(attempt int) time.Duration {
 	return d.jitter(delay)
 }
 
-func (d *DuckDuckGoProvider) Name() string      { return "duckduckgo" }
+func (d *DuckDuckGoProvider) Name() string { return "duckduckgo" }
+
+// Available stays true during the cooldown: the provider is configured and usable, it is this
+// client that the host has just refused for a few minutes. Reporting it as unconfigured would
+// send the reader to a settings page that has nothing to fix, so the pause is reported by the
+// search itself, with the time left.
 func (d *DuckDuckGoProvider) Available() bool   { return true }
 func (d *DuckDuckGoProvider) RequiresKey() bool { return false }
+
+// coolingDown reports how much of the post-refusal pause is left, and clears it once it is over.
+func (d *DuckDuckGoProvider) coolingDown() time.Duration {
+	d.cooldownMu.Lock()
+	defer d.cooldownMu.Unlock()
+	if d.blockedUntil.IsZero() {
+		return 0
+	}
+	if remaining := time.Until(d.blockedUntil); remaining > 0 {
+		return remaining
+	}
+	d.blockedUntil = time.Time{}
+	return 0
+}
+
+// coolDown starts the pause. It is started by the refusal itself rather than by giving up, so a
+// round of parallel searches all see it.
+func (d *DuckDuckGoProvider) coolDown() {
+	if d.cooldown <= 0 {
+		return
+	}
+	d.cooldownMu.Lock()
+	defer d.cooldownMu.Unlock()
+	d.blockedUntil = time.Now().Add(d.cooldown)
+}
 
 // Search asks for one query, retrying the failures that can clear by themselves.
 //
@@ -353,6 +406,11 @@ func (d *DuckDuckGoProvider) enter(ctx context.Context) (func(), error) {
 // taken first, so a round of parallel calls is served one search at a time and the budget below
 // starts when the search does rather than while it stands in line.
 func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]SearchResult, error) {
+	// Asked before the gate, because the point of the pause is that nobody queues behind a host
+	// that has just refused this client.
+	if remaining := d.coolingDown(); remaining > 0 {
+		return nil, ddgCoolingErr(req.Lang, remaining)
+	}
 	release, err := d.enter(ctx)
 	if err != nil {
 		if errors.Is(err, errDDGBusy) {
@@ -362,6 +420,12 @@ func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]S
 	}
 	defer release()
 
+	// A search that waited its turn may have queued behind the refusal that began the pause,
+	// which makes the pause the answer rather than a request sent into it.
+	if remaining := d.coolingDown(); remaining > 0 {
+		return nil, ddgCoolingErr(req.Lang, remaining)
+	}
+
 	searchCtx := ctx
 	if d.budget > 0 {
 		var cancel context.CancelFunc
@@ -370,8 +434,12 @@ func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]S
 	}
 
 	var lastErr error
-	blocks := 0
 	for attempt := 1; attempt <= d.attempts; attempt++ {
+		// Another search may have been refused while this one was between attempts.
+		if remaining := d.coolingDown(); remaining > 0 {
+			lastErr = ddgCoolingErr(req.Lang, remaining)
+			break
+		}
 		if attempt > 1 {
 			if err := sleepContext(searchCtx, d.retryDelay(attempt-1)); err != nil {
 				break
@@ -384,14 +452,13 @@ func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]S
 		}
 		lastErr = err
 		if errors.Is(err, ErrBlocked) {
-			blocks++
-			// The refusal is the host's own pacing signal: the gap grows, and the next
-			// request — this search's or another one's — waits out the cooldown.
+			// The refusal is the host's own pacing signal: the gap grows, and nothing is
+			// asked again until the pause is over. Asking sooner is what the retry this
+			// replaced did, and the measurement says it cannot work — the flag outlives it
+			// by minutes.
 			d.pacer.Blocked()
-			if blocks >= d.blockTries {
-				break
-			}
-			continue
+			d.coolDown()
+			break
 		}
 		if errors.Is(err, errDDGBusy) || !ddgRetryable(err) {
 			break
