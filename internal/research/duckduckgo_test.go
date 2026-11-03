@@ -91,7 +91,7 @@ func TestDuckDuckGoReportsBotChallenge(t *testing.T) {
 		t.Errorf("lite requests = %d, want 0", n)
 	}
 	if n := atomic.LoadInt32(&htmlHits); n != ddgBlockTries {
-		t.Errorf("html requests = %d, want %d (one look and one retry)", n, ddgBlockTries)
+		t.Errorf("html requests = %d, want %d (one look and two retries)", n, ddgBlockTries)
 	}
 }
 
@@ -206,26 +206,74 @@ func TestDuckDuckGoSpacesAParallelBurst(t *testing.T) {
 	}
 }
 
+// TestDuckDuckGoOutlastsARefusalThatRefusesTheSecondSearch is the report this policy was
+// fixed against: two searches started together, the first answered and the second refused —
+// and it stayed refused, so one of two parallel calls failed every time. The host here refuses
+// anything arriving within 400 ms of the previous request, which is the shape of the real
+// burst refusal, and both searches have to come back with results.
+func TestDuckDuckGoOutlastsARefusalThatRefusesTheSecondSearch(t *testing.T) {
+	var mu sync.Mutex
+	var last time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		now := time.Now()
+		tooSoon := !last.IsZero() && now.Sub(last) < 400*time.Millisecond
+		last = now
+		mu.Unlock()
+		if tooSoon {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(ddgChallengeFixture))
+			return
+		}
+		_, _ = w.Write([]byte(ddgFixture))
+	}))
+	defer srv.Close()
+
+	p := newTestDDGProvider(srv.URL, srv.URL)
+	// Pacing on, at a scale a test can afford: 150 ms apart, growing to 600 ms.
+	p.pacer = newDDGPacer(150*time.Millisecond, 600*time.Millisecond)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_, errs[n] = p.Search(context.Background(), SearchRequest{
+				Query: fmt.Sprintf("Anfrage %d", n), Count: 3})
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("parallel search %d was refused: %v", i, err)
+		}
+	}
+}
+
 // TestDDGPacerGrowsTheGapAndPutsItBack: a refusal doubles the gap up to the ceiling and
 // holds the next slot one whole gap away; a real answer restores the base, so one bad
 // burst does not slow every later search.
+//
+// The first refusal doubles it too. It used to leave the gap at the base, which put the retry
+// one base gap behind the request it repeated — inside the window that request was refused
+// for — so a search refused once was refused again and gave up.
 func TestDDGPacerGrowsTheGapAndPutsItBack(t *testing.T) {
 	p := newDDGPacer(20*time.Millisecond, 80*time.Millisecond)
 	p.Blocked()
-	if p.gap != 20*time.Millisecond {
-		t.Errorf("gap after one refusal = %v, want 20ms", p.gap)
+	if p.gap != 40*time.Millisecond {
+		t.Errorf("gap after one refusal = %v, want the doubled 40ms", p.gap)
 	}
 	started := time.Now()
 	if err := p.Wait(context.Background()); err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	if waited := time.Since(started); waited < 20*time.Millisecond {
-		t.Errorf("waited %v after a refusal, want the cooldown to be observed", waited)
+	if waited := time.Since(started); waited < 40*time.Millisecond {
+		t.Errorf("waited %v after a refusal, want the cooldown of the grown gap", waited)
 	}
 	p.Blocked()
-	p.Blocked()
 	if p.gap != 80*time.Millisecond {
-		t.Errorf("gap after three refusals = %v, want the 80ms ceiling", p.gap)
+		t.Errorf("gap after two refusals = %v, want the 80ms ceiling", p.gap)
 	}
 	p.Blocked()
 	if p.gap != 80*time.Millisecond {
@@ -234,6 +282,21 @@ func TestDDGPacerGrowsTheGapAndPutsItBack(t *testing.T) {
 	p.Succeeded()
 	if p.gap != 20*time.Millisecond {
 		t.Errorf("gap after a success = %v, want the base back", p.gap)
+	}
+}
+
+// TestDDGPacerDoesNotSpendASlotItDeclines: a caller turned away because the queue is too long
+// must leave the queue where it found it. Reserving the slot and then declining made a busy
+// pacer busier, so a burst could starve the search that came last for no reason of its own.
+func TestDDGPacerDoesNotSpendASlotItDeclines(t *testing.T) {
+	p := newDDGPacer(time.Minute, time.Minute)
+	p.Blocked()
+	before := p.next
+	if err := p.Wait(context.Background()); !errors.Is(err, errDDGBusy) {
+		t.Fatalf("err = %v, want errDDGBusy", err)
+	}
+	if !p.next.Equal(before) {
+		t.Errorf("a declined wait moved the next slot from %v to %v", before, p.next)
 	}
 }
 

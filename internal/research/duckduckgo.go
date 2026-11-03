@@ -74,15 +74,22 @@ const (
 	ddgMaxGap = 8 * time.Second
 	// ddgMaxWait is the longest one search waits for its slot before it reports a throttle
 	// instead of queueing: a turn spent in a queue is a turn that never arrives.
-	ddgMaxWait = 10 * time.Second
+	//
+	// It has to hold two searches queued behind one refusal: the gap grows to 4 s on the first
+	// and 8 s on the second, so the burst that starts together is served 8 s and 16 s out. The
+	// old 10 s turned the second one away without asking the host at all — which is what "one of
+	// two parallel searches always fails immediately" was. The ceiling stays well under
+	// ddgSearchBudget, so a queue still cannot outlast the search it belongs to.
+	ddgMaxWait = 20 * time.Second
 	// ddgAttempts is how many times one search asks before it reports the failure: one look,
 	// then retries for a connection that dropped or a page that arrived empty.
 	ddgAttempts = 3
-	// ddgBlockTries caps how often a search asks after the interstitial. That is the host
-	// refusing this client, and asking a third time is likelier to deepen the refusal than to
-	// clear it — the retry exists because a burst's later calls are often refused while the
-	// first one was not, and the cooldown is what the retry waits out.
-	ddgBlockTries = 2
+	// ddgBlockTries caps how often a search asks after the interstitial: one look and two
+	// retries, the second at the 8 s ceiling. The retry exists because a burst's later calls
+	// are often refused while the first was not, and the cooldown is what it waits out — so it
+	// is worth asking while the cooldown is still growing. A host that refuses that third look
+	// is refusing the client rather than pacing it, and saying so is cheaper than asking again.
+	ddgBlockTries = 3
 	// ddgRetryBase is the first retry delay: 1 s, doubling, capped at ddgRetryMax.
 	ddgRetryBase = 1 * time.Second
 	ddgRetryMax  = 6 * time.Second
@@ -130,7 +137,9 @@ func newDDGPacer(base, max time.Duration) *ddgPacer {
 
 // Wait reserves the next slot and sleeps until it arrives. errDDGBusy means the slot is
 // further away than one search may wait — somebody was just refused, and queueing behind that
-// would spend the turn to learn the same thing.
+// would spend the turn to learn the same thing. A declined slot is not consumed: a caller that
+// is turned away must not push everyone behind it further out, which is how a busy pacer used
+// to keep making itself busier.
 func (p *ddgPacer) Wait(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -140,27 +149,30 @@ func (p *ddgPacer) Wait(ctx context.Context) error {
 	if now := time.Now(); start.Before(now) {
 		start = now
 	}
+	if start.After(time.Now().Add(ddgMaxWait)) {
+		p.mu.Unlock()
+		return errDDGBusy
+	}
 	p.next = start.Add(p.gap)
 	p.mu.Unlock()
 
-	wait := time.Until(start)
-	if wait > ddgMaxWait {
-		return errDDGBusy
-	}
-	if wait <= 0 {
-		return nil
-	}
-	return sleepContext(ctx, wait)
+	return sleepContext(ctx, time.Until(start))
 }
 
 // Blocked records a refusal: the gap doubles up to the ceiling, and no request goes out for
 // one whole gap — whichever caller it belongs to.
+//
+// The first refusal doubles it too, which is the whole point: a refusal is the host saying the
+// spacing that was fine a moment ago is not, so the next request has to be further out than
+// the one that was refused rather than one base gap behind it. Leaving the first refusal at the
+// base gap made the retry land as soon as the request it repeated, so a search refused once was
+// refused again and gave up — the case two parallel searches hit every time.
 func (p *ddgPacer) Blocked() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.blocks++
 	p.gap = p.base
-	for i := 1; i < p.blocks && p.gap < p.max; i++ {
+	for i := 0; i < p.blocks && p.gap < p.max; i++ {
 		p.gap *= 2
 	}
 	if p.gap > p.max {

@@ -224,19 +224,32 @@ tried as a second, differently-shaped layout.
   already spaced by it. Reported in use: of four searches started together, the first was
   answered and the others drew the interstitial. With the pacer they queue instead, one grown
   gap apart.
+- **The first refusal doubles the gap too** — 2 s, 4 s, 8 s. It used to leave the gap at the
+  base, which put the retry one base gap behind the request it repeated: inside the same
+  window, so a search refused once was refused again and gave up. A caller turned away
+  altogether (the queue is further out than `ddgMaxWait`) leaves the queue where it found it,
+  so being busy is not a reason for the next search to be busier.
 - **One search retries, at most twice** (`Search`): **1 s**, then **2 s**, doubled and capped
   at 6 s, with ±20 % jitter so two searches refused in the same round do not come back in
   lockstep. A dropped connection, a 5xx, a 429 and an empty page are all retried, because all
   of them clear by themselves; a 4xx is not, because that is the request being wrong. An
-  interstitial is retried **once** — the host is refusing this client, and a third ask is
-  likelier to deepen the refusal than to clear it — and the whole search is bounded to **30 s**,
-  retries and pacing included, so a retry cannot cost a turn more than saying what happened
-  would.
-- **A slot further away than 10 s is not queued for.** The search then answers
+  interstitial is retried **twice** — once at the 4 s cooldown the first refusal grows, once at
+  the 8 s the second does — and then reported, because a host that refuses a third look is
+  refusing the client rather than pacing it. It used to be retried once, one base gap out, which
+  is what made a second parallel search fail every time: measured in the reproduction harness
+  on 2026-11-03 against a host that answers the first request and refuses the next two, two
+  searches started together left one answered and the other refused twice, 2 s apart. The whole
+  search is bounded to **30 s**, retries and pacing included, so a retry cannot cost a turn more
+  than saying what happened would.
+- **A slot further away than 20 s is not queued for.** The search then answers
   `ErrRateLimited` ("zu viele DuckDuckGo-Anfragen gleichzeitig – kurz warten und erneut
   versuchen") rather than waiting: somebody was just refused, and queueing behind that spends
   the turn to learn the same thing. Because it is a throttle and not a refusal, a chain with
-  another provider after DuckDuckGo falls through to it.
+  another provider after DuckDuckGo falls through to it. The ceiling is what a burst of two
+  needs — one refusal grows the gap to 4 s and the next to 8 s, so they are served 8 s and
+  16 s out — and it stayed at 10 s for too long, where the second search was turned away
+  without the host being asked at all. It is still well under the 30 s search budget, so a
+  queue cannot outlast the search it belongs to.
 - **Freshness maps onto `df`**: `pd`→`d`, `pw`→`w`, `pm`→`m`, `py`→`y`, anything else
   omitted; the regional parameter is `kl=<country>-<lang>`, with the language defaulting to
   `de`.
@@ -536,7 +549,7 @@ Every parser has a fixture test beside it, and the guards have theirs:
 | --- | --- |
 | `research_test.go` | Brave's five sections and the infobox order (`TestParseBraveResponse`), the count clamp, both DDG layouts, a **layout change returning nothing rather than a wrong answer**, URL normalisation, dedupe/rerank, the SSRF block, non-http schemes, the limiter's cancellation, `robots.txt` parsing |
 | `brave_context_test.go` | the context envelope, empty snippets dropped, query clamping, the failure classification, the **request shape** (parameters as sent), the token floor, the missing-key case, and the three chain-level fallback cases — quota, no key, empty query — plus `TestGroundedContextFallbackCountsBraveOnce` |
-| `duckduckgo_test.go` | that the interstitial is reported as a block, that an empty result is **not** one, that a lite block surfaces, that real result markup is not misread as a challenge, that a refusal and a 503 are each **retried** into results, that a parallel burst reaches the host one pacing gap apart, and the pacer's growth, ceiling and bounded wait |
+| `duckduckgo_test.go` | that the interstitial is reported as a block, that an empty result is **not** one, that a lite block surfaces, that real result markup is not misread as a challenge, that a refusal and a 503 are each **retried** into results, that a second parallel search outlasts the refusal it drew, that a parallel burst reaches the host one pacing gap apart, and the pacer's growth (the first refusal included), ceiling, untouched queue when a wait is declined, and bounded wait |
 | `scrape_cache_test.go` | that a page cached under a small budget still serves a larger one, and that the cached path applies the caller's bound |
 | `scrape_guard_test.go` | that a redirect hop is re-guarded, that the chain stops at the limit, and the dial-time check |
 
