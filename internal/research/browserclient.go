@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
-	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -73,7 +72,6 @@ type browserClient struct {
 	// certificate no CA signed, and a test that needed a trusted certificate would have to
 	// install one in the system store.
 	insecure bool
-	roots    *x509.CertPool
 }
 
 func newBrowserClient(profile browserProfile) *browserClient {
@@ -191,7 +189,6 @@ func (c *browserClient) postForm(ctx context.Context, endpoint string, form url.
 func (c *browserClient) handshake(ctx context.Context, conn net.Conn, host string) (net.Conn, error) {
 	config := &utls.Config{
 		ServerName:         host,
-		RootCAs:            c.roots,
 		InsecureSkipVerify: c.insecure,
 	}
 	uconn := utls.UClient(conn, config, c.profile.hello)
@@ -207,7 +204,9 @@ func (c *browserClient) handshake(ctx context.Context, conn net.Conn, host strin
 		return nil, err
 	}
 	if err := uconn.HandshakeContext(ctx); err != nil {
-		return nil, err
+		// The profile is named here because a failed handshake is the one error whose cause
+		// is the identity rather than the request, and that is what has to be in the message.
+		return nil, fmt.Errorf("%s handshake with %s: %w", c.profile.name, host, err)
 	}
 	return uconn, nil
 }
@@ -220,9 +219,10 @@ func (c *browserClient) handshake(ctx context.Context, conn net.Conn, host strin
 func (c *browserClient) requestText(target *url.URL, form url.Values, lang string) string {
 	body := form.Encode()
 	origin := target.Scheme + "://" + target.Host
-	if target.Scheme == "https" {
-		// Searches are submitted from the site itself; the form endpoints are a different
-		// host than duckduckgo.com but the same site.
+	if host := target.Hostname(); target.Scheme == "https" && isDuckDuckGoHost(host) {
+		// Searches are submitted from the site itself: html.duckduckgo.com and
+		// lite.duckduckgo.com are different hosts than duckduckgo.com but the same site, and a
+		// form posted from a search page names the site in Origin.
 		origin = "https://duckduckgo.com"
 	}
 
@@ -251,6 +251,14 @@ func (c *browserClient) requestText(target *url.URL, form url.Values, lang strin
 	return b.String()
 }
 
+// isDuckDuckGoHost reports whether host is one of the search endpoints' names. It is checked by
+// suffix rather than equality so a subdomain DuckDuckGo adds tomorrow still counts, and it is
+// checked at all so the Origin header is only ever claimed for the site it describes.
+func isDuckDuckGoHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == "duckduckgo.com" || strings.HasSuffix(host, ".duckduckgo.com")
+}
+
 // acceptLanguage renders the search language the way a browser sends it, so the header agrees
 // with the query rather than with the operating system of the machine pretending to be
 // Windows: a German search from a "Windows" client that asks for en-US pages is a pair that
@@ -271,33 +279,43 @@ func acceptLanguage(lang string) string {
 // decodeResponseBody unwraps the content encodings the request advertises. Advertising br and
 // zstd without being able to read them would turn a correct answer into a parse failure, and
 // advertising only gzip would be a header no browser sends.
+//
+// The header may name several encodings — an intermediary in front of a compressed response adds
+// its own — and it lists them in the order they were applied, so they are removed from the last
+// one back. A response that names an encoding but carries no body is left alone: a decoder over
+// an empty stream reports it as a truncated stream, which would turn an empty answer into a
+// decoding failure.
 func decodeResponseBody(resp *http.Response) (io.ReadCloser, error) {
-	switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
-	case "", "identity":
+	header := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if header == "" || header == "identity" || resp.ContentLength == 0 {
 		return resp.Body, nil
-	case "gzip", "x-gzip":
-		reader, err := gzip.NewReader(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		return reader, nil
-	case "deflate":
-		reader, err := zlib.NewReader(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		return reader, nil
-	case "br":
-		return io.NopCloser(brotli.NewReader(resp.Body)), nil
-	case "zstd":
-		reader, err := zstd.NewReader(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		return reader.IOReadCloser(), nil
-	default:
-		return nil, fmt.Errorf("research: unsupported content encoding %q", resp.Header.Get("Content-Encoding"))
 	}
+	body := io.ReadCloser(resp.Body)
+	encodings := strings.Split(header, ",")
+	for i := len(encodings) - 1; i >= 0; i-- {
+		var err error
+		switch strings.TrimSpace(encodings[i]) {
+		case "", "identity":
+			continue
+		case "gzip", "x-gzip":
+			body, err = gzip.NewReader(body)
+		case "deflate":
+			body, err = zlib.NewReader(body)
+		case "br":
+			body = io.NopCloser(brotli.NewReader(body))
+		case "zstd":
+			var decoder *zstd.Decoder
+			if decoder, err = zstd.NewReader(body); err == nil {
+				body = decoder.IOReadCloser()
+			}
+		default:
+			return nil, fmt.Errorf("research: unsupported content encoding %q", resp.Header.Get("Content-Encoding"))
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return body, nil
 }
 
 // connectionBody ties the response body to the connection it arrived on: the connection is

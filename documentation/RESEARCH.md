@@ -206,7 +206,7 @@ never blocked by the state of a metered third-party plan.
 
 DuckDuckGo has no official web-search API, so this provider scrapes the no-JavaScript HTML
 endpoints — `https://html.duckduckgo.com/html/` and `https://lite.duckduckgo.com/lite/`
-([internal/research/duckduckgo.go:24](../internal/research/duckduckgo.go#L24)). That is
+([internal/research/duckduckgo.go:28](../internal/research/duckduckgo.go#L28)). That is
 inherently fragile, and the fragility is managed rather than denied: the selectors are
 covered by fixture tests so layout drift fails a test immediately, and the lite form is
 tried as a second, differently-shaped layout.
@@ -243,7 +243,12 @@ tried as a second, differently-shaped layout.
   connection that sat idle through an 8 s pacing gap is stranger than a fresh one. The client
   advertises `gzip, deflate, br, zstd` — what Chrome advertises — and decodes all four, because
   advertising an encoding it cannot read would turn a correct answer into a parse failure
-  (`TestBrowserClientDecodesWhatItAdvertises`).
+  (`TestBrowserClientDecodesWhatItAdvertises`). That is not defensive: measured on 2026-11-03,
+  the lite endpoint answers `Content-Encoding: br`, so the fallback depends on the brotli path.
+  The header is read as a list — an intermediary in front of a compressed response adds its own,
+  and they are removed from the outermost back — and a response that names an encoding but
+  carries no body is passed through instead of handed to a decoder, which would report an empty
+  answer as a truncated stream (`TestBrowserClientDecodesChainedAndEmptyBodies`).
 - **The form is the endpoint's own.** `q`, an empty page cursor `b`, and the region as `l`
   (`de-de`). `kl` is not a field of this form — it is the setting the site stores in a cookie
   for `duckduckgo.com` — so the provider no longer sends it
@@ -378,7 +383,7 @@ message a user reads should point at the settings instead of looking like a serv
 Measured on 2026-10-08: a host DuckDuckGo did not trust was answered with **HTTP 202** —
 not an error status — and a page with no result nodes at all, which is exactly what a
 genuine zero-result page looks like from the outside
-([internal/research/duckduckgo.go:28](../internal/research/duckduckgo.go#L28)). Both endpoints
+([internal/research/duckduckgo.go:38](../internal/research/duckduckgo.go#L38)). Both endpoints
 were tried, with GET and POST, with a Firefox and a Chrome user agent, and with referer and
 language headers set, and **nothing in the request shape changed it**: the check is on the
 client, so pacing or a HEAD/GET variation is not a workaround. Corrected on **2026-11-03**:
@@ -390,7 +395,7 @@ itself — "Unfortunately, bots use DuckDuckGo too… Select all squares contain
 and the markup markers below are what that recognition is actually made of. Hence:
 
 - a block is detected by the interstitial's own markup — `anomaly.js`, `challenge-form`,
-  `anomaly-modal` ([internal/research/duckduckgo.go:35](../internal/research/duckduckgo.go#L35)) —
+  `anomaly-modal` ([internal/research/duckduckgo.go:38](../internal/research/duckduckgo.go#L38)) —
   and reported as `ErrBlocked`, naming the way out rather than the symptom;
 - `"no results (layout may have changed)"` is reserved for a page that really served zero
   hits, which is what a genuine parse failure looks like and must stay distinguishable from
@@ -587,12 +592,12 @@ streaming update does not erase the list.
 | [internal/research/chain.go:106](../internal/research/chain.go#L106) | `Chain.Search` | order, cache, fall-through, counting |
 | [internal/research/chain.go:222](../internal/research/chain.go#L222) | `Chain.GroundedContext` | context route, then the listing fallback |
 | [internal/research/chain.go:330](../internal/research/chain.go#L330) | `recordGrounded` | cache + count once, not twice |
-| [internal/research/duckduckgo.go:43](../internal/research/duckduckgo.go#L43) | `ddgBlockedErr` | a refusal, worded with its way out |
-| [internal/research/duckduckgo.go:53](../internal/research/duckduckgo.go#L53) | `isDDGChallenge` | the block markers |
-| [internal/research/duckduckgo.go:117](../internal/research/duckduckgo.go#L117) | `ddgPacer` | the shared adaptive gap and the cooldown after a refusal |
-| [internal/research/duckduckgo.go:285](../internal/research/duckduckgo.go#L285) | `DuckDuckGoProvider.Search` | the retry loop: backoff, block budget, 30 s ceiling |
-| [internal/research/duckduckgo.go:350](../internal/research/duckduckgo.go#L350) | `DuckDuckGoProvider.searchOnce` | html then lite, block short-circuits |
-| [internal/research/duckduckgo.go:539](../internal/research/duckduckgo.go#L539) | `unwrapDDGLink` | `/l/?uddg=` unwrapping |
+| [internal/research/duckduckgo.go:46](../internal/research/duckduckgo.go#L46) | `ddgBlockedErr` | a refusal, worded with its way out |
+| [internal/research/duckduckgo.go:56](../internal/research/duckduckgo.go#L56) | `isDDGChallenge` | the block markers |
+| [internal/research/duckduckgo.go:127](../internal/research/duckduckgo.go#L127) | `ddgPacer` | the shared adaptive gap and the cooldown after a refusal |
+| [internal/research/duckduckgo.go:355](../internal/research/duckduckgo.go#L355) | `DuckDuckGoProvider.Search` | the retry loop: backoff, block budget, 30 s ceiling |
+| [internal/research/duckduckgo.go:429](../internal/research/duckduckgo.go#L429) | `DuckDuckGoProvider.searchOnce` | html then lite, block short-circuits |
+| [internal/research/duckduckgo.go:619](../internal/research/duckduckgo.go#L619) | `unwrapDDGLink` | `/l/?uddg=` unwrapping |
 | [internal/research/scrape.go:168](../internal/research/scrape.go#L168) | `Scraper.Scrape` | guard, robots, cache, extract, trim |
 | [internal/research/scrape.go:402](../internal/research/scrape.go#L402) | `guardHost` | the hostname/resolution check |
 | [internal/research/scrape.go:141](../internal/research/scrape.go#L141) | `privateDialControl` | the dial-time check |

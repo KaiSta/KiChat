@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -257,15 +258,26 @@ func TestBrowserClientEndsARequestThatDoesNotAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer listener.Close()
+	var held []net.Conn
+	var mu sync.Mutex
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
-			// Accepted and held: the point of the test.
-			defer conn.Close()
+			// Accepted and then held open without an answer: that is the test.
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
 		}
 	}()
 
@@ -280,4 +292,66 @@ func TestBrowserClientEndsARequestThatDoesNotAnswer(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("request took %v, want it bounded by the timeout", elapsed)
 	}
+}
+
+// TestBrowserClientDecodesChainedAndEmptyBodies covers two shapes the single-encoding test
+// misses and a proxy can produce: a body encoded twice (legal, and what an intermediary in
+// front of a compressed response does), and a response that claims an encoding but carries no
+// body at all. Both used to be reported as an undecodable response, which reads as a broken
+// layout rather than as what it is.
+func TestBrowserClientDecodesChainedAndEmptyBodies(t *testing.T) {
+	body := []byte("<html>results</html>")
+
+	t.Run("chained", func(t *testing.T) {
+		var gzipped bytes.Buffer
+		gzipWriter := gzip.NewWriter(&gzipped)
+		_, _ = gzipWriter.Write(body)
+		_ = gzipWriter.Close()
+		var chained bytes.Buffer
+		brotliWriter := brotli.NewWriter(&chained)
+		_, _ = brotliWriter.Write(gzipped.Bytes())
+		_ = brotliWriter.Close()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Encoding", "gzip, br")
+			_, _ = w.Write(chained.Bytes())
+		}))
+		defer server.Close()
+
+		client := newBrowserClient(chromeWindows)
+		resp, err := client.postForm(context.Background(), server.URL, url.Values{"q": {"x"}}, "en")
+		if err != nil {
+			t.Fatalf("postForm: %v", err)
+		}
+		defer resp.Body.Close()
+		got, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if string(got) != string(body) {
+			t.Errorf("body = %q, want %q", got, body)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.WriteHeader(http.StatusAccepted)
+		}))
+		defer server.Close()
+
+		client := newBrowserClient(chromeWindows)
+		resp, err := client.postForm(context.Background(), server.URL, url.Values{"q": {"x"}}, "en")
+		if err != nil {
+			t.Fatalf("postForm: %v", err)
+		}
+		defer resp.Body.Close()
+		got, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("body = %q, want empty", got)
+		}
+	})
 }
