@@ -1635,6 +1635,57 @@ func TestTheBetweenRoundFoldAsksTheThresholdOnlyWhenTheUserSaidSo(t *testing.T) 
 	}
 }
 
+// TestABetweenRoundCheckFoldsAChatShorterThanKeepRecentTurns pins the shape a turn that grows
+// through tool calls usually has: a few turns, each one long, and a context over the threshold.
+// A targetless automatic fold is refused by the planner when the cut would keep every turn, so
+// the switch did nothing in exactly the chats it exists for, and the growth became a fold only
+// once the backend refused the request for its size.
+func TestABetweenRoundCheckFoldsAChatShorterThanKeepRecentTurns(t *testing.T) {
+	fold := func(t *testing.T, midTurn bool) int {
+		t.Helper()
+		st := newTestStore(t)
+		chat := makeChat(t, st)
+		chat.AutoCompact = true
+		if err := st.UpdateChat(chat); err != nil {
+			t.Fatalf("enable auto-compaction: %v", err)
+		}
+		// Three turns: fewer than the six the cut keeps verbatim by default.
+		for i := 0; i < 3; i++ {
+			for _, role := range []string{"user", "assistant"} {
+				if _, err := st.AppendMessage(store.Message{
+					ID: fmt.Sprintf("%s-%d", role, i), ChatID: chat.ID, Role: role,
+					Content: strings.Repeat("Frage mit Inhalt. ", 400),
+					Status:  store.StatusComplete,
+				}); err != nil {
+					t.Fatalf("seed %s %d: %v", role, i, err)
+				}
+			}
+		}
+		provider := &fakeProvider{
+			model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+			replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}}},
+		}
+		engine, _ := newTestEngine(t, st, provider)
+		settings := engine.Settings()
+		settings.Compact.Threshold = 0.01
+		settings.Compact.MidTurnCheck = true
+		if err := engine.autoFold(context.Background(), &chat, provider, "fake", "fake-model",
+			provider.model, settings, midTurn); err != nil {
+			t.Fatalf("autoFold: %v", err)
+		}
+		return len(summariesOf(t, st))
+	}
+
+	if got := fold(t, true); got != 1 {
+		t.Fatalf("between-round folds on a chat shorter than keepRecentTurns = %d, want the one the threshold asks for", got)
+	}
+	// The check before a turn keeps its own behaviour: there the user has a fold point between
+	// two messages, so a short chat is left alone rather than folded unasked.
+	if got := fold(t, false); got != 0 {
+		t.Fatalf("the fold before the turn = %d, want none on a chat shorter than keepRecentTurns", got)
+	}
+}
+
 // TestTheMidTurnCheckFoldsALocalToolTurnWhenTheUserAsks is the behaviour the setting
 // exists for. A local model publishes no per-request ceiling, so without it the only size
 // check is the one before the turn — and a tool round that grows past the window's

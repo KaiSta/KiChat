@@ -212,8 +212,23 @@ func (e *Engine) autoFold(ctx context.Context, chat *store.Chat, provider llm.Pr
 	// on, so the fold that happens and the bound it was decided by cannot disagree. The
 	// created compaction is irrelevant here — an automatic run has nobody to report back
 	// to, and "nothing to fold" is already the silent outcome.
-	_, err := e.compactWith(ctx, chat, provider, backendID, modelID, modelInfo, settings,
-		CompactOptions{Threshold: threshold, Ceiling: ceiling})
+	opts := CompactOptions{Threshold: threshold, Ceiling: ceiling}
+	if midTurn && threshold > 0 {
+		// Between the rounds of one answer the threshold is also the aim, and that is what
+		// lets the planner fold a history shorter than KeepRecentTurns. Without an aim it
+		// refuses any automatic fold whose cut would keep every turn — so the between-rounds
+		// switch did nothing in the chats it exists for, because a turn that grows through
+		// tool calls is usually one of a few long turns and not one of many short ones. The
+		// growth then became a fold only after the backend refused the request for its size,
+		// which costs that round the whole answer it had already produced.
+		//
+		// The fold still stops before the newest user turn, so the question being answered
+		// and the tool results it is working from stay verbatim; only settled history becomes
+		// memory. The check before a turn keeps its own behaviour: there the user has a fold
+		// point between two messages, so a short chat is left alone rather than folded early.
+		opts.Target = threshold
+	}
+	_, err := e.compactWith(ctx, chat, provider, backendID, modelID, modelInfo, settings, opts)
 	return err
 }
 

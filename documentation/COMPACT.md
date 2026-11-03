@@ -199,7 +199,14 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   means): folding on a window rather than on a published ceiling spends a summarisation inside the
   answer the user is reading, so it is their decision and it ships off. That switch is also the
   only mid-turn check a backend that publishes **no** ceiling can get at all — every local model
-  — and without it such a turn is only ever priced before it starts.
+  — and without it such a turn is only ever priced before it starts. An automatic fold there also
+  *aims* at the threshold (`Target`), and that is what lets it run at all on a history shorter
+  than `KeepRecentTurns`: the planner refuses a targetless fold whose cut would keep every turn,
+  and a turn that grows through tool calls is usually one of a few long turns rather than one of
+  many short ones. The fold still stops before the newest user turn, so the question being answered
+  and the tool results it is working from stay verbatim; the check before a turn is untouched, and
+  a short chat there is still left alone. Pinned by
+  `TestABetweenRoundCheckFoldsAChatShorterThanKeepRecentTurns`.
   Pinned by `TestTheBetweenRoundFoldAsksTheThresholdOnlyWhenTheUserSaidSo` and
   `TestTheMidTurnCheckFoldsALocalToolTurnWhenTheUserAsks` (which asserts the pre-turn check stays
   quiet, so the fold it sees is the mid-turn one). The mid-turn switch is **subordinate**: a chat
