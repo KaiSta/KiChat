@@ -411,12 +411,18 @@ export const useStore = create<State>((set, get) => {
         // not per bootstrap, so this is guarded.
         wireEventsOnce(set, get, clearStreaming, upsertMessage)
 
-        const [health, chats, models] = await Promise.all([
+        // The chat list is a local query; health and the catalogue are probes that ask
+        // every backend over the network, one behind another (see Registry.Health and
+        // Registry.ListModels). Awaited together, the sidebar stayed empty until the
+        // slowest backend had answered — which is what "the chats take ages to appear"
+        // was. The list is therefore awaited alone, and the two probes land when they
+        // land: nothing on screen depends on them being there first.
+        const chats = await App.ListChats(false).catch(() => [] as storeTypes.Chat[])
+        set({ chats })
+        void Promise.all([
           App.GetHealth().catch(() => [] as llm.HealthStatus[]),
-          App.ListChats(false).catch(() => [] as storeTypes.Chat[]),
           App.ListModels(false).catch(() => [] as llm.ModelInfo[]),
-        ])
-        set({ health, chats, models })
+        ]).then(([health, models]) => set({ health, models }))
 
         if (chats.length > 0) {
           await get().selectChat(chats[0].id)
