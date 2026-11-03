@@ -206,7 +206,7 @@ never blocked by the state of a metered third-party plan.
 
 DuckDuckGo has no official web-search API, so this provider scrapes the no-JavaScript HTML
 endpoints — `https://html.duckduckgo.com/html/` and `https://lite.duckduckgo.com/lite/`
-([internal/research/duckduckgo.go:21](../internal/research/duckduckgo.go#L21)). That is
+([internal/research/duckduckgo.go:24](../internal/research/duckduckgo.go#L24)). That is
 inherently fragile, and the fragility is managed rather than denied: the selectors are
 covered by fixture tests so layout drift fails a test immediately, and the lite form is
 tried as a second, differently-shaped layout.
@@ -215,8 +215,28 @@ tried as a second, differently-shaped layout.
   because some networks block the GET variant.
 - **A browser user agent** (Firefox 128 on Linux) is sent on both, along with
   `Accept: text/html,application/xhtml+xml`.
-- **The rate limiter is 0.5/s** — half of Brave's, because a scrape is far more likely to
-  be punished than an API call.
+- **The pacing is adaptive, and every caller shares it** (`ddgPacer`). The gap starts at
+  **2 s** — 0.5/s, half of Brave's, because a scrape is far more likely to be punished than an
+  API call — and a refusal doubles it to a ceiling of **8 s**, with a cooldown of one whole gap
+  during which no request goes out whichever caller it belongs to. The first real answer puts
+  both back. This is the burst fix: a model's round of parallel `search_web` calls is a burst
+  from one client, and a *fixed* gap cannot absorb one because the requests in a burst are
+  already spaced by it. Reported in use: of four searches started together, the first was
+  answered and the others drew the interstitial. With the pacer they queue instead, one grown
+  gap apart.
+- **One search retries, at most twice** (`Search`): **1 s**, then **2 s**, doubled and capped
+  at 6 s, with ±20 % jitter so two searches refused in the same round do not come back in
+  lockstep. A dropped connection, a 5xx, a 429 and an empty page are all retried, because all
+  of them clear by themselves; a 4xx is not, because that is the request being wrong. An
+  interstitial is retried **once** — the host is refusing this client, and a third ask is
+  likelier to deepen the refusal than to clear it — and the whole search is bounded to **30 s**,
+  retries and pacing included, so a retry cannot cost a turn more than saying what happened
+  would.
+- **A slot further away than 10 s is not queued for.** The search then answers
+  `ErrRateLimited` ("zu viele DuckDuckGo-Anfragen gleichzeitig – kurz warten und erneut
+  versuchen") rather than waiting: somebody was just refused, and queueing behind that spends
+  the turn to learn the same thing. Because it is a throttle and not a refusal, a chain with
+  another provider after DuckDuckGo falls through to it.
 - **Freshness maps onto `df`**: `pd`→`d`, `pw`→`w`, `pm`→`m`, `py`→`y`, anything else
   omitted; the regional parameter is `kl=<country>-<lang>`, with the language defaulting to
   `de`.
@@ -230,7 +250,9 @@ handed out per *client* rather than per layout, so the second shape cannot succe
 the first was refused — trying it would only buy a second identical failure plus the pacing
 time the turn does not have. And a block explains itself better on its own than nested under
 whichever other failure came first, so `ErrBlocked` is returned directly from either
-endpoint.
+endpoint. What *is* retried is the same layout, once, after the backoff and the cooldown: the
+refusal that costs a model three of its four parallel searches is the burst rather than a
+verdict, and the second look usually answers.
 
 ---
 
@@ -243,7 +265,7 @@ The sentinels exist because the *responses* are not distinguishable by status
 | --- | --- | --- |
 | `ErrNoProvider` | every configured provider was unavailable | tell the user to configure one |
 | `ErrEmptyQuery` | nothing usable left to search for | a caller bug, not a config problem |
-| `ErrRateLimited` | throttled *for now* | retrying is worth it |
+| `ErrRateLimited` | throttled *for now* — a provider's 429, or DuckDuckGo's own queue declining a slot (§4) | retrying is worth it |
 | `ErrQuotaExhausted` | the plan or credit balance is used up | waiting will not help; fall through and say why |
 | `ErrInvalidKey` | the credential was rejected | the user has to fix the key |
 | `ErrBlocked` | an anti-bot interstitial instead of results | a different client, provider or network |
@@ -279,7 +301,7 @@ message a user reads should point at the settings instead of looking like a serv
 Measured on 2026-10-08: a host DuckDuckGo did not trust was answered with **HTTP 202** —
 not an error status — and a page with no result nodes at all, which is exactly what a
 genuine zero-result page looks like from the outside
-([internal/research/duckduckgo.go:27](../internal/research/duckduckgo.go#L27)). Both endpoints
+([internal/research/duckduckgo.go:28](../internal/research/duckduckgo.go#L28)). Both endpoints
 were tried, with GET and POST, with a Firefox and a Chrome user agent, and with referer and
 language headers set, and **nothing in the request shape changed it**: the check is on the
 client, so pacing or a HEAD/GET variation is not a workaround. The interstitial identifies
@@ -287,7 +309,7 @@ itself — "Unfortunately, bots use DuckDuckGo too… Select all squares contain
 and the markup markers below are what that recognition is actually made of. Hence:
 
 - a block is detected by the interstitial's own markup — `anomaly.js`, `challenge-form`,
-  `anomaly-modal` ([internal/research/duckduckgo.go:33](../internal/research/duckduckgo.go#L33)) —
+  `anomaly-modal` ([internal/research/duckduckgo.go:35](../internal/research/duckduckgo.go#L35)) —
   and reported as `ErrBlocked`, naming the way out rather than the symptom;
 - `"no results (layout may have changed)"` is reserved for a page that really served zero
   hits, which is what a genuine parse failure looks like and must stay distinguishable from
@@ -484,9 +506,12 @@ streaming update does not erase the list.
 | [internal/research/chain.go:106](../internal/research/chain.go#L106) | `Chain.Search` | order, cache, fall-through, counting |
 | [internal/research/chain.go:222](../internal/research/chain.go#L222) | `Chain.GroundedContext` | context route, then the listing fallback |
 | [internal/research/chain.go:330](../internal/research/chain.go#L330) | `recordGrounded` | cache + count once, not twice |
-| [internal/research/duckduckgo.go:43](../internal/research/duckduckgo.go#L43) | `isDDGChallenge` | the block markers |
-| [internal/research/duckduckgo.go:81](../internal/research/duckduckgo.go#L81) | `DuckDuckGoProvider.Search` | html then lite, block short-circuits |
-| [internal/research/duckduckgo.go:271](../internal/research/duckduckgo.go#L271) | `unwrapDDGLink` | `/l/?uddg=` unwrapping |
+| [internal/research/duckduckgo.go:43](../internal/research/duckduckgo.go#L43) | `ddgBlockedErr` | a refusal, worded with its way out |
+| [internal/research/duckduckgo.go:53](../internal/research/duckduckgo.go#L53) | `isDDGChallenge` | the block markers |
+| [internal/research/duckduckgo.go:117](../internal/research/duckduckgo.go#L117) | `ddgPacer` | the shared adaptive gap and the cooldown after a refusal |
+| [internal/research/duckduckgo.go:285](../internal/research/duckduckgo.go#L285) | `DuckDuckGoProvider.Search` | the retry loop: backoff, block budget, 30 s ceiling |
+| [internal/research/duckduckgo.go:350](../internal/research/duckduckgo.go#L350) | `DuckDuckGoProvider.searchOnce` | html then lite, block short-circuits |
+| [internal/research/duckduckgo.go:539](../internal/research/duckduckgo.go#L539) | `unwrapDDGLink` | `/l/?uddg=` unwrapping |
 | [internal/research/scrape.go:168](../internal/research/scrape.go#L168) | `Scraper.Scrape` | guard, robots, cache, extract, trim |
 | [internal/research/scrape.go:402](../internal/research/scrape.go#L402) | `guardHost` | the hostname/resolution check |
 | [internal/research/scrape.go:141](../internal/research/scrape.go#L141) | `privateDialControl` | the dial-time check |
@@ -511,7 +536,7 @@ Every parser has a fixture test beside it, and the guards have theirs:
 | --- | --- |
 | `research_test.go` | Brave's five sections and the infobox order (`TestParseBraveResponse`), the count clamp, both DDG layouts, a **layout change returning nothing rather than a wrong answer**, URL normalisation, dedupe/rerank, the SSRF block, non-http schemes, the limiter's cancellation, `robots.txt` parsing |
 | `brave_context_test.go` | the context envelope, empty snippets dropped, query clamping, the failure classification, the **request shape** (parameters as sent), the token floor, the missing-key case, and the three chain-level fallback cases — quota, no key, empty query — plus `TestGroundedContextFallbackCountsBraveOnce` |
-| `duckduckgo_test.go` | that the interstitial is reported as a block, that an empty result is **not** one, that a lite block surfaces, and that real result markup is not misread as a challenge |
+| `duckduckgo_test.go` | that the interstitial is reported as a block, that an empty result is **not** one, that a lite block surfaces, that real result markup is not misread as a challenge, that a refusal and a 503 are each **retried** into results, that a parallel burst reaches the host one pacing gap apart, and the pacer's growth, ceiling and bounded wait |
 | `scrape_cache_test.go` | that a page cached under a small budget still serves a larger one, and that the cached path applies the caller's bound |
 | `scrape_guard_test.go` | that a redirect hop is re-guarded, that the chain stops at the limit, and the dial-time check |
 
@@ -566,7 +591,8 @@ normal run never touches the network.
 ## 11. Deliberately not done
 
 - **Retrying the DuckDuckGo lite layout after a block.** The check is per client, not per
-  layout, so the second shape cannot succeed where the first was refused (§4).
+  layout, so the second shape cannot succeed where the first was refused; the retry repeats
+  the layout that was refused, after a backoff, and gives up after the second refusal (§4).
 - **Counting the grounded fallback as its own Brave request.** It is built from a `Search`
   that already counted itself; counting again charged one credit twice (§3).
 - **Storing the token-trimmed page in the scrape cache.** It made a page first read with a

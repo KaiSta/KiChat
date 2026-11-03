@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -57,12 +59,180 @@ func isDDGChallenge(body string) bool {
 	return false
 }
 
+// Pacing and retry policy for the scraped provider.
+//
+// A round of parallel search_web calls is a burst from one client, and a burst is the shape
+// DuckDuckGo answers with its anti-bot interstitial. Reported in use: of four searches started
+// together, the first came back with results and the rest with the challenge. The numbers
+// below are the answer to that, and they are conservative on purpose — a scrape is punished
+// far earlier than a documented API call.
+const (
+	// ddgBaseGap is the gap between two requests: 0.5 per second, half of Brave's rate.
+	ddgBaseGap = 2 * time.Second
+	// ddgMaxGap is what the gap may grow to after a refusal. Beyond it a burst is cheaper to
+	// answer from the other layout or from another provider than to keep queueing.
+	ddgMaxGap = 8 * time.Second
+	// ddgMaxWait is the longest one search waits for its slot before it reports a throttle
+	// instead of queueing: a turn spent in a queue is a turn that never arrives.
+	ddgMaxWait = 10 * time.Second
+	// ddgAttempts is how many times one search asks before it reports the failure: one look,
+	// then retries for a connection that dropped or a page that arrived empty.
+	ddgAttempts = 3
+	// ddgBlockTries caps how often a search asks after the interstitial. That is the host
+	// refusing this client, and asking a third time is likelier to deepen the refusal than to
+	// clear it — the retry exists because a burst's later calls are often refused while the
+	// first one was not, and the cooldown is what the retry waits out.
+	ddgBlockTries = 2
+	// ddgRetryBase is the first retry delay: 1 s, doubling, capped at ddgRetryMax.
+	ddgRetryBase = 1 * time.Second
+	ddgRetryMax  = 6 * time.Second
+	// ddgSearchBudget bounds one search end to end — attempts, backoff and pacing alike.
+	ddgSearchBudget = 30 * time.Second
+)
+
+// errDDGBusy is the pacer declining to wait for a slot: the next one is further away than one
+// search may spend. Nothing was asked of the host, so it is a throttle rather than a refusal.
+var errDDGBusy = errors.New("duckduckgo: no free slot within the wait")
+
+// ddgBusyErr is errDDGBusy worded for the caller, as ErrRateLimited: retrying in a moment is
+// worth it, and a chain with another provider should fall through to it now.
+func ddgBusyErr(lang string) error {
+	return fmt.Errorf("%w: %s", ErrRateLimited, text(lang,
+		"zu viele DuckDuckGo-Anfragen gleichzeitig – kurz warten und erneut versuchen",
+		"too many DuckDuckGo requests at once — wait a moment and try again"))
+}
+
+// errDDGNoResults is a page that parsed but carried no hit: either the query really has none,
+// or the layout drifted. Both look identical from outside, and both are worth one more look.
+var errDDGNoResults = errors.New("duckduckgo: no results")
+
+// ddgPacer is the pacing a scraped provider needs beyond a fixed interval.
+//
+// A fixed gap cannot absorb a burst, because the requests in one are already spaced by it:
+// what changes the host's mind is that the gap grows. So a refusal doubles the gap (up to
+// ddgMaxGap) and holds the next slot one whole gap into the future, and the first real answer
+// puts both back. Every caller shares one pacer, which is what makes a round of parallel
+// searches queue behind a refusal instead of all landing on a host that has just decided this
+// machine is a bot.
+type ddgPacer struct {
+	mu   sync.Mutex
+	base time.Duration
+	max  time.Duration
+	gap  time.Duration // the current gap between two requests
+	next time.Time     // the earliest start of the next request
+	// blocks counts consecutive refusals, which is what grows the gap; a success drops it.
+	blocks int
+}
+
+func newDDGPacer(base, max time.Duration) *ddgPacer {
+	return &ddgPacer{base: base, max: max, gap: base}
+}
+
+// Wait reserves the next slot and sleeps until it arrives. errDDGBusy means the slot is
+// further away than one search may wait — somebody was just refused, and queueing behind that
+// would spend the turn to learn the same thing.
+func (p *ddgPacer) Wait(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	start := p.next
+	if now := time.Now(); start.Before(now) {
+		start = now
+	}
+	p.next = start.Add(p.gap)
+	p.mu.Unlock()
+
+	wait := time.Until(start)
+	if wait > ddgMaxWait {
+		return errDDGBusy
+	}
+	if wait <= 0 {
+		return nil
+	}
+	return sleepContext(ctx, wait)
+}
+
+// Blocked records a refusal: the gap doubles up to the ceiling, and no request goes out for
+// one whole gap — whichever caller it belongs to.
+func (p *ddgPacer) Blocked() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.blocks++
+	p.gap = p.base
+	for i := 1; i < p.blocks && p.gap < p.max; i++ {
+		p.gap *= 2
+	}
+	if p.gap > p.max {
+		p.gap = p.max
+	}
+	if hold := time.Now().Add(p.gap); p.next.Before(hold) {
+		p.next = hold
+	}
+}
+
+// Succeeded puts the pacing back to its base: a real answer means the host is not refusing this
+// client, so staying slow after it would only cost time.
+func (p *ddgPacer) Succeeded() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.blocks = 0
+	p.gap = p.base
+}
+
+// sleepContext waits for d unless the context ends first, and answers the context's own error
+// in that case. A zero or negative d is not a wait at all.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// ddgJitter spreads a retry delay by up to a fifth either way, so two searches refused in the
+// same round do not come back in lockstep and draw a second refusal together.
+func ddgJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	spread := float64(d) * 0.2
+	return d + time.Duration((rand.Float64()*2-1)*spread)
+}
+
+// ddgRetryable reports whether asking again can plausibly change the answer. A refusal, a
+// throttle, a server fault and a dropped connection all can clear by themselves, and an empty
+// page can be the tail of a burst; a 4xx is the request being wrong.
+func ddgRetryable(err error) bool {
+	var httpErr *httpError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= 500
+	}
+	return true
+}
+
 // DuckDuckGoProvider scrapes DuckDuckGo's HTML search results.
 type DuckDuckGoProvider struct {
 	Endpoint string
 	LiteURL  string
-	limiter  *rateLimiter
-	client   *http.Client
+	// pacer spaces the requests, and one pacer is shared by every caller of this provider:
+	// that is what keeps a round of parallel tool calls from arriving as a burst.
+	pacer  *ddgPacer
+	client *http.Client
+
+	// The retry policy lives on the struct rather than in the constants alone, so a test can
+	// make a retry instantaneous instead of a second of sleeping (newTestDDGProvider).
+	attempts   int
+	blockTries int
+	retryBase  time.Duration
+	budget     time.Duration
+	jitter     func(time.Duration) time.Duration
 }
 
 // NewDuckDuckGoProvider builds the provider. Endpoints are overridable for tests.
@@ -71,43 +241,132 @@ func NewDuckDuckGoProvider(endpoint string) *DuckDuckGoProvider {
 		endpoint = ddgHTMLEndpoint
 	}
 	return &DuckDuckGoProvider{
-		Endpoint: endpoint,
-		LiteURL:  ddgLiteEndpoint,
-		limiter:  newRateLimiter(0.5),
-		client:   &http.Client{Timeout: 25 * time.Second},
+		Endpoint:   endpoint,
+		LiteURL:    ddgLiteEndpoint,
+		pacer:      newDDGPacer(ddgBaseGap, ddgMaxGap),
+		client:     &http.Client{Timeout: 25 * time.Second},
+		attempts:   ddgAttempts,
+		blockTries: ddgBlockTries,
+		retryBase:  ddgRetryBase,
+		budget:     ddgSearchBudget,
+		jitter:     ddgJitter,
 	}
+}
+
+// retryDelay is the wait before attempt n: doubling from retryBase, capped, and spread by the
+// jitter that keeps two searches refused in the same round from retrying in lockstep.
+func (d *DuckDuckGoProvider) retryDelay(attempt int) time.Duration {
+	delay := d.retryBase
+	for i := 1; i < attempt && delay > 0 && delay < ddgRetryMax; i++ {
+		delay *= 2
+	}
+	if delay > ddgRetryMax {
+		delay = ddgRetryMax
+	}
+	if d.jitter == nil {
+		return delay
+	}
+	return d.jitter(delay)
 }
 
 func (d *DuckDuckGoProvider) Name() string      { return "duckduckgo" }
 func (d *DuckDuckGoProvider) Available() bool   { return true }
 func (d *DuckDuckGoProvider) RequiresKey() bool { return false }
 
-// Search tries the lightweight HTML endpoint first and falls back to the lite
-// form, which has a different and more stable layout. A bot check ends the
-// attempt: it is handed out per client rather than per layout, so the second
-// shape cannot succeed where the first was refused.
+// Search asks for one query, retrying the failures that can clear by themselves.
+//
+// The retry is what a burst needs rather than what one query needs. DuckDuckGo hands its
+// anti-bot interstitial out per client, so the second and third call of a round — the ones a
+// model starts in parallel — are refused while the first was answered; asking again a moment
+// later, after the pacer has grown its gap and held every other caller back by the same
+// amount, is what turns that round from three failures into a queue that fills in over a few
+// seconds. Transient failures (a dropped connection, a 5xx, an empty page) are retried by the
+// same loop, and a 4xx is not: that is the request being wrong.
 func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]SearchResult, error) {
-	if err := d.limiter.Wait(ctx); err != nil {
-		return nil, err
+	searchCtx := ctx
+	if d.budget > 0 {
+		var cancel context.CancelFunc
+		searchCtx, cancel = context.WithTimeout(ctx, d.budget)
+		defer cancel()
 	}
 
+	var lastErr error
+	blocks := 0
+	for attempt := 1; attempt <= d.attempts; attempt++ {
+		if attempt > 1 {
+			if err := sleepContext(searchCtx, d.retryDelay(attempt-1)); err != nil {
+				break
+			}
+		}
+		results, err := d.searchOnce(searchCtx, req)
+		if err == nil {
+			d.pacer.Succeeded()
+			return results, nil
+		}
+		lastErr = err
+		if errors.Is(err, ErrBlocked) {
+			blocks++
+			// The refusal is the host's own pacing signal: the gap grows, and the next
+			// request — this search's or another one's — waits out the cooldown.
+			d.pacer.Blocked()
+			if blocks >= d.blockTries {
+				break
+			}
+			continue
+		}
+		if errors.Is(err, errDDGBusy) || !ddgRetryable(err) {
+			break
+		}
+	}
+
+	// The caller's own context is the one failure that must reach the chain as a
+	// cancellation: a turn being stopped is not evidence about the provider.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	switch {
+	case errors.Is(lastErr, errDDGNoResults):
+		return nil, errors.New(text(req.Lang,
+			"duckduckgo: keine Ergebnisse gefunden (Layout möglicherweise geändert)",
+			"duckduckgo: no results found (the layout may have changed)"))
+	case errors.Is(lastErr, errDDGBusy):
+		return nil, ddgBusyErr(req.Lang)
+	case errors.Is(lastErr, context.DeadlineExceeded):
+		return nil, fmt.Errorf("%w: %s", ErrRateLimited, text(req.Lang,
+			"DuckDuckGo hat nicht rechtzeitig geantwortet",
+			"DuckDuckGo did not answer in time"))
+	case lastErr == nil:
+		return nil, errors.New(text(req.Lang, "duckduckgo: keine Antwort",
+			"duckduckgo: no answer"))
+	}
+	return nil, lastErr
+}
+
+// searchOnce asks both layouts once, one paced request each. The first refusal ends it: the
+// check is handed out per client rather than per layout, so the second shape cannot succeed
+// where the first was refused, and the pacing it would wait out is time the turn does not
+// have. The same reasoning one step later keeps a lite refusal whole instead of nesting it
+// under whichever other failure came first — it explains itself better on its own.
+func (d *DuckDuckGoProvider) searchOnce(ctx context.Context, req SearchRequest) ([]SearchResult, error) {
+	if err := d.pacer.Wait(ctx); err != nil {
+		return nil, err
+	}
 	results, err := d.searchHTML(ctx, req)
 	if err == nil && len(results) > 0 {
 		return results, nil
 	}
 	htmlErr := err
-	// Asking the lite layout now would only buy a second identical failure, and
-	// the pacing it would wait out is time the turn does not have.
 	if errors.Is(htmlErr, ErrBlocked) {
 		return nil, htmlErr
 	}
 
+	if err := d.pacer.Wait(ctx); err != nil {
+		return nil, err
+	}
 	liteResults, liteErr := d.searchLite(ctx, req)
 	if liteErr == nil && len(liteResults) > 0 {
 		return liteResults, nil
 	}
-	// Same reasoning one step later: a block explains itself better on its own
-	// than nested under whichever other failure came first.
 	if errors.Is(liteErr, ErrBlocked) {
 		return nil, liteErr
 	}
@@ -120,9 +379,7 @@ func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]S
 	case htmlErr != nil:
 		return nil, htmlErr
 	default:
-		return nil, errors.New(text(req.Lang,
-			"duckduckgo: keine Ergebnisse gefunden (Layout möglicherweise geändert)",
-			"duckduckgo: no results found (the layout may have changed)"))
+		return nil, errDDGNoResults
 	}
 }
 
