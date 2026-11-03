@@ -39,6 +39,19 @@ type Store struct {
 	mu       sync.Mutex
 	keyring  bool
 	fallback map[string]string
+
+	// keyringCache and keyringMiss remember what the keyring answered for a name, so
+	// one run asks it once per secret instead of once per read. A read is not free:
+	// go-keyring reaches the macOS Keychain by spawning /usr/bin/security, and a start
+	// reads the same handful of names several times over — the settings blob, the
+	// provider set built from it, the image server's key — while a Linux D-Bus round
+	// trip makes the repeats invisible.
+	//
+	// Only a definitive "not there" is remembered as a miss. A locked or busy keyring
+	// fails once and works afterwards, so that answer is not cached: it would hide a
+	// key that is really stored for the rest of the run.
+	keyringCache map[string]string
+	keyringMiss  map[string]bool
 }
 
 // New opens the secret store rooted at dir, using the OS keyring when one is
@@ -67,6 +80,8 @@ func newStore(dir string, useKeyring bool) (*Store, error) {
 		keyFile:       filepath.Join(dir, "secret.key"),
 		dataFile:      filepath.Join(dir, "secrets.enc"),
 		fallback:      map[string]string{},
+		keyringCache:  map[string]string{},
+		keyringMiss:   map[string]bool{},
 		keyringGet:    keyring.Get,
 		keyringSet:    keyring.Set,
 		keyringDelete: keyring.Delete,
@@ -109,6 +124,10 @@ func (s *Store) Set(name, value string) error {
 	if s.keyring {
 		if value == "" {
 			_ = s.keyringDelete(keyringService, name)
+			// The cached answers go with it: a read after a removal must not be served
+			// the value this call just deleted.
+			delete(s.keyringCache, name)
+			delete(s.keyringMiss, name)
 			// Clear the file copy as well, and do not return early as this used to:
 			// a keyring write that failed once left the value in the encrypted
 			// fallback, and Get reads that whenever the keyring has nothing — so
@@ -121,6 +140,8 @@ func (s *Store) Set(name, value string) error {
 			return nil
 		}
 		if err := s.keyringSet(keyringService, name, value); err == nil {
+			s.keyringCache[name] = value
+			delete(s.keyringMiss, name)
 			return nil
 		}
 		// One refusal is not proof the keyring is gone: a locked collection or a
@@ -129,6 +150,9 @@ func (s *Store) Set(name, value string) error {
 		// because Get only consults it while the flag is set — so the write falls
 		// through to the encrypted file and the next call tries the keyring again.
 	}
+	// The write fell through to the file, so whatever the keyring answered before is
+	// no longer the newest answer this store holds.
+	delete(s.keyringCache, name)
 	if value == "" {
 		delete(s.fallback, name)
 	} else {
@@ -142,8 +166,18 @@ func (s *Store) Get(name string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.keyring {
-		if v, err := s.keyringGet(keyringService, name); err == nil && v != "" {
+		if v, ok := s.keyringCache[name]; ok && v != "" {
 			return v, true
+		}
+		if !s.keyringMiss[name] {
+			v, err := s.keyringGet(keyringService, name)
+			switch {
+			case err == nil && v != "":
+				s.keyringCache[name] = v
+				return v, true
+			case errors.Is(err, keyring.ErrNotFound):
+				s.keyringMiss[name] = true
+			}
 		}
 	}
 	v, ok := s.fallback[name]

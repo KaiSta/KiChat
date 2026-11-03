@@ -84,6 +84,17 @@ type Store struct {
 	set           func(service, user, password string) error
 	delete        func(service, user string) error
 	keyringUsable bool
+
+	// keyText, keyRead and keyMiss memoise what the keyring answered, so one start
+	// reads the key once. It is asked for while the database is opened and again when
+	// the status the unlock screen reads is built, and on macOS a read means spawning
+	// /usr/bin/security for the Keychain (go-keyring has no other way in).
+	//
+	// Only a definitive "not there" is remembered. A keyring that is locked or busy
+	// refuses once and answers afterwards, so that refusal is asked about again.
+	keyText string
+	keyRead bool
+	keyMiss bool
 }
 
 // New returns a store for dir, using the OS keyring when one is available.
@@ -133,11 +144,21 @@ func (s *Store) KeyringKey() ([]byte, bool) {
 	if !s.keyringUsable || s.get == nil {
 		return nil, false
 	}
-	text, err := s.get(keyringService, keyringEntry)
-	if err != nil {
+	if !s.keyRead && !s.keyMiss {
+		text, err := s.get(keyringService, keyringEntry)
+		switch {
+		case err == nil:
+			s.keyText, s.keyRead = text, true
+		case errors.Is(err, keyring.ErrNotFound):
+			s.keyMiss = true
+		default:
+			return nil, false
+		}
+	}
+	if !s.keyRead {
 		return nil, false
 	}
-	key, err := base64.StdEncoding.DecodeString(text)
+	key, err := base64.StdEncoding.DecodeString(s.keyText)
 	if err != nil || len(key) != KeySize {
 		return nil, false
 	}
@@ -152,9 +173,11 @@ func (s *Store) SaveKeyring(key []byte) error {
 	if !s.keyringUsable || s.set == nil {
 		return ErrNoKeyring
 	}
-	if err := s.set(keyringService, keyringEntry, base64.StdEncoding.EncodeToString(key)); err != nil {
+	text := base64.StdEncoding.EncodeToString(key)
+	if err := s.set(keyringService, keyringEntry, text); err != nil {
 		return fmt.Errorf("store database key in the keyring: %w", err)
 	}
+	s.keyText, s.keyRead, s.keyMiss = text, true, false
 	return nil
 }
 
@@ -167,6 +190,8 @@ func (s *Store) RemoveKeyring() error {
 	if err := s.delete(keyringService, keyringEntry); err != nil && !errors.Is(err, keyring.ErrNotFound) {
 		return fmt.Errorf("remove database key from the keyring: %w", err)
 	}
+	// Anything read before this call is the key that was just removed.
+	s.keyText, s.keyRead, s.keyMiss = "", false, false
 	return nil
 }
 

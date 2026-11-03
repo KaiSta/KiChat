@@ -7,6 +7,8 @@ import (
 	"os"
 	"runtime"
 	"testing"
+
+	"github.com/zalando/go-keyring"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -195,6 +197,49 @@ func TestKeyringPath(t *testing.T) {
 	}
 	if _, ok := s.KeyringKey(); ok {
 		t.Fatal("the key survived RemoveKeyring")
+	}
+}
+
+// TestTheKeyringKeyIsReadOnce pins the memo the launch depends on: the key is asked for
+// while the database is opened and again when the status the unlock screen reads is built,
+// and on macOS a read means spawning /usr/bin/security for the Keychain.
+func TestTheKeyringKeyIsReadOnce(t *testing.T) {
+	entries := map[string]string{}
+	reads := 0
+	s := NewIsolated(t.TempDir())
+	s.keyringUsable = true
+	s.get = func(_, user string) (string, error) {
+		reads++
+		v, ok := entries[user]
+		if !ok {
+			return "", keyring.ErrNotFound
+		}
+		return v, nil
+	}
+	s.set = func(_, user, value string) error { entries[user] = value; return nil }
+	s.delete = func(_, user string) error { delete(entries, user); return nil }
+
+	key, _ := NewKey()
+	for i := 0; i < 2; i++ {
+		if _, ok := s.KeyringKey(); ok {
+			t.Fatalf("an empty keyring yielded a key on read %d", i)
+		}
+	}
+	if reads != 1 {
+		t.Errorf("an empty keyring was read %d times, want one", reads)
+	}
+
+	if err := s.SaveKeyring(key); err != nil {
+		t.Fatalf("SaveKeyring: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		got, ok := s.KeyringKey()
+		if !ok || !bytes.Equal(got, key) {
+			t.Fatalf("KeyringKey on read %d = %x, %v; want the saved key", i, got, ok)
+		}
+	}
+	if reads != 1 {
+		t.Errorf("%d keyring reads after a save, want the saved value to answer", reads)
 	}
 }
 

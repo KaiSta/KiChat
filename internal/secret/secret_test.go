@@ -135,6 +135,107 @@ func TestClearingASecretAlsoClearsTheFallbackCopy(t *testing.T) {
 	}
 }
 
+// TestAKeyringReadIsAskedForOnce pins what the memo is for. A read is not free: go-keyring
+// reaches the macOS Keychain by spawning /usr/bin/security, and one start reads the same
+// names repeatedly — the settings blob, the provider set built from it, the image server's
+// credential, then every probe. Nothing else writes these entries while the app runs, so a
+// second answer would be the same one at the cost of another process.
+func TestAKeyringReadIsAskedForOnce(t *testing.T) {
+	s := newFallbackStore(t)
+	s.keyring = true
+	reads := 0
+	s.keyringGet = func(_, user string) (string, error) {
+		reads++
+		if user == "brave" {
+			return "stored-in-keyring", nil
+		}
+		return "", keyring.ErrNotFound
+	}
+
+	for i := 0; i < 3; i++ {
+		if got, ok := s.Get("brave"); !ok || got != "stored-in-keyring" {
+			t.Fatalf("Get on read %d = %q, %v; want the keyring value", i, got, ok)
+		}
+	}
+	if reads != 1 {
+		t.Errorf("the keyring was read %d times for one name, want one", reads)
+	}
+
+	// A name the keyring does not hold is a fact about this run too: repeating it would
+	// be one spawn per probe for a secret that does not exist.
+	for i := 0; i < 3; i++ {
+		if _, ok := s.Get("groq"); ok {
+			t.Fatalf("an unset secret was reported set on read %d", i)
+		}
+	}
+	if reads != 2 {
+		t.Errorf("%d keyring reads for one stored and one missing name, want 2", reads)
+	}
+}
+
+// TestATransientKeyringFailureIsNotRemembered is the other half of the memo: a locked or
+// busy keyring refuses once and answers afterwards, so that refusal is asked about again
+// rather than cached as "this secret does not exist" for the rest of the run.
+func TestATransientKeyringFailureIsNotRemembered(t *testing.T) {
+	s := newFallbackStore(t)
+	s.keyring = true
+	locked := true
+	reads := 0
+	s.keyringGet = func(_, _ string) (string, error) {
+		reads++
+		if locked {
+			return "", errors.New("keyring gesperrt")
+		}
+		return "recovered-value", nil
+	}
+
+	if _, ok := s.Get("brave"); ok {
+		t.Fatal("a locked keyring yielded a secret")
+	}
+	locked = false
+	got, ok := s.Get("brave")
+	if !ok || got != "recovered-value" {
+		t.Fatalf("Get after the keyring came back = %q, %v; want the stored value", got, ok)
+	}
+	if reads != 2 {
+		t.Errorf("the keyring was read %d times, want the refusal asked about again", reads)
+	}
+}
+
+// TestASetIsVisibleToTheNextGet pins the memo against the writes that pass through the
+// same store: a value just stored must not be hidden by a miss remembered from before,
+// and a removal must not leave the old answer behind.
+func TestASetIsVisibleToTheNextGet(t *testing.T) {
+	s := newFallbackStore(t)
+	s.keyring = true
+	entries := map[string]string{}
+	s.keyringGet = func(_, user string) (string, error) {
+		v, ok := entries[user]
+		if !ok {
+			return "", keyring.ErrNotFound
+		}
+		return v, nil
+	}
+	s.keyringSet = func(_, user, value string) error { entries[user] = value; return nil }
+	s.keyringDelete = func(_, user string) error { delete(entries, user); return nil }
+
+	if _, ok := s.Get("brave"); ok {
+		t.Fatal("a fresh store holds a secret")
+	}
+	if err := s.Set("brave", "BSA-new-value"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if got, ok := s.Get("brave"); !ok || got != "BSA-new-value" {
+		t.Fatalf("Get after Set = %q, %v; want the value just stored", got, ok)
+	}
+	if err := s.Set("brave", ""); err != nil {
+		t.Fatalf("Set(\"\"): %v", err)
+	}
+	if got, ok := s.Get("brave"); ok {
+		t.Fatalf("the cleared secret is still readable: %q", got)
+	}
+}
+
 // TestIsolatedStoreNeverTouchesTheKeyring is the guard for a bug that reached a
 // user: a test store built over the real keyring wrote its fixture string into
 // it, so the stored Brave key the app read back at startup was a test value and

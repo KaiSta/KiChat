@@ -160,6 +160,14 @@ prompt is instant. The wrapped copy is what makes a keyring reset, an OS reinsta
 new machine recoverable rather than fatal; without it, "the key lives in the keyring"
 means "the key is lost with the keyring".
 
+The keyring is read once per run, not once per question. The start asks for the key while
+it opens the database and again for the status the unlock screen reads, and on macOS a read
+is the `/usr/bin/security` process `go-keyring` spawns — so `dbkey` memoises the answer,
+including a definitive "no entry". A *refusal* is not memoised: a locked or busy keyring
+fails once and answers afterwards, and caching that would hide a key that really is stored.
+The same rule applies to `internal/secret`, which reads every provider's key on the same
+path.
+
 Rules that follow from the threat:
 
 - **No plaintext key fallback.** The existing `internal/secret` fallback writes an AES key
