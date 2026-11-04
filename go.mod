@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0
 	github.com/PuerkitoBio/goquery v1.13.0
-	github.com/andybalholm/brotli v1.0.6
+	github.com/andybalholm/brotli v1.2.7
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
 	github.com/klauspost/compress v1.17.4
 	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
