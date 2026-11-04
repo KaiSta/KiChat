@@ -1168,18 +1168,21 @@ type DigestSettings struct {
 	// result is handed over verbatim: a second request costs more in latency than the
 	// tokens it would save.
 	Threshold int `json:"threshold"`
-	// MaxTokens caps the summary itself — the length of what the chat's model reads
-	// in place of the page, not the size at which condensing starts. It is a setting
-	// rather than a constant because how short a summary can be before it loses the
-	// answer depends on the model and the task, and no measurement here fixes it for
-	// everyone: 600 is a starting point, not a finding.
+	// MaxTokens is the length the summary is aimed at — the length of what the chat's
+	// model reads in place of the page, not the size at which condensing starts. It is
+	// stated to the model as a target, and the request is given whatever room the
+	// window leaves beside the text (up to MaxDigestMaxTokens), so a summary that needs
+	// a little more finishes instead of being cut mid-sentence. It is a setting rather
+	// than a constant because how short a summary can be before it loses the answer
+	// depends on the model and the task, and no measurement here fixes it for everyone:
+	// 600 is a starting point, not a finding.
 	//
 	// Read it through DigestMaxTokens, which answers the zero value as the default and
 	// holds it to a range — a save persists the draft as it arrived, so an emptied
 	// numeric field reaches the running app as 0.
 	//
 	// It is independent of Threshold: one is the least page worth a request, the other
-	// is how long the answer may be, and a large page costs a large summary.
+	// is how long the answer should be, and a large page costs a large summary.
 	MaxTokens int `json:"maxTokens"`
 }
 
@@ -1196,8 +1199,9 @@ const (
 	// MinDigestMaxTokens is the floor. Below a hundred tokens the "summary" is a
 	// sentence or two, which loses more than the request costs.
 	MinDigestMaxTokens = 100
-	// MaxDigestMaxTokens is the ceiling. Past this the answer is no longer a
-	// condensation: it is the page again, paid for twice.
+	// MaxDigestMaxTokens is the ceiling of one summary — the target's own upper bound
+	// and the answer's hard stop. Past this the answer is no longer a condensation: it
+	// is the page again, paid for twice.
 	MaxDigestMaxTokens = 8000
 )
 

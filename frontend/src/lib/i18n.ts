@@ -637,9 +637,9 @@ const de = {
   'settings.digestThreshold': 'Ab dieser Größe kürzen (Tokens)',
   'settings.digestThresholdHint':
     'Darunter wird das Ergebnis unverändert übernommen — die zusätzliche Anfrage kostet mehr Zeit als Tokens. Für Code gilt dasselbe: eine kurze Datei wird ganz übergeben.',
-  'settings.digestMaxTokens': 'Max. Länge der Kürzung (Tokens)',
+  'settings.digestMaxTokens': 'Ziel-Länge der Kürzung (Tokens)',
   'settings.digestMaxTokensHint':
-    'Wie lang die Zusammenfassung höchstens werden darf. Kurz halten — sie ersetzt die Seite oder Datei im Kontext; für sehr lange Seiten darf es mehr sein als die Schwelle oben.',
+    'Wie lang die Zusammenfassung sein soll. Sie darf etwas länger werden, damit sie nicht mitten im Satz abbricht; kurz halten — sie ersetzt die Seite oder Datei im Kontext.',
   'settings.backendDigest': 'Tool-Ergebnisse kürzen',
   'settings.backendDigestHint':
     'Gilt nur für Antworten dieses Backends. Große Seiten und große Dateien werden vor dem Senden zusammengefasst; ein zweiter Aufruf derselben Seite liefert den Volltext.',
@@ -1281,9 +1281,8 @@ const de = {
     'das Modell hat sein Ausgabebudget beim Reasoning aufgebraucht und keine Zusammenfassung geschrieben (stop_reason {{1}}, {{2}} Zeichen Reasoning) — erhöhe „Max. Zusammenfassung (Tokens)“ in den Einstellungen',
   'err.chat.digestFailed': 'Kürzung des Tool-Ergebnisses fehlgeschlagen: {{1}}',
   'err.chat.digestEmpty': 'das Modell hat eine leere gekürzte Fassung geliefert',
-  'err.chat.digestTruncated': 'die gekürzte Fassung wurde abgeschnitten — erhöhe das Ausgabebudget oder wähle ein Modell mit größerem Kontext',
   'err.chat.digestBudgetSpent':
-    'das Modell hat sein Ausgabebudget beim Reasoning aufgebraucht und keine gekürzte Fassung geschrieben (stop_reason {{1}}, {{2}} Zeichen Reasoning) — erhöhe „Max. Länge der Kürzung (Tokens)“ in den Einstellungen oder wähle ein Modell, das nicht zuerst denkt',
+    'das Modell hat sein Ausgabebudget beim Reasoning aufgebraucht und keine gekürzte Fassung geschrieben (stop_reason {{1}}, {{2}} Zeichen Reasoning) — erhöhe „Ziel-Länge der Kürzung (Tokens)“ in den Einstellungen oder wähle ein Modell, das nicht zuerst denkt',
   'err.chat.compactionWhileRunning':
     'für diesen Chat läuft noch eine Generierung — kompaktieren ist möglich, sobald sie fertig ist',
   'err.chat.backendNotConfigured': 'Backend {{1}} ist nicht konfiguriert',
@@ -2105,9 +2104,9 @@ const en: Record<keyof typeof de, string> = {
   'settings.digestThreshold': 'Condense above (tokens)',
   'settings.digestThresholdHint':
     'Below this the result is handed over unchanged — the extra request costs more in time than it saves in tokens. The same holds for code: a short file arrives whole.',
-  'settings.digestMaxTokens': 'Condensation length (tokens)',
+  'settings.digestMaxTokens': 'Condensation length target (tokens)',
   'settings.digestMaxTokensHint':
-    'The most the summary may write. Keep it short — it is what replaces the page or file in the context; for a very long page it may legitimately be more than the threshold above.',
+    'How long the summary should be. It may run a little longer so that it is not cut off mid-sentence; keep it short — it is what replaces the page or file in the context.',
   'settings.backendDigest': 'Condense tool results',
   'settings.backendDigestHint':
     'Applies to answers on this backend only. Large pages and large files are summarised before sending; asking for the same page again returns the full text.',
@@ -2727,9 +2726,8 @@ const en: Record<keyof typeof de, string> = {
     'the model spent its output budget thinking and wrote no summary (stop_reason {{1}}, {{2}} characters of reasoning) — raise “Max summary (tokens)” in Settings',
   'err.chat.digestFailed': 'condensing the tool result failed: {{1}}',
   'err.chat.digestEmpty': 'the model returned an empty condensation',
-  'err.chat.digestTruncated': 'the condensation was cut off — increase the output budget or choose a model with a larger context',
   'err.chat.digestBudgetSpent':
-    'the model spent its output budget thinking and wrote no condensation (stop_reason {{1}}, {{2}} characters of reasoning) — raise “Max condensed length (tokens)” in Settings or pick a model that does not think first',
+    'the model spent its output budget thinking and wrote no condensation (stop_reason {{1}}, {{2}} characters of reasoning) — raise “Condensation length target (tokens)” in Settings or pick a model that does not think first',
   'err.chat.compactionWhileRunning':
     'this chat is still generating — compaction is possible once it finishes',
   'err.chat.backendNotConfigured': 'backend {{1}} is not configured',
@@ -3498,9 +3496,9 @@ const zh: Record<keyof typeof de, string> = {
     '选择一个小而快的模型——最好不要与对话在同一个后端。同一后端会用同一份每分钟额度支付压缩开销；若压缩模型在云端，它会读到这些网页和文件的内容。模型用 offset/limit 定向读取的片段绝不会被压缩——它需要原样的文本来修改。',
   'settings.digestThreshold': '超过此大小则压缩（tokens）',
   'settings.digestThresholdHint': '低于此值时结果原样使用——额外请求花费的时间会多于节省的令牌。代码同理：很短的文件会完整交付。',
-  'settings.digestMaxTokens': '压缩结果的最大长度（tokens）',
+  'settings.digestMaxTokens': '压缩结果的目标长度（tokens）',
   'settings.digestMaxTokensHint':
-    '摘要最多写多长。请保持简短——它将在上下文中取代原网页或文件；对于很长的网页，可以合理地超过上面的阈值。',
+    '摘要的理想长度。为免中途被截断，可以略长一些；请保持简短——它将在上下文中取代原网页或文件。',
   'settings.backendDigest': '压缩工具结果',
   'settings.backendDigestHint':
     '仅对该后端的回答生效。较大的网页和大文件会在发送前被概括；再次请求同一网页会得到完整文本。',
@@ -4062,9 +4060,8 @@ const zh: Record<keyof typeof de, string> = {
     '模型把输出预算用于推理，没有写出摘要（stop_reason {{1}}，{{2}} 个字符的推理）——请在设置中提高“摘要最大 token”',
   'err.chat.digestFailed': '压缩工具结果失败：{{1}}',
   'err.chat.digestEmpty': '模型返回了空的压缩结果',
-  'err.chat.digestTruncated': '压缩结果被截断——请增加输出预算或选择上下文更大的模型',
   'err.chat.digestBudgetSpent':
-    '模型把输出预算用于推理，没有写出压缩结果（stop_reason {{1}}，{{2}} 个字符的推理）——请在设置中提高“压缩最大长度 token”，或选择不先推理的模型',
+    '模型把输出预算用于推理，没有写出压缩结果（stop_reason {{1}}，{{2}} 个字符的推理）——请在设置中提高“压缩结果的目标长度 token”，或选择不先推理的模型',
   'err.chat.compactionWhileRunning': '该对话仍在生成——生成结束后才能压缩',
   'err.chat.backendNotConfigured': '后端 {{1}} 尚未配置',
   'err.chat.contextUnknown': '模型的上下文窗口未知',

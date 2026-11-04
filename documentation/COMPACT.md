@@ -1059,10 +1059,15 @@ manual, not an edge case.
 | `Digest.MaxTokens` | Settings → Tool results | `600` tokens (0 means the default; range 100–8000) |
 | `Backend.Digest` | Settings → Backends, per backend | `false` |
 
-`Digest.MaxTokens` is the **length of the summary**, not the size at which condensing
-starts: it goes out as the request's `max_tokens`. It is a setting because how short a
-summary can be before it stops answering the question depends on the model and the
-page, and 600 was a starting point rather than a measurement. Two rules resolve it
+`Digest.MaxTokens` is the **target length of the summary**, not the size at which
+condensing starts and not the request's hard stop. It is stated to the model in the prompt
+("Ziel: etwa N Tokens"), and the request is given whatever room the window leaves beside
+the text — up to `MaxDigestMaxTokens = 8000` — so a summary that needs a few more tokens
+than it was aiming at finishes instead of being cut mid-sentence. Only the window or that
+8000-token line can still cut one, and a summary cut there is used as it is
+(§17.2). The target is a setting because how short a summary can be before it stops
+answering the question depends on the model and the page, and 600 was a starting point
+rather than a measurement. Two rules resolve it
 (`DigestSettings.DigestMaxTokens`): 0 means the default, and the range is bounded
 (100–8000).
 
@@ -1095,6 +1100,16 @@ bound that remains is the tool budget: a condensation still passes through
   model, an empty answer — returns the result unchanged and emits a warning. The feature
   is an optimisation of what the model reads; the behaviour without it is always the
   fallback.
+- **The target is an aim, not a wall.** The prompt asks the model to fit `MaxTokens`,
+  and the request's `max_tokens` is the room the window leaves beside the text (capped at
+  `MaxDigestMaxTokens`), so 600 asked for and 750 written is a complete 750-token summary
+  rather than 600 tokens cut mid-sentence. A summary that still stops at that ceiling is
+  kept: refusing it would hand the chat the whole page, exactly the cost this exists to
+  avoid, and the tool card holds the page while the second read returns it. The
+  rejection lives in `extractWithBudget` (`TruncatedError`) and only a fold sets it — a
+  memory replaces history, so a sentence cut short there is a fact nothing can recover
+  (`TestCompactionRejectsMaxTokensStop`, against
+  `TestACondensationCutAtItsCeilingIsStillUsed`).
 - **The way back is the same call.** The second read of a page in one chat hands over the
   full text (a per-process ledger keys it), so a model that needs an exact quotation can
   ask for it. The ledger is marked only when the full summary reaches the model; a tool
@@ -1107,9 +1122,11 @@ bound that remains is the tool budget: a condensation still passes through
   whole result would miss on every re-read of the same document
   (`TestTheCondensationCacheIsKeyedByThePageNotItsFraming`). Hashing the text that was
   read, rather than the document, is what stops a summariser with a narrower window from
-  serving a wider summary out of the cache. The cap is in the key because it is a setting: a summary asked to fit
-  in 600 tokens is not the one the same model gives at 2000, so a changed effective cap must miss
-  the cache instead of serving the old length for up to 30 days. A page read twice in one
+  serving a wider summary out of the cache. The target and the ceiling are in the key
+  because one is a setting stated in the prompt and the other bounds the same answer, and
+  the same ceiling can serve two targets: a summary asked to fit in 600 tokens is not the
+  one the same model gives at 2000, so a changed target must miss the cache instead of
+  serving the old length for up to 30 days. A page read twice in one
   chat or across chats costs one condensation; the entry expires after 30 days and the
   start-up prune removes it.
 - **No ratio is stated to the model.** It is told that the text is a summary and that the
@@ -1123,16 +1140,16 @@ bound that remains is the tool budget: a condensation still passes through
 `budget.take`, so the budget is charged for what the model actually receives. The call
 itself reuses `extractWithBudget` ([compact.go:673](../internal/chat/compact.go#L673)) — the
 retry that survives a reasoning model spending its cap on thinking is the same failure
-here — with its own prompt, the configured cap and thinking switched off where the
-backend allows it.
+here — with its own prompt (which states the target), the answer's ceiling and thinking
+switched off where the backend allows it.
 
-The cap is also held under the summariser's window on the *first* attempt, not only on
-the retry: a backend validates the prompt and the output allowance together, so 8000
+The allowance is also held under the summariser's window on the *first* attempt, not only
+on the retry: a backend validates the prompt and the output allowance together, so 8000
 output tokens beside a page that fills a small window is an oversized request, refused
-before a token is generated. That was theoretical while the cap was a constant of 600;
-with the cap as a setting it is what a small local model sees first, so
-`extractWithBudget` shrinks the allowance to the room that is left (pinned by
-`TestTheCapIsHeldUnderTheWindow`).
+before a token is generated. That was theoretical while the setting was a constant of
+600; with the target as a setting and the room the window leaves as the ceiling it is
+what a small local model sees first, so `extractWithBudget` shrinks the allowance to the
+room that is left (pinned by `TestTheCapIsHeldUnderTheWindow`).
 
 Because it is the same helper, every reasoning-model measure a fold takes is taken here
 too, for free: the backend's thinking toggle, the `/no_think` soft switch, inline
@@ -1149,9 +1166,10 @@ purpose and now configurable — which is why the retry matters more here than t
 `internal/chat/digest_test.go`, one per rule above: the page replaced by the
 condensation end to end (through a real scrape against a local page), a backend without
 the switch, no model configured, below the threshold, a failed condensation delivering
-the page plus a warning, the second read returning the full text, a cache hit across
-chats, a document chunk left alone, the configured cap reaching the request as
-`max_tokens`, a changed cap missing the cache, inline thinking stripped from the answer,
+the page plus a warning, the second read returning the full text, a condensation that
+stops at its ceiling still replacing the page, a cache hit across chats, a document chunk
+left alone, the configured target reaching the model in the prompt with room above it, a
+changed target missing the cache, inline thinking stripped from the answer,
 and a thinking-only answer retried with a larger budget. `TestACondensationReplacesThePageTheModelReads`
 fails by design if the call in `runTool` is removed. The cap's resolution (0 = default,
 bounds, threshold) is pinned in `internal/config/config_test.go`. The file half is §17.6:

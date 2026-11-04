@@ -470,33 +470,40 @@ func TestAFailedCondensationStillDeliversTheResult(t *testing.T) {
 	}
 }
 
-func TestTruncatedCondensationKeepsOriginalAndIsNotCached(t *testing.T) {
+// TestACondensationCutAtItsCeilingIsStillUsed pins the difference between a condensation
+// and a fold. The setting is a target, so an answer that ran past it was given the room
+// to finish (TestTheTargetReachesTheModelAndTheAnswerMayFinish); only the window or the
+// feature's own ceiling can still cut one. Throwing that away would hand the chat the
+// whole page instead — the cost this feature exists to avoid. Nothing is lost by keeping
+// it either: the tool card holds the page and a second read returns the full text. A
+// fold's memory still refuses a cut-off answer, because a memory replaces history and
+// cannot be read again (`TestCompactionRejectsMaxTokensStop`).
+func TestACondensationCutAtItsCeilingIsStillUsed(t *testing.T) {
 	for _, reason := range []string{"length", "max_tokens"} {
 		t.Run(reason, func(t *testing.T) {
 			st := newTestStore(t)
 			digester := newDigester(
-				[]llm.StreamEvent{{Type: llm.EventDelta, Text: "partial"}, {Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: reason}}},
-				[]llm.StreamEvent{{Type: llm.EventDelta, Text: "complete"}, {Type: llm.EventDone}},
+				[]llm.StreamEvent{{Type: llm.EventDelta, Text: "Kurzfassung bis zur Grenze"}, {Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: reason}}},
 			)
-			engine, log := newDigestEngine(t, st, digestSettings(), digester)
+			engine, _ := newDigestEngine(t, st, digestSettings(), digester)
 			call := scrapeCall("https://example.com/a")
-			page := bigPage()
-			out, condensed := engine.condenseToolOutput(context.Background(), "chat-1", call, page, tools.TurnRef{BackendID: "fake"}, "")
-			if out != page || condensed {
-				t.Fatal("truncated summary replaced the original")
+
+			out, condensed := engine.condenseToolOutput(context.Background(), "chat-1", call,
+				bigPage(), tools.TurnRef{BackendID: "fake"}, "")
+			if !condensed || !strings.Contains(out, "Kurzfassung bis zur Grenze") {
+				t.Fatalf("a summary cut at the cap was thrown away: condensed=%v out=%q",
+					condensed, truncateForTest(out, 160))
 			}
-			warned := false
-			for _, ev := range log.snapshot() {
-				if msg, ok := uimsg.Parse(fmt.Sprint(ev.payload["warning"])); ok && ev.name == "chat:warning" && msg.Code == "chat.digestKeptWhole" {
-					warned = true
-				}
+			if got := digester.requestCount(); got != 1 {
+				t.Fatalf("digester calls = %d, want one — the ceiling already gave the answer its room", got)
 			}
-			if !warned {
-				t.Fatal("missing warning for truncated summary")
-			}
-			out, condensed = engine.condenseToolOutput(context.Background(), "chat-1", call, page, tools.TurnRef{BackendID: "fake"}, "")
-			if !condensed || !strings.Contains(out, "complete") || digester.requestCount() != 2 {
-				t.Fatalf("truncated summary was cached: condensed=%v calls=%d", condensed, digester.requestCount())
+			// It is a condensation of that text like any other, so the next chat reuses
+			// it rather than paying for the page again.
+			other, _ := engine.condenseToolOutput(context.Background(), "chat-2", call,
+				bigPage(), tools.TurnRef{BackendID: "fake"}, "")
+			if !strings.Contains(other, "Kurzfassung bis zur Grenze") || digester.requestCount() != 1 {
+				t.Fatalf("the cut summary was not reused: out=%q calls=%d",
+					truncateForTest(other, 160), digester.requestCount())
 			}
 		})
 	}
@@ -814,26 +821,37 @@ func TestTheNoticeSpeaksTheInterfaceLanguage(t *testing.T) {
 // the line numbers a page summary is allowed to drop, so one must never answer for the
 // other.
 func TestACondensationIsKeyedByTheWholeModelReference(t *testing.T) {
-	a := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite")
-	b := digestKey(digestJobPage, llm.Ref{Backend: "nvidia", Model: "same-id"}, 600, "die Seite")
+	a := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite")
+	b := digestKey(digestJobPage, llm.Ref{Backend: "nvidia", Model: "same-id"}, 600, 1200, "die Seite")
 	if a == b {
 		t.Fatal("the same model id on two backends shares a condensation")
 	}
-	if again := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite"); again != a {
+	if again := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); again != a {
 		t.Error("the same page and model produced a different key")
 	}
-	if changed := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite, geändert"); changed == a {
+	if changed := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite, geändert"); changed == a {
 		t.Error("a changed page inherited the old condensation")
 	}
-	if asFile := digestKey(digestJobFile, llm.Ref{Backend: "groq", Model: "same-id"}, 600, "die Seite"); asFile == a {
+	if asFile := digestKey(digestJobFile, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); asFile == a {
 		t.Error("a file condensation is served out of a page's cache entry")
+	}
+	// The target is in the prompt, and the same ceiling can serve two targets, so the
+	// key has to carry both: 600 and 1200 beside an 8000-token ceiling are two
+	// different summaries of the same words.
+	if retargeted := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 1200, 8000, "die Seite"); retargeted == a {
+		t.Error("a changed target inherited the old condensation")
+	}
+	if wider := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 8000, "die Seite"); wider == a {
+		t.Error("a changed ceiling inherited the old condensation")
 	}
 }
 
-// TestTheConfiguredCapIsWhatTheModelIsAskedFor pins the setting on the wire. The cap
-// is the summary's length, so it has to be the request's `max_tokens` — a value read
-// into the settings and never sent would leave the panel lying about what it does.
-func TestTheConfiguredCapIsWhatTheModelIsAskedFor(t *testing.T) {
+// TestTheTargetReachesTheModelAndTheAnswerMayFinish pins the setting on the wire. It is
+// a target, so it travels in the prompt; it is not the request's hard stop, because a
+// summary that needs a few more tokens than it was aiming at must finish rather than be
+// cut mid-sentence. A value read into the settings and never sent would leave the panel
+// lying about what it does, so the prompt is the half that matters.
+func TestTheTargetReachesTheModelAndTheAnswerMayFinish(t *testing.T) {
 	st := newTestStore(t)
 	settings := digestSettings()
 	settings.Digest.MaxTokens = 180
@@ -846,8 +864,12 @@ func TestTheConfiguredCapIsWhatTheModelIsAskedFor(t *testing.T) {
 	if got := digester.requestCount(); got != 1 {
 		t.Fatalf("digester calls = %d, want one condensation", got)
 	}
-	if got := digester.requestAt(0).MaxTokens; got != 180 {
-		t.Errorf("max_tokens = %d, want the configured 180", got)
+	req := digester.requestAt(0)
+	if prompt := req.Messages[len(req.Messages)-1].Content; !strings.Contains(prompt, "etwa 180 Tokens") {
+		t.Errorf("the target is not stated to the model: %q", truncateForTest(prompt, 160))
+	}
+	if req.MaxTokens <= 180 {
+		t.Errorf("max_tokens = %d: the answer has no room to finish past its target", req.MaxTokens)
 	}
 }
 
@@ -979,8 +1001,8 @@ func TestAChangedCapDoesNotReuseTheOldSummary(t *testing.T) {
 	if !strings.Contains(other, "Längere Fassung") {
 		t.Fatalf("the raised cap served the old length: %q", truncateForTest(other, 120))
 	}
-	if got := digester.requestAt(1).MaxTokens; got != 1200 {
-		t.Errorf("max_tokens = %d, want the new 1200", got)
+	if prompt := digester.requestAt(1).Messages[1].Content; !strings.Contains(prompt, "etwa 1200 Tokens") {
+		t.Errorf("the raised target was not sent: %q", truncateForTest(prompt, 160))
 	}
 }
 

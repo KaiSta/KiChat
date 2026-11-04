@@ -665,7 +665,11 @@ type extractionOptions struct {
 	// think first.
 	EmptyCode  string
 	BudgetCode string
-	// TruncatedError rejects an answer that stopped at the output limit.
+	// TruncatedError rejects an answer that stopped at the output limit. Only a fold
+	// sets it: the memory it writes replaces history, so a sentence cut short is a
+	// fact nothing can recover. A condensation's cap-cut summary is used as it is —
+	// the page it stands in for is still on the tool card and comes back on a second
+	// read (digest.go, DigestToolOutput).
 	TruncatedError error
 }
 

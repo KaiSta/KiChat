@@ -74,7 +74,11 @@ Antworte ausschließlich mit der Zusammenfassung.`
 // the first read of a page or a file after that change missed the cache. That is the
 // harmless direction: a miss costs one request, while a shared entry would answer a
 // question about a source file with a summary of a web page.
-const digestPromptVersion = 2
+//
+// The third bump is the target: the prompt now states the length the summary is aimed
+// at, so a summary written before that instruction is not the summary this code asks
+// for even when the text and the model are the same.
+const digestPromptVersion = 3
 
 // digestCacheDays bounds how long a condensation is reused. Content is the key, so
 // the entry cannot go stale in the way a URL-keyed cache can; the expiry only stops
@@ -155,13 +159,15 @@ func digestNotice(call llm.ToolCall, partial bool, lang string) string {
 // error. It is derived rather than a number someone typed, so a longer prompt cannot
 // quietly eat into the room the page was given.
 var digestPromptReserve = llm.EstimateTokens(digestSystemPrompt) +
-	llm.EstimateTokens(digestPrompt("")) + llm.EstimateTokens(noThinkTag) + 128
+	llm.EstimateTokens(digestPrompt("", config.DefaultDigestMaxTokens)) +
+	llm.EstimateTokens(noThinkTag) + 128
 
 // readFilePromptReserve is the same derivation for a file condensation, which has its own
 // system prompt and its own wrapper. It is derived rather than typed for the same reason:
 // a longer prompt cannot quietly eat the room the text was given.
 var readFilePromptReserve = llm.EstimateTokens(readFileSystemPrompt) +
-	llm.EstimateTokens(readFileDigestPrompt("", "")) + llm.EstimateTokens(noThinkTag) + 128
+	llm.EstimateTokens(readFileDigestPrompt("", "", config.DefaultDigestMaxTokens)) +
+	llm.EstimateTokens(noThinkTag) + 128
 
 // The markers tools.scrapeURL wraps the page in. Everything between them is the page;
 // everything around them is the tool's own framing — title, source line, page count,
@@ -367,25 +373,27 @@ const (
 )
 
 // digestKey identifies a condensation by everything that decides its content: the job,
-// the model that writes it, the prompt that asks for it, the cap it was written under,
-// and the text it is made from. File paths are included in the content argument because
-// the file prompt names them. The URL is deliberately absent — a page whose text
-// changed is a different page, and a summary of the old text must not be served for
-// the new one.
+// the model that writes it, the prompt that asks for it, the target and ceiling it was
+// written under, and the text it is made from. File paths are included in the content
+// argument because the file prompt names them. The URL is deliberately absent — a page
+// whose text changed is a different page, and a summary of the old text must not be
+// served for the new one.
 //
-// The cap belongs in the key because it is a setting: a summary written to answer in
-// 600 tokens is not the summary the same model would give at 2000, so a changed cap
-// has to miss the cache rather than serve the old length until the entry expires.
+// The target belongs in the key because it is a setting and it is stated in the prompt:
+// a summary written to answer in 600 tokens is not the summary the same model would give
+// at 2000, so a changed target has to miss the cache rather than serve the old length
+// until the entry expires. The ceiling is there beside it because it is a second bound
+// on the same answer — the window can shrink it without the target changing.
 //
 // The model is its whole reference, backend included, because that is what a model
 // is everywhere else in this app (llm.Ref keys the summary model and the per-model
 // overrides): two backends can expose the same id — a local file named like a hosted
 // model, two vendors reselling the same weights — and their condensations are not
 // interchangeable, even when the weights are.
-func digestKey(job string, ref llm.Ref, maxTokens int, content string) string {
+func digestKey(job string, ref llm.Ref, target, ceiling int, content string) string {
 	sum := sha256.Sum256([]byte(content))
-	raw := fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%d\x00%s", job, ref.Backend, ref.Model,
-		digestPromptVersion, maxTokens, hex.EncodeToString(sum[:]))
+	raw := fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%d\x00%d\x00%s", job, ref.Backend, ref.Model,
+		digestPromptVersion, target, ceiling, hex.EncodeToString(sum[:]))
 	key := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(key[:])
 }
@@ -398,7 +406,13 @@ type DigestOptions struct {
 	// the summary is told not to lose are all different (readFileSystemPrompt). Empty
 	// means a page.
 	File string
-	// MaxTokens caps the summary itself; a reasoning model may need more than this
+	// Target is the length the summary is aimed at, stated in the prompt. It is what
+	// the setting means: the model is asked to fit it, and the request's own ceiling
+	// (MaxTokens) is generous enough that an answer needing a little more finishes
+	// instead of being cut mid-sentence.
+	Target int
+	// MaxTokens is the request's output ceiling — the room the caller's window leaves
+	// beside the text, not the target. A reasoning model may need more than either
 	// because extractWithBudget grows the budget by the thinking it measured.
 	MaxTokens int
 	// DisableThinking asks the backend to skip reasoning. A condensation is not a
@@ -413,10 +427,22 @@ type DigestOptions struct {
 
 // DigestToolOutput condenses one tool result for the chat's model to read.
 func DigestToolOutput(ctx context.Context, p llm.Provider, model string, opts DigestOptions) (string, error) {
-	system, prompt := digestSystemPrompt, digestPrompt(opts.Text)
-	if opts.File != "" {
-		system, prompt = readFileSystemPrompt, readFileDigestPrompt(opts.File, opts.Text)
+	target := opts.Target
+	if target <= 0 {
+		target = opts.MaxTokens
 	}
+	system, prompt := digestSystemPrompt, digestPrompt(opts.Text, target)
+	if opts.File != "" {
+		system, prompt = readFileSystemPrompt, readFileDigestPrompt(opts.File, opts.Text, target)
+	}
+	// Trusted as it stands, including a summary that still stopped at the ceiling:
+	// the target is an aim, not a wall, so an answer that ran past it is a summary
+	// that needed the room, not a failure. Refusing it (as a fold does) would hand the
+	// chat the whole page instead — the exact cost this feature exists to avoid — and
+	// no fact is lost by keeping it, because the tool card holds the page and the
+	// second read of it returns the full text. A fold's memory is the opposite case and
+	// still rejects a truncated answer: it replaces history, so nothing can be read
+	// again.
 	return extractWithBudget(ctx, p, model, system,
 		prompt+"\n\n"+noThinkTag, extractionOptions{
 			Temperature:     0.2,
@@ -426,15 +452,17 @@ func DigestToolOutput(ctx context.Context, p llm.Provider, model string, opts Di
 			FailureCode:     "chat.digestFailed",
 			// Two fixes, named in the order that costs less: the cap is a setting now,
 			// and a model that thinks first is the other half of the same failure.
-			EmptyCode:      "chat.digestEmpty",
-			BudgetCode:     "chat.digestBudgetSpent",
-			TruncatedError: uimsg.Errorf("chat.digestTruncated"),
+			EmptyCode:  "chat.digestEmpty",
+			BudgetCode: "chat.digestBudgetSpent",
 		})
 }
 
-func digestPrompt(text string) string {
+// The target travels in the wrapper as a sentence rather than only as the request's
+// `max_tokens`, because the two stopped being the same number: `max_tokens` is the
+// ceiling that lets the answer finish, and this is what the answer is asked to fit.
+func digestPrompt(text string, target int) string {
 	var sb strings.Builder
-	sb.WriteString("Fasse den folgenden Seitentext zusammen.\n\n<page>\n")
+	fmt.Fprintf(&sb, "Fasse den folgenden Seitentext zusammen. Ziel: etwa %d Tokens.\n\n<page>\n", target)
 	sb.WriteString(text)
 	sb.WriteString("\n</page>")
 	return sb.String()
@@ -443,9 +471,9 @@ func digestPrompt(text string) string {
 // readFileDigestPrompt wraps the numbered lines a read_file returned. The path travels in
 // the wrapper as well as in the result's own header, because it is the one fact the
 // summary has to name correctly for the next call to be about the right file.
-func readFileDigestPrompt(path, text string) string {
+func readFileDigestPrompt(path, text string, target int) string {
 	var sb strings.Builder
-	sb.WriteString("Fasse den folgenden Dateiinhalt zusammen.\n\n")
+	fmt.Fprintf(&sb, "Fasse den folgenden Dateiinhalt zusammen. Ziel: etwa %d Tokens.\n\n", target)
 	fmt.Fprintf(&sb, "<file path=%q>\n", path)
 	sb.WriteString(text)
 	sb.WriteString("\n</file>")
@@ -633,7 +661,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// files, and that is a cost rule rather than a tidiness one: a coding model re-reads a file
 	// as a matter of routine, once per turn, and a repeated read that handed over 20k tokens
 	// would undo this feature for the rest of the chat. Re-condensing costs one lookup, because
-	// the cache is keyed on the text (same job, model, cap and content).
+	// the cache is keyed on the text (same job, model, target and content).
 	rereadIsEscape := job == digestJobPage
 	if rereadIsEscape {
 		identity = condensedIdentity(chatID, call, output)
@@ -648,11 +676,12 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 			uimsg.Errorf("chat.digestBackendMissing", ref.Model, ref.Backend).Error())
 		return output, false
 	}
-	// The cap the user configured, resolved: zero means the default and the range is
-	// bounded. Independent of the threshold on purpose — that is the least page worth
-	// a request, while this is how long the answer may be, and a 40k page above a 2k
-	// threshold can want more than 2k tokens out.
-	maxTokens := settings.Digest.DigestMaxTokens()
+	// The length the user asked for, resolved: zero means the default and the range is
+	// bounded. It is the target the summary is asked to fit, not the point where it is
+	// stopped (the answer's ceiling is derived below). Independent of the threshold on
+	// purpose — that is the least page worth a request, while this is how long the
+	// answer should be, and a 40k page above a 2k threshold can want more than 2k out.
+	target := settings.Digest.DigestMaxTokens()
 	// The cached resolution, not the fresh one: only the window and the capability
 	// list are needed here, and asking for them unconditionally means a listing of
 	// every configured backend inside a tool call — up to twenty seconds each for a
@@ -672,13 +701,21 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// An indexed document can be far larger than the summariser can read — a 56-page
 	// manual is ~98k tokens against a 32k window — and a request that large is refused
 	// before a token is generated. The text is cut to the room the window leaves beside
-	// the summary, and the notice says the result is a partial one: a summary that
+	// the answer, and the notice says the result is a partial one: a summary that
 	// silently covered the first third of a manual would be worse than no summary. The
 	// reserve is the one for this job: a file's prompt is a different prompt.
 	text, partial := content, incomplete
+	// outputCeiling is the request's output allowance. It starts as the target — a
+	// window nobody reported gives nothing more — and grows below to whatever room the
+	// text leaves, so a summary that needs a little more than the target can finish
+	// instead of being cut mid-sentence. That is the whole difference between this and a
+	// wall: the user's number is what the summary is asked to fit (digestPrompt), not
+	// the point where it is stopped.
+	outputCeiling := target
 	if limit > 0 {
-		// Leave at least half the usable window for input when the configured output
-		// cap is larger than the model can accommodate.
+		// Half the usable window is the most the answer may reserve for itself when
+		// sizing the input: a text that cannot fit must give up room for the text, not
+		// for the answer's ambition.
 		overhead := reserve
 		if job == digestJobFile {
 			overhead += llm.EstimateTokens(path)
@@ -687,15 +724,22 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 		if available <= 2 {
 			return output, false
 		}
-		answer := min(maxTokens, available/2)
-		room := available - answer
-		if llm.EstimateTokens(content) > room {
-			cut := cutToTokens(content, room)
+		answerRoom := min(target, available/2)
+		inputRoom := min(llm.EstimateTokens(content), available-answerRoom)
+		if inputRoom <= 0 {
+			return output, false
+		}
+		if llm.EstimateTokens(content) > inputRoom {
+			cut := cutToTokens(content, inputRoom)
 			if cut == "" {
 				return output, false
 			}
 			text, partial = cut, true
 		}
+		// Whatever the text did not need is the answer's, up to the feature's own
+		// ceiling: past that a "condensation" is the page again, paid for twice
+		// (config.MaxDigestMaxTokens).
+		outputCeiling = min(available-inputRoom, config.MaxDigestMaxTokens)
 	}
 	// The key is the text that was read, not the result: a scrape's framing carries a
 	// document id that is new on every scrape, so hashing the whole output would miss the
@@ -705,12 +749,12 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	// The job is in it as well (digestKey), because a page and a file can be condensed out
 	// of the same words and the answers are not interchangeable.
 	keyText := text
-	system, prompt := digestSystemPrompt, digestPrompt(text)
+	system, prompt := digestSystemPrompt, digestPrompt(text, target)
 	if job == digestJobFile {
 		keyText = path + "\x00" + text
-		system, prompt = readFileSystemPrompt, readFileDigestPrompt(path, text)
+		system, prompt = readFileSystemPrompt, readFileDigestPrompt(path, text, target)
 	}
-	cacheCap := maxTokens
+	cacheCap := outputCeiling
 	if limit > 0 {
 		prompt += "\n\n" + noThinkTag
 		promptTokens := llm.EstimateMessagesTokens([]llm.Message{
@@ -722,7 +766,7 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 			cacheCap = room
 		}
 	}
-	key := digestKey(job, ref, cacheCap, keyText)
+	key := digestKey(job, ref, target, cacheCap, keyText)
 	// assemble puts the condensation back where the text was. A result that was never
 	// framed is returned as before, one string with the notice on top. A file has no
 	// markers around its content — the header, the continuation line and the AGENTS.md
@@ -752,7 +796,8 @@ func (e *Engine) condenseToolOutput(ctx context.Context, chatID string, call llm
 	summary, err := DigestToolOutput(ctx, provider, ref.Model, DigestOptions{
 		Text:            text,
 		File:            path,
-		MaxTokens:       maxTokens,
+		Target:          target,
+		MaxTokens:       outputCeiling,
 		DisableThinking: disableThinking,
 		ContextLimit:    limit,
 	})
