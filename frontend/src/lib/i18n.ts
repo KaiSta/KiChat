@@ -752,6 +752,11 @@ const de = {
   'settings.images.cfgHint':
     'Wie stark der Prompt das Bild bestimmt (1–30, üblich 7). Niedrig malt mehr aus dem Modell selbst, hoch hält sich streng an den Prompt; destillierte bzw. Turbo-/Flow-Modelle (Flux, Qwen-Image, SDXL-Turbo) laufen mit 1, wo es keine Führung gibt.',
   'settings.images.size': 'Größe',
+  // The option that leaves both size boxes empty, which is how the model chooses the
+  // resolution itself on every generate_image call. It is a button beside the presets
+  // because the empty state is a choice, not an unfilled field.
+  'settings.images.sizeModelHint':
+    'Beide Felder leer: das Modell wählt die Größe bei jedem generate_image-Aufruf selbst — passend zum Motiv, etwa hochkant für ein Porträt oder quer für eine Landschaft. Ein eingetragener Wert gilt für jedes Bild.',
   'settings.images.sizePreset': 'Quadratische Größe',
   // The two 16:9 bases. The label names the screen size; the hint gives the arithmetic
   // that reaches it, because 4K has to start at 1920 — a pass is capped at 2×, so 2560
@@ -2212,6 +2217,10 @@ const en: Record<keyof typeof de, string> = {
   'settings.images.cfgHint':
     'How hard the prompt drives the picture (1–30, usually 7). Low paints more out of the model itself, high holds closely to the prompt; a distilled or turbo/flow-matching model (Flux, Qwen-Image, SDXL-Turbo) runs at 1, where there is no guidance at all.',
   'settings.images.size': 'Size',
+  // The option that leaves both size boxes empty, which is how the model chooses the
+  // resolution itself on every generate_image call.
+  'settings.images.sizeModelHint':
+    'Both boxes empty: the model chooses the size on every generate_image call to fit the subject — portrait, landscape, a wallpaper. A value you type here applies to every picture.',
   'settings.images.sizePreset': 'Square size',
   // The two 16:9 bases. The label names the screen size; the hint gives the arithmetic
   // that reaches it, because 4K has to start at 1920 — a pass is capped at 2×, so 2560
@@ -3597,6 +3606,8 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.cfgHint':
     '提示词对画面的约束强度（1–30，通常为 7）。数值低更依赖模型自身的发挥，数值高则严格遵循提示词；蒸馏模型或 Turbo/Flow 模型（Flux、Qwen-Image、SDXL-Turbo）使用 1，此时不存在引导。',
   'settings.images.size': '尺寸',
+  'settings.images.sizeModelHint':
+    '两个框都留空：模型在每次 generate_image 调用时自行选择尺寸以贴合主题——竖幅、横幅、壁纸。填入的数值适用于每张图片。',
   'settings.images.sizePreset': '正方形尺寸',
   // The two 16:9 bases. The label names the screen size; the hint gives the arithmetic
   // that reaches it, because 4K has to start at 1920 — a pass is capped at 2×, so 2560

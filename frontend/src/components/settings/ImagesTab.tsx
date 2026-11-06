@@ -1317,6 +1317,18 @@ export function ImagesTab({
               enlargement that lands on the size its label names. A size this row does
               not offer is still typed into the boxes above. */}
           <div className="mt-1 flex flex-wrap items-center gap-1">
+            {/* The option that means "no size": both boxes empty, which is the one state in
+                which the model picks the resolution per picture through its generate_image
+                arguments. It sits with the presets because it is the same kind of choice —
+                one click that fills the boxes, here with nothing. */}
+            <button
+              type="button"
+              className="btn btn-sm"
+              title={t('settings.images.sizeModelHint')}
+              onClick={() => update({ width: 0, height: 0 })}
+            >
+              {t('settings.images.modelDecides')}
+            </button>
             {SIZE_PRESETS.map((preset) => {
               const label = preset.labelKey ? tDynamic(preset.labelKey) : `${preset.width}²`
               const title = preset.hintKey
