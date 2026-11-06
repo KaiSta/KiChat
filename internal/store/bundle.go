@@ -114,11 +114,12 @@ func (s *Store) chatDocuments(chatID string) ([]Document, error) {
 // machines allocated independently. Replacing is what makes an import idempotent — the
 // same archive applied twice leaves the database as the archive describes it.
 //
-// Two values are not carried across. Attachment.SavedPath is a path on the machine the
-// archive was written on, so importing it would make the pictures panel claim a file
-// the user does not have. Everything else — ids, sequence numbers and timestamps —
-// is preserved, because the import policy compares timestamps and because a chat's
-// message ids are referenced by its compactions and tool calls.
+// Two values are not carried across. Attachment.SavedPath and Attachment.ProjectPath both
+// point at files the archive does not contain, so importing either would make the window
+// claim a copy the user does not have — the first in the pictures panel, the second on the
+// picture's card. Everything else — ids, sequence numbers and timestamps — is preserved,
+// because the import policy compares timestamps and because a chat's message ids are
+// referenced by its compactions and tool calls.
 func (s *Store) SaveChatBundle(b ChatBundle) error {
 	if b.Chat.ID == "" {
 		return errors.New("chat bundle has no id")
@@ -221,8 +222,8 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		if _, err := tx.Exec(`
 INSERT INTO attachments (id,chat_id,message_id,kind,filename,mime,size_bytes,
   sha256,pages,token_estimate,placement,document_id,warning,created_at,generation_json,
-  saved_path,derivation_json)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'',?)`,
+  saved_path,project_path,derivation_json)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'','',?)`,
 			a.ID, c.ID, a.MessageID, a.Kind, a.Filename, a.Mime, a.SizeBytes,
 			a.SHA256, a.Pages, a.TokenEstimate, a.Placement, a.DocumentID,
 			a.Warning, millis(a.CreatedAt), generation, derivation); err != nil {

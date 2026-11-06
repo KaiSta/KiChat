@@ -1911,6 +1911,7 @@ export namespace store {
 	    // Go type: time
 	    createdAt: any;
 	    savedPath?: string;
+	    projectPath?: string;
 	    generation?: GenerationRecipe;
 	    derivation?: Derivation;
 	
@@ -1935,6 +1936,7 @@ export namespace store {
 	        this.warning = source["warning"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	        this.savedPath = source["savedPath"];
+	        this.projectPath = source["projectPath"];
 	        this.generation = this.convertValues(source["generation"], GenerationRecipe);
 	        this.derivation = this.convertValues(source["derivation"], Derivation);
 	    }

@@ -556,6 +556,16 @@ CREATE INDEX IF NOT EXISTS idx_file_snapshots_chat ON file_snapshots(chat_id, up
 	// before this column existed and every backend that reports nothing, which is why
 	// the window shows the row only when it is positive.
 	`ALTER TABLE messages ADD COLUMN cache_hit_tokens INTEGER NOT NULL DEFAULT 0`,
+	// 16: the copy of a drawn picture that sits in a project's folder.
+	//
+	// A relative path, and a column of its own rather than a second use of `saved_path`: that
+	// one records where the *user* exported a picture, which may be anywhere and is replaced
+	// by the next Save as, while this one is a fact about the project the picture was drawn
+	// in. It is what lets a picture's card name the file without the reader opening the tool
+	// result above it. Empty is every picture drawn outside a project, and every row written
+	// before this column existed. Appended here for the reason migrations 4–15 are: the
+	// runner resumes at the version a database is already at.
+	`ALTER TABLE attachments ADD COLUMN project_path TEXT NOT NULL DEFAULT ''`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

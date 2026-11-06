@@ -3,7 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -216,9 +219,26 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 		return "", uimsg.Detailf("tools.imageNamesUnreadable",
 			fmt.Sprintf("the filenames already used in this chat could not be read: %v", err), err)
 	}
+	// A chat with a project folder keeps its own copy of every picture drawn in it, so
+	// generate_image in a coding chat lands a file in the folder the code lives in — no
+	// second save step and no second tool. A failure here does not throw the picture away:
+	// it is already drawn and filed in the chat, and the result says what went wrong rather
+	// than claiming a file that is not there.
+	var saved []string
+	var saveErr error
 	for i, img := range result.Kept() {
 		name := uniqueName(used, imageFilename(prompt, i, img.Ext))
-		if _, err := s.storeGeneratedImage(chatID, messageID, name, img, &recipe, nil); err != nil {
+		// The project copy is written first so its path can go onto the attachment that
+		// links to it: the picture's card reads that path from the row, and a path written
+		// after the row existed would need a second statement to say so.
+		path, err := s.saveInProject(chatID, name, img)
+		switch {
+		case err != nil:
+			saveErr = err
+		case path != "":
+			saved = append(saved, path)
+		}
+		if _, err := s.storeGeneratedImage(chatID, messageID, name, img, &recipe, nil, path); err != nil {
 			// The picture is already drawn and paid for, so an error here loses it
 			// entirely. Reporting the failure is still right: silently returning a
 			// cheerful result would leave the user with a tool card claiming a
@@ -229,7 +249,59 @@ func (s *Service) generateImage(ctx context.Context, chatID, argsJSON string) (s
 		used[name] = true
 	}
 
-	return summarizeGeneration(s.Language(), req, result, caption, captionErr, pipeline, adjusted), nil
+	return summarizeGeneration(s.Language(), req, result, caption, captionErr, pipeline, adjusted, saved, saveErr), nil
+}
+
+// saveInProject writes one generated picture into the project folder's root and returns the
+// path in the form the model writes paths in — relative to that root. An empty path with a
+// nil error means the chat has no project folder, which is not a failure: a chat keeps its
+// pictures in the transcript and has no folder to put them in.
+//
+// This is what makes a picture drawn in a project usable from its code without a save step.
+// The chat attachment stays beside it, because that is what renders the picture and holds the
+// recipe a redraw reads.
+//
+// An existing name is never overwritten. A generated picture and a file the user already had
+// can share a slug, and drawing the same prompt twice is ordinary, so a taken name moves to
+// the next numbered variant instead. The check is O_EXCL rather than a stat beforehand, so two
+// draws racing on one name cannot both create it.
+func (s *Service) saveInProject(chatID, name string, img images.Image) (string, error) {
+	root, err := s.workspaceFor(chatID)
+	if err != nil {
+		// Either no project, or one whose folder can no longer be opened — the latter is
+		// reported by the file tools when something reads it. Neither is worth failing a
+		// finished draw over.
+		return "", nil
+	}
+	for n := 1; n <= 1000; n++ {
+		candidate := name
+		if n > 1 {
+			candidate = numberedName(name, n)
+		}
+		abs, err := root.Resolve(candidate)
+		if err != nil {
+			return "", err
+		}
+		file, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, writeErr := file.Write(img.Data)
+		if closeErr := file.Close(); writeErr == nil {
+			writeErr = closeErr
+		}
+		if writeErr != nil {
+			// A half-written picture would take the name and never open, which is a worse
+			// answer than reporting the failure.
+			_ = os.Remove(abs)
+			return "", writeErr
+		}
+		return root.Relative(abs), nil
+	}
+	return "", fmt.Errorf("%s could not be given a free name in the project folder", name)
 }
 
 // caption asks the loaded model for the caption the backend will draw from, when the
@@ -263,11 +335,22 @@ func (s *Service) caption(ctx context.Context, chatID, mode string, req images.R
 // above all: stopping the model from describing what it drew. The chat model that
 // called this tool has not seen the picture, and a reply that invents its contents
 // reads as a broken feature rather than as an absent capability.
-func summarizeGeneration(lang string, req images.Request, result images.Result, caption images.CaptionResult, captionErr error, pipeline images.Pipeline, adjusted images.Adjustments) string {
+func summarizeGeneration(lang string, req images.Request, result images.Result, caption images.CaptionResult, captionErr error, pipeline images.Pipeline, adjusted images.Adjustments, saved []string, saveErr error) string {
 	var sb strings.Builder
 	kept := len(result.Kept())
 	fmt.Fprintf(&sb, text(lang, "%d Bild(er) wurden erzeugt und im Chat angezeigt.\n",
 		"%d image(s) were created and shown in the chat.\n"), kept)
+	// The path in the folder is what makes the file usable: the model references it from
+	// code, so a picture whose location it only has to guess is a picture it will not use.
+	if len(saved) > 0 {
+		fmt.Fprintf(&sb, text(lang, "Im Projektordner gespeichert: %s\n",
+			"Saved in the project folder: %s\n"), strings.Join(saved, ", "))
+	}
+	if saveErr != nil {
+		fmt.Fprintf(&sb, text(lang,
+			"Im Projektordner nicht gespeichert (%v) — das Bild ist trotzdem im Chat.\n",
+			"Not saved in the project folder (%v) — the picture is in the chat anyway.\n"), saveErr)
+	}
 	if dropped := len(result.Images) - kept; dropped > 0 {
 		// Said out loud rather than dropped in silence: the server drew them, the chat does
 		// not show them, and a model that was told only about the kept ones would answer a
@@ -418,7 +501,7 @@ func (s *Service) imageSettings() config.ImageSettings {
 // none, and a backend that validates the shape refuses the whole request
 // (GROQ.md §6). The model reads its own call and the tool result instead; the
 // picture is stored, shown, saved and redrawn from the transcript.
-func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img images.Image, recipe *store.GenerationRecipe, derivation *store.Derivation) (store.Attachment, error) {
+func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img images.Image, recipe *store.GenerationRecipe, derivation *store.Derivation, projectPath string) (store.Attachment, error) {
 	if s.Store == nil {
 		return store.Attachment{}, uimsg.Detailf("tools.noStore", "no storage is available, so the picture cannot be filed")
 	}
@@ -443,6 +526,9 @@ func (s *Service) storeGeneratedImage(chatID, messageID, filename string, img im
 		// Nil for a picture that was not enlarged from another one. The two fields are
 		// exclusive in practice: an upscale has provenance, a draw has a prompt.
 		Derivation: derivation,
+		// Empty unless this picture was drawn in a project, where its file sits in the
+		// folder's root and the card names it from here.
+		ProjectPath: projectPath,
 	}
 	document := store.Document{
 		ID:           uuid.New().String(),
@@ -644,7 +730,7 @@ func (s *Service) Regenerate(ctx context.Context, attachmentID string, recipe st
 	var first store.Attachment
 	for i, img := range result.Kept() {
 		name := uniqueName(used, redrawFilename(req.Prompt, effective.Seed, img.Ext, i))
-		attachment, err := s.storeGeneratedImage(source.ChatID, source.MessageID, name, img, &effective, nil)
+		attachment, err := s.storeGeneratedImage(source.ChatID, source.MessageID, name, img, &effective, nil, "")
 		if err != nil {
 			return store.Attachment{}, err
 		}
@@ -842,16 +928,22 @@ func uniqueName(used map[string]bool, name string) string {
 	if !used[name] {
 		return name
 	}
+	for n := 2; ; n++ {
+		if candidate := numberedName(name, n); !used[candidate] {
+			return candidate
+		}
+	}
+}
+
+// numberedName spells the numbered variant of a picture's name, `a-fox-1.png` →
+// `a-fox-1-2.png`. One spelling for both the chat's names and the folder's, so a picture
+// cannot be called one thing in the transcript and another on disk.
+func numberedName(name string, n int) string {
 	base, ext := name, ""
 	if dot := strings.LastIndex(name, "."); dot >= 0 {
 		base, ext = name[:dot], name[dot:]
 	}
-	for n := 2; ; n++ {
-		candidate := fmt.Sprintf("%s-%d%s", base, n, ext)
-		if !used[candidate] {
-			return candidate
-		}
-	}
+	return fmt.Sprintf("%s-%d%s", base, n, ext)
 }
 
 // imageFilename builds a name that says what the picture is. A generated file is

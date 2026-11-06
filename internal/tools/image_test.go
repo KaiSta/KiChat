@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -163,6 +164,88 @@ func TestGenerateImageFilesThePictureOnTheCallingMessage(t *testing.T) {
 	}
 	if !strings.Contains(out, "Seed: 4242") {
 		t.Errorf("the seed is missing, so the picture cannot be reproduced:\n%s", out)
+	}
+}
+
+// The project half of the tool: a picture drawn in a project is a file in the folder, so the
+// model can reference it from code without a second save step. The chat attachment stays,
+// because that is what renders the picture and holds the recipe a redraw reads.
+func TestGenerateImageWritesThePictureIntoTheProjectRoot(t *testing.T) {
+	folder := t.TempDir()
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, _ := newImageService(t, provider, config.ImageSettings{})
+	chatID := "project-1"
+	if err := st.CreateChat(store.Chat{ID: chatID, Title: "Projekt", Mode: store.ModeCoding,
+		Workspace: folder, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+
+	out, err := service.Execute(WithCallingMessage(context.Background(), "msg-1"), chatID,
+		ToolGenerateImage, `{"prompt":"a red fox in deep snow"}`)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	path := filepath.Join(folder, "a-red-fox-in-deep-snow-1.png")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the picture is not in the project root: %v", err)
+	}
+	if !bytes.Equal(data, pictureBytes) {
+		t.Errorf("the file holds %d bytes, want the drawn picture", len(data))
+	}
+	if !strings.Contains(out, "a-red-fox-in-deep-snow-1.png") {
+		t.Errorf("the result does not name the file it wrote:\n%s", out)
+	}
+	attachments, err := st.ListAttachments(chatID)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(attachments) != 1 {
+		t.Errorf("attachments = %d, want 1: the chat keeps its own copy", len(attachments))
+	}
+	if got := attachments[0].ProjectPath; got != "a-red-fox-in-deep-snow-1.png" {
+		t.Errorf("projectPath = %q, want the file that was written", got)
+	}
+}
+
+// A file the user already had is never replaced by a draw that happens to produce the same
+// name. Drawing one prompt twice is ordinary, so the second picture takes the next free name.
+func TestGenerateImageDoesNotOverwriteAFileInTheProjectRoot(t *testing.T) {
+	folder := t.TempDir()
+	existing := filepath.Join(folder, "a-red-fox-in-deep-snow-1.png")
+	if err := os.WriteFile(existing, []byte("mine"), 0o644); err != nil {
+		t.Fatalf("write the existing file: %v", err)
+	}
+	provider := &fakeImageProvider{result: onePicture()}
+	service, st, _ := newImageService(t, provider, config.ImageSettings{})
+	chatID := "project-1"
+	if err := st.CreateChat(store.Chat{ID: chatID, Title: "Projekt", Mode: store.ModeCoding,
+		Workspace: folder, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+
+	if _, err := service.Execute(WithCallingMessage(context.Background(), "msg-1"), chatID,
+		ToolGenerateImage, `{"prompt":"a red fox in deep snow"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if data, err := os.ReadFile(existing); err != nil || string(data) != "mine" {
+		t.Errorf("the existing file was replaced (%q, %v)", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(folder, "a-red-fox-in-deep-snow-1-2.png")); err != nil {
+		t.Errorf("the draw did not take the next free name: %v", err)
+	} else if !bytes.Equal(data, pictureBytes) {
+		t.Errorf("the second file holds %d bytes, want the drawn picture", len(data))
+	}
+	attachments, err := st.ListAttachments(chatID)
+	if err != nil {
+		t.Fatalf("ListAttachments: %v", err)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(attachments))
+	}
+	// The card names the file that was really written, not the name the chat used for it.
+	if got := attachments[0].ProjectPath; got != "a-red-fox-in-deep-snow-1-2.png" {
+		t.Errorf("projectPath = %q, want the name the collision produced", got)
 	}
 }
 

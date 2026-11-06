@@ -146,6 +146,13 @@ type Attachment struct {
 	// itself lives in the document either way, so an empty path means "the only copy is the
 	// one in this database" and nothing more. That is what the pictures panel reads it for.
 	SavedPath string `json:"savedPath,omitempty"`
+	// ProjectPath is where a drawn picture's file sits inside the project folder it was
+	// drawn in, as a path relative to that folder's root — empty for a picture drawn
+	// outside a project and for one whose file could not be written. It is the copy this
+	// app made itself, not one the user chose, which is why it is a field of its own rather
+	// than a SavedPath: the card shows it so the file can be found without reading the tool
+	// result, and a Save as elsewhere does not erase it.
+	ProjectPath string `json:"projectPath,omitempty"`
 
 	// Generation is the recipe a picture this app drew was made with, so it can be
 	// drawn again. It is nil for a file the user attached: a photograph has no

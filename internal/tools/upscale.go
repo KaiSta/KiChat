@@ -89,7 +89,9 @@ func (s *Service) Upscale(ctx context.Context, attachmentID string, req images.U
 		return store.Attachment{}, err
 	}
 	name := uniqueName(used, upscaleFilename(source.Filename, result.Width, result.Image.Ext))
-	return s.storeGeneratedImage(source.ChatID, source.MessageID, name, result.Image, nil, derivation)
+	// No project path: an enlargement is a copy in the chat, and writing it into the folder
+	// would make one picture two files nobody named.
+	return s.storeGeneratedImage(source.ChatID, source.MessageID, name, result.Image, nil, derivation, "")
 }
 
 // upscaleFilename marks the copy with the long side it was enlarged to, so two

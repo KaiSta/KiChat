@@ -1548,6 +1548,18 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
         >
           {attachment.filename}
         </span>
+        {/* Where the project keeps the file. A picture drawn in a project is written into the
+            folder's root by the tool itself, so the card names it — otherwise the only record
+            of the file is the tool result above the picture. */}
+        {attachment.projectPath ? (
+          <span
+            className="faint truncate"
+            style={{ maxWidth: 220 }}
+            title={t('images.projectPathHint')}
+          >
+            {`${t('images.projectPath')}: ${attachment.projectPath}`}
+          </span>
+        ) : null}
         {/* The seed is the number that reproduces a picture, and it is what tells two
             redraws of one prompt apart once both are on screen. */}
         {recipe?.seed ? (

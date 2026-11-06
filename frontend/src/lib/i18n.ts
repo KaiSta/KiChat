@@ -154,6 +154,11 @@ const de = {
   'images.save': 'Speichern',
   'images.saving': 'Wird gespeichert …',
   'images.saved': 'Bild gespeichert',
+  // The copy generate_image wrote into a project folder. The card names it so the file can
+  // be found without reading the tool result above the picture.
+  'images.projectPath': 'Im Projekt',
+  'images.projectPathHint':
+    'Diese Datei liegt im Wurzelordner des Projekts; der Pfad ist relativ dazu.',
   'images.loading': 'Bild wird geladen …',
   'images.unreadable': 'Bild konnte nicht gelesen werden',
   'images.zoom': 'Zum Vergrößern klicken',
@@ -1632,6 +1637,10 @@ const en: Record<keyof typeof de, string> = {
   'images.save': 'Save',
   'images.saving': 'Saving…',
   'images.saved': 'Image saved',
+  // The copy generate_image wrote into a project folder.
+  'images.projectPath': 'In project',
+  'images.projectPathHint':
+    'This file sits in the project folder’s root; the path is relative to it.',
   'images.loading': 'Loading image…',
   'images.unreadable': 'Image could not be read',
   'images.zoom': 'Click to enlarge',
@@ -3050,6 +3059,8 @@ const zh: Record<keyof typeof de, string> = {
   'images.save': '保存',
   'images.saving': '正在保存…',
   'images.saved': '图像已保存',
+  'images.projectPath': '项目中',
+  'images.projectPathHint': '该文件位于项目根目录；路径相对于该目录。',
   'images.loading': '正在加载图像…',
   'images.unreadable': '无法读取图像',
   'images.zoom': '点击放大',
