@@ -151,6 +151,11 @@ func makeAbsurdRowXlsx(t *testing.T, rowNum uint64) []byte {
 // POI's fuzz corpus works out at about eleven days of one core. The read is
 // streamed and bounded now, so the deadline is generous by three orders of
 // magnitude — and a regression fails here in seconds instead of hanging CI.
+//
+// v2.11.1 refuses the row number itself (ErrMaxRows, raised by the Columns call
+// that consumed the following <row>), so the workbook is not cut at the row
+// budget any more: the ordinary row in front of the damaged one still has to
+// reach the output, and the sheet is flagged as only partly readable.
 func TestExtractXlsxIsNotSlowOnAnAbsurdRowNumber(t *testing.T) {
 	data := makeAbsurdRowXlsx(t, 2000000000)
 
@@ -170,7 +175,7 @@ func TestExtractXlsxIsNotSlowOnAnAbsurdRowNumber(t *testing.T) {
 	if !strings.Contains(text, "\n1\n") {
 		t.Errorf("the ordinary first row is missing from the output")
 	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "2000") {
-		t.Errorf("warnings = %v, want one naming the 2000-row budget", warnings)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "Sheet1") {
+		t.Errorf("warnings = %v, want one naming the damaged sheet", warnings)
 	}
 }

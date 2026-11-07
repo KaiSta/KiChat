@@ -171,11 +171,12 @@ func extractXlsx(data []byte, lang string) (content string, sheets int, warnings
 		// row *number*, not per row present: a 1.6 KB workbook whose second <row>
 		// carries r="2000000000" took 8.271 s and returned one row (measured on
 		// v2.11.0 on this machine; the cost is linear, and the r="231999999999940"
-		// in Apache POI's fuzz corpus is about eleven days of one core). The limit
-		// is checked in Rows.Next but not in Rows.Columns, which sets the row number
-		// from the next element it consumes — so the bound below is what keeps a
-		// crafted attachment from parking a core forever. It also stops the whole
-		// sheet being materialised before the row budget throws most of it away.
+		// in Apache POI's fuzz corpus is about eleven days of one core). v2.11.1
+		// rejects such a row number itself with ErrMaxRows, but only after Columns
+		// has consumed the next <row> element, and the budget below is what keeps
+		// the sheet from being walked in the versions where it does not. It also
+		// stops the whole sheet being materialised before the row budget throws
+		// most of it away.
 		it, err := f.Rows(sheet)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf(text(lang,
@@ -191,6 +192,13 @@ func extractXlsx(data []byte, lang string) (content string, sheets int, warnings
 			}
 			row, err := it.Columns()
 			if err != nil {
+				// Columns returns the cells it finished along with the error, and the
+				// error can come from the *next* row element (v2.11.1's ErrMaxRows, for
+				// one), so writing them keeps the readable rows of a damaged sheet.
+				if len(row) > 0 {
+					sb.WriteString(strings.Join(row, ","))
+					sb.WriteString("\n")
+				}
 				failed = true
 				break
 			}
