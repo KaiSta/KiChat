@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -167,41 +168,49 @@ func extractXlsx(data []byte, lang string) (content string, sheets int, warnings
 	var sb strings.Builder
 	const maxRows = 2000
 	for _, sheet := range names {
-		// Streamed rather than read with GetRows, because GetRows costs one step per
-		// row *number*, not per row present: a 1.6 KB workbook whose second <row>
-		// carries r="2000000000" took 8.271 s and returned one row (measured on
-		// v2.11.0 on this machine; the cost is linear, and the r="231999999999940"
-		// in Apache POI's fuzz corpus is about eleven days of one core). The limit
-		// is checked in Rows.Next but not in Rows.Columns, which sets the row number
-		// from the next element it consumes — so the bound below is what keeps a
-		// crafted attachment from parking a core forever. It also stops the whole
-		// sheet being materialised before the row budget throws most of it away.
-		it, err := f.Rows(sheet)
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf(text(lang,
-				"Blatt %q nicht lesbar", "sheet %q could not be read"), sheet))
-			continue
-		}
 		fmt.Fprintf(&sb, "## Blatt: %s\n\n```csv\n", sheet)
 		read, truncated, failed := 0, false, false
-		for it.Next() {
-			if read >= maxRows {
-				truncated = true
-				break
-			}
-			row, err := it.Columns()
-			if err != nil {
+		it, err := f.Rows(sheet)
+		if err != nil {
+			if fallback, rowCount, truncatedFallback, ok, fallbackErr := xlsxSheetFallbackCSV(data, sheet, maxRows); fallbackErr == nil && ok {
+				sb.WriteString(fallback)
+				read = rowCount
+				truncated = truncatedFallback
+			} else {
 				failed = true
-				break
 			}
-			sb.WriteString(strings.Join(row, ","))
-			sb.WriteString("\n")
-			read++
+		} else {
+			for it.Next() {
+				if read >= maxRows {
+					truncated = true
+					break
+				}
+				row, err := it.Columns()
+				if err != nil {
+					failed = true
+					break
+				}
+				sb.WriteString(strings.Join(row, ","))
+				sb.WriteString("\n")
+				read++
+			}
+			if err := it.Error(); err != nil {
+				failed = true
+			}
+			_ = it.Close()
+			if failed {
+				if fallback, rowCount, truncatedFallback, ok, fallbackErr := xlsxSheetFallbackCSV(data, sheet, maxRows); fallbackErr == nil && ok {
+					sb.Reset()
+					fmt.Fprintf(&sb, "## Blatt: %s\n\n```csv\n", sheet)
+					sb.WriteString(fallback)
+					read = rowCount
+					truncated = truncatedFallback
+					failed = false
+				} else {
+					failed = true
+				}
+			}
 		}
-		if err := it.Error(); err != nil {
-			failed = true
-		}
-		_ = it.Close()
 		sb.WriteString("```\n\n")
 		if failed {
 			warnings = append(warnings, fmt.Sprintf(text(lang,
@@ -213,6 +222,179 @@ func extractXlsx(data []byte, lang string) (content string, sheets int, warnings
 		}
 	}
 	return normaliseLines(sb.String()), len(names), warnings, nil
+}
+
+var xlsxSheetNameRE = regexp.MustCompile(`(?s)<sheet\b[^>]*name="([^"]+)"[^>]*r:id="([^"]+)"[^>]*>`)
+var xlsxRelationshipRE = regexp.MustCompile(`(?s)<Relationship\b[^>]*Id="([^"]+)"[^>]*Target="([^"]+)"[^>]*>`)
+var xlsxRowRE = regexp.MustCompile(`(?s)<row\b[^>]*>(.*?)</row>`)
+var xlsxCellRE = regexp.MustCompile(`(?s)<c\b([^>]*)>(.*?)</c>`)
+var xlsxAttrRE = regexp.MustCompile(`\s+r="([^"]+)"`)
+var xlsxValueRE = regexp.MustCompile(`(?s)<v>(.*?)</v>`)
+var xlsxTextRE = regexp.MustCompile(`(?s)<t>(.*?)</t>`)
+
+func xlsxSheetFallbackCSV(data []byte, sheet string, maxRows int) (string, int, bool, bool, error) {
+	zr, err := zipReader(data)
+	if err != nil {
+		return "", 0, false, false, err
+	}
+	sheetPath, err := xlsxSheetPath(zr, sheet)
+	if err != nil {
+		return "", 0, false, false, err
+	}
+	part, err := zipPart(zr, sheetPath)
+	if err != nil {
+		return "", 0, false, false, err
+	}
+	raw, err := io.ReadAll(part)
+	if err != nil {
+		return "", 0, false, false, err
+	}
+	csv, count, truncated, err := xlsxRowsToCSV(raw, maxRows)
+	if err != nil {
+		return "", 0, false, false, err
+	}
+	if count == 0 && strings.TrimSpace(csv) == "" {
+		return "", 0, false, false, nil
+	}
+	return csv, count, truncated, true, nil
+}
+
+func xlsxSheetPath(zr *zip.Reader, sheet string) (string, error) {
+	wb, err := zipPart(zr, "xl/workbook.xml")
+	if err != nil {
+		return "", err
+	}
+	workbook, err := io.ReadAll(wb)
+	if err != nil {
+		return "", err
+	}
+	rels, err := zipPart(zr, "xl/_rels/workbook.xml.rels")
+	if err != nil {
+		return "", err
+	}
+	relRaw, err := io.ReadAll(rels)
+	if err != nil {
+		return "", err
+	}
+	relMap := map[string]string{}
+	for _, match := range xlsxRelationshipRE.FindAllSubmatch(relRaw, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		relMap[string(match[1])] = string(match[2])
+	}
+	for _, match := range xlsxSheetNameRE.FindAllSubmatch(workbook, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		name := string(match[1])
+		if !strings.EqualFold(name, sheet) {
+			continue
+		}
+		target := relMap[string(match[2])]
+		if target == "" {
+			return "", uimsg.Errorf("ingest.xlsxNoSheetRel", sheet)
+		}
+		if strings.HasPrefix(target, "/") {
+			return "xl" + target, nil
+		}
+		if strings.HasPrefix(target, "xl/") {
+			return target, nil
+		}
+		return "xl/" + strings.TrimPrefix(target, "./"), nil
+	}
+	return "", uimsg.Errorf("ingest.xlsxMissingSheet", sheet)
+}
+
+func xlsxRowsToCSV(raw []byte, maxRows int) (string, int, bool, error) {
+	var sb strings.Builder
+	rowCount := 0
+	truncated := false
+	for _, rowMatch := range xlsxRowRE.FindAllSubmatch(raw, -1) {
+		rowXML := string(rowMatch[0])
+		rowAttr := xlsxAttrRE.FindStringSubmatch(rowXML)
+		if len(rowAttr) < 2 {
+			continue
+		}
+		rowNum, err := strconv.ParseUint(rowAttr[1], 10, 64)
+		if err != nil || rowNum > uint64(maxRows)*10 {
+			continue
+		}
+		if rowNum > uint64(maxRows) {
+			continue
+		}
+		cells := map[int]string{}
+		for _, cellMatch := range xlsxCellRE.FindAllSubmatch(rowMatch[1], -1) {
+			if len(cellMatch) < 3 {
+				continue
+			}
+			cellAttrs := string(cellMatch[1])
+			cellRefAttr := xlsxAttrRE.FindStringSubmatch(cellAttrs)
+			if len(cellRefAttr) < 2 {
+				continue
+			}
+			col, err := xlsxColumnIndex(cellRefAttr[1])
+			if err != nil {
+				continue
+			}
+			cells[col] = xlsxCellValue(string(cellMatch[2]))
+		}
+		if len(cells) == 0 {
+			continue
+		}
+		maxCol := 0
+		for col := range cells {
+			if col > maxCol {
+				maxCol = col
+			}
+		}
+		vals := make([]string, maxCol)
+		for i := 1; i <= maxCol; i++ {
+			vals[i-1] = cells[i]
+		}
+		sb.WriteString(strings.Join(vals, ","))
+		sb.WriteString("\n")
+		rowCount++
+		if rowCount >= maxRows {
+			truncated = true
+			break
+		}
+	}
+	return sb.String(), rowCount, truncated, nil
+}
+
+func xlsxColumnIndex(cellRef string) (int, error) {
+	head := cellRef
+	for i, ch := range head {
+		if ch >= '0' && ch <= '9' {
+			head = head[:i]
+			break
+		}
+	}
+	if head == "" {
+		return 0, fmt.Errorf("missing column part in %q", cellRef)
+	}
+	v := 0
+	for _, ch := range head {
+		if ch < 'A' || ch > 'Z' {
+			if ch < 'a' || ch > 'z' {
+				return 0, fmt.Errorf("non-column ref %q", cellRef)
+			}
+			ch = ch - 'a' + 'A'
+		}
+		v = v*26 + int(ch-'A'+1)
+	}
+	return v, nil
+}
+
+func xlsxCellValue(raw string) string {
+	if value := xlsxValueRE.FindStringSubmatch(raw); len(value) > 1 {
+		return string(value[1])
+	}
+	if text := xlsxTextRE.FindStringSubmatch(raw); len(text) > 1 {
+		return string(text[1])
+	}
+	return ""
 }
 
 // --- ooxml plumbing --------------------------------------------------------
