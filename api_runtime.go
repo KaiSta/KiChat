@@ -139,6 +139,10 @@ type RuntimeStatus struct {
 	// pass. The words are the app's own — llama.cpp takes a count, `auto` or `all`,
 	// so "off" is how KiChat spells `--gpu-layers 0`.
 	OffloadModes []string `json:"offloadModes"`
+	// ExpertOffloadModes are the values a managed model may carry for llama.cpp's
+	// `--cpu-moe` and `--n-cpu-moe N`, filled from here for the same reason: the
+	// picker offers what this app can pass, and a dense model simply ignores it.
+	ExpertOffloadModes []string `json:"expertOffloadModes"`
 	// Update is the last look at llama.cpp's releases, if one has been made. It is
 	// reported rather than asked for here: see RuntimeUpdate.
 	Update RuntimeUpdate `json:"update"`
@@ -476,6 +480,7 @@ func runtimeStatusBase(settings config.Settings, goos, goarch string) RuntimeSta
 		FlashAttentionModes: config.FlashAttentionModes(),
 		CacheTypes:          config.CacheTypes(),
 		OffloadModes:        config.OffloadModes(),
+		ExpertOffloadModes:  config.ExpertOffloadModes(),
 		Devices:             []string{},
 		DevicesMissingLibs:  []string{},
 		Models:              []ManagedStatus{},
@@ -557,6 +562,91 @@ func modelFileSize(path string) int64 {
 		return 0
 	}
 	return info.Size()
+}
+
+// ManagedModelTraits is what a GGUF says about itself before it is loaded: the
+// architecture, the layer count, and — for a mixture of experts — how many experts one
+// layer holds and how many fire per token. Zeros mean the file did not say, which the
+// panel reads as "unknown" rather than as "dense".
+type ManagedModelTraits struct {
+	Architecture    string `json:"architecture,omitempty"`
+	BlockCount      int    `json:"blockCount"`
+	ExpertCount     int    `json:"expertCount"`
+	ExpertUsedCount int    `json:"expertUsedCount"`
+}
+
+// ManagedModelProbe is those traits plus the layer count this app would suggest as a
+// starting point for `--n-cpu-moe N`. The suggestion is computed here rather than in the
+// panel so the arithmetic has a test, and it uses the same free-memory figure the
+// panel's own warning compares against — see rt.SuggestExpertLayers for the direction it
+// errs in.
+type ManagedModelProbe struct {
+	Traits          ManagedModelTraits `json:"traits"`
+	SuggestedLayers int                `json:"suggestedLayers"`
+}
+
+// InspectManagedModel reads one GGUF's header for the fields above.
+//
+// An error is the honest answer for a file that is not a GGUF or cannot be read, and the
+// panel treats it as "nothing known" rather than as a failure to show: a control that
+// hid itself because a header would not parse would take the expert-offload setting away
+// from the models that need it.
+func (a *App) InspectManagedModel(path string, modelBytes, freeBytes int64) (ManagedModelProbe, error) {
+	if err := a.ensure(); err != nil {
+		return ManagedModelProbe{}, err
+	}
+	info, err := rt.ProbeGGUF(path)
+	if err != nil {
+		return ManagedModelProbe{}, err
+	}
+	// A caller that has only a path — the chat's picker, which starts a file it may never
+	// have listed — still gets a suggestion: the file is right there to be measured, and
+	// the probe has already stat'd it.
+	if modelBytes <= 0 {
+		modelBytes = modelFileSize(path)
+	}
+	traits := managedModelTraits(info)
+	return ManagedModelProbe{
+		Traits:          traits,
+		SuggestedLayers: rt.SuggestForModel(info, modelBytes, freeBytes),
+	}, nil
+}
+
+// managedModelTraits is the bridge's copy of a header reading. One function rather than
+// a literal in each caller, so the single-file probe and the folder listing cannot
+// disagree about what they send.
+func managedModelTraits(info rt.GGUFInfo) ManagedModelTraits {
+	return ManagedModelTraits{
+		Architecture:    info.Architecture,
+		BlockCount:      info.BlockCount,
+		ExpertCount:     info.ExpertCount,
+		ExpertUsedCount: info.ExpertUsedCount,
+	}
+}
+
+// InspectManagedModels reads the headers of a whole folder listing in one call, keyed
+// by path. The listing already has every path, and a probe per row would be a round
+// trip per row for what is a stat and a few kilobytes of the same metadata block.
+//
+// A file whose header cannot be read is left out of the map rather than answered with
+// zeros: the list shows a badge only for the files it knows about, and an entry of
+// zeros would claim the file is dense when it may be anything.
+func (a *App) InspectManagedModels(paths []string) (map[string]ManagedModelTraits, error) {
+	if err := a.ensure(); err != nil {
+		return map[string]ManagedModelTraits{}, err
+	}
+	out := make(map[string]ManagedModelTraits, len(paths))
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		info, err := rt.ProbeGGUF(path)
+		if err != nil {
+			continue
+		}
+		out[path] = managedModelTraits(info)
+	}
+	return out, nil
 }
 
 // sortedRuntimeIDs lists the configured managed backends in a stable order, so the

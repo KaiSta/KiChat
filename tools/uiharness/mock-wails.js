@@ -3409,6 +3409,13 @@ Available tools: {{tool_list}}`,
     return 0
   }
 
+  // The one file whose header will not parse — a corrupt byte, or a download that stopped
+  // early while keeping the .gguf name. The harness never reads bytes, so the state is
+  // declared by name: what matters is the shape the panel has when `ProbeGGUF` fails, and
+  // that shape is a row with no counts, no suggestion and no badge in the list.
+  const unreadableModel = 'Gemma-3-4B-Q4_K_M.gguf'
+  const unreadable = (path) => `${path}`.endsWith(unreadableModel)
+
   /*
    * The release lookup, as a state rather than a call: the real binding answers one
    * of the three shapes below, so the panel's row has a fixture for each. The
@@ -3494,6 +3501,7 @@ Available tools: {{tool_list}}`,
       // The GPU layers the picker offers. This app's own three words rather than
       // llama.cpp's spellings: `off` is how KiChat names `--gpu-layers 0`.
       offloadModes: ['auto', 'all', 'off'],
+      expertOffloadModes: ['auto', 'cpu', 'layers'],
       // What the installed build can use. Measured shape of `--list-devices` on
       // the Vulkan build; `?devices=none` empties it for the CPU-only case the
       // panel has to render as a warning, and `?fit=large` nearly fills the card
@@ -3599,6 +3607,19 @@ Available tools: {{tool_list}}`,
       { model: 'lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF', name: 'Ministral-3-3B-Instruct-2512-Q4_K_M.gguf', size: 2146498240 },
       { model: 'lmstudio-community/LFM2.5-2.6B-GGUF', name: 'LFM2.5-2.6B-Q4_K_M.gguf', size: 1674454368 },
       { model: 'empero-ai/Qwen3.8-4B-Distill-GGUF', name: 'Qwen3.8-4B-Q4_K_M.gguf', size: 2783446304 },
+      // The one mixture of experts in the library, so the list's badge has a row to
+      // land on and a dense file beside it to stay off.
+      { model: 'unsloth/Qwen3.6-35B-A3B-GGUF', name: 'Qwen3.6-35B-A3B-Q4_K_M.gguf', size: 20395000000 },
+      // A second quantisation of the same mixture of experts, so the panel has two files
+      // whose expert placement can be told apart.
+      { model: 'unsloth/Qwen3.6-35B-A3B-GGUF', name: 'Qwen3.6-35B-A3B-Q8_0.gguf', size: 38600000000 },
+      // A header that will not parse: a corrupt byte, or a download that stopped early
+      // while keeping the .gguf name. The panel keeps the expert row — silence is not
+      // evidence of a dense model — shows no counts, and offers neither the suggested
+      // count nor the button that applies it. Its own name, not the catalogue's
+      // `Qwen3-8B-Q4_K_M` row, which is a loaded-model fixture rather than a file in a
+      // folder and must not start answering probes.
+      { model: 'google/gemma-3-4b-it-GGUF', name: 'Gemma-3-4B-Q4_K_M.gguf', size: 3576000000 },
     ],
     // The second library, remembered from an earlier session: a model LM Studio
     // would not run, which is the reason a user keeps a folder of their own.
@@ -3994,6 +4015,57 @@ Available tools: {{tool_list}}`,
       extraBuilds = []
       console.log('[harness] old builds removed', removed)
       return Promise.resolve(removed)
+    },
+    // The panel asks for a model's header facts before it shows the expert-offload
+    // row, so the fixture answers like a real GGUF would: a name that says MoE is one,
+    // everything else is dense and hides the row. The suggestion is the share of the
+    // file that does not fit, applied to the layer count — the same arithmetic as
+    // rt.SuggestExpertLayers. One file answers with an error instead, which is the
+    // panel's state for a header that would not parse.
+    InspectManagedModel: (path, modelBytes, freeBytes) => {
+      // The backend measures the file when the caller does not know its size, which is how
+      // the chat picker asks: it has a path, not a listing row.
+      if (!modelBytes) modelBytes = sizeOfModel(path)
+      if (unreadable(path)) {
+        // What ProbeGGUF answers for a header it cannot read. The panel catches it and
+        // keeps its row without counts; the chat's picker catches it and starts untuned.
+        return Promise.reject(new Error(`${path}: GGUF header is truncated — the file is not complete`))
+      }
+      const moe = /moe|a3b|35b|expert/i.test(String(path))
+      const blockCount = moe ? 48 : 32
+      const expertCount = moe ? 256 : 0
+      const fits = !freeBytes || !(modelBytes > freeBytes)
+      const suggested =
+        !moe || fits
+          ? 0
+          : Math.min(blockCount, Math.max(1, Math.ceil((blockCount * (modelBytes - freeBytes)) / modelBytes)))
+      return Promise.resolve({
+        traits: {
+          architecture: moe ? 'qwen3moe' : 'llama',
+          blockCount,
+          expertCount,
+          expertUsedCount: moe ? 8 : 0,
+        },
+        suggestedLayers: suggested,
+      })
+    },
+    // The whole listing in one call, keyed by path — the same rule as the single
+    // file above, so a badge in the list and the panel's own detection agree.
+    InspectManagedModels: (paths) => {
+      const out = {}
+      for (const path of paths || []) {
+        // A file that cannot be read is left out of the map, as the backend does: a badge
+        // in the list is only shown for the files whose header answered.
+        if (unreadable(path)) continue
+        const moe = /moe|a3b|35b|expert/i.test(String(path))
+        out[path] = {
+          architecture: moe ? 'qwen3moe' : 'qwen3',
+          blockCount: moe ? 48 : 32,
+          expertCount: moe ? 256 : 0,
+          expertUsedCount: moe ? 8 : 0,
+        }
+      }
+      return Promise.resolve(out)
     },
     PickManagedModelFile: () => Promise.resolve('/models/Qwen3-4B-Q4_K_M.gguf'),
     // Empty means "the folder the backend would use", which is what the panel

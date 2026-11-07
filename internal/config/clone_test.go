@@ -34,6 +34,9 @@ func settingsWithEveryContainerFilled() Settings {
 		// The MLX section is the one pointer in the schema; it is filled so the walk
 		// below proves Clone copied the value rather than the address.
 		MLX: &MLXOptions{KVBits: 4, DraftModel: "/models/draft"},
+		// The per-file expert choices: another map inside a map value, and the one a
+		// picker start writes while a snapshot may be marshalled.
+		Experts: map[string]ExpertChoice{"/models/a.gguf": {Offload: ExpertOffloadLayers, Layers: 13}},
 	}}
 	return s
 }
@@ -108,7 +111,7 @@ func TestCloneSharesNothingWithTheOriginal(t *testing.T) {
 	// The number of containers the value holds, counted: a walk that stopped matching — a
 	// renamed field, a struct that is no longer reached — would otherwise pass without
 	// having looked at anything. Move it together with the fixture when the schema gains one.
-	const containers = 10
+	const containers = 11
 	if walked != containers {
 		t.Errorf("walked %d containers, want %d: the fixture, this number and Clone() have to "+
 			"move together when the schema gains a map or a slice", walked, containers)

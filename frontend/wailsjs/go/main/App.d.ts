@@ -78,6 +78,10 @@ export function GetUpscalerStatus():Promise<tools.UpscalerStatus>;
 
 export function ImportBackup(arg1:Array<string>):Promise<main.BackupImportResult>;
 
+export function InspectManagedModel(arg1:string,arg2:number,arg3:number):Promise<main.ManagedModelProbe>;
+
+export function InspectManagedModels(arg1:Array<string>):Promise<Record<string, main.ManagedModelTraits>>;
+
 export function InstallLlamaRuntime(arg1:string,arg2:string):Promise<void>;
 
 export function InstallMLXRuntime():Promise<void>;

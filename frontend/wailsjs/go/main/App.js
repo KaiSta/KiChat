@@ -138,6 +138,14 @@ export function ImportBackup(arg1) {
   return window['go']['main']['App']['ImportBackup'](arg1);
 }
 
+export function InspectManagedModel(arg1, arg2, arg3) {
+  return window['go']['main']['App']['InspectManagedModel'](arg1, arg2, arg3);
+}
+
+export function InspectManagedModels(arg1) {
+  return window['go']['main']['App']['InspectManagedModels'](arg1);
+}
+
 export function InstallLlamaRuntime(arg1, arg2) {
   return window['go']['main']['App']['InstallLlamaRuntime'](arg1, arg2);
 }

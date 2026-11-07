@@ -419,6 +419,38 @@ A managed model carries a mode (`ManagedModel.Offload`):
 | `all` | `-ngl all` |
 | `off` | `-ngl 0`, because llama.cpp has no word for CPU only |
 
+**Mixture-of-experts models have a second placement knob.** `-cmoe, --cpu-moe` keeps every
+routed-expert tensor in system RAM and `-ncmoe, --n-cpu-moe N` keeps the first N layers' worth,
+while attention, the shared weights and the KV cache stay on the device. That is what makes a
+model whose weights outgrow the card usable at all: Qwen3.6-35B-A3B is 20.4 GB at `Q4_K_M` but
+fires 3B parameters per token, and reported runs put it at 28–35 tok/s on a 12–16 GB card with
+32 GB of RAM. A managed entry keeps that placement per file — `Experts`, keyed by the GGUF's path,
+each an `ExpertChoice` (`auto`, `cpu`, `layers`) with its layer count — because a count that
+fits one mixture is the wrong answer for another, and the chat's picker moves only the path. A file
+with no stored choice starts on `auto`: neither flag, because `--fit` already places the experts as
+far into the device as they go. A stored `auto` is a decision and survives, so a file set back to
+automatic is not suggested at again. A dense model ignores the setting — it has no expert tensors
+to move.
+
+The panel does not make you guess whether a file is an MoE: it reads `general.architecture`,
+`block_count`, `expert_count` and `expert_used_count` out of the selected GGUF's header (a bounded
+read of the metadata block, cached by size and mtime), keeps the row only when the file has experts,
+and shows the counts it found. It also suggests a `--n-cpu-moe` count from the share of the file
+that does not fit in device memory, scaled by the block count, and fills the row with it as soon as
+an undecided file is selected — the control then states what a start would do before anything is
+edited. A header it cannot read leaves the row in place: silence is not evidence of a dense model.
+
+The chat's model picker reads the same header when it starts a file that has no stored choice, so a
+first start from the picker lands on the suggested count instead of waiting for Settings. A choice
+already stored for that path is sent as it is — the picker fills a gap, it does not overrule one —
+and a file it cannot parse starts on `--fit` like any other untuned model.
+
+In the panel, *Use the suggestion (N)* returns that file to the recommended count — or to automatic
+placement when it fits — because a count typed once survives a switch to another file and back. The
+recommendation also needs no click: an undecided file is filled with it as soon as it is selected.
+The chat's picker list does not repeat the number — it is a reading of the file and the free memory,
+and a copy there would be one more thing to keep in step.
+
 An exact count stays a *further argument* (`-ngl 24`), which is where a number only one
 model needs belongs, and it wins over the mode because the user's arguments go last on the
 command line. `-dev`, `-ts` and `-sm` live there too, and the device row, the free-memory
@@ -682,6 +714,95 @@ words instead of a sentence from the app.
 binds to `127.0.0.1` only, so this is a local-origin exposure rather than a network one; it is
 recorded as a limitation in `PLAN.md` §8.
 
+### 3.14 The libraries the archive does not carry
+
+The GPU archives ship the GPU code and not the vendor runtime, so which build runs is decided
+by what the machine already has on disk. The README keeps the picker and the measured offload;
+the prerequisites live here.
+
+**CUDA: the runtime bundle, the driver floor, and why the build is not self-contained.**
+The published CUDA build does **not** carry its runtime. Its `libggml-cuda.so` links
+`libcudart.so.13`, `libcublas.so.13` and the driver's own `libcuda.so.1`; unpacked on its own,
+`ldd libggml-cuda.so` answers `libcudart.so.13 => not found` on all of them (measured on b11538
+and b11541: 152.8 MB, 62 entries, exactly one of them CUDA-named).
+
+llama.cpp *does* publish the runtime separately, and KiChat fetches it in the same step under
+one progress bar: 440.2 MB for CUDA 13.4, 594.4 MB for 12.8, against 152.8 MB and 172.0 MB for
+the builds themselves. It is unpacked **beside** the launcher, because that `$ORIGIN` runpath is
+the only place the build looks. A CUDA install is therefore **593 MB fetched by the app itself**,
+and it is skipped when the machine already has a CUDA toolkit (`libcudart.so.<major>` and
+`libcublas.so.<major>` in the loader's index).
+
+The driver is the part no archive carries, and its version picks the build:
+
+| CUDA | oldest driver |
+| --- | --- |
+| 13.x | 580 |
+| 12.x | 525 |
+| 11.x | 450 |
+
+A release publishes several suites at once, and KiChat takes the newest one this machine can
+run, reading the driver version from `/proc/driver/nvidia/version`. A 570 driver therefore gets
+12.8 rather than a 13.4 build that would find no device and run the model on the CPU. A machine
+with no driver at all is refused before the download starts, and told that the driver is what is
+missing.
+
+**ROCm: the version has to line up, and AMD's repo has to outrank Ubuntu's.**
+The ROCm build has the same hole and no runtime bundle to fill it. Its `libggml-hip.so` links
+`libamdhip64`, `libhipblas` and `librocblas`, and those come from the system.
+
+**The versions have to line up.** Ubuntu 24.04 (noble, and Mint 22 on top of it) ships ROCm 5.7
+— `libamdhip64.so.5` — while the published assets ask for `libamdhip64.so.7`,
+`libhipblas.so.3` and `librocblas.so.5`. Those come from ROCm 7.x, so any 7.x or newer
+user-space runs the `rocm-10.0` build. KiChat checks before it downloads anything: with no
+matching HIP runtime it refuses the 245 MB build and names both versions instead of handing you
+a model that silently runs on the CPU.
+
+```sh
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2.4 noble main" \
+  | sudo tee /etc/apt/sources.list.d/rocm.list
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends rocm-hip-runtime hipblas rocblas
+```
+
+That is 17 packages — measured at **3.1 GB to download and 7.5 GB unpacked**, most of it
+`rocm-llvm`, `comgr` and `rocblas`, and user-space only. The `amdgpu` module, `/dev/kfd` and
+`/dev/dri/renderD128` are the kernel's and are already there; your user still has to be in the
+`render` group (usually `video` too) to open them.
+
+**AMD's repository has to outrank Ubuntu's.** Ubuntu also packages `rocminfo` at `5.7.1`, a
+version that sorts *above* AMD's `1.0.0.70204`, so without a pin apt keeps Ubuntu's copy and the
+two stacks mix. AMD's own installer writes the same pin:
+
+```sh
+printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 600\n' \
+  | sudo tee /etc/apt/preferences.d/rocm-pin-600
+```
+
+Then check it, on the machine and in the app:
+
+```sh
+rocminfo | grep -E "Marketing Name|gfx11"   # -> AMD Radeon RX 7900 XT / gfx1100
+```
+
+The GPU has to be one that ROCm version supports (`gfx1100` is the 7900 XT). Restart KiChat or
+press Save / the refresh arrow in Settings → Backends — a running instance caches its device
+probe per binary path — then start the model.
+
+AMD's packages unpack into `/opt/rocm-<version>/lib` and register nothing with the loader, so
+KiChat resolves the directory itself (`ROCM_PATH`, then `/opt/rocm`, then the versioned trees,
+newest first) and starts `llama-server` with it on `LD_LIBRARY_PATH`. The device, library and
+version probes get the same environment, so the panel describes the build's situation rather than
+the app's.
+
+**If the panel still says it found no device**, it also names what the build cannot resolve
+(`libamdhip64.so.7, libhipblas.so.3, …`): those sonames did not arrive, so the install above did
+not land or the pin was skipped. Otherwise use **Vulkan** instead — it needs no ROCm and runs on
+every card RADV supports.
+
 ---
 
 ## 4. Ternary models on the GPU (measured)
@@ -875,6 +996,14 @@ a third path (`/media/usb/models`) that holds models — a pick that landed on a
 in the row would neither add a chip nor scan anything. `ModelFolders` in the mock is computed
 from `settings.runtime.modelDirs` the way the backend computes it from the blob, so picking,
 forgetting and saving all move the chips rather than only the draft.
+
+The file whose header will not parse is in the folder every time: `…/Gemma-3-4B-Q4_K_M.gguf`
+answers `InspectManagedModel` with an error and is absent from `InspectManagedModels`, the two
+shapes `ProbeGGUF`'s callers produce. It is the expert controls' state without a reading —
+selecting it keeps the row (silence is not evidence of a dense model) at `automatic` and 0, with
+neither the suggested count nor the button that applies it, and the listing shows it without a
+MoE badge. A probe failure is caught rather than reported, so nothing about the file appears in
+the UI.
 
 The loaded mark needs one flag and one click: `?fit=fits` installs a build and selects the
 Ministral file, and pressing **Start** then loads it — so the listing carries the mark while

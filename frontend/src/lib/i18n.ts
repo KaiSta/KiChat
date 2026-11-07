@@ -511,6 +511,7 @@ const de = {
   'settings.managed.folderForget': 'Aus der Liste entfernen',
   'settings.managed.folderLoaded': 'im Einsatz',
   'settings.managed.folderLoading': 'wird geladen',
+  'settings.managed.folderMoe': 'MoE · {{active}} von {{experts}}',
   'settings.managed.loadedOther':
     'Der laufende Server bedient noch {{model}}; ein Start übernimmt die Auswahl.',
   'settings.managed.flashAttention': 'Flash Attention (--flash-attn)',
@@ -538,6 +539,18 @@ const de = {
     'Automatisch ist llama.cpps eigener Standard: es legt so viele Layer in den Gerätespeicher, wie hineinpassen. „Alle\u201c erzwingt alle Layer, „Nur CPU\u201c rechnet alles auf der CPU. Der Start gilt ab dem nächsten Start.',
   'settings.managed.offloadReport': 'Auf {{device}}: {{layers}} von {{total}} Layern auf der GPU',
   'settings.managed.offloadCpu': '{{total}} Layer rechnen auf der CPU — kein Layer auf der GPU',
+  'settings.managed.expert': 'MoE-Experten',
+  'settings.managed.expertAuto': 'Automatisch — llama.cpp entscheidet',
+  'settings.managed.expertCpu': 'Alle Experten in den Arbeitsspeicher (--cpu-moe)',
+  'settings.managed.expertLayerCount': 'Layer (N)',
+  'settings.managed.expertLayers': 'Erste N Layer in den Arbeitsspeicher (--n-cpu-moe)',
+  'settings.managed.expertUseSuggested': 'Vorschlag übernehmen ({{n}})',
+  'settings.managed.expertUseAuto': 'Experten automatisch platzieren',
+  'settings.managed.moeDetected': '{{layers}} Layer · {{experts}} Experten, {{active}} pro Token',
+  'settings.managed.expertSuggested':
+    'Die Datei ist größer als der freie Gerätespeicher; {{n}} Layer ist ein Ausgangswert — mehr im Arbeitsspeicher ist langsamer, geht aber nicht aus dem Speicher.',
+  'settings.managed.expertHint':
+    'Nur für Mixture-of-Experts-Modelle: die Expertengewichte bleiben im Arbeitsspeicher, Aufmerksamkeit, gemeinsame Gewichte und KV-Cache weiter auf der GPU. Das macht ein 20-GB-MoE-Modell auf einer 16-GB-Karte nutzbar — langsamer als alles in der GPU, aber pro Token rechnen nur 3B Parameter. Ein dichtes Modell hat keine Experten; dort bewirkt die Einstellung nichts.',
   'settings.managed.tooLarge':
     'Die Gewichte ({{model}}) sind größer als der freie Speicher der erkannten Geräte ({{free}}) — das Modell passt nicht vollständig auf die GPU und wird ganz oder teilweise auf der CPU gerechnet. Eine stärker quantisierte Datei passt eher.',
   'settings.managed.ctx': 'Kontextfenster (-c)',
@@ -1988,6 +2001,7 @@ const en: Record<keyof typeof de, string> = {
   'settings.managed.folderForget': 'Remove from the list',
   'settings.managed.folderLoaded': 'in use',
   'settings.managed.folderLoading': 'loading',
+  'settings.managed.folderMoe': 'MoE · {{active}} of {{experts}}',
   'settings.managed.loadedOther':
     'The running server still serves {{model}}; a start applies the selection.',
   'settings.managed.flashAttention': 'Flash attention (--flash-attn)',
@@ -2015,6 +2029,18 @@ const en: Record<keyof typeof de, string> = {
     'Automatic is the server\u2019s own default: it places as many layers in the device memory as fit. \u201cAll\u201d forces every layer onto the GPU, \u201cCPU only\u201d computes everything on the CPU. A change applies from the next start.',
   'settings.managed.offloadReport': 'On {{device}}: {{layers}} of {{total}} layers on the GPU',
   'settings.managed.offloadCpu': '{{total}} layers are computed on the CPU — no layer on the GPU',
+  'settings.managed.expert': 'MoE experts',
+  'settings.managed.expertAuto': 'Automatic — llama.cpp decides',
+  'settings.managed.expertCpu': 'All experts in system RAM (--cpu-moe)',
+  'settings.managed.expertLayerCount': 'Layers (N)',
+  'settings.managed.expertLayers': 'First N layers in system RAM (--n-cpu-moe)',
+  'settings.managed.expertUseSuggested': 'Use the suggestion ({{n}})',
+  'settings.managed.expertUseAuto': 'Place the experts automatically',
+  'settings.managed.moeDetected': '{{layers}} layers · {{experts}} experts, {{active}} per token',
+  'settings.managed.expertSuggested':
+    'The file is larger than the free device memory; {{n}} layers is a starting point — more in system RAM is slower, but it does not run out of memory.',
+  'settings.managed.expertHint':
+    'Mixture-of-experts models only: the expert weights stay in system RAM while attention, the shared weights and the KV cache stay on the GPU. That is what makes a 20 GB MoE model usable on a 16 GB card — slower than holding it all in VRAM, but only 3B parameters are read per token. A dense model has no experts, so the setting does nothing there.',
   'settings.managed.tooLarge':
     'The weights ({{model}}) are larger than the free memory the reported devices have ({{free}}) — the model does not fit on the GPU in full and will be computed on the CPU, wholly or partly. A more strongly quantised file is more likely to fit.',
   'settings.managed.ctx': 'Context window (-c)',
@@ -3392,6 +3418,7 @@ const zh: Record<keyof typeof de, string> = {
   'settings.managed.folderForget': '从列表中移除',
   'settings.managed.folderLoaded': '使用中',
   'settings.managed.folderLoading': '加载中',
+  'settings.managed.folderMoe': 'MoE · {{active}}/{{experts}} 个专家',
   'settings.managed.loadedOther': '正在运行的服务器仍在使用 {{model}}；启动后才会切换。',
   'settings.managed.flashAttention': 'Flash Attention（--flash-attn）',
   'settings.managed.flashAuto': '自动（由服务器决定）',
@@ -3418,6 +3445,18 @@ const zh: Record<keyof typeof de, string> = {
     '自动是 llama.cpp 自身的默认值：尽可能多地把层放入设备内存。“全部”强制所有层放入 GPU，“仅 CPU”则完全在 CPU 上计算。修改从下次启动起生效。',
   'settings.managed.offloadReport': '在 {{device}} 上：{{layers}}/{{total}} 层运行于 GPU',
   'settings.managed.offloadCpu': '{{total}} 层在 CPU 上计算——没有层运行于 GPU',
+  'settings.managed.expert': 'MoE 专家',
+  'settings.managed.expertAuto': '自动——由 llama.cpp 决定',
+  'settings.managed.expertCpu': '全部专家放入系统内存（--cpu-moe）',
+  'settings.managed.expertLayerCount': '层数（N）',
+  'settings.managed.expertLayers': '前 N 层专家放入系统内存（--n-cpu-moe）',
+  'settings.managed.expertUseSuggested': '采用建议（{{n}}）',
+  'settings.managed.expertUseAuto': '自动放置专家',
+  'settings.managed.moeDetected': '{{layers}} 层 · {{experts}} 个专家，每个 token 激活 {{active}} 个',
+  'settings.managed.expertSuggested':
+    '文件大于可用显存；{{n}} 层是一个起点——放在系统内存里的越多越慢，但不会耗尽显存。',
+  'settings.managed.expertHint':
+    '仅适用于混合专家（MoE）模型：专家权重留在系统内存，注意力、共享权重和 KV 缓存仍在 GPU 上。这让 20 GB 的 MoE 模型能在 16 GB 显卡上运行——比全部放入显存慢，但每个 token 只读取 3B 参数。稠密模型没有专家，此设置不起作用。',
   'settings.managed.tooLarge':
     '权重（{{model}}）大于所识别设备的可用显存（{{free}}）——模型无法完整放入 GPU，将全部或部分在 CPU 上计算。量化程度更高的文件更有可能放得下。',
   'settings.managed.ctx': '上下文窗口（-c）',

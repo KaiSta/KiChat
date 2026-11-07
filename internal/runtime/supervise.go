@@ -85,6 +85,13 @@ type Options struct {
 	// for the two explicit modes, empty for the server's own default — as many
 	// layers as fit in the device memory. See gpuLayers.
 	Offload string
+	// ExpertOffload keeps a mixture-of-experts model's expert tensors in system
+	// RAM: ExpertOffloadCPU passes `--cpu-moe`, ExpertOffloadLayers passes
+	// `--n-cpu-moe ExpertLayers`. Empty passes nothing, which is llama.cpp's own
+	// placement and the right answer for a dense model.
+	ExpertOffload string
+	// ExpertLayers is the N of `--n-cpu-moe N`, read only with ExpertOffloadLayers.
+	ExpertLayers int
 	// Trace asks for the server's log at llama.cpp's trace level, which is where it
 	// names the device it chose and how many layers it placed there; the reading
 	// this app reports comes from those two lines and nowhere else. See
@@ -614,6 +621,17 @@ func (o Options) args() []string {
 	// words would be a flag on a build that may not read it the same way.
 	if n := gpuLayers(o.Offload); n != "" {
 		args = append(args, "--gpu-layers", n)
+	}
+	// A mixture-of-experts model reads only the few experts that fire per token, so
+	// keeping the expert tensors in system RAM costs bandwidth rather than
+	// correctness — which is what makes a 20.4 GB model answer on a 16 GB card. The
+	// two flags are llama.cpp's own; "auto" passes neither, because the placement
+	// that fits is what `--fit` already does.
+	switch o.ExpertOffload {
+	case ExpertOffloadCPU:
+		args = append(args, "--cpu-moe")
+	case ExpertOffloadLayers:
+		args = append(args, "--n-cpu-moe", strconv.Itoa(o.ExpertLayers))
 	}
 	// The level whose output carries the placement reading. Before Extra, so a
 	// verbosity the user typed themselves is the one that counts.

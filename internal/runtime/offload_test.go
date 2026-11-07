@@ -62,6 +62,30 @@ func TestOffloadAndTraceReachTheCommandLine(t *testing.T) {
 	if tr := argsOf(Options{Model: "/m.gguf", Trace: true}); !has(tr, "-lv", "4") {
 		t.Errorf("a traced start = %v, want -lv 4", tr)
 	}
+	// The expert flags: nothing for "auto", llama.cpp's own two spellings for the
+	// explicit modes, and the user's count still last.
+	contains := func(args []string, want string) bool {
+		for _, a := range args {
+			if a == want {
+				return true
+			}
+		}
+		return false
+	}
+	if expertAuto := argsOf(Options{Model: "/m.gguf"}); contains(expertAuto, "--cpu-moe") || contains(expertAuto, "--n-cpu-moe") {
+		t.Errorf("an auto expert offload sent a flag: %v", expertAuto)
+	}
+	if allExperts := argsOf(Options{Model: "/m.gguf", ExpertOffload: ExpertOffloadCPU}); !contains(allExperts, "--cpu-moe") {
+		t.Errorf("expert offload cpu = %v, want --cpu-moe", allExperts)
+	}
+	someExperts := argsOf(Options{Model: "/m.gguf", ExpertOffload: ExpertOffloadLayers, ExpertLayers: 13})
+	if !has(someExperts, "--n-cpu-moe", "13") {
+		t.Errorf("expert offload layers = %v, want --n-cpu-moe 13", someExperts)
+	}
+	// A count of zero is llama.cpp's own "none of them", not a reason to drop the flag.
+	if zero := argsOf(Options{Model: "/m.gguf", ExpertOffload: ExpertOffloadLayers}); !has(zero, "--n-cpu-moe", "0") {
+		t.Errorf("expert offload layers 0 = %v, want --n-cpu-moe 0", zero)
+	}
 	// Both new flags come before the user's own, so a verbosity or a layer count
 	// typed into *Further arguments* is the one that counts.
 	both := argsOf(Options{Model: "/m.gguf", Offload: OffloadAll, Trace: true, Extra: []string{"-ngl", "24"}})

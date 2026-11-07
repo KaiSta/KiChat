@@ -528,6 +528,10 @@ func (a *App) startManagedModel(backendID string) (err error) {
 	if err != nil {
 		return err
 	}
+	// The expert placement belongs to the file, not to the entry: a count tuned for a
+	// 48-layer mixture is the wrong answer for a 32-layer one, and the chat's picker
+	// moves only the path. A file with no stored choice gets llama.cpp's own placement.
+	experts := mm.ExpertFor(mm.ModelPath)
 	// Only the build this app installed is asked for its trace log. The placement
 	// reading — which device, how many layers — is printed at that level and nowhere
 	// else, but `-lv` is a flag an older binary a user points at may not know, and an
@@ -543,6 +547,8 @@ func (a *App) startManagedModel(backendID string) (err error) {
 		CacheTypeK:     mm.CacheTypeK,
 		CacheTypeV:     mm.CacheTypeV,
 		Offload:        mm.Offload,
+		ExpertOffload:  experts.Offload,
+		ExpertLayers:   experts.Layers,
 		Trace:          verboseTrace,
 		Extra:          rt.SplitArgs(mm.ExtraArgs),
 	})

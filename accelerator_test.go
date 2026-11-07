@@ -149,6 +149,7 @@ func TestFlashAndCacheValuesHaveLabels(t *testing.T) {
 	check("flash", config.FlashAttentionModes())
 	check("cache", config.CacheTypes())
 	check("offload", config.OffloadModes())
+	check("expert", config.ExpertOffloadModes())
 }
 
 // The GPU offload modes are spelled twice on purpose — the settings package owns the
@@ -172,6 +173,15 @@ func TestOffloadModesAgreeEverywhere(t *testing.T) {
 	// count `""` the runtime sends). It only has to be one of the modes.
 	if !config.IsOffload(config.OffloadAuto) {
 		t.Errorf("%q is not accepted as an offload value", config.OffloadAuto)
+	}
+	// The expert modes are spelled the same in both packages because both words are
+	// llama.cpp's own flags; a drift here would send `--cpu-moe` for a mode the
+	// settings call something else, which is a start with no flag at all.
+	if config.ExpertOffloadCPU != rt.ExpertOffloadCPU {
+		t.Errorf("settings spell the all-experts mode %q and the runtime %q", config.ExpertOffloadCPU, rt.ExpertOffloadCPU)
+	}
+	if config.ExpertOffloadLayers != rt.ExpertOffloadLayers {
+		t.Errorf("settings spell the layer-count mode %q and the runtime %q", config.ExpertOffloadLayers, rt.ExpertOffloadLayers)
 	}
 
 	raw, err := os.ReadFile(frontendDictPath)

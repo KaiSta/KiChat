@@ -786,6 +786,24 @@ type ManagedModel struct {
 	// whose KV cache does not fit beside its own weights needs as well.
 	// Empty is normalised to "auto".
 	Offload string `json:"offload"`
+	// ExpertOffload and ExpertLayers are the pre-Experts pair: one placement for
+	// the whole entry, written by a version that did not keep one per file. They
+	// are read only so that blob keeps its setting — normalise moves the pair to
+	// Experts under ModelPath and leaves these at "auto"/0, and nothing reads
+	// them after that. Passing no flag leaves the placement to llama.cpp's own
+	// `--fit`; "cpu" is `--cpu-moe`, every expert in system RAM; "layers" is
+	// `--n-cpu-moe N`.
+	ExpertOffload string `json:"expertOffload"`
+	ExpertLayers  int    `json:"expertLayers"`
+	// Experts keeps each file's expert placement, keyed by the GGUF's path, because
+	// the placement is a property of the file: a layer count that fits a 48-layer
+	// mixture is the wrong answer for a 32-layer one, and the chat's model picker
+	// moves only ModelPath — one pair per entry would follow the next file picked
+	// there. An absent path means the file has not been decided on yet — the panel
+	// fills it with the count it suggests — while a stored "auto" is a decision of
+	// its own: this file keeps llama.cpp's own `--fit` placement whatever the panel
+	// would otherwise suggest for it.
+	Experts map[string]ExpertChoice `json:"experts,omitempty"`
 	// ExtraArgs is the rest of the command line, for the flags this app has no
 	// field for (--n-gpu-layers 24, a chat template).
 	ExtraArgs string `json:"extraArgs"`
@@ -794,6 +812,27 @@ type ManagedModel struct {
 	// kind, which is what keeps a llama.cpp entry from growing a section of
 	// fields that mean nothing to it.
 	MLX *MLXOptions `json:"mlx,omitempty"`
+}
+
+// ExpertChoice is one file's expert placement: the mode and, for the layer mode, the
+// count that goes with it. It is a type rather than two fields because the pair has to
+// travel together — a count left beside another file's mode is the bug keying by path
+// exists to stop.
+type ExpertChoice struct {
+	Offload string `json:"offload"`
+	Layers  int    `json:"layers"`
+}
+
+// ExpertFor is the placement this entry uses for one file: the choice stored for that
+// path, or "auto" when the file has none. An unknown path deliberately does not get the
+// last file's setting — llama.cpp's own `--fit` placement is the safe answer for a model
+// nobody has tuned, and the alternative is a layer count built for a different number of
+// layers.
+func (m ManagedModel) ExpertFor(path string) ExpertChoice {
+	if choice, ok := m.Experts[strings.TrimSpace(path)]; ok {
+		return choice
+	}
+	return ExpertChoice{Offload: ExpertOffloadAuto}
 }
 
 // MLXOptions is how mlx_lm.server is started for one model.
@@ -995,6 +1034,94 @@ func IsOffload(value string) bool {
 		}
 	}
 	return false
+}
+
+// Expert-offload modes, for the routed experts of a mixture-of-experts model.
+// "auto" is the default and passes no flag: llama.cpp's `--fit` already places the
+// experts as far into the device as they go. The other two words are llama.cpp's
+// own flag names (`--cpu-moe`, `--n-cpu-moe N`) rather than a vocabulary of this
+// app's, because the hint has to teach the flags anyway, and a second name for the
+// same thing would only be one more word to translate.
+const (
+	ExpertOffloadAuto   = "auto"
+	ExpertOffloadCPU    = "cpu"
+	ExpertOffloadLayers = "layers"
+)
+
+// ExpertOffloadModes is every value the expert-offload field may hold, in the
+// order a picker should offer them: the placement llama.cpp does on its own
+// first, the two explicit ones after it.
+func ExpertOffloadModes() []string {
+	return []string{ExpertOffloadAuto, ExpertOffloadCPU, ExpertOffloadLayers}
+}
+
+// IsExpertOffload reports whether a value names an expert-offload mode.
+func IsExpertOffload(value string) bool {
+	for _, v := range ExpertOffloadModes() {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+
+// normaliseExpertOffload maps an absent or unrecognised value onto "auto" for the
+// same reason as the other modes: a word nothing here knows would reach
+// `--n-cpu-moe` as a layer count and stop the server from starting.
+func normaliseExpertOffload(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !IsExpertOffload(value) {
+		return ExpertOffloadAuto
+	}
+	return value
+}
+
+// normaliseExpertChoices repairs the per-file expert placement and moves a blob's single
+// legacy pair onto the file it names.
+//
+// The entry-level pair is migration, not a default: it was written when one entry carried
+// one placement, and leaving it in place would let it shadow a file's own choice the next
+// time a different model was picked on the same backend. After this the placement lives
+// in Experts, and an absent path means "auto". A stored auto is kept rather than dropped:
+// the panel fills an undecided file with the count it suggests, so an empty slot and a
+// deliberate "leave the placement to llama.cpp" have to stay distinguishable — otherwise
+// choosing automatic would be overwritten by the next suggestion.
+func normaliseExpertChoices(mm *ManagedModel) {
+	mm.ExpertOffload = normaliseExpertOffload(mm.ExpertOffload)
+	if mm.ExpertLayers < 0 {
+		mm.ExpertLayers = 0
+	}
+	if path := strings.TrimSpace(mm.ModelPath); path != "" && len(mm.Experts) == 0 && mm.ExpertOffload != ExpertOffloadAuto {
+		mm.Experts = map[string]ExpertChoice{path: {Offload: mm.ExpertOffload, Layers: mm.ExpertLayers}}
+	}
+	mm.ExpertOffload, mm.ExpertLayers = ExpertOffloadAuto, 0
+
+	out := make(map[string]ExpertChoice, len(mm.Experts))
+	for path, choice := range mm.Experts {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		stored := strings.TrimSpace(choice.Offload)
+		choice.Offload = normaliseExpertOffload(stored)
+		if choice.Layers < 0 || choice.Offload == ExpertOffloadAuto {
+			// Automatic has no layer count: a number left beside it is sent by nothing
+			// and shown by nothing, and the next reader would take it as current.
+			choice.Layers = 0
+		}
+		// A literal auto is a decision and is kept. Anything else that fell back to it
+		// is damage, not a choice — storing that would hide a corrupt value behind the
+		// word that means "llama.cpp decides", and the panel would stop suggesting for
+		// a file nobody ever chose anything for.
+		if choice.Offload == ExpertOffloadAuto && stored != ExpertOffloadAuto {
+			continue
+		}
+		out[path] = choice
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	mm.Experts = out
 }
 
 // NormaliseMLX repairs the MLX-only section: a number the server would refuse is
@@ -1536,6 +1663,16 @@ func (s Settings) Clone() Settings {
 				mlx := *mm.MLX
 				mm.MLX = &mlx
 			}
+			// The per-file expert choices are the entry's other map: a snapshot that
+			// shared it would be written by a picker start while another goroutine
+			// marshals the settings.
+			if mm.Experts != nil {
+				experts := make(map[string]ExpertChoice, len(mm.Experts))
+				for path, choice := range mm.Experts {
+					experts[path] = choice
+				}
+				mm.Experts = experts
+			}
 			out.Runtime.Models[id] = mm
 		}
 	}
@@ -1719,6 +1856,7 @@ func (s *Settings) normalise() {
 		mm.CacheTypeK = normaliseCacheType(mm.CacheTypeK)
 		mm.CacheTypeV = normaliseCacheType(mm.CacheTypeV)
 		mm.Offload = normaliseOffload(mm.Offload)
+		normaliseExpertChoices(&mm)
 		mm.MLX = NormaliseMLX(mm.MLX)
 		s.Runtime.Models[id] = mm
 	}

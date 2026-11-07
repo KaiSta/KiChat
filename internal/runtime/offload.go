@@ -14,6 +14,12 @@ import (
 const (
 	OffloadAll = "all"
 	OffloadOff = "off"
+	// The expert-offload modes, llama.cpp's own `--cpu-moe` and `--n-cpu-moe N`.
+	// "auto" is not passed at all: `--fit` on already places the expert tensors as
+	// far into the device as they go. Spelled here as well as in the settings
+	// package for the same reason as the two above; a test pins them together.
+	ExpertOffloadCPU    = "cpu"
+	ExpertOffloadLayers = "layers"
 )
 
 // TraceVerbosity is llama.cpp's `-lv 4`, the level at which a server says which

@@ -108,6 +108,8 @@ export namespace main {
   export type AttachmentInput = Plain<Gen.main.AttachmentInput>
   export type RuntimeStatus = Plain<Gen.main.RuntimeStatus>
   export type ManagedStatus = Plain<Gen.main.ManagedStatus>
+  /** What one GGUF's header says about itself: architecture, layers, expert layout. */
+  export type ManagedModelTraits = Plain<Gen.main.ManagedModelTraits>
   /** The last look at llama.cpp's releases, carried inside RuntimeStatus. */
   export type RuntimeUpdate = Plain<Gen.main.RuntimeUpdate>
   /** One llama.cpp build on disk, as the cleanup list reads it. */
@@ -189,6 +191,13 @@ export const App = {
     WailsApp.SetManagedModel(backendID, Gen.config.ManagedModel.createFrom(mm)),
   StartManagedModelWith: (backendID: string, mm: config.ManagedModel) =>
     WailsApp.StartManagedModelWith(backendID, Gen.config.ManagedModel.createFrom(mm)),
+  // The header facts of a GGUF, plus the expert-offload layer count this app would
+  // suggest for it from the file's size and the free device memory.
+  InspectManagedModel: (path: string, modelBytes: number, freeBytes: number) =>
+    WailsApp.InspectManagedModel(path, modelBytes, freeBytes),
+  // The same facts for a whole folder listing, keyed by path, so the model list can
+  // mark the files that have experts without a round trip per row.
+  InspectManagedModels: (paths: string[]) => WailsApp.InspectManagedModels(paths),
 }
 
 /**
@@ -213,6 +222,12 @@ export function defaultManagedModel(): config.ManagedModel {
     cacheTypeK: 'f16',
     cacheTypeV: 'f16',
     offload: 'auto',
+    // The pre-Experts pair, kept at its defaults: a placement is stored per file in
+    // `experts` (keyed by path) because a layer count tuned for one mixture is the wrong
+    // answer for the next file started on the same backend.
+    expertOffload: 'auto',
+    expertLayers: 0,
+    experts: {},
     extraArgs: '',
     // The MLX-only section. Its zeros mean "the server's own default", and the
     // field is present for every entry because the bridge's JSON carries it; only

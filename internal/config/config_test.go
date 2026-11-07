@@ -1206,10 +1206,34 @@ func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 		}
 	}
 
+	// The expert modes survive with their count, including the count 0 that means
+	// "none of the experts leaves the device" — keyed by the file the entry names,
+	// because the placement belongs to the file.
+	for _, mode := range ExpertOffloadModes() {
+		s = Default()
+		s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
+			ModelPath: "/models/a.gguf", ExpertOffload: mode, ExpertLayers: 13,
+		}}}
+		s.normalise()
+		got := s.Runtime.Models["llamacpp"]
+		choice := got.ExpertFor("/models/a.gguf")
+		if mode == ExpertOffloadAuto {
+			if choice.Offload != ExpertOffloadAuto || len(got.Experts) != 0 {
+				t.Errorf("auto became %q/%d with %d stored choices, want none",
+					choice.Offload, choice.Layers, len(got.Experts))
+			}
+			continue
+		}
+		if choice.Offload != mode || choice.Layers != 13 {
+			t.Errorf("expert offload %q/13 became %q/%d", mode, choice.Offload, choice.Layers)
+		}
+	}
+
 	// Junk falls back to the default rather than being passed on.
 	s = Default()
 	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
 		FlashAttention: "maybe", CacheTypeK: "q3_k", CacheTypeV: "  ", Offload: "gpu",
+		ExpertOffload: "experts", ExpertLayers: -4,
 	}}}
 	s.normalise()
 	mm = s.Runtime.Models["llamacpp"]
@@ -1221,6 +1245,54 @@ func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 	}
 	if mm.Offload != OffloadAuto {
 		t.Errorf("offload = %q, want an unknown value replaced by %q", mm.Offload, OffloadAuto)
+	}
+	if mm.ExpertOffload != ExpertOffloadAuto {
+		t.Errorf("expert offload = %q, want an unknown value replaced by %q", mm.ExpertOffload, ExpertOffloadAuto)
+	}
+	if mm.ExpertLayers != 0 {
+		t.Errorf("expert layers = %d, want a negative count clamped to 0", mm.ExpertLayers)
+	}
+}
+
+// TestExpertChoiceStaysWithItsFile pins why the placement is keyed by path: the chat's
+// model picker moves only the path, so a count chosen for one mixture must not become
+// the next file's — and a file nobody tuned keeps llama.cpp's own placement.
+func TestExpertChoiceStaysWithItsFile(t *testing.T) {
+	m := ManagedModel{
+		ModelPath: "/models/a.gguf",
+		Experts:   map[string]ExpertChoice{"/models/a.gguf": {Offload: ExpertOffloadLayers, Layers: 13}},
+	}
+	if got := m.ExpertFor("/models/b.gguf"); got.Offload != ExpertOffloadAuto || got.Layers != 0 {
+		t.Errorf("another file got %q/%d, want the default placement", got.Offload, got.Layers)
+	}
+	if got := m.ExpertFor("/models/a.gguf"); got.Offload != ExpertOffloadLayers || got.Layers != 13 {
+		t.Errorf("the file's own choice became %q/%d", got.Offload, got.Layers)
+	}
+
+	// A negative count is not a count and an unknown mode is not a mode: both are
+	// repaired here, where every other out-of-range value is, so the map holds only
+	// choices a server can be given. A literal auto is kept without a count beside it,
+	// because the panel fills an undecided file with the count it suggests — so
+	// "automatic" has to stay distinguishable from "nobody has looked at this yet".
+	s := Default()
+	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
+		ModelPath: "/models/a.gguf",
+		Experts: map[string]ExpertChoice{
+			"/models/a.gguf": {Offload: ExpertOffloadLayers, Layers: -4},
+			"/models/b.gguf": {Offload: ExpertOffloadAuto, Layers: 7},
+			"/models/c.gguf": {Offload: "experts", Layers: 2},
+		},
+	}}}
+	s.normalise()
+	got := s.Runtime.Models["llamacpp"]
+	if choice := got.ExpertFor("/models/a.gguf"); choice.Offload != ExpertOffloadLayers || choice.Layers != 0 {
+		t.Errorf("a negative count became %q/%d, want %q/0", choice.Offload, choice.Layers, ExpertOffloadLayers)
+	}
+	if choice := got.ExpertFor("/models/b.gguf"); choice.Offload != ExpertOffloadAuto || choice.Layers != 0 {
+		t.Errorf("a stored auto became %q/%d, want auto with no count", choice.Offload, choice.Layers)
+	}
+	if _, ok := got.Experts["/models/c.gguf"]; ok {
+		t.Error("an unknown mode was stored, want it dropped as auto")
 	}
 }
 
