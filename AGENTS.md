@@ -149,14 +149,14 @@ check are [`verify-ui`](.claude/skills/verify-ui/SKILL.md).
 
 | Document | What it holds |
 | --- | --- |
-| [`PLAN.md`](documentation/PLAN.md) | the architecture, and the reasoning behind it |
+| [`PLAN.md`](documentation/PLAN.md) | the architecture, the reasoning behind it, and the build manual (§6: prerequisites, artifacts, traps) |
 | [`COMPACT.md`](documentation/COMPACT.md) | compaction: strategy, arithmetic, failure modes |
 | [`CODING.md`](documentation/CODING.md) | coding mode: folder boundary, confirmation gate, the terminal's shell, caps and timeout |
 | [`RESEARCH.md`](documentation/RESEARCH.md) | search and scraping: providers, refusals, guards, budgets |
 | [`IMAGES.md`](documentation/IMAGES.md) | picture generation: three server kinds, parameters, profiles |
 | [`IMAGES-CLOUD.md`](documentation/IMAGES-CLOUD.md) | hosted picture backends: the free tiers and their cost |
 | [`UPSCALING.md`](documentation/UPSCALING.md) | enlarging: the resampler, Real-ESRGAN, the Enlarge panel |
-| [`LLAMACPP.md`](documentation/LLAMACPP.md) | the llama.cpp provider and runtime, projectors, ternary models |
+| [`LLAMACPP.md`](documentation/LLAMACPP.md) | the llama.cpp provider and runtime, the CUDA/ROCm prerequisites, projectors, ternary models |
 | [`MLX.md`](documentation/MLX.md) | the MLX provider and the mlx-lm environment KiChat installs on Apple silicon |
 | [`GROQ.md`](documentation/GROQ.md), [`NVIDIA.md`](documentation/NVIDIA.md), [`MISTRAL.md`](documentation/MISTRAL.md), [`DEEPSEEK.md`](documentation/DEEPSEEK.md) | a hosted backend each: listing, window, ceiling, pacing, refusals |
 | [`ENCRYPTION.md`](documentation/ENCRYPTION.md) | the encrypted database: page encryption, the key and its recovery copy |
