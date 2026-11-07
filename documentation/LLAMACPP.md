@@ -490,6 +490,17 @@ override would make llama.cpp reinterpret trunk layers.
 One caveat belongs with the flags: MTP is documented for a single slot, so a `--parallel` above 1
 typed into the further arguments is outside what llama.cpp measures for it.
 
+**MTP costs memory of its own, and a quantized V cache needs flash attention.** Measured on that 27B
+IQ3_S file, CPU, 4096 tokens of context: 13 061 MiB without MTP and 15 213 with it — about 2.1 GiB
+for the draft context — and the same gap at 16 384 tokens (13 803 against 16 029), so it is the
+draft's own weights, buffers and KV rather than a share of the main cache. Flash attention `on`
+with a q8_0 cache *saves* about 120 MiB (12 941), and MTP adds its 2.1 GiB on top of that (15 093).
+The draft cache stays f16 whatever the main one is: `--spec-draft-type-k`/`-v` change it, and a
+measured q8_0 pair came out no better here (15 110 MiB), so the app does not pass them. What it does
+refuse is the one pair llama.cpp cannot load at all — a quantized V cache with flash attention
+*off*, where the server answers `quantized V cache requires flash_attn to be enabled` and exits —
+which is why that combination is a sentence in the panel rather than a failed load.
+
 An exact count stays a *further argument* (`-ngl 24`), which is where a number only one
 model needs belongs, and it wins over the mode because the user's arguments go last on the
 command line. `-dev`, `-ts` and `-sm` live there too, and the device row, the free-memory
