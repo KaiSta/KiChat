@@ -46,18 +46,26 @@ const (
 // BlockCount is the layer count and the ceiling for `--n-cpu-moe`; ExpertCount is how
 // many experts one layer holds and is 0 for a dense model, which is the question the
 // panel asks. ExpertUsedCount is how many of them fire per token — the number that
-// makes a 20 GB file answer at 3B parameters. Zeros mean "the file did not say",
-// because a header this app cannot read is not evidence of a dense model.
+// makes a 20 GB file answer at 3B parameters. MTPLayers is how many nextn-prediction
+// heads the file was converted with, and 0 means it has none. Zeros mean "the file did
+// not say", because a header this app cannot read is not evidence of a dense model.
 type GGUFInfo struct {
 	Architecture    string
 	BlockCount      int
 	ExpertCount     int
 	ExpertUsedCount int
+	MTPLayers       int
 }
 
 // MoE reports whether the header says the model has experts. It is deliberately not
 // "ExpertCount > 0 or unknown": the caller decides what an unreadable header means.
 func (i GGUFInfo) MoE() bool { return i.ExpertCount > 0 }
+
+// MTP reports whether the file was converted with multi-token prediction heads — the
+// `{arch}.nextn_predict_layers` count llama.cpp's converter writes. A file without it
+// cannot speculate from its own heads, so the flag would stop the server rather than do
+// nothing.
+func (i GGUFInfo) MTP() bool { return i.MTPLayers > 0 }
 
 var errGGUFTruncated = errors.New("GGUF header does not fit in the read window")
 
@@ -163,7 +171,7 @@ const (
 // The keys are namespaced by architecture in the file (`qwen3moe.block_count`), so the
 // parse keeps only the suffix and resolves the prefix at the end: a file whose
 // architecture key comes last reads the same as one whose key comes first.
-var ggufNumberKeys = []string{".block_count", ".expert_count", ".expert_used_count"}
+var ggufNumberKeys = []string{".block_count", ".expert_count", ".expert_used_count", ".nextn_predict_layers"}
 
 func parseGGUFInfo(data []byte) (GGUFInfo, error) {
 	if len(data) < 4 || string(data[:4]) != "GGUF" {
@@ -197,6 +205,15 @@ func parseGGUFInfo(data []byte) (GGUFInfo, error) {
 		if err != nil {
 			return GGUFInfo{}, err
 		}
+		// The tokenizer section is the largest part of a header (arrays of 100k+
+		// strings), so stopping at its first key is what keeps this read bounded. It is
+		// also the honest boundary: every architecture scalar precedes it in the files
+		// llama.cpp's converter writes. Stopping on the expert trio instead was not
+		// enough, because some converters write the MTP head count after it — a mixture
+		// would then answer "no MTP" about a file that has the heads.
+		if strings.HasPrefix(key, "tokenizer.") && architecture != "" && numbers[architecture+".block_count"] > 0 {
+			break
+		}
 		typ, err := cursor.u32()
 		if err != nil {
 			return GGUFInfo{}, err
@@ -223,17 +240,6 @@ func parseGGUFInfo(data []byte) (GGUFInfo, error) {
 				}
 			}
 		}
-		// A mixture-of-experts file has all four keys — the expert_used_count comes
-		// after expert_count, so all of them are required before stopping or the "how
-		// many fire per token" answer is lost. The tokenizer arrays that follow are the
-		// largest part of the header, which is what makes stopping worth doing; a dense
-		// model never publishes expert keys and reads to the end, bounded by the window.
-		if architecture != "" &&
-			numbers[architecture+".block_count"] > 0 &&
-			numbers[architecture+".expert_count"] > 0 &&
-			numbers[architecture+".expert_used_count"] > 0 {
-			break
-		}
 	}
 
 	prefix := architecture
@@ -253,6 +259,7 @@ func parseGGUFInfo(data []byte) (GGUFInfo, error) {
 		BlockCount:      int(numbers[prefix+".block_count"]),
 		ExpertCount:     int(numbers[prefix+".expert_count"]),
 		ExpertUsedCount: int(numbers[prefix+".expert_used_count"]),
+		MTPLayers:       int(numbers[prefix+".nextn_predict_layers"]),
 	}, nil
 }
 
@@ -436,4 +443,40 @@ func SuggestForModel(info GGUFInfo, modelBytes, freeBytes int64) int {
 		return 0
 	}
 	return SuggestExpertLayers(info.BlockCount, modelBytes, freeBytes)
+}
+
+// SuggestMTPDraftTokens is the starting `--spec-draft-n-max` for a file that has
+// multi-token prediction heads, and 0 for one that has none.
+//
+// Three, for three reasons that agree: it is llama.cpp's own default
+// (docs/speculative.md), it is the count the published Qwen3.6 27B/35B runs use, and a
+// direct 2-against-3 comparison on one machine measured 3 higher — about 18–21 tok/s
+// against 16, at 72% draft acceptance against 82%. A draft that is mostly accepted
+// earns more per verification pass than a short one that always is, which is why the
+// lower count is not automatically the safer one. The values above 4 that the measured
+// guides recommend are all paired with `--spec-draft-p-min`, so the head stops drafting
+// when it is unsure; without that floor a longer draft is where throughput starts to
+// fall. Unsloth's 2 is a starting point for smaller and older models and says as much.
+// It stays a starting point: the panel says "recommended" and the hint names the range
+// worth measuring, rather than presenting one number as the answer for every card.
+func SuggestMTPDraftTokens(info GGUFInfo) int {
+	if info.MTPLayers <= 0 {
+		return 0
+	}
+	return 3
+}
+
+// SuggestMTPConfidence is the starting `--spec-draft-p-min` for a file with
+// multi-token prediction heads, and 0 — llama.cpp's own "no floor" — for one without.
+//
+// 0.75 is the value every measured guide that drafts 4–6 tokens uses (llama.cpp
+// discussion #25198 at 0.8, the per-GPU Qwen guide at 0.75). The floor is what makes a
+// longer draft pay: below it the head stops instead of guessing, so the acceptance rate
+// stops collapsing as the count rises. Setting it does not make a count of 1 cheaper,
+// which is why it is a separate setting rather than folded into the count.
+func SuggestMTPConfidence(info GGUFInfo) float64 {
+	if info.MTPLayers <= 0 {
+		return 0
+	}
+	return 0.75
 }

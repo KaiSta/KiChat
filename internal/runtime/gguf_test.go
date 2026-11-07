@@ -239,3 +239,63 @@ func TestDenseModelGetsNoExpertSuggestion(t *testing.T) {
 		t.Error("a mixture that does not fit got no suggestion at all")
 	}
 }
+
+// Multi-token prediction is declared by the converter in one metadata value, and only a
+// file that carries the heads can be started with the flag: llama.cpp rejects it on a
+// model without them, so the suggestion and the start both ask this question first.
+func TestGGUFProbeFindsTheMTPHeads(t *testing.T) {
+	data := ggufHeader(3,
+		kvString("general.architecture", "qwen35moe"),
+		kvU32("qwen35moe.block_count", 48),
+		kvU32("qwen35moe.expert_count", 256),
+		kvU32("qwen35moe.expert_used_count", 8),
+		kvU32("qwen35moe.nextn_predict_layers", 1),
+		// The tokenizer array follows, and the read must never need it: the MTP count is
+		// architecture metadata, and the parse stops at the section's first key. Before
+		// that boundary existed the parse stopped once it had the expert trio, which is
+		// why the heads have to be declared after it here.
+		func(g *ggufBuilder) {
+			g.key("tokenizer.ggml.tokens", 9)
+			g.u32(3)
+			g.u64(3)
+			g.text("a")
+			g.text("b")
+			g.text("c")
+		},
+	)
+	path := filepath.Join(t.TempDir(), "mtp.gguf")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	forgetGgufProbes()
+	info, err := ProbeGGUF(path)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if info.MTPLayers != 1 || !info.MTP() {
+		t.Errorf("MTP layers = %d, want the one the header declares", info.MTPLayers)
+	}
+	if got := SuggestMTPDraftTokens(info); got != 3 {
+		t.Errorf("suggested drafts = %d, want 3", got)
+	}
+	if got := SuggestMTPConfidence(info); got != 0.75 {
+		t.Errorf("suggested floor = %v, want 0.75", got)
+	}
+
+	// A file without the key is not told to speculate: the row does not appear and the
+	// start sends no flag.
+	dense := ggufHeader(3, kvString("general.architecture", "llama"), kvU32("llama.block_count", 32))
+	plain := filepath.Join(t.TempDir(), "plain.gguf")
+	if err := os.WriteFile(plain, dense, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	forgetGgufProbes()
+	info, err = ProbeGGUF(plain)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if info.MTP() || SuggestMTPDraftTokens(info) != 0 || SuggestMTPConfidence(info) != 0 {
+		t.Errorf("a file without MTP heads reports %d heads, %d drafts and floor %v",
+			info.MTPLayers, SuggestMTPDraftTokens(info), SuggestMTPConfidence(info))
+	}
+}
