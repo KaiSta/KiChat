@@ -36,6 +36,11 @@ const (
 	// CacheTypeF16 is llama.cpp's default KV cache type. Passing it is a no-op, so
 	// it is omitted rather than sent.
 	CacheTypeF16 = "f16"
+	// CacheTypeF32 and CacheTypeBF16 are the other two KV cache types that are not
+	// quantized, so they are the company a quantized V cache needs flash attention
+	// without. Spelled here for the same reason as F16, and pinned by a test.
+	CacheTypeF32  = "f32"
+	CacheTypeBF16 = "bf16"
 	// SpecTypeDraftMTP is llama.cpp's name for speculative decoding that uses the
 	// model's own multi-token prediction heads (docs/speculative.md). The heads ship in
 	// the model's own GGUF, so there is no second file to name.
@@ -228,6 +233,12 @@ func probeHealth(ctx context.Context, url string) error {
 // is reported through Status: the caller gets a "starting" server immediately
 // rather than a bound method that blocks for minutes.
 func (s *Server) Start(opts Options) error {
+	// First, because it is a contradiction between two settings rather than anything
+	// about the files: a start that got as far as the binary would report the wrong
+	// reason for the same failure.
+	if err := opts.cacheAttentionRefusal(); err != nil {
+		return err
+	}
 	label := opts.label()
 	if opts.Binary == "" {
 		return uimsg.Errorf("runtime.binaryMissing", label)
@@ -601,6 +612,27 @@ func (s *Server) publish() {
 	if s.onState != nil {
 		s.onState(s.Status())
 	}
+}
+
+// cacheAttentionRefusal reports a V cache type the server cannot load with flash
+// attention off.
+//
+// llama.cpp implements a quantized V cache through flash attention and refuses the model
+// otherwise — "quantized V cache requires flash_attn to be enabled", measured on build
+// 12189 — so the contradiction is caught here, where it can be a sentence about the two
+// settings instead of a log line from a load that already failed. "auto" is not a
+// contradiction: the server switches flash attention on by itself for such a cache
+// (same build, a q8_0 cache starts with no flag and is refused only with `off`).
+func (o Options) cacheAttentionRefusal() error {
+	v := strings.TrimSpace(o.CacheTypeV)
+	if v == "" || o.FlashAttention != FlashAttentionOff {
+		return nil
+	}
+	switch v {
+	case CacheTypeF16, CacheTypeF32, CacheTypeBF16:
+		return nil
+	}
+	return uimsg.Errorf("runtime.quantizedVCacheNeedsFlashAttention", v)
 }
 
 // label is what the messages call this program.

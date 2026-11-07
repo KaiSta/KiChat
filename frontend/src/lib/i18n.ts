@@ -1455,6 +1455,8 @@ const de = {
   'err.runtime.binaryMissing': 'kein {{1}} installiert',
   'err.runtime.binaryNotFound': '{{1}} nicht gefunden: {{2}}',
   'err.runtime.modelIsFolder': 'Modellpfad ist ein Ordner: {{1}}',
+  'err.runtime.quantizedVCacheNeedsFlashAttention':
+    'Ein quantisierter V-Cache ({{1}}) braucht Flash Attention \u2014 stell Flash Attention auf \u201eon\u201c oder den V-Cache auf f16.',
   'err.runtime.freePort': 'freien Port finden: {{1}}',
   'err.runtime.startServer': '{{1}} starten: {{2}}',
   'err.runtime.unexpectedPortAddress': 'unerwartete Adresse für den freien Port',
@@ -2931,6 +2933,8 @@ const en: Record<keyof typeof de, string> = {
   'err.runtime.binaryMissing': 'no {{1}} is installed',
   'err.runtime.binaryNotFound': '{{1}} not found: {{2}}',
   'err.runtime.modelIsFolder': 'the model path is a folder: {{1}}',
+  'err.runtime.quantizedVCacheNeedsFlashAttention':
+    'A quantized V cache ({{1}}) needs flash attention \u2014 set flash attention to on, or the V cache to f16.',
   'err.runtime.freePort': 'finding a free port: {{1}}',
   'err.runtime.startServer': 'starting {{1}}: {{2}}',
   'err.runtime.unexpectedPortAddress': 'unexpected address for the free port',
@@ -4272,6 +4276,8 @@ const zh: Record<keyof typeof de, string> = {
   'err.runtime.binaryMissing': '未安装 {{1}}',
   'err.runtime.binaryNotFound': '未找到 {{1}}：{{2}}',
   'err.runtime.modelIsFolder': '模型路径是一个文件夹：{{1}}',
+  'err.runtime.quantizedVCacheNeedsFlashAttention':
+    '量化的 V 缓存（{{1}}）需要 Flash Attention\u2014\u2014请把 Flash Attention 设为 on，或把 V 缓存设为 f16。',
   'err.runtime.freePort': '查找空闲端口：{{1}}',
   'err.runtime.startServer': '启动 {{1}}：{{2}}',
   'err.runtime.unexpectedPortAddress': '空闲端口返回了意外的地址',
