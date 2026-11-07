@@ -30,5 +30,8 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^5.6.3",
     "vite": "^7.0.0"
+  },
+  "overrides": {
+    "katex": "$katex"
   }
 }

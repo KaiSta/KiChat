@@ -88,7 +88,7 @@ copyright line is given beside it; the text of the licence follows the list.
 - **is-decimal** 2.0.1 — Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
 - **is-hexadecimal** 2.0.1 — Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
 - **is-plain-obj** 4.1.0 — Copyright (c) Sindre Sorhus <sindresorhus@gmail.com> (https://sindresorhus.com)
-- **katex** 0.19.0 — Copyright (c) 2013-2020 Khan Academy and other contributors
+- **katex** 0.19.1 — Copyright (c) 2013-2020 Khan Academy and other contributors
 - **longest-streak** 3.1.0 — Copyright (c) 2015 Titus Wormer <mailto:tituswormer@gmail.com>
 - **lowlight** 3.3.0 — Copyright (c) Titus Wormer <tituswormer@gmail.com>
 - **lukechampine.com/adiantum** v1.1.1 — Copyright (c) 2019 Luke Champine
