@@ -36,6 +36,10 @@ const (
 	// CacheTypeF16 is llama.cpp's default KV cache type. Passing it is a no-op, so
 	// it is omitted rather than sent.
 	CacheTypeF16 = "f16"
+	// SpecTypeDraftMTP is llama.cpp's name for speculative decoding that uses the
+	// model's own multi-token prediction heads (docs/speculative.md). The heads ship in
+	// the model's own GGUF, so there is no second file to name.
+	SpecTypeDraftMTP = "draft-mtp"
 )
 
 // Options describe one server to start.
@@ -92,6 +96,15 @@ type Options struct {
 	ExpertOffload string
 	// ExpertLayers is the N of `--n-cpu-moe N`, read only with ExpertOffloadLayers.
 	ExpertLayers int
+	// MTPDraft is the N of `--spec-draft-n-max N`, sent with `--spec-type draft-mtp`:
+	// the model's own heads draft that many tokens and the model verifies them in one
+	// batch. Zero sends nothing, which is llama.cpp's default of no speculation, and is
+	// also what a file without the heads gets — see the header check at the start.
+	MTPDraft int
+	// MTPConfidence is the P of `--spec-draft-p-min P`: the head stops drafting once it
+	// is less sure than this, which is what lets a longer draft pay. Zero is
+	// llama.cpp's own "no floor" and sends nothing; it is only read with MTPDraft.
+	MTPConfidence float64
 	// Trace asks for the server's log at llama.cpp's trace level, which is where it
 	// names the device it chose and how many layers it placed there; the reading
 	// this app reports comes from those two lines and nowhere else. See
@@ -632,6 +645,18 @@ func (o Options) args() []string {
 		args = append(args, "--cpu-moe")
 	case ExpertOffloadLayers:
 		args = append(args, "--n-cpu-moe", strconv.Itoa(o.ExpertLayers))
+	}
+	// Multi-token prediction, from the model's own heads. Both flags are needed: the
+	// type is what turns the heads on, and the count is how far ahead they draft. Only
+	// sent when there is a count, because llama.cpp's default is no speculation at all.
+	if o.MTPDraft > 0 {
+		args = append(args, "--spec-type", SpecTypeDraftMTP, "--spec-draft-n-max", strconv.Itoa(o.MTPDraft))
+		// The floor is only meaningful with a count to truncate, so it rides along with
+		// it. FormatFloat with -1 prints the shortest form that round-trips, which is
+		// "0.75" rather than "0.750000" — the flag takes a probability, not a shape.
+		if o.MTPConfidence > 0 {
+			args = append(args, "--spec-draft-p-min", strconv.FormatFloat(o.MTPConfidence, 'f', -1, 64))
+		}
 	}
 	// The level whose output carries the placement reading. Before Extra, so a
 	// verbosity the user typed themselves is the one that counts.

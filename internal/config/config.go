@@ -804,6 +804,23 @@ type ManagedModel struct {
 	// its own: this file keeps llama.cpp's own `--fit` placement whatever the panel
 	// would otherwise suggest for it.
 	Experts map[string]ExpertChoice `json:"experts,omitempty"`
+	// MTP keeps, per file, how many tokens multi-token prediction may draft before the
+	// model verifies them — llama.cpp's `--spec-type draft-mtp` with
+	// `--spec-draft-n-max N`. Keyed by path for the same reason as Experts: the ranks
+	// are a property of the file, and the chat's picker moves only the path.
+	//
+	// Three states, and the difference matters: absent means nobody has decided, so a
+	// file whose header declares the heads starts with the recommendation; a stored 0 is
+	// a deliberate off — the only way to start such a file without the flags; and a stored
+	// count is used as it is. The start still checks the header, because the flag on a
+	// file without MTP heads stops the server rather than being ignored.
+	MTP map[string]int `json:"mtp,omitempty"`
+	// MTPConfidence keeps, per file, the `--spec-draft-p-min` floor: the probability
+	// below which the MTP head stops drafting instead of guessing. It is a second value
+	// rather than a field of one because the useful count and the useful floor move
+	// together — a longer draft only pays with a floor — yet either can be set alone.
+	// Absent follows the recommendation (0.75); a stored 0 is a deliberate "no floor".
+	MTPConfidence map[string]float64 `json:"mtpConfidence,omitempty"`
 	// ExtraArgs is the rest of the command line, for the flags this app has no
 	// field for (--n-gpu-layers 24, a chat template).
 	ExtraArgs string `json:"extraArgs"`
@@ -1048,6 +1065,12 @@ const (
 	ExpertOffloadLayers = "layers"
 )
 
+// MaxMTPDrafts bounds a stored `--spec-draft-n-max`. The model verifies every drafted
+// token in one batch, so the useful range is single digits and a larger number is a
+// typed mistake rather than a preference; a value past this is clamped, not rejected,
+// because losing the setting would be worse than lowering it.
+const MaxMTPDrafts = 16
+
 // ExpertOffloadModes is every value the expert-offload field may hold, in the
 // order a picker should offer them: the placement llama.cpp does on its own
 // first, the two explicit ones after it.
@@ -1122,6 +1145,50 @@ func normaliseExpertChoices(mm *ManagedModel) {
 		out = nil
 	}
 	mm.Experts = out
+}
+
+// normaliseMTPChoices repairs the per-file multi-token prediction counts.
+//
+// Zero is kept: it is the stored "off", and the only way to say that about a file whose
+// header has the heads without also turning the setting into "whatever the app
+// recommends". A negative count is not a setting and drops out. A count past
+// MaxMTPDrafts is clamped for the same reason the number field has a maximum — the value
+// is still usable, and losing it over a typed extra digit would be worse.
+func normaliseMTPChoices(mm *ManagedModel) {
+	out := make(map[string]int, len(mm.MTP))
+	for path, drafts := range mm.MTP {
+		path = strings.TrimSpace(path)
+		if path == "" || drafts < 0 {
+			continue
+		}
+		out[path] = min(drafts, MaxMTPDrafts)
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	mm.MTP = out
+}
+
+// normaliseMTPConfidence repairs the per-file confidence floors.
+//
+// Zero is kept here for the same reason as a zero count — it is the stored "no floor",
+// which an absent entry does not say, since that follows the recommendation. A floor of 1
+// (or more) passes no draft at all and a negative one is not a probability: both drop
+// out. A value in between is kept as entered — the flag takes a probability, and
+// rounding it to a house grid would be a different number than the user asked for.
+func normaliseMTPConfidence(mm *ManagedModel) {
+	out := make(map[string]float64, len(mm.MTPConfidence))
+	for path, floor := range mm.MTPConfidence {
+		path = strings.TrimSpace(path)
+		if path == "" || floor < 0 || floor >= 1 {
+			continue
+		}
+		out[path] = floor
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	mm.MTPConfidence = out
 }
 
 // NormaliseMLX repairs the MLX-only section: a number the server would refuse is
@@ -1673,6 +1740,23 @@ func (s Settings) Clone() Settings {
 				}
 				mm.Experts = experts
 			}
+			// The MTP counts are the entry's third map, and the same rule applies: a
+			// value-type map that the clone shares is written underneath the marshaller.
+			if mm.MTP != nil {
+				mtp := make(map[string]int, len(mm.MTP))
+				for path, drafts := range mm.MTP {
+					mtp[path] = drafts
+				}
+				mm.MTP = mtp
+			}
+			// And the fourth: the confidence floor that goes with the count.
+			if mm.MTPConfidence != nil {
+				floors := make(map[string]float64, len(mm.MTPConfidence))
+				for path, floor := range mm.MTPConfidence {
+					floors[path] = floor
+				}
+				mm.MTPConfidence = floors
+			}
 			out.Runtime.Models[id] = mm
 		}
 	}
@@ -1857,6 +1941,8 @@ func (s *Settings) normalise() {
 		mm.CacheTypeV = normaliseCacheType(mm.CacheTypeV)
 		mm.Offload = normaliseOffload(mm.Offload)
 		normaliseExpertChoices(&mm)
+		normaliseMTPChoices(&mm)
+		normaliseMTPConfidence(&mm)
 		mm.MLX = NormaliseMLX(mm.MLX)
 		s.Runtime.Models[id] = mm
 	}

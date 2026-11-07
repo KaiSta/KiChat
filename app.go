@@ -532,6 +532,31 @@ func (a *App) startManagedModel(backendID string) (err error) {
 	// 48-layer mixture is the wrong answer for a 32-layer one, and the chat's picker
 	// moves only the path. A file with no stored choice gets llama.cpp's own placement.
 	experts := mm.ExpertFor(mm.ModelPath)
+	// Multi-token prediction is per file as well, and the header decides whether the
+	// flag can be used at all: `--spec-type draft-mtp` on a file without the heads is
+	// not ignored, it stops the server. A stored count on a file that was replaced
+	// therefore sends nothing, and an unreadable header does the same, so the model
+	// loads as it would have.
+	//
+	// An entry nobody has written is not "off": it is undecided, and a file whose header
+	// has the heads starts with the recommendation — which is what makes a pick in the chat
+	// get the same numbers the panel shows. The stored 0 is the one that says off.
+	mtpDraft, mtpConfidence := 0, 0.0
+	if info, err := rt.ProbeGGUF(mm.ModelPath); err == nil && info.MTP() {
+		path := strings.TrimSpace(mm.ModelPath)
+		drafts, decided := mm.MTP[path]
+		if !decided {
+			drafts = rt.SuggestMTPDraftTokens(info)
+		}
+		mtpDraft = drafts
+		if mtpDraft > 0 {
+			if floor, ok := mm.MTPConfidence[path]; ok {
+				mtpConfidence = floor
+			} else {
+				mtpConfidence = rt.SuggestMTPConfidence(info)
+			}
+		}
+	}
 	// Only the build this app installed is asked for its trace log. The placement
 	// reading — which device, how many layers — is printed at that level and nowhere
 	// else, but `-lv` is a flag an older binary a user points at may not know, and an
@@ -549,6 +574,8 @@ func (a *App) startManagedModel(backendID string) (err error) {
 		Offload:        mm.Offload,
 		ExpertOffload:  experts.Offload,
 		ExpertLayers:   experts.Layers,
+		MTPDraft:       mtpDraft,
+		MTPConfidence:  mtpConfidence,
 		Trace:          verboseTrace,
 		Extra:          rt.SplitArgs(mm.ExtraArgs),
 	})

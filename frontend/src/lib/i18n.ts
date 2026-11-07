@@ -551,6 +551,19 @@ const de = {
     'Die Datei ist größer als der freie Gerätespeicher; {{n}} Layer ist ein Ausgangswert — mehr im Arbeitsspeicher ist langsamer, geht aber nicht aus dem Speicher.',
   'settings.managed.expertHint':
     'Nur für Mixture-of-Experts-Modelle: die Expertengewichte bleiben im Arbeitsspeicher, Aufmerksamkeit, gemeinsame Gewichte und KV-Cache weiter auf der GPU. Das macht ein 20-GB-MoE-Modell auf einer 16-GB-Karte nutzbar — langsamer als alles in der GPU, aber pro Token rechnen nur 3B Parameter. Ein dichtes Modell hat keine Experten; dort bewirkt die Einstellung nichts.',
+  'settings.managed.mtp': 'Multi-Token-Vorhersage (MTP)',
+  'settings.managed.mtpDraft': 'Entwurfs-Token (N)',
+  'settings.managed.mtpSuggested': 'Empfohlen für diese Datei: {{n}} Entwurfs-Token.',
+  'settings.managed.mtpDetected': '{{n}} MTP-Köpfe in der Datei',
+  'settings.managed.folderMTP': 'MTP',
+  'settings.managed.mtpHint':
+    'Das Modell entwirft die nächsten Token selbst und prüft sie in einem Durchlauf; veröffentlichte Qwen3.6-Läufe mit MTP berichten etwa 1,5–2× schnellere Ausgabe ohne Genauigkeitsverlust. Drei Entwürfe sind llama.cpps eigener Standard und der Wert der veröffentlichten 27–35B-Läufe; sinnvoll ist der Bereich 1–6, weil der beste Wert von der Karte abhängt. Nur GGUFs, die mit den MTP-Köpfen umgewandelt wurden, können das — deshalb erscheint die Zeile nur bei ihnen. Wirkt ab dem nächsten Start.',
+  'settings.managed.mtpStale':
+    'Diese Datei hat keine MTP-Köpfe — der gespeicherte Wert bleibt, beim Start wird aber nichts gesendet.',
+  'settings.managed.mtpFloor': 'Mindestwahrscheinlichkeit',
+  'settings.managed.mtpFloorSuggested': 'Empfohlen: {{p}} — damit lohnen sich auch mehr Entwürfe.',
+  'settings.managed.mtpFloorHint':
+    'Unterhalb dieses Werts hört der MTP-Kopf auf zu entwerfen, statt zu raten; genau das lässt vier bis sechs Entwürfe etwas bringen. 0 schaltet die Grenze aus. Wirkt ab dem nächsten Start.',
   'settings.managed.tooLarge':
     'Die Gewichte ({{model}}) sind größer als der freie Speicher der erkannten Geräte ({{free}}) — das Modell passt nicht vollständig auf die GPU und wird ganz oder teilweise auf der CPU gerechnet. Eine stärker quantisierte Datei passt eher.',
   'settings.managed.ctx': 'Kontextfenster (-c)',
@@ -2041,6 +2054,19 @@ const en: Record<keyof typeof de, string> = {
     'The file is larger than the free device memory; {{n}} layers is a starting point — more in system RAM is slower, but it does not run out of memory.',
   'settings.managed.expertHint':
     'Mixture-of-experts models only: the expert weights stay in system RAM while attention, the shared weights and the KV cache stay on the GPU. That is what makes a 20 GB MoE model usable on a 16 GB card — slower than holding it all in VRAM, but only 3B parameters are read per token. A dense model has no experts, so the setting does nothing there.',
+  'settings.managed.mtp': 'Multi-token prediction (MTP)',
+  'settings.managed.mtpDraft': 'Draft tokens (N)',
+  'settings.managed.mtpSuggested': 'Recommended for this file: {{n}} draft tokens.',
+  'settings.managed.mtpDetected': '{{n}} MTP heads in the file',
+  'settings.managed.folderMTP': 'MTP',
+  'settings.managed.mtpHint':
+    'The model drafts the next tokens itself and verifies them in one pass; published Qwen3.6 MTP runs report about 1.5–2× faster output with no loss of accuracy. Three drafts is llama.cpp\'s own default and the count the published 27–35B runs use; 1–6 is the range worth measuring, because the best number depends on the card. Only GGUFs converted with the MTP heads can do this, which is why the row appears only for them. Applies from the next start.',
+  'settings.managed.mtpStale':
+    'This file has no MTP heads — the stored value is kept, but nothing is sent when it starts.',
+  'settings.managed.mtpFloor': 'Confidence floor',
+  'settings.managed.mtpFloorSuggested': 'Recommended: {{p}} — this is what makes a longer draft pay.',
+  'settings.managed.mtpFloorHint':
+    'Below this probability the MTP head stops drafting instead of guessing, which is what lets four to six drafts help. 0 turns the floor off. Applies from the next start.',
   'settings.managed.tooLarge':
     'The weights ({{model}}) are larger than the free memory the reported devices have ({{free}}) — the model does not fit on the GPU in full and will be computed on the CPU, wholly or partly. A more strongly quantised file is more likely to fit.',
   'settings.managed.ctx': 'Context window (-c)',
@@ -3457,6 +3483,18 @@ const zh: Record<keyof typeof de, string> = {
     '文件大于可用显存；{{n}} 层是一个起点——放在系统内存里的越多越慢，但不会耗尽显存。',
   'settings.managed.expertHint':
     '仅适用于混合专家（MoE）模型：专家权重留在系统内存，注意力、共享权重和 KV 缓存仍在 GPU 上。这让 20 GB 的 MoE 模型能在 16 GB 显卡上运行——比全部放入显存慢，但每个 token 只读取 3B 参数。稠密模型没有专家，此设置不起作用。',
+  'settings.managed.mtp': '多 token 预测（MTP）',
+  'settings.managed.mtpDraft': '草稿 token 数（N）',
+  'settings.managed.mtpSuggested': '此文件的建议值：{{n}} 个草稿 token。',
+  'settings.managed.mtpDetected': '文件中有 {{n}} 个 MTP 头',
+  'settings.managed.folderMTP': 'MTP',
+  'settings.managed.mtpHint':
+    '模型自行草拟接下来的 token，并在一次前向中一起校验；公开的 Qwen3.6 MTP 运行报告称输出约快 1.5–2 倍且不损失精度。三个草稿 token 是 llama.cpp 的默认值，也是公开的 27–35B 运行所用的值；值得测量的是 1–6，因为最佳值取决于显卡。只有带 MTP 头转换出的 GGUF 才支持，因此该行只对它们显示。修改从下次启动起生效。',
+  'settings.managed.mtpStale': '此文件没有 MTP 头——保存的值会保留，但启动时不会发送任何参数。',
+  'settings.managed.mtpFloor': '置信度下限',
+  'settings.managed.mtpFloorSuggested': '建议值：{{p}}——有了它，更长的草稿才划算。',
+  'settings.managed.mtpFloorHint':
+    '低于该概率时，MTP 头会停止草拟而不是继续猜测；这正是四个到六个草稿能带来收益的原因。0 表示不设下限。修改从下次启动起生效。',
   'settings.managed.tooLarge':
     '权重（{{model}}）大于所识别设备的可用显存（{{free}}）——模型无法完整放入 GPU，将全部或部分在 CPU 上计算。量化程度更高的文件更有可能放得下。',
   'settings.managed.ctx': '上下文窗口（-c）',

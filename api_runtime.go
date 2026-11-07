@@ -573,9 +573,10 @@ type ManagedModelTraits struct {
 	BlockCount      int    `json:"blockCount"`
 	ExpertCount     int    `json:"expertCount"`
 	ExpertUsedCount int    `json:"expertUsedCount"`
+	MTPLayers       int    `json:"mtpLayers"`
 }
 
-// ManagedModelProbe is those traits plus the layer count this app would suggest as a
+// ManagedModelProbe is those traits plus the values this app would suggest as a
 // starting point for `--n-cpu-moe N`. The suggestion is computed here rather than in the
 // panel so the arithmetic has a test, and it uses the same free-memory figure the
 // panel's own warning compares against — see rt.SuggestExpertLayers for the direction it
@@ -583,6 +584,13 @@ type ManagedModelTraits struct {
 type ManagedModelProbe struct {
 	Traits          ManagedModelTraits `json:"traits"`
 	SuggestedLayers int                `json:"suggestedLayers"`
+	// SuggestedMTPTokens is the starting `--spec-draft-n-max`, 0 for a file without
+	// MTP heads. It is computed here for the same reason as the layer count: the
+	// arithmetic has a test, and the panel shows a number it did not invent.
+	SuggestedMTPTokens int `json:"suggestedMtpTokens"`
+	// SuggestedMTPConfidence is the starting `--spec-draft-p-min`, and 0 for a file
+	// without MTP heads or for a start that should use no floor at all.
+	SuggestedMTPConfidence float64 `json:"suggestedMtpConfidence"`
 }
 
 // InspectManagedModel reads one GGUF's header for the fields above.
@@ -607,8 +615,10 @@ func (a *App) InspectManagedModel(path string, modelBytes, freeBytes int64) (Man
 	}
 	traits := managedModelTraits(info)
 	return ManagedModelProbe{
-		Traits:          traits,
-		SuggestedLayers: rt.SuggestForModel(info, modelBytes, freeBytes),
+		Traits:                 traits,
+		SuggestedLayers:        rt.SuggestForModel(info, modelBytes, freeBytes),
+		SuggestedMTPTokens:     rt.SuggestMTPDraftTokens(info),
+		SuggestedMTPConfidence: rt.SuggestMTPConfidence(info),
 	}, nil
 }
 
@@ -621,6 +631,7 @@ func managedModelTraits(info rt.GGUFInfo) ManagedModelTraits {
 		BlockCount:      info.BlockCount,
 		ExpertCount:     info.ExpertCount,
 		ExpertUsedCount: info.ExpertUsedCount,
+		MTPLayers:       info.MTPLayers,
 	}
 }
 

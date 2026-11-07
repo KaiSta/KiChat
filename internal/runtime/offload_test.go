@@ -86,6 +86,25 @@ func TestOffloadAndTraceReachTheCommandLine(t *testing.T) {
 	if zero := argsOf(Options{Model: "/m.gguf", ExpertOffload: ExpertOffloadLayers}); !has(zero, "--n-cpu-moe", "0") {
 		t.Errorf("expert offload layers 0 = %v, want --n-cpu-moe 0", zero)
 	}
+	// Multi-token prediction needs both flags: the type turns the model's own heads on
+	// and the count says how far ahead they draft. No count is llama.cpp's own default
+	// of no speculation, so a start without one sends neither.
+	if mtp := argsOf(Options{Model: "/m.gguf", MTPDraft: 2}); !has(mtp, "--spec-type", SpecTypeDraftMTP) {
+		t.Errorf("an MTP start = %v, want --spec-type %s", mtp, SpecTypeDraftMTP)
+	} else if !has(mtp, "--spec-draft-n-max", "2") {
+		t.Errorf("an MTP start = %v, want --spec-draft-n-max 2", mtp)
+	}
+	if quiet := argsOf(Options{Model: "/m.gguf"}); contains(quiet, "--spec-type") || contains(quiet, "--spec-draft-n-max") {
+		t.Errorf("a start without MTP sent a speculative flag: %v", quiet)
+	}
+	// The floor rides with the count, printed as the shortest probability that reads
+	// back the same; without a count there is nothing to truncate, so it is not sent.
+	if floored := argsOf(Options{Model: "/m.gguf", MTPDraft: 4, MTPConfidence: 0.75}); !has(floored, "--spec-draft-p-min", "0.75") {
+		t.Errorf("an MTP start with a floor = %v, want --spec-draft-p-min 0.75", floored)
+	}
+	if stray := argsOf(Options{Model: "/m.gguf", MTPConfidence: 0.75}); contains(stray, "--spec-draft-p-min") {
+		t.Errorf("a floor without a draft count was sent: %v", stray)
+	}
 	// Both new flags come before the user's own, so a verbosity or a layer count
 	// typed into *Further arguments* is the one that counts.
 	both := argsOf(Options{Model: "/m.gguf", Offload: OffloadAll, Trace: true, Extra: []string{"-ngl", "24"}})

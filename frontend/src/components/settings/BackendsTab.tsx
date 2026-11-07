@@ -513,6 +513,27 @@ function LocalModelSection({
   const traits = probe?.traits ?? null
   const expertRow = !traits || traits.expertCount > 0
   const suggestedLayers = probe?.suggestedLayers ?? 0
+  // Multi-token prediction is a second per-file capability. Its row exists only for a
+  // file whose header declares the heads — or for a file that still carries a count,
+  // which is how one gets turned off after the file was replaced.
+  //
+  // Three states, and the row has to show the same one the start uses: a stored 0 is a
+  // deliberate off, a stored count is used as it is, and an absent entry is undecided —
+  // so a file whose header has the heads starts with the recommendation, which is why
+  // the box arrives ticked rather than at 0.
+  const storedMTP = (model.mtp ?? {})[model.modelPath]
+  const mtpSupported = (traits?.mtpLayers ?? 0) > 0
+  const suggestedMTP = probe?.suggestedMtpTokens ?? 0
+  const mtpDrafts = storedMTP ?? (mtpSupported ? suggestedMTP : 0)
+  const mtpRow = mtpSupported || storedMTP !== undefined
+  // The confidence floor is the count's companion: the head stops drafting below it,
+  // and that is what makes a longer draft pay. Same three states: a stored 0 is "no floor"
+  // on purpose, an absent entry follows the recommendation.
+  const storedFloor = (model.mtpConfidence ?? {})[model.modelPath]
+  const suggestedMTPFloor = probe?.suggestedMtpConfidence ?? 0
+  // The fallback follows the count, not the header: with MTP off nothing is sent, so a
+  // suggested floor sitting in the disabled field would claim a setting in effect.
+  const mtpFloor = storedFloor ?? (mtpDrafts > 0 && mtpSupported ? suggestedMTPFloor : 0)
 
   // The expert placement of the file on screen. It is kept per file, not per entry: a
   // layer count that fits a 48-layer mixture is the wrong answer for a 32-layer one,
@@ -539,6 +560,33 @@ function LocalModelSection({
       : expertChoice.offload === 'auto'
   const useSuggestion = () =>
     setExpertChoice(suggestedLayers > 0 ? 'layers' : 'auto', suggestedLayers)
+  // The MTP count for the file on screen. Turning it on fills the recommendation rather
+  // than leaving a 1 nobody asked for; turning it off writes a 0, because deleting the
+  // entry would mean "undecided" and the next start would turn the flags back on.
+  const setMTP = (drafts: number) => {
+    const path = model.modelPath
+    if (!path) return
+    const next = { ...(model.mtp ?? {}), [path]: drafts }
+    const floors = { ...(model.mtpConfidence ?? {}) }
+    if (drafts > 0) {
+      // The floor is part of the recommendation, not a second decision: past four drafts
+      // it is what keeps the acceptance rate from collapsing, so switching MTP on fills
+      // it as well — unless a floor is already there, which is a choice of the user's.
+      if (floors[path] === undefined && suggestedMTPFloor > 0) floors[path] = suggestedMTPFloor
+    } else {
+      // A floor with no count to truncate describes nothing, and dropping it means
+      // switching MTP back on fills the recommendation again rather than an old number.
+      delete floors[path]
+    }
+    update({ mtp: next, mtpConfidence: floors })
+  }
+  // The floor is written even at 0: an absent entry follows the recommendation, so a
+  // field the user cleared has to store "no floor" rather than fall back to the advice.
+  const setMTPFloor = (floor: number) => {
+    const path = model.modelPath
+    if (!path) return
+    update({ mtpConfidence: { ...(model.mtpConfidence ?? {}), [path]: floor } })
+  }
 
   // Probed again when the numbers it is computed from change, so the suggestion is not
   // frozen at whatever the panel knew on its first render.
@@ -1047,6 +1095,17 @@ function LocalModelSection({
                       })}
                     </span>
                   )}
+                  {/* The other capability a header can declare, on the same row and for
+                      the same reason: whether this file can speculate from its own heads
+                      is not something its name says. */}
+                  {fileTrait && fileTrait.mtpLayers > 0 && (
+                    <span
+                      className="badge shrink-0"
+                      title={t('settings.managed.mtpDetected', { n: formatNumber(fileTrait.mtpLayers) })}
+                    >
+                      {t('settings.managed.folderMTP')}
+                    </span>
+                  )}
                   {file.path === loadedModel && (
                     <span className={`badge shrink-0 ${state === 'starting' ? '' : 'badge-ok'}`}>
                       {t(
@@ -1274,6 +1333,91 @@ function LocalModelSection({
               {t('settings.managed.expertSuggested', { n: formatNumber(suggestedLayers) })}
             </div>
           )}
+        </>
+      )}
+
+      {/* The model's own heads drafting the next tokens, verified in one batch. The row
+          appears only when the header declares them: the flag on a file without MTP
+          heads stops the server rather than doing nothing, which is why the start checks
+          the same header again. */}
+      {mtpRow && (
+        <>
+          <div className="mb-2 flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="h-3 w-3"
+              checked={mtpDrafts > 0}
+              onChange={(e) =>
+                setMTP(e.target.checked ? (suggestedMTP > 0 ? suggestedMTP : 1) : 0)
+              }
+            />
+            <span className="text-[11px]">{t('settings.managed.mtp')}</span>
+          </div>
+          <div className="mb-2">
+            <label className="text-[11px]">
+              {t('settings.managed.mtpDraft')}
+              {/* Committed on blur for the same reason as the floor: clearing the field to
+                  type a new count would otherwise switch MTP off — and wipe the floor it
+                  carries — between two keystrokes. */}
+              <input
+                key={`mtp-count:${model.modelPath}:${mtpDrafts}`}
+                className="input mono mt-1"
+                type="number"
+                min={1}
+                max={16}
+                step={1}
+                disabled={mtpDrafts <= 0}
+                defaultValue={mtpDrafts}
+                onBlur={(e) => {
+                  const typed = Math.round(Number(e.target.value))
+                  if (!Number.isFinite(typed) || typed <= 0) setMTP(0)
+                  else setMTP(Math.min(typed, 16))
+                }}
+              />
+            </label>
+          </div>
+          {mtpSupported && suggestedMTP > 0 && (
+            <div className="mb-2 text-[11px] faint">
+              {t('settings.managed.mtpSuggested', { n: formatNumber(suggestedMTP) })}
+            </div>
+          )}
+          {/* A count whose file was replaced by one without the heads: the row is kept so
+              it can be turned off, but the start probes the header and sends nothing, and
+              a ticked box with no such line would claim otherwise. */}
+          {mtpDrafts > 0 && traits && !mtpSupported && (
+            <div className="mb-2 text-[11px] faint">{t('settings.managed.mtpStale')}</div>
+          )}
+          <div className="mb-2">
+            <label className="text-[11px]">
+              {t('settings.managed.mtpFloor')}
+              {/* Uncontrolled while it is being typed, and committed on blur: coercing
+                  every keystroke makes a decimal impossible, because "0." parses to 0 and
+                  the field resets before the "8" arrives. The key re-mounts the input
+                  when the stored number changes underneath — ticking the box fills it. */}
+              <input
+                key={`mtp-floor:${model.modelPath}:${mtpFloor}`}
+                className="input mono mt-1"
+                type="number"
+                min={0.05}
+                max={0.95}
+                step={0.05}
+                disabled={mtpDrafts <= 0}
+                defaultValue={mtpFloor}
+                onBlur={(e) => {
+                  const typed = Number(e.target.value)
+                  if (!Number.isFinite(typed) || typed <= 0) setMTPFloor(0)
+                  else setMTPFloor(Math.min(typed, 0.95))
+                }}
+              />
+            </label>
+          </div>
+          {mtpSupported && suggestedMTPFloor > 0 && (
+            <div className="mb-2 text-[11px] faint">
+              {t('settings.managed.mtpFloorSuggested', { p: formatNumber(suggestedMTPFloor) })}
+            </div>
+          )}
+          <div className="mb-2 text-[11px] faint">{t('settings.managed.mtpFloorHint')}</div>
+          <div className="mb-2 text-[11px] faint">{t('settings.managed.mtpHint')}</div>
         </>
       )}
 

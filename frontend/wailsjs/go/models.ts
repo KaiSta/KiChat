@@ -400,6 +400,8 @@ export namespace config {
 	    expertOffload: string;
 	    expertLayers: number;
 	    experts?: Record<string, ExpertChoice>;
+	    mtp?: Record<string, number>;
+	    mtpConfidence?: Record<string, number>;
 	    extraArgs: string;
 	    mlx?: MLXOptions;
 	
@@ -420,6 +422,8 @@ export namespace config {
 	        this.expertOffload = source["expertOffload"];
 	        this.expertLayers = source["expertLayers"];
 	        this.experts = this.convertValues(source["experts"], ExpertChoice, true);
+	        this.mtp = source["mtp"];
+	        this.mtpConfidence = source["mtpConfidence"];
 	        this.extraArgs = source["extraArgs"];
 	        this.mlx = this.convertValues(source["mlx"], MLXOptions);
 	    }
@@ -1296,6 +1300,7 @@ export namespace main {
 	    blockCount: number;
 	    expertCount: number;
 	    expertUsedCount: number;
+	    mtpLayers: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new ManagedModelTraits(source);
@@ -1307,11 +1312,14 @@ export namespace main {
 	        this.blockCount = source["blockCount"];
 	        this.expertCount = source["expertCount"];
 	        this.expertUsedCount = source["expertUsedCount"];
+	        this.mtpLayers = source["mtpLayers"];
 	    }
 	}
 	export class ManagedModelProbe {
 	    traits: ManagedModelTraits;
 	    suggestedLayers: number;
+	    suggestedMtpTokens: number;
+	    suggestedMtpConfidence: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new ManagedModelProbe(source);
@@ -1321,6 +1329,8 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.traits = this.convertValues(source["traits"], ManagedModelTraits);
 	        this.suggestedLayers = source["suggestedLayers"];
+	        this.suggestedMtpTokens = source["suggestedMtpTokens"];
+	        this.suggestedMtpConfidence = source["suggestedMtpConfidence"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

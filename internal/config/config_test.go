@@ -1296,6 +1296,72 @@ func TestExpertChoiceStaysWithItsFile(t *testing.T) {
 	}
 }
 
+// The MTP count is per file for the same reason as the expert placement, and its zero is
+// a real value: it is the stored "off", which is the only way to say that about a file
+// whose header has the heads, since an absent path follows the recommendation. A
+// negative count and a blank path drop out, and a count past the maximum is clamped
+// rather than thrown away.
+func TestMTPCountStaysWithItsFile(t *testing.T) {
+	s := Default()
+	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
+		ModelPath: "/models/a.gguf",
+		MTP: map[string]int{
+			"/models/a.gguf": 4,
+			"/models/b.gguf": 0,
+			"/models/c.gguf": -3,
+			"/models/d.gguf": 99,
+			"  ":             2,
+		},
+	}}}
+	s.normalise()
+	got := s.Runtime.Models["llamacpp"]
+	if got.MTP["/models/a.gguf"] != 4 {
+		t.Errorf("the chosen count became %d, want 4", got.MTP["/models/a.gguf"])
+	}
+	if drafts, ok := got.MTP["/models/b.gguf"]; !ok || drafts != 0 {
+		t.Errorf("the stored off for /models/b.gguf became %d (present=%v), want 0", drafts, ok)
+	}
+	for _, path := range []string{"/models/c.gguf", "  "} {
+		if _, ok := got.MTP[path]; ok {
+			t.Errorf("%q kept an entry, want it dropped", path)
+		}
+	}
+	if got.MTP["/models/d.gguf"] != MaxMTPDrafts {
+		t.Errorf("an oversized count became %d, want it clamped to %d", got.MTP["/models/d.gguf"], MaxMTPDrafts)
+	}
+}
+
+// The confidence floor is stored the same way and for the same reason, but it is a
+// probability: 0 is a deliberate "no floor" and is kept, 1 passes no draft at all and a
+// negative value is not a probability, so those two drop out. A number in between is
+// kept exactly as entered — the flag takes a probability, not a shape.
+func TestMTPConfidenceIsAPerFileFloor(t *testing.T) {
+	s := Default()
+	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
+		ModelPath: "/models/a.gguf",
+		MTPConfidence: map[string]float64{
+			"/models/a.gguf": 0.75,
+			"/models/b.gguf": 0,
+			"/models/c.gguf": 1,
+			"/models/d.gguf": -0.2,
+			"  ":             0.5,
+		},
+	}}}
+	s.normalise()
+	got := s.Runtime.Models["llamacpp"]
+	if got.MTPConfidence["/models/a.gguf"] != 0.75 {
+		t.Errorf("the chosen floor became %v, want 0.75", got.MTPConfidence["/models/a.gguf"])
+	}
+	if floor, ok := got.MTPConfidence["/models/b.gguf"]; !ok || floor != 0 {
+		t.Errorf("the stored \"no floor\" for /models/b.gguf became %v (present=%v), want 0", floor, ok)
+	}
+	for _, path := range []string{"/models/c.gguf", "/models/d.gguf", "  "} {
+		if _, ok := got.MTPConfidence[path]; ok {
+			t.Errorf("%q kept a floor that cannot change anything, want it dropped", path)
+		}
+	}
+}
+
 // TestDefaultLeavesImageGenerationOff pins the decision the whole feature rests
 // on: a fresh install contacts no image server. A WebUI is a several-gigabyte
 // install of its own, so probing an address for a feature nobody has asked for

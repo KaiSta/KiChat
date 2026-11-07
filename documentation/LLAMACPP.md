@@ -451,6 +451,31 @@ recommendation also needs no click: an undecided file is filled with it as soon 
 The chat's picker list does not repeat the number — it is a reading of the file and the free memory,
 and a copy there would be one more thing to keep in step.
 
+**Multi-token prediction (MTP)** is the other per-file capability, and the one that changes speed
+rather than memory. A GGUF converted with the model's own MTP heads declares them as
+`{arch}.nextn_predict_layers`, and llama.cpp 22673 turns them on with `--spec-type draft-mtp`
+plus `--spec-draft-n-max N`: the model drafts N tokens itself and verifies them in one batch, so
+every draft it rejects costs a verification pass. The suggestion is **3**, and the number has a
+reason rather than a guess: 3 is llama.cpp's own default (`docs/speculative.md`) and the count the
+published Qwen3.6 27B/35B runs use, and the one direct 2-against-3 comparison on a single machine
+put 3 ahead — about 18–21 tok/s against 16, at 72% draft acceptance against 82%, because a draft
+that is mostly accepted earns more per verification pass than a short one that always is. Unsloth's
+2 is a starting point for smaller and older models, and its guide says to try 1–6; the measured
+guides that run 4–6 all pair them with `--spec-draft-p-min`, which stops the head once it is
+unsure. That floor is a per-file setting of its own, suggested at 0.75 — the value both measured
+guides use — and sent as `--spec-draft-p-min P` only alongside a draft count, since a floor with
+nothing to truncate describes nothing. Setting it is what makes the 1–6 range worth measuring:
+without it, past four the drafts are mostly rejected, and with it the head simply stops talking.
+The row appears only for a file whose header declares the heads, and the count is stored per
+file like the expert placement. That map has three states, and the start treats them
+differently: an absent entry means nobody has decided, so the file starts with the
+recommendation — which is what makes a pick in the chat get the same numbers the panel shows;
+a stored 0 is a deliberate off; a stored count is used as it is. The start checks the same
+header again, because the flag on a file without the heads stops the server rather than being
+ignored, so a count left on a replaced file sends nothing. One
+caveat belongs with the flags: MTP is documented for a single slot, so a `--parallel` above 1
+typed into the further arguments is outside what llama.cpp measures for it.
+
 An exact count stays a *further argument* (`-ngl 24`), which is where a number only one
 model needs belongs, and it wins over the mode because the user's arguments go last on the
 command line. `-dev`, `-ts` and `-sm` live there too, and the device row, the free-memory
@@ -1004,6 +1029,12 @@ selecting it keeps the row (silence is not evidence of a dense model) at `automa
 neither the suggested count nor the button that applies it, and the listing shows it without a
 MoE badge. A probe failure is caught rather than reported, so nothing about the file appears in
 the UI.
+
+Beside the two plain quantisations of Qwen3.6-35B-A3B sits one converted with its MTP heads,
+`…/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf`, and the mock answers its header with one `nextn_predict_layers`
+and a suggested 2 draft tokens. That is what makes both halves visible at once: the list's `MTP`
+badge and the panel's row appear on that file alone, and the two files without the heads show
+neither — the row and the badge are readings of the header, not of the name they happen to share.
 
 The loaded mark needs one flag and one click: `?fit=fits` installs a build and selects the
 Ministral file, and pressing **Start** then loads it — so the listing carries the mark while

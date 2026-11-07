@@ -3613,6 +3613,9 @@ Available tools: {{tool_list}}`,
       // A second quantisation of the same mixture of experts, so the panel has two files
       // whose expert placement can be told apart.
       { model: 'unsloth/Qwen3.6-35B-A3B-GGUF', name: 'Qwen3.6-35B-A3B-Q8_0.gguf', size: 38600000000 },
+      // The same mixture converted with its MTP heads: the list marks it and the panel
+      // offers multi-token prediction, while the two files above do not.
+      { model: 'unsloth/Qwen3.6-35B-A3B-MTP-GGUF', name: 'Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf', size: 20420000000 },
       // A header that will not parse: a corrupt byte, or a download that stopped early
       // while keeping the .gguf name. The panel keeps the expert row — silence is not
       // evidence of a dense model — shows no counts, and offers neither the suggested
@@ -4032,6 +4035,9 @@ Available tools: {{tool_list}}`,
         return Promise.reject(new Error(`${path}: GGUF header is truncated — the file is not complete`))
       }
       const moe = /moe|a3b|35b|expert/i.test(String(path))
+      // A name that says MTP is a file converted with the heads, which is the only
+      // thing that lets llama.cpp speculate from them.
+      const mtp = /mtp/i.test(String(path))
       const blockCount = moe ? 48 : 32
       const expertCount = moe ? 256 : 0
       const fits = !freeBytes || !(modelBytes > freeBytes)
@@ -4045,8 +4051,11 @@ Available tools: {{tool_list}}`,
           blockCount,
           expertCount,
           expertUsedCount: moe ? 8 : 0,
+          mtpLayers: mtp ? 1 : 0,
         },
         suggestedLayers: suggested,
+        suggestedMtpTokens: mtp ? 3 : 0,
+        suggestedMtpConfidence: mtp ? 0.75 : 0,
       })
     },
     // The whole listing in one call, keyed by path — the same rule as the single
@@ -4058,11 +4067,14 @@ Available tools: {{tool_list}}`,
         // in the list is only shown for the files whose header answered.
         if (unreadable(path)) continue
         const moe = /moe|a3b|35b|expert/i.test(String(path))
+        // The same reading as the single-file call above, by the same naming rule.
+        const mtp = /mtp/i.test(String(path))
         out[path] = {
           architecture: moe ? 'qwen3moe' : 'qwen3',
           blockCount: moe ? 48 : 32,
           expertCount: moe ? 256 : 0,
           expertUsedCount: moe ? 8 : 0,
+          mtpLayers: mtp ? 1 : 0,
         }
       }
       return Promise.resolve(out)
