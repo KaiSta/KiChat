@@ -342,7 +342,7 @@ user who trusted it would be worse off than one who reads the card.
 
 | Bound | Value | Why |
 | --- | --- | --- |
-| Output kept | 32 KiB from the start, 32 KiB from the end, the middle dropped and counted | A build says what it is doing first and what failed last. Keeping one end loses the story or its conclusion. |
+| Output kept | 15 KiB from the start, 15 KiB from the end, the middle dropped and counted | A build says what it is doing first and what failed last. Keeping one end loses the story or its conclusion. The two ends sit under `tools.MaxToolResultBytes` (32 KiB) rather than at half of it, so the note saying where the body was cut still fits. |
 | Default timeout | 120 s | Sized for a test suite or a build on a slow machine. Too short is worse than too long: it turns a working command into a mystery. |
 | Maximum timeout | 600 s | Beyond that it is not a command, it is a service, and a service belongs in a terminal the user owns. |
 | stdin | closed | A command that stops to ask a question gets EOF immediately — `git commit` without `-m` complains instead of a two-minute silence. |

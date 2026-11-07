@@ -71,7 +71,12 @@ spend 16 GB: [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) is 2
 system RAM and keep attention and the KV cache on the card — reported at 28–35 tok/s on a
 12–16 GB card with 32 GB of RAM. The model panel has the control — **MoE experts**, *all in system
 RAM* (`--cpu-moe`) or *first N layers* (`--n-cpu-moe N`) — so it is a dropdown choice like the rest
-of the table; every other row assumes the weights fit in VRAM.
+of the table; every other row assumes the weights fit in VRAM. The same panel changes speed rather
+than memory with a **Multi-token prediction (MTP)** row, for a GGUF converted with the model's own
+MTP heads: the model drafts the next three tokens itself and verifies them in one batch, behind a
+0.75 confidence floor, which the published Qwen3.6 runs report at roughly 1.5–2× the output rate.
+Like the expert placement it is a per-file choice, it starts on for a file whose header declares the
+heads, and it takes effect at the next start.
 
 KiChat shows the running model's actual placement (`34 of 34 layers on the GPU`, with the device
 and its free memory), so you can see whether it is really on the card. On unified memory the limit
@@ -197,7 +202,7 @@ works inside it and nowhere else:
   asking** is the wider per-kind switch that survives a restart.
 - **A terminal, one command at a time, behind the same gate.** `run_command` shows the exact line,
   editable on the card, and runs it with no stdin, a 120 s limit (600 s if the model asks), the
-  process tree killed at the limit and output capped at 32 KiB per end. A line that would throw
+  process tree killed at the limit and output capped at 15 KiB per end. A line that would throw
   away uncommitted work (`git reset --hard`, `checkout --`, `restore`, `clean -f`) is refused
   before you are asked, and so is one wanting administrator rights.
 - **It sees the working tree:** branch, ahead/behind and up to 40 pending paths are in the prompt
@@ -383,7 +388,7 @@ ceiling and the rate-limit remainder really are readable from a live response.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `Cannot find native binding` from Vite | Node older than 20.19 — see the npm 9 trap above |
+| `Cannot find native binding` from Vite | npm 9 skipped the Tailwind binding during install — see the npm 9 trap above, or run `make deps` |
 | Link error about webkit2gtk | built without `-tags webkit2_41` on a 4.1-only system |
 | `pattern all:frontend/dist: no matching files found` | `go build` before the frontend was built — run `make build` |
 | "no backend reachable" on first start | LM Studio and Ollama both stopped: start one, or install the managed llama.cpp runtime |
@@ -428,7 +433,7 @@ and each one distinguishes what was observed from what is expected.
 | [`IMAGES-CLOUD.md`](documentation/IMAGES-CLOUD.md) | hosted picture backends: what each free tier really is |
 | [`UPSCALING.md`](documentation/UPSCALING.md) | enlarging: the resampler, Real-ESRGAN, targets, the Enlarge panel |
 | [`ENCRYPTION.md`](documentation/ENCRYPTION.md) | the encrypted database: page encryption, the key and its recovery copy, the limits |
-| [`LLAMACPP.md`](documentation/LLAMACPP.md) | the llama.cpp provider and runtime, the CUDA/ROCm prerequisites, projectors, ternary models |
+| [`LLAMACPP.md`](documentation/LLAMACPP.md) | the llama.cpp provider and runtime, the CUDA/ROCm prerequisites, projectors, ternary models, multi-token prediction |
 | [`MLX.md`](documentation/MLX.md) | the MLX provider and the `mlx-lm` environment KiChat installs on Apple silicon |
 | [`GROQ.md`](documentation/GROQ.md) | the Groq backend: listings, refusals, ceilings, pacing |
 | [`NVIDIA.md`](documentation/NVIDIA.md) | the build.nvidia.com backend and its availability check |
