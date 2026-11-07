@@ -472,8 +472,22 @@ differently: an absent entry means nobody has decided, so the file starts with t
 recommendation — which is what makes a pick in the chat get the same numbers the panel shows;
 a stored 0 is a deliberate off; a stored count is used as it is. The start checks the same
 header again, because the flag on a file without the heads stops the server rather than being
-ignored, so a count left on a replaced file sends nothing. One
-caveat belongs with the flags: MTP is documented for a single slot, so a `--parallel` above 1
+ignored, so a count left on a replaced file sends nothing.
+
+MTP also depends on where the count is written, not only on whether it is. ISTA-DASLab's
+`Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` puts `tokenizer.ggml.tokens` at byte 1868 and
+`qwen35.nextn_predict_layers` at 10 944 502, behind ten megabytes of tokenizer arrays, so a
+read that stopped at the first tokenizer key never saw the heads — which is why the panel used
+to say "no MTP" about a file that declares it, while llama.cpp, which reads the whole metadata
+table, loaded it with them. The probe walks every key now, and then the tensor table as a
+second answer: a conversion that keeps the `blk.N.nextn.*` tensors and drops the key is read
+from the block index — one head, in the block after the trunk, is the layout llama.cpp
+expects — and the start supplies the count as `--override-kv {arch}.nextn_predict_layers=int:N`,
+since llama.cpp takes `n_layer_nextn` from that key alone and asserts it is positive before it
+builds the draft graph. A file whose nextn tensors sit anywhere else is left alone: there the
+override would make llama.cpp reinterpret trunk layers.
+
+One caveat belongs with the flags: MTP is documented for a single slot, so a `--parallel` above 1
 typed into the further arguments is outside what llama.cpp measures for it.
 
 An exact count stays a *further argument* (`-ngl 24`), which is where a number only one

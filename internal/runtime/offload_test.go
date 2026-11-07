@@ -105,6 +105,37 @@ func TestOffloadAndTraceReachTheCommandLine(t *testing.T) {
 	if stray := argsOf(Options{Model: "/m.gguf", MTPConfidence: 0.75}); contains(stray, "--spec-draft-p-min") {
 		t.Errorf("a floor without a draft count was sent: %v", stray)
 	}
+	// A file whose conversion dropped the head count gets it back as a metadata
+	// override, and only alongside the flags that use it — an override alone would
+	// change how llama.cpp reads the block table for nothing.
+	repaired := argsOf(Options{Model: "/m.gguf", MTPDraft: 3, MTPKVOverride: "qwen35.nextn_predict_layers=int:1"})
+	if !has(repaired, "--override-kv", "qwen35.nextn_predict_layers=int:1") {
+		t.Errorf("an MTP start on a file missing its count = %v, want the override", repaired)
+	}
+	if lone := argsOf(Options{Model: "/m.gguf", MTPKVOverride: "qwen35.nextn_predict_layers=int:1"}); contains(lone, "--override-kv") {
+		t.Errorf("an override without a draft count was sent: %v", lone)
+	}
+	// llama.cpp applies the first matching `--override-kv`, so the app must not put a
+	// duplicate in front of the user's own pair for the same key.
+	theirs := argsOf(Options{Model: "/m.gguf", MTPDraft: 3,
+		MTPKVOverride: "qwen35.nextn_predict_layers=int:1",
+		Extra:         []string{"--override-kv", "qwen35.nextn_predict_layers=int:1"}})
+	pairs := 0
+	for _, arg := range theirs {
+		if arg == "--override-kv" {
+			pairs++
+		}
+	}
+	if pairs != 1 {
+		t.Errorf("the app's override doubled the user's: %v", theirs)
+	}
+	// Another key is another question: the app's pair still goes in.
+	otherKey := argsOf(Options{Model: "/m.gguf", MTPDraft: 3,
+		MTPKVOverride: "qwen35.nextn_predict_layers=int:1",
+		Extra:         []string{"--override-kv", "qwen35.block_count=int:70"}})
+	if !has(otherKey, "--override-kv", "qwen35.nextn_predict_layers=int:1") {
+		t.Errorf("a different key suppressed the app's override: %v", otherKey)
+	}
 	// Both new flags come before the user's own, so a verbosity or a layer count
 	// typed into *Further arguments* is the one that counts.
 	both := argsOf(Options{Model: "/m.gguf", Offload: OffloadAll, Trace: true, Extra: []string{"-ngl", "24"}})

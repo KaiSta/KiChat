@@ -100,6 +100,60 @@ func TestAStoredMTPCountNeverReachesAFileWithoutHeads(t *testing.T) {
 	}
 }
 
+// A conversion can keep the head tensors and drop the metadata count — ISTA-DASLab's
+// GSQ-RCO MTP export does — and llama.cpp splits the block table by that count. The
+// start therefore says the count out loud, so the heads it can see are not loaded as
+// unused tensors.
+func TestATensorOnlyMTPFileIsStartedWithTheCountItIsMissing(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the command line is read from /proc")
+	}
+	model := writeTensorOnlyMTPModel(t, t.TempDir())
+	_, argv := startManagedForArgv(t, config.ManagedModel{ModelPath: model})
+
+	if !hasFlagValue(argv, "--override-kv", "qwen35.nextn_predict_layers=int:1") {
+		t.Errorf("the running server's command line is %v, want --override-kv qwen35.nextn_predict_layers=int:1", argv)
+	}
+	if !hasFlagValue(argv, "--spec-type", "draft-mtp") {
+		t.Errorf("the command line is %v, want the heads used once they are declared", argv)
+	}
+}
+
+// writeTensorOnlyMTPModel is that file: the head count exists only as the tensor the
+// block carries, which is what a conversion that dropped the key leaves behind.
+func writeTensorOnlyMTPModel(t *testing.T, dir string) string {
+	t.Helper()
+	var b []byte
+	u32 := func(v uint32) { b = binary.LittleEndian.AppendUint32(b, v) }
+	u64 := func(v uint64) { b = binary.LittleEndian.AppendUint64(b, v) }
+	str := func(s string) { u64(uint64(len(s))); b = append(b, s...) }
+	kv := func(k string, v uint32) { str(k); u32(4); u32(v) }
+	tensor := func(name string, offset uint64) {
+		str(name)
+		u32(1)
+		u64(16)
+		u32(0)
+		u64(offset)
+	}
+
+	b = append(b, "GGUF"...)
+	u32(3) // version
+	u64(2) // tensors
+	u64(2) // metadata keys
+	str("general.architecture")
+	u32(8) // string
+	str("qwen35")
+	kv("qwen35.block_count", 65)
+	tensor("blk.63.ffn_down.weight", 0)
+	tensor("blk.64.nextn.eh_proj.weight", 64)
+
+	path := filepath.Join(dir, "mtp-tensors-only.gguf")
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // writeMTPModel writes the smallest header the probe accepts that still declares one MTP
 // head, in the shape llama.cpp's converter writes: the architecture string, then the
 // namespaced scalars.

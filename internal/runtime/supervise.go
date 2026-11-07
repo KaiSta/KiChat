@@ -105,6 +105,12 @@ type Options struct {
 	// is less sure than this, which is what lets a longer draft pay. Zero is
 	// llama.cpp's own "no floor" and sends nothing; it is only read with MTPDraft.
 	MTPConfidence float64
+	// MTPKVOverride is one `--override-kv` pair for the metadata key a file is missing,
+	// sent only alongside a draft count. The value this app builds is
+	// GGUFInfo.MTPKVOverride(): the head count of a file whose conversion kept the nextn
+	// tensors and dropped the key llama.cpp splits the block table by, which would
+	// otherwise load with every head reported unused.
+	MTPKVOverride string
 	// Trace asks for the server's log at llama.cpp's trace level, which is where it
 	// names the device it chose and how many layers it placed there; the reading
 	// this app reports comes from those two lines and nowhere else. See
@@ -650,6 +656,17 @@ func (o Options) args() []string {
 	// type is what turns the heads on, and the count is how far ahead they draft. Only
 	// sent when there is a count, because llama.cpp's default is no speculation at all.
 	if o.MTPDraft > 0 {
+		// The key a conversion dropped comes first: llama.cpp reads metadata overrides in
+		// get_key, so this is what makes the head count exist before the flags that use it.
+		if kv := strings.TrimSpace(o.MTPKVOverride); kv != "" {
+			// The user's own pair wins: llama.cpp applies the first matching
+			// `--override-kv` it reads, so a duplicate appended after theirs would shadow
+			// them despite coming later on the command line.
+			key, _, _ := strings.Cut(kv, "=")
+			if !o.userOverridesKV(key) {
+				args = append(args, "--override-kv", kv)
+			}
+		}
 		args = append(args, "--spec-type", SpecTypeDraftMTP, "--spec-draft-n-max", strconv.Itoa(o.MTPDraft))
 		// The floor is only meaningful with a count to truncate, so it rides along with
 		// it. FormatFloat with -1 prints the shortest form that round-trips, which is
@@ -685,6 +702,29 @@ func (o Options) args() []string {
 		args = append(args, "--mmproj", p)
 	}
 	return append(args, o.Extra...)
+}
+
+// userOverridesKV reports whether the user's own arguments already set this metadata
+// key, as `--override-kv KEY=TYPE:VALUE` with the pair possibly inside a comma list.
+func (o Options) userOverridesKV(key string) bool {
+	key = strings.TrimSpace(key)
+	for i := 0; i < len(o.Extra); i++ {
+		var value string
+		switch {
+		case o.Extra[i] == "--override-kv" && i+1 < len(o.Extra):
+			value = o.Extra[i+1]
+		case strings.HasPrefix(o.Extra[i], "--override-kv="):
+			value = strings.TrimPrefix(o.Extra[i], "--override-kv=")
+		default:
+			continue
+		}
+		for _, pair := range strings.Split(value, ",") {
+			if k, _, ok := strings.Cut(pair, "="); ok && strings.TrimSpace(k) == key {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FreePort asks the kernel for an unused port.

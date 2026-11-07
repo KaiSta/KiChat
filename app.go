@@ -541,7 +541,7 @@ func (a *App) startManagedModel(backendID string) (err error) {
 	// An entry nobody has written is not "off": it is undecided, and a file whose header
 	// has the heads starts with the recommendation — which is what makes a pick in the chat
 	// get the same numbers the panel shows. The stored 0 is the one that says off.
-	mtpDraft, mtpConfidence := 0, 0.0
+	mtpDraft, mtpConfidence, mtpOverride := 0, 0.0, ""
 	if info, err := rt.ProbeGGUF(mm.ModelPath); err == nil && info.MTP() {
 		path := strings.TrimSpace(mm.ModelPath)
 		drafts, decided := mm.MTP[path]
@@ -555,6 +555,10 @@ func (a *App) startManagedModel(backendID string) (err error) {
 			} else {
 				mtpConfidence = rt.SuggestMTPConfidence(info)
 			}
+			// A file whose conversion kept the head tensors and dropped the count needs
+			// that count back before llama.cpp will use them; the probe says so, and this
+			// is the one line that carries it to the command line.
+			mtpOverride = info.MTPKVOverride()
 		}
 	}
 	// Only the build this app installed is asked for its trace log. The placement
@@ -576,6 +580,7 @@ func (a *App) startManagedModel(backendID string) (err error) {
 		ExpertLayers:   experts.Layers,
 		MTPDraft:       mtpDraft,
 		MTPConfidence:  mtpConfidence,
+		MTPKVOverride:  mtpOverride,
 		Trace:          verboseTrace,
 		Extra:          rt.SplitArgs(mm.ExtraArgs),
 	})

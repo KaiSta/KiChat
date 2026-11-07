@@ -28,12 +28,26 @@ func (g *ggufBuilder) key(k string, typ uint32) {
 
 // ggufHeader assembles a file: a version, no tensors, and the given key/value pairs.
 func ggufHeader(version uint32, kvs ...func(*ggufBuilder)) []byte {
+	return ggufTensors(version, nil, kvs...)
+}
+
+// ggufTensors is the same file with a tensor table behind the key/value pairs. One
+// dimension and one element each is enough: the MTP probe reads the names there and
+// skips everything after them.
+func ggufTensors(version uint32, tensors []string, kvs ...func(*ggufBuilder)) []byte {
 	g := &ggufBuilder{b: []byte("GGUF")}
 	g.u32(version)
-	g.u64(0)
+	g.u64(uint64(len(tensors)))
 	g.u64(uint64(len(kvs)))
 	for _, kv := range kvs {
 		kv(g)
+	}
+	for i, name := range tensors {
+		g.text(name)
+		g.u32(1)              // one dimension
+		g.u64(16)             // of sixteen elements
+		g.u32(0)              // f32
+		g.u64(uint64(i) * 64) // data offset
 	}
 	return g.b
 }
@@ -240,6 +254,147 @@ func TestDenseModelGetsNoExpertSuggestion(t *testing.T) {
 	}
 }
 
+// A conversion can keep the head tensors and drop the count llama.cpp splits the block
+// table by. The probe reads the tensor names for that case, and the count it finds is
+// the one a start hands back as `--override-kv`.
+func TestGGUFProbeFindsMTPHeadsTheMetadataDoesNotDeclare(t *testing.T) {
+	info, err := parseGGUFInfo(ggufTensors(3, []string{
+		"token_embd.weight",
+		"blk.0.attn_norm.weight",
+		"blk.63.ffn_down.weight",
+		"blk.64.attn_norm.weight",
+		"blk.64.nextn.eh_proj.weight",
+		"blk.64.nextn.enorm.weight",
+		"blk.64.nextn.hnorm.weight",
+		"blk.64.nextn.shared_head_norm.weight",
+		"output.weight",
+	},
+		kvString("general.architecture", "qwen35"),
+		kvU32("qwen35.block_count", 65),
+	))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if info.MTPLayers != 1 || !info.MTPFromTensors || !info.MTP() {
+		t.Errorf("MTP = %d from tensors = %v, want the one head the tensors declare",
+			info.MTPLayers, info.MTPFromTensors)
+	}
+	if got := info.MTPKVOverride(); got != "qwen35.nextn_predict_layers=int:1" {
+		t.Errorf("override = %q, want qwen35.nextn_predict_layers=int:1", got)
+	}
+}
+
+// The count is taken from the tensors only when it is unambiguous: one head, in the
+// block after the trunk. Anything else is left alone, because the override would make
+// llama.cpp reinterpret trunk layers as a head.
+func TestGGUFProbeLeavesAnAmbiguousTensorLayoutAlone(t *testing.T) {
+	cases := []struct {
+		name    string
+		tensors []string
+	}{
+		{"a head that is not the last block", []string{"blk.0.nextn.eh_proj.weight"}},
+		{"two heads", []string{"blk.63.nextn.eh_proj.weight", "blk.64.nextn.eh_proj.weight"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info, err := parseGGUFInfo(ggufTensors(3, tc.tensors,
+				kvString("general.architecture", "qwen35"),
+				kvU32("qwen35.block_count", 65),
+			))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if info.MTPLayers != 0 || info.MTPFromTensors {
+				t.Errorf("MTP = %d from tensors = %v, want no guess", info.MTPLayers, info.MTPFromTensors)
+			}
+			if got := info.MTPKVOverride(); got != "" {
+				t.Errorf("override = %q, want none", got)
+			}
+		})
+	}
+}
+
+// A file that declares the count in its metadata needs no override: that is the key
+// llama.cpp already reads, so a pair saying the same thing would only be noise.
+func TestGGUFProbeDeclaredCountNeedsNoOverride(t *testing.T) {
+	info, err := parseGGUFInfo(ggufTensors(3, []string{"blk.64.nextn.eh_proj.weight"},
+		kvString("general.architecture", "qwen35"),
+		kvU32("qwen35.block_count", 65),
+		kvU32("qwen35.nextn_predict_layers", 1),
+	))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !info.MTP() || info.MTPFromTensors {
+		t.Errorf("MTP = %d from tensors = %v, want the declared count", info.MTPLayers, info.MTPFromTensors)
+	}
+	if got := info.MTPKVOverride(); got != "" {
+		t.Errorf("override = %q, want none", got)
+	}
+}
+
+// A download that is still running has its architecture and expert counts long before
+// its tail, and a file the app cannot finish reading must not answer "nothing known":
+// the panel would lose the expert row it had a moment earlier. The strict parse has to
+// report the truncation so the bigger window is tried, and the tolerant one keeps what
+// it read.
+func TestGGUFProbeKeepsWhatItReadOfADamagedTail(t *testing.T) {
+	data := ggufTensors(3, []string{"blk.0.attn_norm.weight"},
+		kvString("general.architecture", "qwen35"),
+		kvU32("qwen35.block_count", 65),
+		kvU32("qwen35.expert_count", 8),
+	)
+	path := filepath.Join(t.TempDir(), "partial.gguf")
+	// The tensor entry is cut in half: the name and the header behind it, and none of the
+	// dimensions that close it.
+	if err := os.WriteFile(path, data[:len(data)-40], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	forgetGgufProbes()
+	info, err := ProbeGGUF(path)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if info.Architecture != "qwen35" || info.BlockCount != 65 || info.ExpertCount != 8 {
+		t.Errorf("a damaged tail lost the header: %+v", info)
+	}
+	if info.MTP() {
+		t.Errorf("a half-read tensor table claimed %d MTP heads", info.MTPLayers)
+	}
+}
+
+// The shape that got this wrong: a real conversion writes the tokenizer arrays first and
+// the architecture scalars after them. Measured on ISTA-DASLab's
+// Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf, `tokenizer.ggml.tokens` sits at byte 1868 and
+// `qwen35.nextn_predict_layers` at 10 944 502 — a read that stopped at the first
+// tokenizer key never saw the head count, so the panel said "no MTP" about a file that
+// declares it while llama.cpp, which reads the whole table, loaded the heads.
+func TestGGUFProbeReadsTheMTPCountWrittenAfterTheTokenizerArrays(t *testing.T) {
+	info, err := parseGGUFInfo(ggufHeader(3,
+		kvString("general.architecture", "qwen35"),
+		kvU32("qwen35.block_count", 65),
+		func(g *ggufBuilder) {
+			g.key("tokenizer.ggml.tokens", 9)
+			g.u32(8)
+			g.u64(3)
+			g.text("a")
+			g.text("b")
+			g.text("c")
+		},
+		kvU32("qwen35.nextn_predict_layers", 1),
+	))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if info.MTPLayers != 1 || !info.MTP() {
+		t.Errorf("MTP layers = %d, want the one the header declares", info.MTPLayers)
+	}
+	// Declared metadata needs no help from the tensor table, and no override.
+	if info.MTPFromTensors || info.MTPKVOverride() != "" {
+		t.Errorf("a declared count came from the tensors: %+v", info)
+	}
+}
+
 // Multi-token prediction is declared by the converter in one metadata value, and only a
 // file that carries the heads can be started with the flag: llama.cpp rejects it on a
 // model without them, so the suggestion and the start both ask this question first.
@@ -250,13 +405,12 @@ func TestGGUFProbeFindsTheMTPHeads(t *testing.T) {
 		kvU32("qwen35moe.expert_count", 256),
 		kvU32("qwen35moe.expert_used_count", 8),
 		kvU32("qwen35moe.nextn_predict_layers", 1),
-		// The tokenizer array follows, and the read must never need it: the MTP count is
-		// architecture metadata, and the parse stops at the section's first key. Before
-		// that boundary existed the parse stopped once it had the expert trio, which is
-		// why the heads have to be declared after it here.
+		// The tokenizer array follows, and the count must survive it: the parse walks
+		// the whole key/value table to reach the tensor table, so an array between the
+		// scalars and the end is what a real header puts there.
 		func(g *ggufBuilder) {
 			g.key("tokenizer.ggml.tokens", 9)
-			g.u32(3)
+			g.u32(8)
 			g.u64(3)
 			g.text("a")
 			g.text("b")

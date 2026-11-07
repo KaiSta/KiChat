@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,23 +48,29 @@ const (
 // many experts one layer holds and is 0 for a dense model, which is the question the
 // panel asks. ExpertUsedCount is how many of them fire per token — the number that
 // makes a 20 GB file answer at 3B parameters. MTPLayers is how many nextn-prediction
-// heads the file was converted with, and 0 means it has none. Zeros mean "the file did
-// not say", because a header this app cannot read is not evidence of a dense model.
+// heads the file carries, and 0 means it has none. MTPFromTensors says the count came
+// from the head tensors rather than from the metadata key llama.cpp reads, which is
+// the one case a start has to help llama.cpp with — see MTPKVOverride. Zeros mean "the
+// file did not say", because a header this app cannot read is not evidence of a dense
+// model.
 type GGUFInfo struct {
 	Architecture    string
 	BlockCount      int
 	ExpertCount     int
 	ExpertUsedCount int
 	MTPLayers       int
+	MTPFromTensors  bool
 }
 
 // MoE reports whether the header says the model has experts. It is deliberately not
 // "ExpertCount > 0 or unknown": the caller decides what an unreadable header means.
 func (i GGUFInfo) MoE() bool { return i.ExpertCount > 0 }
 
-// MTP reports whether the file was converted with multi-token prediction heads — the
-// `{arch}.nextn_predict_layers` count llama.cpp's converter writes. A file without it
-// cannot speculate from its own heads, so the flag would stop the server rather than do
+// MTP reports whether the file carries multi-token prediction heads. The count is
+// normally the `{arch}.nextn_predict_layers` value llama.cpp's converter writes; when
+// that key is missing, MTPFromTensors says the answer came from the head tensors
+// themselves, which llama.cpp cannot use until the count is given back to it. A file
+// with neither cannot speculate, so the flag would stop the server rather than do
 // nothing.
 func (i GGUFInfo) MTP() bool { return i.MTPLayers > 0 }
 
@@ -147,6 +154,12 @@ func readGGUFInfo(path string, size int64) (GGUFInfo, error) {
 		}
 		info, err = parseGGUFInfo(window)
 	}
+	if errors.Is(err, errGGUFTruncated) {
+		// Bigger than the window, or cut short by a download that is still running. The
+		// old read stopped at the first tokenizer key and never hit either; walking past
+		// it must not cost the facts the file does have.
+		return parseGGUFInfoTolerant(window), nil
+	}
 	return info, err
 }
 
@@ -173,7 +186,18 @@ const (
 // architecture key comes last reads the same as one whose key comes first.
 var ggufNumberKeys = []string{".block_count", ".expert_count", ".expert_used_count", ".nextn_predict_layers"}
 
-func parseGGUFInfo(data []byte) (GGUFInfo, error) {
+func parseGGUFInfo(data []byte) (GGUFInfo, error) { return parseGGUFInfoIn(data, false) }
+
+// parseGGUFInfoTolerant is the last resort for a header that does not fit the window or
+// a tensor table that is damaged — a file still being downloaded, mostly. It keeps the
+// keys it could read: the architecture and the expert counts are what the panel shows,
+// and they arrive long before the tail does.
+func parseGGUFInfoTolerant(data []byte) GGUFInfo {
+	info, _ := parseGGUFInfoIn(data, true)
+	return info
+}
+
+func parseGGUFInfoIn(data []byte, tolerant bool) (GGUFInfo, error) {
 	if len(data) < 4 || string(data[:4]) != "GGUF" {
 		return GGUFInfo{}, fmt.Errorf("not a GGUF file")
 	}
@@ -186,8 +210,10 @@ func parseGGUFInfo(data []byte) (GGUFInfo, error) {
 	if version < 2 || version > 3 {
 		return GGUFInfo{}, fmt.Errorf("GGUF version %d is not read", version)
 	}
-	// The tensor count is not needed, and its table is after the key/value table.
-	if _, err := cursor.u64(); err != nil {
+	// The tensor table sits after the key/value table, and it is where a file whose
+	// metadata has no head count keeps the only evidence of one.
+	tensorCount, err := cursor.u64()
+	if err != nil {
 		return GGUFInfo{}, err
 	}
 	kvCount, err := cursor.u64()
@@ -200,27 +226,40 @@ func parseGGUFInfo(data []byte) (GGUFInfo, error) {
 
 	numbers := map[string]uint64{}
 	architecture := ""
+	// Every key is walked, including the tokenizer section that is by far the largest
+	// part of a header (arrays of 100k+ strings). That section used to be the stopping
+	// point, because every architecture scalar precedes it in the files llama.cpp's
+	// converter writes — and the walk has to end at the tensor table to answer a file
+	// whose metadata has no head count. Arrays are skipped by their own lengths, so this
+	// costs a few hundred kilobytes of the bounded window rather than an allocation.
+	// A tolerant pass stops at the first value the window cannot hold; the strict one
+	// returns the truncation, which is what makes readGGUFInfo retry with a bigger
+	// window before falling back to this. Either way the keys read so far stand.
+	complete := true
 	for i := uint64(0); i < kvCount; i++ {
 		key, err := cursor.str()
 		if err != nil {
+			if tolerant {
+				complete = false
+				break
+			}
 			return GGUFInfo{}, err
-		}
-		// The tokenizer section is the largest part of a header (arrays of 100k+
-		// strings), so stopping at its first key is what keeps this read bounded. It is
-		// also the honest boundary: every architecture scalar precedes it in the files
-		// llama.cpp's converter writes. Stopping on the expert trio instead was not
-		// enough, because some converters write the MTP head count after it — a mixture
-		// would then answer "no MTP" about a file that has the heads.
-		if strings.HasPrefix(key, "tokenizer.") && architecture != "" && numbers[architecture+".block_count"] > 0 {
-			break
 		}
 		typ, err := cursor.u32()
 		if err != nil {
+			if tolerant {
+				complete = false
+				break
+			}
 			return GGUFInfo{}, err
 		}
 		if typ == ggufTypeString {
 			value, err := cursor.str()
 			if err != nil {
+				if tolerant {
+					complete = false
+					break
+				}
 				return GGUFInfo{}, err
 			}
 			if key == "general.architecture" {
@@ -230,6 +269,10 @@ func parseGGUFInfo(data []byte) (GGUFInfo, error) {
 		}
 		value, isNumber, err := cursor.value(typ)
 		if err != nil {
+			if tolerant {
+				complete = false
+				break
+			}
 			return GGUFInfo{}, err
 		}
 		if isNumber {
@@ -254,13 +297,100 @@ func parseGGUFInfo(data []byte) (GGUFInfo, error) {
 			prefix = ""
 		}
 	}
+	blockCount := int(numbers[prefix+".block_count"])
+	mtp := int(numbers[prefix+".nextn_predict_layers"])
+	mtpFromTensors := false
+	if complete && mtp == 0 && tensorCount > 0 && blockCount > 0 {
+		blocks, last, err := cursor.nextnBlocks(tensorCount)
+		if err != nil && !tolerant {
+			return GGUFInfo{}, err
+		}
+		// A single head in the block after the trunk is the layout llama.cpp splits by,
+		// so the count is unambiguous. Two heads, or one somewhere else, is a file this
+		// app will not reinterpret on a guess: the metadata path is all it trusts there.
+		if blocks == 1 && last == blockCount-1 {
+			mtp, mtpFromTensors = 1, true
+		}
+	}
 	return GGUFInfo{
 		Architecture:    prefix,
-		BlockCount:      int(numbers[prefix+".block_count"]),
+		BlockCount:      blockCount,
 		ExpertCount:     int(numbers[prefix+".expert_count"]),
 		ExpertUsedCount: int(numbers[prefix+".expert_used_count"]),
-		MTPLayers:       int(numbers[prefix+".nextn_predict_layers"]),
+		MTPLayers:       mtp,
+		MTPFromTensors:  mtpFromTensors,
 	}, nil
+}
+
+// nextnBlocks walks the tensor table and counts the blocks that carry a nextn tensor
+// (`blk.N.nextn.eh_proj` and its siblings). Only the names are read: the dimensions,
+// type and offset after each name are skipped by their widths, so a table of a thousand
+// entries costs a few kilobytes of the window that already holds it.
+func (c *ggufCursor) nextnBlocks(count uint64) (blocks, last int, err error) {
+	seen := map[uint64]bool{}
+	for i := uint64(0); i < count; i++ {
+		name, err := c.str()
+		if err != nil {
+			return 0, 0, err
+		}
+		if n, ok := nextnBlockIndex(name); ok && !seen[n] {
+			seen[n] = true
+			blocks++
+			if int(n) > last {
+				last = int(n)
+			}
+		}
+		dims, err := c.u32()
+		if err != nil {
+			return 0, 0, err
+		}
+		if err := c.skipN(uint64(dims) * 8); err != nil {
+			return 0, 0, err
+		}
+		// The quantisation type and the data offset close each entry.
+		if err := c.skipN(12); err != nil {
+			return 0, 0, err
+		}
+	}
+	return blocks, last, nil
+}
+
+// nextnBlockIndex reads the block number out of a tensor named `blk.<n>.nextn.<what>`.
+func nextnBlockIndex(name string) (uint64, bool) {
+	rest, ok := strings.CutPrefix(name, "blk.")
+	if !ok {
+		return 0, false
+	}
+	dot := strings.IndexByte(rest, '.')
+	if dot <= 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(rest[:dot], 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	if !strings.HasPrefix(rest[dot:], ".nextn.") {
+		return 0, false
+	}
+	return n, true
+}
+
+// MTPKVOverride is the `--override-kv` pair that gives llama.cpp a head count the file
+// itself does not declare, and "" when the file says it in the metadata and needs no
+// help.
+//
+// llama.cpp takes `n_layer_nextn` from `{arch}.nextn_predict_layers` alone — it splits
+// the block table into trunk plus head with it — and asserts the count is positive
+// before it builds the draft graph (src/models/qwen35.cpp), so a conversion that kept
+// the nextn tensors and dropped the key would load with every head reported unused.
+// That is what the probe's tensor pass is for: the count is recovered from the block
+// index and handed back as a metadata override, which llama.cpp applies in get_key
+// before the loader reads it.
+func (i GGUFInfo) MTPKVOverride() string {
+	if !i.MTPFromTensors || i.MTPLayers <= 0 || i.Architecture == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s.nextn_predict_layers=int:%d", i.Architecture, i.MTPLayers)
 }
 
 // ggufCursor is a bounds-checked little-endian cursor over the read window. Every
