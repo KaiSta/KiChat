@@ -78,7 +78,8 @@ Two rules keep this useful:
 | Path | Owns |
 | --- | --- |
 | `frontend/src/App.tsx` | Shell: sidebar, chat list, settings modal, global key handling (Escape) |
-| `frontend/src/components/ChatView.tsx` | The conversation: message list, composer (which answers `/clear` itself), attachments, context meter, stop, and a project's folder and permission note |
+| `frontend/src/components/ChatView.tsx` | The conversation: message list, composer (which answers `/clear` itself), attachments, context meter, stop, in-chat search (Ctrl+F), and a project's folder and permission note |
+| `frontend/src/components/ChatSearch.tsx` | The find bar over the transcript: query, match counter, previous/next, close |
 | `frontend/src/components/Confirmation.tsx` | The question a project tool asks, in its two shapes — a change's two sides with line counts, a command's line *as an editable field* with its folder, shell and limit — and the three answers. It is rendered at the composer because the turn behind it is blocked |
 | `frontend/src/components/ProjectChanges.tsx` | A project's changed files: the header's count, the panel, each file's diff and its undo (or the reason undo is not offered) |
 | `frontend/src/components/MessageParts.tsx` | How one message renders — the split between settled and streaming pieces |

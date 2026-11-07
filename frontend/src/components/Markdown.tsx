@@ -52,7 +52,12 @@ function MarkdownImage({ src, alt }: React.ComponentPropsWithoutRef<'img'>) {
   return alt ? <span className="faint">{alt}</span> : null
 }
 
-export const Markdown = memo(function Markdown({ text, streaming = false, sources }: MarkdownProps) {
+export const Markdown = memo(function Markdown({
+  text,
+  streaming = false,
+  sources,
+  query = '',
+}: MarkdownProps) {
   // One map for the whole reply: the numbers are the turn's, so a marker resolves the
   // same way in every piece of a streamed answer. Memoised on the array identity, which
   // only changes when the stored message is reloaded with its list.
@@ -66,7 +71,11 @@ export const Markdown = memo(function Markdown({ text, streaming = false, source
         resolves against a definition further down, footnotes collect at the
         end. Streaming splits the text, and a split cannot promise those.
       */}
-      {streaming ? <StreamingMarkdown text={text} citations={citations} /> : <Block source={text} citations={citations} />}
+      {streaming ? (
+        <StreamingMarkdown text={text} citations={citations} query={query} />
+      ) : (
+        <Block source={text} citations={citations} query={query} />
+      )}
     </div>
   )
 })
@@ -97,6 +106,8 @@ type MdNode = {
   value?: string
   url?: string
   title?: string
+  tagName?: string
+  properties?: { className?: string[] }
   children?: MdNode[]
 }
 
@@ -138,12 +149,87 @@ function walkCitations(node: MdNode, citations: Map<number, storeTypes.Source>) 
   node.children = out
 }
 
+/*
+ * The in-chat search, marked in the text the reader sees.
+ *
+ * The search bar hands over the query, not offsets: those were counted against the
+ * message's markdown source, and by the time a paragraph reaches the screen its syntax is
+ * gone, so an offset into the source points at a different place — or at nothing. Matching
+ * the rendered text again is what keeps the marks on words. The counter in the bar counts
+ * the source (minus link targets, which are not text on screen), so it can still outrun the
+ * marks for a query that matches markdown syntax or a formula.
+ */
+function rehypeSearch(query: string) {
+  const needle = query.trim().toLowerCase()
+  return () => (tree: MdNode) => {
+    if (needle) markHits(tree, needle)
+  }
+}
+
+/* Formulas and script/style are skipped: rehype-katex builds MathML, whose text nodes are
+ * single symbols and which has no `<mark>` in it, so marking inside would either break the
+ * formula or land in nodes nothing draws. */
+const MARK_SKIP = new Set(['math', 'semantics', 'annotation', 'annotation-xml', 'script', 'style'])
+
+function markHits(node: MdNode, needle: string) {
+  if (!node.children) return
+  if (node.tagName && MARK_SKIP.has(node.tagName)) return
+  if ((node.properties?.className ?? []).includes('katex')) return
+
+  const out: MdNode[] = []
+  for (const child of node.children) {
+    if (child.type === 'text' && child.value) {
+      out.push(...splitHits(child, needle))
+      continue
+    }
+    markHits(child, needle)
+    out.push(child)
+  }
+  node.children = out
+}
+
+/**
+ * One text node, split around the hits.
+ *
+ * The text node is the unit the tree offers, so a hit that straddles two of them — half of
+ * a highlighted code token, say — is left unmarked rather than guessed at across elements.
+ */
+function splitHits(node: MdNode, needle: string): MdNode[] {
+  const text = node.value ?? ''
+  const haystack = text.toLowerCase()
+  const out: MdNode[] = []
+  let from = 0
+  for (;;) {
+    const at = haystack.indexOf(needle, from)
+    if (at < 0) break
+    if (at > from) out.push({ type: 'text', value: text.slice(from, at) })
+    out.push({
+      type: 'element',
+      tagName: 'mark',
+      properties: { className: ['chat-hit'] },
+      children: [{ type: 'text', value: text.slice(at, at + needle.length) }],
+    })
+    from = at + needle.length
+  }
+  if (from === 0) return [node]
+  if (from < text.length) out.push({ type: 'text', value: text.slice(from) })
+  return out
+}
+
 /**
  * A reply that is still arriving, in the two parts `stream.ts` describes: the
  * pieces that are finished and can be rendered once, and the piece being
  * written.
  */
-function StreamingMarkdown({ text, citations }: { text: string; citations: Map<number, storeTypes.Source> | null }) {
+function StreamingMarkdown({
+  text,
+  citations,
+  query,
+}: {
+  text: string
+  citations: Map<number, storeTypes.Source> | null
+  query: string
+}) {
   // Re-splitting is a cheap scan; the parse the pieces trigger is not, and that
   // is what the memo inside Block keeps from happening per delta.
   const { settled, live } = useMemo(() => splitSettled(text), [text])
@@ -152,9 +238,9 @@ function StreamingMarkdown({ text, citations }: { text: string; citations: Map<n
       {/* An index is the right key here: pieces only ever get appended, so the
           key of a piece never changes and its memo keeps holding. */}
       {settled.map((chunk, index) => (
-        <Block key={index} source={chunk} citations={citations} />
+        <Block key={index} source={chunk} citations={citations} query={query} />
       ))}
-      <LivePiece source={live} citations={citations} />
+      <LivePiece source={live} citations={citations} query={query} />
       {/*
         The cursor is part of the stream, not a thing that comes and goes: it
         used to be hidden whenever the throttled text had caught up with the
@@ -171,7 +257,15 @@ function StreamingMarkdown({ text, citations }: { text: string; citations: Map<n
  * fenced code block there is no parse at all: markdown never reads code, so it
  * is shown as the plain text it is and gets its colours once the fence closes.
  */
-function LivePiece({ source, citations }: { source: string; citations: Map<number, storeTypes.Source> | null }) {
+function LivePiece({
+  source,
+  citations,
+  query,
+}: {
+  source: string
+  citations: Map<number, storeTypes.Source> | null
+  query: string
+}) {
   // Always active: this component only exists while the reply is streaming, and
   // it unmounts when it is not.
   const shown = useThrottled(source, true, 90)
@@ -185,14 +279,14 @@ function LivePiece({ source, citations }: { source: string; citations: Map<numbe
     const language = fence.lang ? `hljs language-${fence.lang}` : undefined
     return (
       <>
-        {fence.before.trim() ? <Block source={fence.before} citations={citations} /> : null}
+        {fence.before.trim() ? <Block source={fence.before} citations={citations} query={query} /> : null}
         <CodeBlock>
           <code className={language}>{fence.code}</code>
         </CodeBlock>
       </>
     )
   }
-  return <Block source={shown} citations={citations} />
+  return <Block source={shown} citations={citations} query={query} />
 }
 
 /**
@@ -204,9 +298,11 @@ function LivePiece({ source, citations }: { source: string; citations: Map<numbe
 const Block = memo(function Block({
   source,
   citations,
+  query,
 }: {
   source: string
   citations: Map<number, storeTypes.Source> | null
+  query: string
 }) {
   // The plugin list is a new array only when the sources change, so the memo above still
   // holds for every settled piece of a long streamed answer.
@@ -214,8 +310,14 @@ const Block = memo(function Block({
     () => (citations ? [...REMARK_PLUGINS, remarkCitations(citations)] : REMARK_PLUGINS),
     [citations],
   )
+  // Likewise for the search: an empty query reuses the plain list, so a closed search costs
+  // a settled piece no re-parse at all.
+  const rehype = useMemo(
+    () => (query.trim() ? [...REHYPE_PLUGINS, rehypeSearch(query)] : REHYPE_PLUGINS),
+    [query],
+  )
   return (
-    <ReactMarkdown remarkPlugins={plugins} rehypePlugins={REHYPE_PLUGINS} components={COMPONENTS}>
+    <ReactMarkdown remarkPlugins={plugins} rehypePlugins={rehype} components={COMPONENTS}>
       {source}
     </ReactMarkdown>
   )
@@ -276,5 +378,7 @@ interface MarkdownProps {
   streaming?: boolean
   /** The numbered sources of the turn this answer belongs to, when it has any. */
   sources?: storeTypes.Source[]
+  /** The in-chat search's query, marked in the rendered body; empty when it is closed. */
+  query?: string
 }
 
