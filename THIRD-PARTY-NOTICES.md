@@ -28,11 +28,11 @@ licence its publisher attached to it.
 
 | Licence | Components |
 | --- | --- |
-| MIT | 135 |
+| MIT | 136 |
 | BSD-3-Clause | 12 |
 | BSD-2-Clause | 4 |
 | ISC | 2 |
-| Apache-2.0 | 2 |
+| Apache-2.0 | 3 |
 
 ## MIT
 
@@ -55,6 +55,7 @@ copyright line is given beside it; the text of the licence follows the list.
 - **estree-util-is-identifier-name** 3.0.0 — Copyright (c) 2020 Titus Wormer <tituswormer@gmail.com>
 - **extend** 3.0.2 — Copyright (c) 2014 Stefan Thomas
 - **github.com/JohannesKaufmann/html-to-markdown** v1.6.0 — Copyright (c) 2018 Johannes Kaufmann
+- **github.com/andybalholm/brotli** v1.2.7 — Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
 - **github.com/araddon/dateparse** v0.0.0-20210429162001-6b43995a97de — Copyright (c) 2015-2017 Aaron Raddon
 - **github.com/danieljoos/wincred** v1.2.3 — Copyright (c) 2014 Daniel Joos
 - **github.com/go-shiori/dom** v0.0.0-20230515143342-73569d674e1c — Copyright (c) 2019-present Radhi Fadlillah
@@ -63,13 +64,13 @@ copyright line is given beside it; the text of the licence follows the list.
 - **github.com/leaanthony/go-ansi-parser** v1.6.1 — Copyright (c) 2021-Present Lea Anthony
 - **github.com/leaanthony/slicer** v1.6.0 — Copyright (c) 2019 Lea Anthony
 - **github.com/leaanthony/u** v1.1.1 — Copyright (c) 2023-Present Lea Anthony
-- **github.com/ncruces/go-sqlite3** v0.35.6 — Copyright (c) 2023 Nuno Cruces
-- **github.com/ncruces/go-sqlite3-wasm/v6** v6.3.35304 — Copyright (c) 2026 Nuno Cruces
+- **github.com/ncruces/go-sqlite3** v0.36.0 — Copyright (c) 2023 Nuno Cruces
+- **github.com/ncruces/go-sqlite3-wasm/v6** v6.4.35401 — Copyright (c) 2026 Nuno Cruces
 - **github.com/ncruces/julianday** v1.0.0 — Copyright (c) 2022 Nuno Cruces
 - **github.com/rivo/uniseg** v0.4.7 — Copyright (c) 2019 Oliver Kuederle
 - **github.com/tiendc/go-deepcopy** v1.7.2 — Copyright (c) 2023 tiendc
 - **github.com/wailsapp/go-webview2** v1.0.22 — Copyright (c) 2020 John Chadwick
-- **github.com/wailsapp/wails/v2** v2.17.0 — Copyright (c) 2018-Present Lea Anthony
+- **github.com/wailsapp/wails/v2** v2.17.1 — Copyright (c) 2018-Present Lea Anthony
 - **github.com/zalando/go-keyring** v0.2.8 — Copyright (c) 2016 Zalando SE
 - **hast-util-from-html** 2.0.3 — Copyright (c) 2022 Titus Wormer <tituswormer@gmail.com>
 - **hast-util-from-html-isomorphic** 2.0.0 — Copyright (c) 2023 Remco Haszing <remcohaszing@gmail.com>
@@ -203,14 +204,14 @@ The following components are used under this licence. Each one's
 copyright line is given beside it; the text of the licence follows the list.
 
 - **github.com/PuerkitoBio/goquery** v1.13.0 — Copyright (c) 2012-2021, Martin Angers & Contributors
-- **github.com/google/uuid** v1.6.0 — Copyright (c) 2009,2014 Google Inc. All rights reserved.
 - **github.com/ledongthuc/pdf** v0.0.0-20260907135840-6c8c28e0e8a0 — Copyright (c) 2009 The Go Authors. All rights reserved.
-- **github.com/xuri/efp** v0.0.1 — Copyright (c) 2017 - 2025 Ri Xu All rights reserved.
-- **github.com/xuri/excelize/v2** v2.11.0 — Copyright (c) 2016-2026 The excelize Authors.
+- **github.com/refraction-networking/utls** v1.8.2 — Copyright (c) 2009 The Go Authors. All rights reserved.
+- **github.com/xuri/efp** v0.0.3-0.20260924042702-217b81952dec — Copyright (c) 2017 - 2026 Ri Xu All rights reserved.
+- **github.com/xuri/excelize/v2** v2.11.1 — Copyright (c) 2016-2026 The excelize Authors.
 - **github.com/xuri/nfp** v0.0.2-0.20250530014748-2ddeb826f9a9 — Copyright (c) 2022-2025 Ri Xu All rights reserved.
-- **golang.org/x/crypto** v0.57.0 — Copyright 2009 The Go Authors.
+- **golang.org/x/crypto** v0.58.0 — Copyright 2009 The Go Authors.
 - **golang.org/x/image** v0.47.0 — Copyright 2009 The Go Authors.
-- **golang.org/x/net** v0.60.0 — Copyright 2009 The Go Authors.
+- **golang.org/x/net** v0.62.0 — Copyright 2009 The Go Authors.
 - **golang.org/x/sys** v0.49.0 — Copyright 2009 The Go Authors.
 - **golang.org/x/text** v0.43.0 — Copyright 2009 The Go Authors.
 - **highlight.js** 11.11.2 — Copyright (c) 2006, Ivan Sagalaev.
@@ -308,6 +309,7 @@ PERFORMANCE OF THIS SOFTWARE.
 The following components are used under this licence. Its text is the
 Apache License, Version 2.0 reproduced in [LICENSE](LICENSE).
 
-- **github.com/richardlehane/mscfb** v1.0.7
+- **github.com/klauspost/compress** v1.20.3 — Copyright (c) 2012 The Go Authors. All rights reserved.
+- **github.com/richardlehane/mscfb** v1.0.9
 - **github.com/richardlehane/msoleps** v1.0.6
 
