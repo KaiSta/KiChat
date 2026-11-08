@@ -594,14 +594,17 @@ Pinned by `TestRenderSearchSourcesDistilsTheListingFormat`,
 
 ### 9.1 The memory contract (system prompt)
 
-`summarySystemPrompt` (`compact.go:348`) is deliberately explicit about
+`summarySystemPrompt` is deliberately explicit about
 preservation: *"a compaction that loses a URL or a number silently corrupts every later
-answer."* Its rules, verbatim:
+answer."* It is written in the app's language (Settings → Language), names that
+language explicitly, and translates its headings with it: the contract being German is
+what made a German memory out of an English transcript, and the memory travels in the
+system message of every later request. Its rules, for the English contract:
 
-- Write in the language of the transcript.
+- Write in English.
 - Carry names, numbers, dates, prices, legal references and URLs over **WORD FOR WORD** —
   do not shorten or paraphrase them.
-- Invent nothing. Anything that stayed unclear goes under "Offene Punkte".
+- Invent nothing. Anything that stayed unclear goes under "Open questions".
 - Be terse: bullets, no prose, no repetition.
 
 and it fixes the output structure, omitting empty sections:
@@ -611,12 +614,14 @@ and it fixes the output structure, omitting empty sections:
 ## Quellen                   ## Dateien & Dokumente  ## Vorgaben & Präferenzen
 ```
 
-This is a research-memory schema: what was established, what was decided, what is still
-open, which sources back it, which files are in play, and the user's standing preferences.
+The German contract is shown above; the English and Chinese contracts carry the same
+sections in their own language. This is a research-memory schema: what was established,
+what was decided, what is still open, which sources back it, which files are in play, and
+the user's standing preferences.
 
 ### 9.2 The user message
 
-`summarisePrompt` (`compact.go:538`) is split out of `Summarize` so that the transcript
+`summarisePrompt` is split out of `Summarize` so that the transcript
 budget can be measured against *exactly* the text that will be sent — the wrappers, the
 existing memory and the focus line all share the window with the transcript and are charged
 before its allowance is set. Its shape:
@@ -1029,6 +1034,12 @@ keeps what the tool actually returned. The message that is stored — and theref
 replayed on every later turn — holds the condensation, which is the whole point: a page
 the user read once would otherwise cost every subsequent request in that chat.
 
+**The condensation is written in the app's language.** A German page read in an English
+window is summarised in English: the original's names, numbers and quotations stay
+verbatim, but the prose around them follows the app, so a German source cannot pull the
+next answer into German. The language (beside the target and the ceiling) is part of the
+digest cache key, so a window that changes language does not get the other one's summary.
+
 Inside a `scrape_url` result, only the page is condensed: the text between
 `<scraped_content>` and `</scraped_content>` is replaced by the summary, and everything
 the tool wrote around it — title, source line, page count, and, for a document too large
@@ -1062,7 +1073,7 @@ manual, not an edge case.
 
 `Digest.MaxTokens` is the **target length of the summary**, not the size at which
 condensing starts and not the request's hard stop. It is stated to the model in the prompt
-("Ziel: etwa N Tokens"), and the request is given whatever room the window leaves beside
+("Target: about N tokens"; "Ziel: etwa N Tokens" in a German window), and the request is given whatever room the window leaves beside
 the text — up to `MaxDigestMaxTokens = 8000` — so a summary that needs a few more tokens
 than it was aiming at finishes instead of being cut mid-sentence. Only the window or that
 8000-token line can still cut one, and a summary cut there is used as it is

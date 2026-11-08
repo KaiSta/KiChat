@@ -366,11 +366,16 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	// read it, less the prompt that carries it and a reserve for the answer.
 	// Measuring the prompt here, with the transcript left out, is what makes that
 	// subtraction exact instead of a guess.
+	// The memory is written in the app's language, not a guess at the conversation's:
+	// the user chose this language for the interface, and a German memory in an
+	// English chat is what made later answers German.
+	lang := promptLanguage(settings.Language)
 	overhead := llm.EstimateMessagesTokens([]llm.Message{
-		{Role: llm.RoleSystem, Content: summarySystemPrompt},
+		{Role: llm.RoleSystem, Content: summarySystemPrompt(lang)},
 		{Role: llm.RoleUser, Content: summarisePrompt(SummarizeOptions{
 			PreviousSummary: previous,
 			Focus:           opts.Focus,
+			Lang:            lang,
 		})},
 	})
 
@@ -462,6 +467,7 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		PreviousSummary: previous,
 		Transcript:      transcript,
 		Focus:           opts.Focus,
+		Lang:            lang,
 		Temperature:     settings.Compact.SummaryTemperature,
 		MaxTokens:       maxTokens,
 		NumCtx:          target.NumCtx,

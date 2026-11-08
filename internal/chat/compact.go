@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"kichat/internal/config"
 	"kichat/internal/llm"
 	"kichat/internal/store"
 	"kichat/internal/uimsg"
@@ -532,13 +533,30 @@ func turnTokenSpans(messages []store.Message, userSeqs []int) []int {
 	return spans
 }
 
-// summarySystemPrompt drives the summarisation call. It is deliberately explicit
-// about preservation: a compaction that loses a URL or a number silently
-// corrupts every later answer.
-const summarySystemPrompt = `Du komprimierst den Verlauf eines Recherche-Chats zu einem dauerhaften Gedächtnis.
+// summarySystemPrompt picks the memory contract in the language the app is set
+// to. The contract's language is not a detail: a German contract over an English
+// transcript produced German memories, and the memory is part of the system
+// message of every request that follows it, so the chat then answered in German
+// while the user kept writing English. The rules, the headings and the language
+// they name are translated together; naming the language in its own words is what
+// a small local model follows.
+func summarySystemPrompt(lang string) string {
+	switch promptLanguage(lang) {
+	case config.LangGerman:
+		return summaryPromptDE
+	case config.LangChinese:
+		return summaryPromptZH
+	default:
+		return summaryPromptEN
+	}
+}
+
+// summaryPromptDE is the original memory contract. Its headings are part of the
+// German interface, because a German window's memory has always read this way.
+const summaryPromptDE = `Du komprimierst den Verlauf eines Recherche-Chats zu einem dauerhaften Gedächtnis.
 
 Regeln:
-- Schreibe in der Sprache des Verlaufs.
+- Schreibe auf Deutsch.
 - Übernimm Namen, Zahlen, Daten, Preise, Gesetzesangaben und URLs WÖRTLICH. Kürze oder paraphrasiere sie nicht.
 - Erfinde nichts. Wenn etwas unklar blieb, schreibe es unter "Offene Punkte".
 - Fasse dich kurz: Stichpunkte, keine Prosa, keine Wiederholungen.
@@ -559,6 +577,56 @@ Antworte ausschließlich mit Markdown in genau dieser Struktur:
 - ...
 
 Lasse einen Abschnitt weg, wenn er leer ist.`
+
+const summaryPromptEN = `You compact the history of a research chat into a durable memory.
+
+Rules:
+- Write in English.
+- Copy names, numbers, dates, prices, legal references and URLs VERBATIM. Do not shorten or paraphrase them.
+- Invent nothing. If something stayed unclear, write it under "Open questions".
+- Be brief: bullet points, no prose, no repetition.
+
+Answer only with Markdown in exactly this structure:
+
+## Established facts
+- ...
+## Decisions
+- ...
+## Open questions
+- ...
+## Sources
+- [Title](URL)
+## Files & documents
+- ...
+## Requirements & preferences
+- ...
+
+Omit a section when it is empty.`
+
+const summaryPromptZH = `你将一段研究对话的历史压缩为持久记忆。
+
+规则：
+- 用中文书写。
+- 名称、数字、日期、价格、法律条款和 URL 必须逐字保留，不得缩写或改写。
+- 不要编造。仍不清楚的内容写入“未决问题”。
+- 简明：用要点，不写散文，不重复。
+
+只输出以下结构的 Markdown：
+
+## 已确认的事实
+- ...
+## 决定
+- ...
+## 未决问题
+- ...
+## 来源
+- [标题](URL)
+## 文件与文档
+- ...
+## 要求与偏好
+- ...
+
+某一节为空时省略。`
 
 // summaryOutputTokens is the summariser's default output cap. It is deliberately
 // generous and independent of the target summary size: `max_tokens` bounds a
@@ -633,7 +701,7 @@ func Summarize(ctx context.Context, p llm.Provider, model string, opts Summarize
 	// soft switch — the only lever that reaches a local backend with no reasoning
 	// parameter (LM Studio). A model that does not know the tag treats it as an
 	// ignorable trailing note.
-	return extractWithBudget(ctx, p, model, summarySystemPrompt,
+	return extractWithBudget(ctx, p, model, summarySystemPrompt(opts.Lang),
 		summarisePrompt(opts)+"\n\n"+noThinkTag, extractionOptions{
 			Temperature:     opts.Temperature,
 			MaxTokens:       opts.MaxTokens,
@@ -795,18 +863,41 @@ func emptyExtractionError(out completion, emptyCode, budgetCode string) error {
 // the focus line all share the window with the transcript, so they are charged
 // before its allowance is set.
 func summarisePrompt(opts SummarizeOptions) string {
+	lang := promptLanguage(opts.Lang)
 	var sb strings.Builder
 	if opts.PreviousSummary != "" {
 		sb.WriteString("<existing_memory>\n")
 		sb.WriteString(opts.PreviousSummary)
 		sb.WriteString("\n</existing_memory>\n\n")
-		sb.WriteString("Der folgende Verlauf schließt an das bestehende Gedächtnis an. ")
-		sb.WriteString("Führe beides zu EINEM Gedächtnis zusammen, ohne Informationen zu verlieren.\n\n")
+		switch lang {
+		case config.LangGerman:
+			sb.WriteString("Der folgende Verlauf schließt an das bestehende Gedächtnis an. ")
+			sb.WriteString("Führe beides zu EINEM Gedächtnis zusammen, ohne Informationen zu verlieren.\n\n")
+		case config.LangChinese:
+			sb.WriteString("以下记录接续现有记忆。请将两者合并为一份记忆，不要丢失任何信息。\n\n")
+		default:
+			sb.WriteString("The following transcript continues the existing memory. ")
+			sb.WriteString("Merge both into ONE memory without losing information.\n\n")
+		}
 	} else {
-		sb.WriteString("Komprimiere den folgenden Verlauf zu einem Gedächtnis.\n\n")
+		switch lang {
+		case config.LangGerman:
+			sb.WriteString("Komprimiere den folgenden Verlauf zu einem Gedächtnis.\n\n")
+		case config.LangChinese:
+			sb.WriteString("将以下记录压缩为一份记忆。\n\n")
+		default:
+			sb.WriteString("Compact the following transcript into a memory.\n\n")
+		}
 	}
 	if opts.Focus != "" {
-		sb.WriteString("Besonderer Fokus des Nutzers: ")
+		switch lang {
+		case config.LangGerman:
+			sb.WriteString("Besonderer Fokus des Nutzers: ")
+		case config.LangChinese:
+			sb.WriteString("用户特别关注：")
+		default:
+			sb.WriteString("The user's particular focus: ")
+		}
 		sb.WriteString(opts.Focus)
 		sb.WriteString("\n\n")
 	}
@@ -821,9 +912,14 @@ type SummarizeOptions struct {
 	PreviousSummary string
 	Transcript      string
 	Focus           string
-	Temperature     float64
-	MaxTokens       int
-	NumCtx          int
+	// Lang is the app's language (Settings → Language), which decides the
+	// language of the memory and of the prompt that asks for it. It is the
+	// setting rather than the transcript's language: the user chose it for the
+	// window, and a wrong guess would rewrite the memory in the wrong language.
+	Lang        string
+	Temperature float64
+	MaxTokens   int
+	NumCtx      int
 	// DisableThinking asks the backend to skip reasoning for this call. A summary
 	// is not a reasoning task, and a thinking model spends the output budget on
 	// private thinking before it writes a word of it. Only a backend with a

@@ -821,28 +821,70 @@ func TestTheNoticeSpeaksTheInterfaceLanguage(t *testing.T) {
 // the line numbers a page summary is allowed to drop, so one must never answer for the
 // other.
 func TestACondensationIsKeyedByTheWholeModelReference(t *testing.T) {
-	a := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite")
-	b := digestKey(digestJobPage, llm.Ref{Backend: "nvidia", Model: "same-id"}, 600, 1200, "die Seite")
+	a := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite")
+	b := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "nvidia", Model: "same-id"}, 600, 1200, "die Seite")
 	if a == b {
 		t.Fatal("the same model id on two backends shares a condensation")
 	}
-	if again := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); again != a {
+	if again := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); again != a {
 		t.Error("the same page and model produced a different key")
 	}
-	if changed := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite, geändert"); changed == a {
+	if changed := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite, geändert"); changed == a {
 		t.Error("a changed page inherited the old condensation")
 	}
-	if asFile := digestKey(digestJobFile, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); asFile == a {
+	if asFile := digestKey(digestJobFile, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); asFile == a {
 		t.Error("a file condensation is served out of a page's cache entry")
 	}
 	// The target is in the prompt, and the same ceiling can serve two targets, so the
 	// key has to carry both: 600 and 1200 beside an 8000-token ceiling are two
 	// different summaries of the same words.
-	if retargeted := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 1200, 8000, "die Seite"); retargeted == a {
+	if retargeted := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 1200, 8000, "die Seite"); retargeted == a {
 		t.Error("a changed target inherited the old condensation")
 	}
-	if wider := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 8000, "die Seite"); wider == a {
+	if wider := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 8000, "die Seite"); wider == a {
 		t.Error("a changed ceiling inherited the old condensation")
+	}
+	if german := digestKey(digestJobPage, config.LangGerman, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); german == a {
+		t.Error("a German condensation was served the English one")
+	}
+}
+
+// TestACondensationSpeaksTheAppLanguage pins the wiring from the setting to the
+// prompt. The language is the app's, not the page's: a German page read in an English
+// window is summarised in English, so it cannot pull the next answer into German.
+func TestACondensationSpeaksTheAppLanguage(t *testing.T) {
+	cases := []struct {
+		lang    string
+		rule    string
+		wrapper string
+	}{
+		{config.LangEnglish, "Write in English.", "Summarise the following page text"},
+		{config.LangGerman, "Schreibe auf Deutsch.", "Fasse den folgenden Seitentext"},
+		{config.LangChinese, "用中文书写。", "总结以下网页文本"},
+	}
+	for _, tc := range cases {
+		settings := digestSettings()
+		settings.Language = tc.lang
+		digester := newDigester([]llm.StreamEvent{
+			{Type: llm.EventDelta, Text: "Kurzfassung"}, {Type: llm.EventDone},
+		})
+		engine, _ := newDigestEngine(t, newTestStore(t), settings, digester)
+
+		_, condensed := engine.condenseToolOutput(context.Background(), "chat-1",
+			scrapeCall("https://example.com/a"), bigPage(), tools.TurnRef{BackendID: "fake"}, "")
+		if !condensed {
+			t.Fatalf("%s: the page was not condensed", tc.lang)
+		}
+		req := digester.lastRequest()
+		if len(req.Messages) < 2 {
+			t.Fatalf("%s: the digester was not called", tc.lang)
+		}
+		if got := req.Messages[0].Content; !strings.Contains(got, tc.rule) {
+			t.Errorf("%s: the system prompt is not in the app language:\n%s", tc.lang, got)
+		}
+		if got := req.Messages[len(req.Messages)-1].Content; !strings.Contains(got, tc.wrapper) {
+			t.Errorf("%s: the wrapper is not in the app language:\n%s", tc.lang, got)
+		}
 	}
 }
 
@@ -865,7 +907,7 @@ func TestTheTargetReachesTheModelAndTheAnswerMayFinish(t *testing.T) {
 		t.Fatalf("digester calls = %d, want one condensation", got)
 	}
 	req := digester.requestAt(0)
-	if prompt := req.Messages[len(req.Messages)-1].Content; !strings.Contains(prompt, "etwa 180 Tokens") {
+	if prompt := req.Messages[len(req.Messages)-1].Content; !strings.Contains(prompt, "about 180 tokens") {
 		t.Errorf("the target is not stated to the model: %q", truncateForTest(prompt, 160))
 	}
 	if req.MaxTokens <= 180 {
@@ -1001,7 +1043,7 @@ func TestAChangedCapDoesNotReuseTheOldSummary(t *testing.T) {
 	if !strings.Contains(other, "Längere Fassung") {
 		t.Fatalf("the raised cap served the old length: %q", truncateForTest(other, 120))
 	}
-	if prompt := digester.requestAt(1).Messages[1].Content; !strings.Contains(prompt, "etwa 1200 Tokens") {
+	if prompt := digester.requestAt(1).Messages[1].Content; !strings.Contains(prompt, "about 1200 tokens") {
 		t.Errorf("the raised target was not sent: %q", truncateForTest(prompt, 160))
 	}
 }
@@ -1166,7 +1208,7 @@ func TestALargeReadIsCondensedBeforeTheModelSeesIt(t *testing.T) {
 	if !strings.Contains(asked, `<file path="big.go">`) {
 		t.Errorf("the digester was not told which file it was reading: %q", truncateForTest(asked, 200))
 	}
-	if !strings.Contains(asked, "Textdatei") {
+	if !strings.Contains(asked, "text file") {
 		t.Error("the digester was given the page prompt for a source file")
 	}
 
