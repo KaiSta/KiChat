@@ -74,6 +74,28 @@ func TestTheClockStaysOutOfTheRenderedPrompt(t *testing.T) {
 	}
 }
 
+// TestDateAndDatetimeAreNotTheSameVariable keeps the two spellings of the day apart:
+// {{datetime}} is the weekday and the date, {{date}} is the date alone. Both are day
+// precision, so the weekday is the whole difference — and a description that promised a
+// clock was what made them look identical.
+func TestDateAndDatetimeAreNotTheSameVariable(t *testing.T) {
+	now := time.Date(2026, 11, 8, 14, 32, 0, 0, time.UTC)
+	vars := TemplateVars{Now: now}
+	date := RenderPrompt("{{date}}", vars)
+	datetime := RenderPrompt("{{datetime}}", vars)
+
+	if date != "08.11.2026" {
+		t.Errorf("{{date}} = %q, want 08.11.2026", date)
+	}
+	want := germanWeekdays[now.Weekday()] + ", 08.11.2026"
+	if datetime != want {
+		t.Errorf("{{datetime}} = %q, want %q", datetime, want)
+	}
+	if datetime == date {
+		t.Error("{{datetime}} and {{date}} render the same text")
+	}
+}
+
 // TestTurnClockIsISOAndToTheMinute keeps the tail's one moving value readable to a model
 // answering in any language, and keeps the seconds out of a difference no answer can act on.
 func TestTurnClockIsISOAndToTheMinute(t *testing.T) {

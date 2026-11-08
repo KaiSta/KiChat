@@ -387,7 +387,7 @@ type PromptVariable struct {
 // GetPromptVariables lists the supported template variables.
 func (a *App) GetPromptVariables() []PromptVariable {
 	return []PromptVariable{
-		{Name: "datetime", Key: "promptvar.datetime", Description: "Aktuelles Datum, Uhrzeit und Wochentag"},
+		{Name: "datetime", Key: "promptvar.datetime", Description: "Datum und Wochentag, ohne Uhrzeit"},
 		{Name: "date", Key: "promptvar.date", Description: "Nur das Datum (TT.MM.JJJJ)"},
 		{Name: "time", Key: "promptvar.time", Description: "Nur die Uhrzeit (HH:MM)"},
 		{Name: "weekday", Key: "promptvar.weekday", Description: "Wochentag ausgeschrieben"},
