@@ -329,7 +329,7 @@ type ToolCallRecord struct {
 	Error      string `json:"error"`
 	// SourceTokens is the size of what the tool returned; ContextTokens is the size
 	// of the text the model was given instead. They differ when a second model
-	// condensed the result or when the answer's tool budget cut it, and Condensed
+	// condensed the result or when the room left in the request cut it, and Condensed
 	// says which — a number the user cannot attribute is worse than no number.
 	//
 	// Withheld is the third outcome, and the only one whose ContextTokens is not a

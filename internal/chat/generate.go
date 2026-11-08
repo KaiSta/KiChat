@@ -83,10 +83,11 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 	if maxIter <= 0 {
 		maxIter = 1
 	}
-	// Tool results are charged against one budget for the whole answer, so a
-	// single large scrape cannot fill the window on its own. The figure is the mode's
-	// (maxToolResultTokens): a project's reads and build output against a chat's pages.
-	toolBudget := newToolOutputBudget(maxToolResultTokens(in.Chat, in.Settings))
+	// Tool results are charged against the room the request that reads them has left,
+	// measured before every round. There is no per-answer figure: ageing keeps a reply's
+	// newest results and stubs the rest (toolhistory.go), so the request — not a
+	// hand-tuned allowance — is what bounds them.
+	toolBudget := newToolOutputBudget()
 
 	// A tool-heavy turn is many requests back to back, and the minute's *request*
 	// allowance can be smaller than the rounds the model will ask for. Reading it before
@@ -455,12 +456,10 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		}
 
 		// A tool result is read by the *next* request, so it is budgeted against the room
-		// that request has left rather than only against the user's figure for an answer.
-		// On a backend whose per-request ceiling is a fraction of its window those are
-		// different numbers, and the difference is a refused turn: Groq's allowance is a
-		// few thousand tokens while the tool budget defaults to 60000, so one scraped page
-		// was enough to make the round that reads it unsendable — and no fold can take it
-		// back, because the result belongs to the turn being answered.
+		// that request has left. On a backend whose per-request ceiling is a fraction of
+		// its window that room is what matters: Groq's allowance is a few thousand tokens,
+		// so one scraped page was enough to make the round that reads it unsendable — and
+		// no fold can take it back, because the result belongs to the turn being answered.
 		//
 		// The prompt the backend just described is its own count when it reports one, and
 		// that is worth more than the assembly's estimate here: an estimate that runs low
@@ -656,11 +655,11 @@ func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Messag
 	// result would hide the page from the user; storing the page in the message is
 	// the cost this exists to avoid.
 	//
-	// It is skipped when the budget is already spent: take would replace the summary
-	// with the exhausted notice, so the request would be paid for and thrown away.
+	// It is skipped when the request has no room left: take would replace the summary
+	// with the notice, so the request would be paid for and thrown away.
 	condensed := output
 	condensedByModel := false
-	if execErr == nil && budget.remaining > 0 {
+	if execErr == nil && budget.hasRoom() {
 		normalized := call
 		normalized.Arguments = tools.NormalizeArguments(call.Name, call.Arguments)
 		condensed, condensedByModel = e.condenseToolOutput(ctx, chatID, normalized, output, turn, out.result.DocumentID)
@@ -677,7 +676,7 @@ func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Messag
 	// condensation visible: without it the feature is indistinguishable from a page
 	// that happened to be short. Both numbers are measured on the strings that travel
 	// — the tool's own output and the exact text `take` returns — so a result cut by
-	// the answer's budget, by the second model, or by neither is reported as it is.
+	// the room left, by the second model, or by neither is reported as it is.
 	//
 	// One outcome has no size to report: a budget with nothing left answers with the
 	// notice rather than with a prefix of the result, and a card that printed both sizes
@@ -769,69 +768,49 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 	e.finishTool(ctx, chatID, row, call, record, e.executeCall(ctx, chatID, row, call, turn), budget, turn)
 }
 
-// toolResultShare is how much of an answer's tool budget one result may take: a quarter
-// of it.
+// toolOutputBudget bounds what one round's tool results may add to the request that
+// reads them.
 //
-// The budget alone does not give that guarantee, because take hands a single result
-// everything that is left — so one enormous answer, a scraped page or a JSON dump read
-// back, could arrive in one call and spend the allowance that thirty later rounds of the
-// same reply were going to need, leaving them notices instead of file contents. Cline
-// caps each tool result the same way, at a fixed size a call rather than at whatever the
-// conversation has left; the model's remedy is the one a read's own caps already offer,
-// ask for less or for another slice.
-//
-// A quarter rather than Cline's flat figure because the budget it divides is already the
-// mode's: 120 000 tokens in a project gives a result 30 000, which is more than the 32 000
-// of tool text a reply keeps verbatim (internal/chat/toolhistory.go) — so one result can
-// never be the whole of what survives a round.
-const toolResultShare = 4
-
-// toolOutputBudget bounds how many tokens of tool results one answer carries into
-// its next request. The setting is per answer rather than per call, so several
-// tools cannot together exceed it. The budget is shared across the tool rounds
-// of a single generate call.
+// There is no per-answer figure. A reply's older results are handled by ageing
+// (toolhistory.go), which keeps the newest 32 000 tokens verbatim and stubs the rest, so
+// what a reply carries is bounded by what its request can hold rather than by a number the
+// user has to keep raising as windows grow. The room capTo receives is the only bound the
+// window does not already imply.
 type toolOutputBudget struct {
+	// remaining is what this round may still add. Negative means no room was measured —
+	// a model whose window nobody reported — and then the only bound is the size a single
+	// result may reach (tools.MaxToolResultBytes), applied where it leaves the tool
+	// service.
 	remaining int
-	// perResult is one result's own ceiling, so spending it cannot spend the next
-	// one's room. Zero means the field was never set — a hand-built literal — and
-	// then a result may use whatever is left, which is what the budget did before
-	// this field existed.
-	perResult int
 }
 
-// newToolOutputBudget starts the answer's budget from the mode's figure. A zero is read as
-// the default — a hand-edited blob or a settings literal — and the figure is tightened to
-// each request's remaining room as the rounds go (capTo).
-func newToolOutputBudget(tokens int) *toolOutputBudget {
-	if tokens <= 0 {
-		tokens = config.DefaultToolTokenBudget
-	}
-	return &toolOutputBudget{remaining: tokens, perResult: tokens / toolResultShare}
+// newToolOutputBudget starts unbounded: the first round has no measured room yet, and a
+// model whose window nobody reports never gets one.
+func newToolOutputBudget() *toolOutputBudget {
+	return &toolOutputBudget{remaining: -1}
 }
 
-// capTo tightens the budget to the room one request has left for tool results.
+// hasRoom reports whether a result can still be added. An unmeasured budget has room —
+// its bound is the tool service's own byte cap.
+func (b *toolOutputBudget) hasRoom() bool { return b.remaining != 0 }
+
+// capTo tightens the round's allowance to the room its request has left.
 //
-// The user's figure bounds an answer; it says nothing about whether the request
-// that reads the answer will fit the backend. Where those differ, the backend wins,
-// because the cost of ignoring it is not a shorter answer but a refused turn: on
-// Groq the per-minute token allowance is also the largest single request the
-// account may send, and it is a few thousand tokens against a setting that defaults
-// to 60000. A result is not something a history fold can take back either — it
-// belongs to the turn being answered, which the fold keeps verbatim — so the cut has
-// to happen where the result is handed to the model.
+// This is the bound the backend imposes, and ignoring it costs the whole turn rather than
+// one request: on Groq the per-minute token allowance is also the largest single request
+// the account may send, and it is a few thousand tokens. A result is not something a
+// history fold can take back either — it belongs to the turn being answered, which the
+// fold keeps verbatim — so the cut has to happen where the result is handed to the model.
 //
-// It only ever tightens, which is what keeps a backend that had nothing to cap against
-// exactly as it was: a window larger than the spare tool budget leaves `remaining`
-// where the setting put it, and a model whose limit nobody reported never reaches this
-// call at all. A window *smaller* than the budget does cap now — that request was
-// already unsendable, and the fold that answers the refusal cannot touch the result.
-// A later round with more room cannot undo a cut an earlier one needed, because the
-// rounds of one answer build one history between them.
+// It only ever tightens. Once a result was cut, a later round cannot hand back what it
+// gave up, because the rounds of one answer build one history between them. A model whose
+// limit nobody reported never reaches this call at all, which leaves the budget
+// unmeasured and the result whole.
 func (b *toolOutputBudget) capTo(room int) {
 	if room < 0 {
 		room = 0
 	}
-	if room < b.remaining {
+	if b.remaining < 0 || room < b.remaining {
 		b.remaining = room
 	}
 }
@@ -852,7 +831,7 @@ func (b *toolOutputBudget) capTo(room int) {
 // backend stated nothing, which is the case of a local server that reports no usage.
 //
 // bounded is false when no limit is known — a model whose window nobody reported,
-// which is also the only case in which the tool budget is left alone. There is nothing
+// which is also the only case in which the budget is left unmeasured. There is nothing
 // to aim at then, and a bare 0 would mean "no room" rather than "nobody said", which
 // is the difference between a withheld result and an untouched budget.
 func roomForToolResults(budget ContextBudget, promptTokens, replyTokens int) (room int, bounded bool) {
@@ -872,29 +851,28 @@ func roomForToolResults(budget ContextBudget, promptTokens, replyTokens int) (ro
 
 // exhaustedNotice is what the model sees once the budget is spent, so it learns
 // that a result was withheld instead of reading an empty answer as a result.
-const exhaustedNotice = "Das Token-Budget für Tool-Ergebnisse in dieser Antwort ist aufgebraucht. " +
-	"Weitere Tool-Ergebnisse werden nicht mehr in den Kontext übernommen."
+const exhaustedNotice = "Der Platz, den diese Anfrage noch hat, reicht für ein weiteres " +
+	"Tool-Ergebnis nicht aus. Weitere Tool-Ergebnisse werden nicht mehr in den Kontext übernommen."
 
-// take returns the part of a tool result the model may see and charges it
-// against the budget. A result that does not fit is cut with the shared
-// truncation marker, so the model can tell a short result from a shortened one.
+// take returns the part of a tool result the model may see and charges it against the
+// round's remaining room. A result that does not fit is cut with the shared truncation
+// marker, so the model can tell a short result from a shortened one.
 //
-// What a result may use is the smaller of the budget's remainder and one result's share
-// of it (perResult), and what it actually used is what it is charged — not the rest of
-// the budget. A cut result therefore leaves room for the round's other results and for
-// the rounds after it, which is the point of a share: the answer keeps working with
-// slices of a large file instead of one slice and then nothing.
+// What a result is charged is what it actually used, not everything that was left, so a
+// small result leaves its room to the round's other results. An unmeasured budget
+// (remaining < 0) hands the result over whole: tools.MaxToolResultBytes already bounded it
+// where it left the tool service, and there is no window to aim at.
 //
 // The second return value says the model got none of it and the notice instead. It is
 // reported rather than left to be recognised from the text, because it is the one
 // outcome a tool card must not render as a size: "4,374 → 41 tokens" is what a spent
-// budget looked like on the card, and it reads as a summary the model wrote when in
+// allowance looked like on the card, and it reads as a summary the model wrote when in
 // fact the search results never arrived.
 func (b *toolOutputBudget) take(output string) (string, bool) {
-	allowance := b.remaining
-	if b.perResult > 0 && b.perResult < allowance {
-		allowance = b.perResult
+	if b.remaining < 0 {
+		return output, false
 	}
+	allowance := b.remaining
 	if allowance <= 0 {
 		return exhaustedNotice, true
 	}

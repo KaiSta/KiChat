@@ -443,15 +443,14 @@ turn. `internal/chat/oversize.go`:
    `search_web` or `scrape_url`, and the round that reads the result is refused because the
    result alone is bigger than the whole allowance. A fold cuts at user-turn boundaries, so the
    reply and the tool traffic of the turn being answered stay verbatim — which is exactly the
-   material that has to shrink. The user's own tool budget is no help either: it defaults to
-   **60000** tokens in a chat and **120000** in a project, seven and fifteen times an 8K
-   allowance, and one `scrape_url` may ask for **12000** on its own. So `generate` budgets the result against what the next request can actually carry —
+   material that has to shrink. There is no per-answer allowance to raise either: `generate`
+   budgets the result against what the next request can actually carry —
    `roomForToolResults` is the effective limit less what the assembly already priced, the
    reserve for the answer and the reply this round wrote, and the backend's **own count** of the
    prompt in place of the estimate as soon as it reports one: the estimate is a heuristic, and an
    underestimate is exactly what leaves a result cut too late (item 1 above corrects the same
    error for a fold). `toolOutputBudget.capTo` only ever tightens, so a model whose window is
-   larger than its spare tool budget behaves as before; a window *smaller* than it caps too,
+   larger than the room its request has behaves as before; a window *smaller* than it caps too,
    because a request there was already unsendable and the fold that answers a refusal cannot
    touch the result. A result cut this way carries the shared `…[gekürzt]` marker, so the model
    can read a narrower page range instead of re-scraping the same URL. Measured: a 13 480-token

@@ -1022,7 +1022,8 @@ tool result can be long — a scraped page and a file read out of the project fo
 
 ### 17.1 What it does
 
-After a tool returns and before its text is charged against the tool budget, a second
+After a tool returns and before its text is charged against the room the request has
+left, a second
 model condenses the text. The chat's model reads the condensation; the tool-call card
 keeps what the tool actually returned. The message that is stored — and therefore
 replayed on every later turn — holds the condensation, which is the whole point: a page
@@ -1077,7 +1078,7 @@ worth a request, not the size of the page in hand, so a 40k-token page above a 2
 threshold can want far more than 2k tokens out. And `normalise` stored the capped value,
 so a chosen 3000 came back as 2000, was gone from the blob, and raising the threshold
 later did not restore it. Both are pinned by `TestTheDigestCapIsResolvedNotTrusted`. The
-bound that remains is the tool budget: a condensation still passes through
+bound that remains is the room the request has left: a condensation still passes through
 `toolOutputBudget.take` before the model reads it.
 
 ### 17.2 The rules that make it safe to switch on
@@ -1187,7 +1188,7 @@ sizes, and they are the backend's own measurements rather than a client-side est
 `ToolCallRecord.SourceTokens` is `llm.EstimateTokens` of what the tool returned, and
 `ContextTokens` is the same estimate of the exact string `toolOutputBudget.take` handed
 to `appendToolResult` — so the second number already includes the digest notice and any
-cut the answer's budget made *after* the condensation.
+cut the room left made *after* the condensation.
 
 Three outcomes produce those numbers and only one of them is a setting the user switched
 on, so the record keeps the cause rather than leaving it to be inferred from the sizes:
@@ -1196,7 +1197,7 @@ on, so the record keeps the cause rather than leaving it to be inferred from the
 | --- | --- | --- | --- |
 | whole | false | false | `4,371 tokens` |
 | cut by the second model | true | false | `12,345 → 640 tokens` |
-| cut by the answer's budget | false | false | `31,280 → 2,048 tokens (budget)` |
+| cut by the room left in the request | false | false | `31,280 → 2,048 tokens (context)` |
 | withheld: the budget was spent | false | true | `4,374 tokens discarded` |
 
 The fourth row is the one that shipped wrong. `take` answers a spent budget with
@@ -1405,31 +1406,30 @@ a re-read returns the file, because the write tools drop the turn's read memory 
 (`Service.forgetReads`). The sentence is charged to the history segment rather than reported as a
 saving, so the meter keeps describing what is sent.
 
-**No single result may spend the answer.** Ageing bounds what a reply *re-sends*; the tool budget
-bounds what it *adds*, and `take` used to hand one result everything that was left of it — so the
-first enormous result spent the allowance the rest of the reply's rounds were going to need.
-A result may now take the smaller of the remainder and `toolResultShare` of the budget the
-answer started with, and is charged what it actually used: a quarter, so 30 000 tokens in a
-project (120 000) and 15 000 in a chat (60 000), and a cut result leaves room for the round's
-other results and for the rounds after it. A quarter rather than a flat figure because the
-budget it divides is already the mode's, and 30 000 sits just under the 32 000 a reply keeps
-verbatim above — one result can never be the whole of what survives a round. It bites where a
-result class has no bound of its own: measured with `llm.EstimateTokens`, a full 24 kB
-`read_file` prices at about 7 800 tokens and a 30 kB command result at about 10 800 (the
-app's own 64 kB command measurement, halved), both inside a project's share and both over a
-chat's. Under that share sits the absolute bound: no
-single result may exceed `tools.MaxToolResultBytes` (32 KiB, measured at 10 347 tokens of
-source), applied once where the result leaves the tool service, so a result the shares would
-have allowed is still cut. Pinned by `TestOneResultCannotTakeTheWholeBudget` (one
-result, then the next, then the total) and `TestAPerResultCeilingNeverExceedsTheRoom` (a share is
-a ceiling, not an entitlement: the room a request has left stays the smaller of the two).
+**What a result may add is the room the request has.** Ageing bounds what a reply *re-sends*;
+the other bound is what the request that reads the result can still hold.
+`roomForToolResults` measures it — the effective limit less what the assembly priced, the
+reserve for the answer and the reply this round wrote — and `take` charges a result what it
+actually used, so a small one leaves its room to the round's other results. There is no
+per-answer token figure any more: the old 60 000/120 000 setting had to be raised as windows
+grew, and once spent it withheld *new* results while ageing would have kept them and stubbed
+the oldest — a long reply read notices with room still in the request
+(`TestToolOutputBudgetHasNoPerAnswerCeiling`).
+
+**The one number that survives.** The tool service's own byte bound, because it is a fact
+about a result rather than about a window: a full 24 kB `read_file` prices at about 7 800
+tokens and a 30 kB command result at about 10 800 (the app's own 64 kB command measurement,
+halved), and no single result may exceed `tools.MaxToolResultBytes` (32 KiB, measured at
+10 347 tokens of source), applied once where the result leaves the tool service. Pinned by
+`TestToolOutputBudgetIsTheRoomTheRequestHasLeft` (unmeasured passes, measured cuts, nothing
+left withholds) and `TestToolOutputBudgetNeverLoosens`.
 
 **The coupling that makes it safe.** Dropping a `read_file` result would otherwise be a trap:
 the app remembers which file each turn has read, and a model asking again for a range it already
 read is answered "unchanged — use a different offset". That is true about the transcript and
 useless about the request, because the request no longer carries the text. `Engine.buildAssembly`
-therefore forgets the read for exactly the files that are in **no copy at all** — stubbed by the
-budget, replaced by a later read, or both (`Service.ForgetReads`, `internal/tools/reads.go`) — so
+therefore forgets the read for exactly the files that are in **no copy at all** — stubbed by
+ageing, replaced by a later read, or both (`Service.ForgetReads`, `internal/tools/reads.go`) — so
 the ordinary way to refresh a window works again. A file whose newer read is still in the request
 is deliberately not forgotten: there the shortcut's answer is true about this request, and a
 re-read would spend a round fetching text the model was just sent. Every other read keeps the

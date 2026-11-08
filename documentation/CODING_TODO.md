@@ -5,7 +5,7 @@ of KiChat? The mechanism is [CODING.md](CODING.md) and is not repeated here — 
 list, and it separates what was checked from what was not.
 
 Written against `feat/coding` at `c093673`: 30 commits and +16 672/−599 lines over the released
-`0.6.2`, not in any tag, with this review's own two changes (the raised tool budgets and the git
+`0.6.2`, not in any tag, with this review's own two changes (the per-mode round figures and the git
 block) still uncommitted. Re-check the defaults and line numbers before trusting any of it; a
 TODO that describes a moving branch is wrong by default.
 
@@ -25,17 +25,14 @@ shell is killed.
 Three things this list used to open with are now held, and it matters what they do and do not
 reach:
 
-- **A project replies on its own figures: 60 rounds and 120 000 tool-result tokens**, against
-  a chat's 24 and 60 000 (`config.DefaultCodingToolIterations`, `DefaultCodingToolTokenBudget`,
-  `DefaultToolIterations`, `DefaultToolTokenBudget`; `MaxToolIterations` is the ceiling both
-  round fields are repaired against). Reading four files, editing two and running `make check`
-  fits. They are separate figures because sharing them was the bug: a chat set to 10 rounds
-  cut a project at 10, and the shared token budget was two whole reads of a file the size of
-  `app.go` (24 429 tokens each) with most of the project's rounds still to come
-  (`chat.maxToolRounds` and `chat.maxToolResultTokens` pick by mode). Both are still cut to
-  the room the next request actually has, so a small local window is unaffected; and a
-  settings row that already stores 6 — or an absent token field — is repaired the same way,
-  so a fresh install and an upgraded one both get the project's figures.
+- **A project replies on its own round figure: 60 rounds**, against
+  a chat's 24 (`config.DefaultCodingToolIterations`, `DefaultToolIterations`;
+  `MaxToolIterations` is the ceiling both are repaired against). Reading four files, editing
+  two and running `make check` fits. They are separate figures because sharing them was the
+  bug: a chat set to 10 rounds cut a project at 10. Tool-result text is no longer given a
+  per-answer token figure at all: the room the next request has left is the bound, and ageing
+  keeps a reply's newest 32 000 tokens verbatim, so a large window is not held to a number
+  somebody had to raise (`chat.maxToolRounds`, `chat.roomForToolResults`).
 - **The working tree travels with the prompt.** A project whose folder is a git repository gets
   `<project_git>` on every turn: branch (or detached), ahead/behind, and every pending path with
   the staged half, the kind of change and its line counts — 40 entries and 4 KiB at most, charged

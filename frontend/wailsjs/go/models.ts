@@ -584,8 +584,6 @@ export namespace config {
 	    autoTitle: boolean;
 	    toolIterations: number;
 	    codingToolIterations: number;
-	    toolTokenBudget: number;
-	    codingToolTokenBudget: number;
 	    nativeTools: boolean;
 	    runtime: RuntimeSettings;
 	    hiddenModels?: string[];
@@ -614,8 +612,6 @@ export namespace config {
 	        this.autoTitle = source["autoTitle"];
 	        this.toolIterations = source["toolIterations"];
 	        this.codingToolIterations = source["codingToolIterations"];
-	        this.toolTokenBudget = source["toolTokenBudget"];
-	        this.codingToolTokenBudget = source["codingToolTokenBudget"];
 	        this.nativeTools = source["nativeTools"];
 	        this.runtime = this.convertValues(source["runtime"], RuntimeSettings);
 	        this.hiddenModels = source["hiddenModels"];

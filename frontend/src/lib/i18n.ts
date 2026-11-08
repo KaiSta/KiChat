@@ -723,11 +723,6 @@ const de = {
   'settings.summaryModelUnavailable': '(nicht verfügbar)',
   'settings.summaryModelHint':
     'Ein Reasoning-Modell kann sein Ausgabebudget beim Denken aufbrauchen, statt eine Zusammenfassung zu schreiben. Ein kleines Instruct-Modell umgeht das.',
-  'settings.toolBudget': 'Tool-Budget',
-  'settings.toolBudgetHint': 'Token-Budget für Tool-Ergebnisse pro Chat-Antwort',
-  'settings.codingToolBudget': 'Token-Budget für Tool-Ergebnisse im Coding-Agent',
-  'settings.codingToolBudgetHint':
-    'Gilt für Projekt-Chats. Quellcode und Build-Ausgaben sind dichter als Seiten — ein ganzer Blick in eine große Datei kostet allein über 24 000 Tokens.',
   'settings.research': 'Recherche',
   'settings.braveKey': 'Brave Search API-Key',
   'settings.braveKeySet': 'Ein Key ist gespeichert.',
@@ -1120,15 +1115,15 @@ const de = {
     'Beendet nur diesen Befehl, nicht die Antwort. Das Modell liest die bisherige Ausgabe und macht weiter.',
   'tool.tokensOne': '{{tokens}} Tokens',
   'tool.tokensCut': '{{source}} → {{context}} Tokens',
-  'tool.tokensBudgetTag': 'Budget',
+  'tool.tokensBudgetTag': 'Kontext',
   'tool.tokensWithheld': '{{tokens}} Tokens verworfen',
   'tool.tokensWithheldHint':
-    'Das Tool hat {{tokens}} Tokens zurückgegeben; das Token-Budget dieser Antwort war bereits aufgebraucht, deshalb hat das Modell sie nie gelesen. Frage noch einmal, um das Ergebnis in einer neuen Antwort zu bekommen.',
+    'Das Tool hat {{tokens}} Tokens zurückgegeben; diese Anfrage hatte keinen Platz mehr dafür, deshalb hat das Modell sie nie gelesen. Frage noch einmal, um das Ergebnis in einer neuen Antwort zu bekommen.',
   'tool.tokensHint': 'Das Tool hat {{tokens}} Tokens zurückgegeben; sie stehen unverändert im Kontext.',
   'tool.tokensCondensedHint':
     'Das Tool hat {{source}} Tokens zurückgegeben; ein zweites Modell hat sie auf {{context}} Tokens gekürzt, und so stehen sie im Kontext.',
   'tool.tokensBudgetHint':
-    'Das Tool hat {{source}} Tokens zurückgegeben; das Token-Budget dieser Antwort hat nur {{context}} davon in den Kontext gelassen.',
+    'Das Tool hat {{source}} Tokens zurückgegeben; der Platz dieser Anfrage hat nur {{context}} davon in den Kontext gelassen.',
 
   // Das Schreib-Tool. Es hält den Chat an, bis geantwortet ist — deshalb steht hier, was
   // passiert, und nicht nur, was gefragt wird.
@@ -2234,11 +2229,6 @@ const en: Record<keyof typeof de, string> = {
   'settings.summaryModelUnavailable': '(not available)',
   'settings.summaryModelHint':
     'A reasoning model can spend its output budget thinking instead of writing a summary. A small instruction model avoids that.',
-  'settings.toolBudget': 'Tool budget',
-  'settings.toolBudgetHint': 'Token budget for tool results per chat reply',
-  'settings.codingToolBudget': 'Token budget for tool results in a project',
-  'settings.codingToolBudgetHint':
-    'Applies to project chats. Source files and build output are denser than pages — one whole read of a large file costs over 24 000 tokens on its own.',
   'settings.research': 'Research',
   'settings.braveKey': 'Brave Search API key',
   'settings.braveKeySet': 'A key is stored.',
@@ -2610,15 +2600,15 @@ const en: Record<keyof typeof de, string> = {
     'Ends this command only, not the answer. The model reads the output so far and carries on.',
   'tool.tokensOne': '{{tokens}} tokens',
   'tool.tokensCut': '{{source}} → {{context}} tokens',
-  'tool.tokensBudgetTag': 'budget',
+  'tool.tokensBudgetTag': 'context',
   'tool.tokensWithheld': '{{tokens}} tokens discarded',
   'tool.tokensWithheldHint':
-    'The tool returned {{tokens}} tokens; this answer’s tool budget was already spent, so the model never read them. Ask again to get the result in a fresh answer.',
+    'The tool returned {{tokens}} tokens; this request had no room left for them, so the model never read them. Ask again to get the result in a fresh answer.',
   'tool.tokensHint': 'The tool returned {{tokens}} tokens; they stand in the context unchanged.',
   'tool.tokensCondensedHint':
     'The tool returned {{source}} tokens; a second model condensed them to {{context}}, which is what stands in the context.',
   'tool.tokensBudgetHint':
-    'The tool returned {{source}} tokens; this answer’s tool budget let only {{context}} of them into the context.',
+    'The tool returned {{source}} tokens; this request had room for only {{context}} of them in the context.',
 
   // The write tool. It stops the chat until it is answered, which is why these say what
   // is happening and not only what is being asked.
@@ -3664,11 +3654,6 @@ const zh: Record<keyof typeof de, string> = {
   'settings.summaryModelDefault': '与对话相同（默认）',
   'settings.summaryModelUnavailable': '（不可用）',
   'settings.summaryModelHint': '推理模型可能把输出预算耗尽在思考上，写不出摘要。使用小型指令模型可避免这一点。',
-  'settings.toolBudget': '工具预算',
-  'settings.toolBudgetHint': '每次对话回答的工具结果 token 预算',
-  'settings.codingToolBudget': '项目对话的工具结果 token 预算',
-  'settings.codingToolBudgetHint':
-    '适用于项目对话。源代码和构建输出比网页更密集——完整读取一个大文件本身就要超过 24 000 个 token。',
   'settings.research': '研究',
   'settings.braveKey': 'Brave Search API 密钥',
   'settings.braveKeySet': '已保存密钥。',
@@ -4006,15 +3991,15 @@ const zh: Record<keyof typeof de, string> = {
   'tool.stopCommandHint': '只结束这条命令，不停止回答。模型会读取已产生的输出并继续。',
   'tool.tokensOne': '{{tokens}} 个令牌',
   'tool.tokensCut': '{{source}} → {{context}} 个令牌',
-  'tool.tokensBudgetTag': '预算',
+  'tool.tokensBudgetTag': '上下文',
   'tool.tokensWithheld': '{{tokens}} 个令牌未采用',
   'tool.tokensWithheldHint':
-    '工具返回了 {{tokens}} 个令牌，但本回答的工具预算已经用完，模型从未读到它们。再次提问可在新的回答中获得结果。',
+    '工具返回了 {{tokens}} 个令牌，但此请求已没有空间，模型从未读到它们。再次提问可在新的回答中获得结果。',
   'tool.tokensHint': '工具返回了 {{tokens}} 个令牌，原样进入上下文。',
   'tool.tokensCondensedHint':
     '工具返回了 {{source}} 个令牌；第二个模型将其压缩为 {{context}} 个，并以此进入上下文。',
   'tool.tokensBudgetHint':
-    '工具返回了 {{source}} 个令牌；本回答的工具预算只让其中 {{context}} 个进入上下文。',
+    '工具返回了 {{source}} 个令牌；此请求的空间只让其中 {{context}} 个进入上下文。',
 
   // 写入工具。它会暂停对话直到得到答复，因此这里说明的是正在发生什么，而不只是被问什么。
   'confirm.title': '项目确认',

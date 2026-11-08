@@ -68,17 +68,9 @@ type Settings struct {
 	// the tests, read the failure, edit again — that a figure tuned for questions
 	// would cut short. Sharing one number meant exactly that: a chat set to ten
 	// stopped a refactor at ten rounds. The mode picks (chat.maxToolRounds).
-	ToolIterations       int `json:"toolIterations"`
-	CodingToolIterations int `json:"codingToolIterations"`
-	// ToolTokenBudget is how much tool-result text one reply of an ordinary chat may
-	// carry into its next request, CodingToolTokenBudget the same for a project. They
-	// are separate for the reason the round figures are: a project's reply spends its
-	// budget on source files and test output, where a chat's spends it on pages. Two
-	// whole reads of a file the size of `app.go` measure 48 858 tokens, most of the
-	// chat figure — so a project's answer ran dry while it still had rounds left.
-	ToolTokenBudget       int  `json:"toolTokenBudget"`
-	CodingToolTokenBudget int  `json:"codingToolTokenBudget"`
-	NativeTools           bool `json:"nativeTools"`
+	ToolIterations       int  `json:"toolIterations"`
+	CodingToolIterations int  `json:"codingToolIterations"`
+	NativeTools          bool `json:"nativeTools"`
 	// Runtime is the llama.cpp that KiChat runs itself, as opposed to the one a
 	// user started and pointed a backend at. Every field here describes a
 	// capability the app provides rather than a server it contacts, which is why
@@ -1426,8 +1418,8 @@ func (d DigestSettings) DigestThreshold() int {
 // being condensed, so a 40k-token page above a 2000-token threshold can want far more
 // than 2000 tokens out. Worse, normalise stored the capped value, so a chosen 3000 came
 // back as 2000, was gone from the blob, and raising the threshold later did not bring
-// it back. The remaining bound is the tool budget: whatever comes back still passes
-// through toolOutputBudget.take.
+// it back. The remaining bound is the room the request has left: whatever comes back
+// still passes through toolOutputBudget.take.
 func (d DigestSettings) DigestMaxTokens() int {
 	max := d.MaxTokens
 	if max <= 0 {
@@ -1494,36 +1486,27 @@ func Text(lang, de, en string) string { return ilang.Text(lang, de, en) }
 // speaks.
 func LangOf(lang func() string) string { return ilang.Of(lang) }
 
-// The tool loop's bounds: how many model/tool rounds one reply may take, and how many
-// tokens of tool results it may carry into the next request.
+// The tool loop's round bound: how many model/tool rounds one reply may take.
 //
-// There are two round figures because there are two shapes of reply. A chat's answer ends
-// when the model stops asking for tools, so its figure is the guard against a model that
-// never does. A project's reply is a piece of work: reading four files, editing two and
-// running `make check` is six rounds before the first failure comes back, and the failure
-// is then read and fixed. That is why the project's default is the larger one — and why it
-// is a separate field rather than one shared number, which is what stopped a project at
-// ten rounds when its chat setting said ten.
+// There are two figures because there are two shapes of reply. A chat's answer ends when
+// the model stops asking for tools, so its figure is the guard against a model that never
+// does. A project's reply is a piece of work: reading four files, editing two and running
+// `make check` is six rounds before the first failure comes back, and the failure is then
+// read and fixed. That is why the project's default is the larger one — and why it is a
+// separate field rather than one shared number, which is what stopped a project at ten
+// rounds when its chat setting said ten.
 //
-// A research turn does not get longer because the project has its own figures: the loop
-// still ends when the model stops calling tools, and the token budget is still capped by
-// the room the next request actually has (`chat.roomForToolResults`), so a small local
-// window keeps cutting results where it always did.
-//
-// The project's token budget is twice the chat's because the material is denser: a failing
-// `make check` is a few thousand tokens before anything is read, and a source file is worth
-// more per token than a page. It is not unbounded for the same reason the rounds are not —
-// it is what stops one enormous build log from filling the window on its own.
+// How much tool text a round may add is not a figure here: it is the room the next request
+// actually has (`chat.roomForToolResults`), so a small local window cuts results where it
+// always did and a large one is not held to a number somebody had to raise.
 //
 // MaxToolIterations is the ceiling both round fields are repaired against, and it is a
 // bound rather than a default because a long autonomous run is a choice — and because each
 // round is a request the user pays for in time and tokens.
 const (
-	DefaultToolIterations        = 24
-	DefaultCodingToolIterations  = 60
-	MaxToolIterations            = 100
-	DefaultToolTokenBudget       = 60000
-	DefaultCodingToolTokenBudget = 120000
+	DefaultToolIterations       = 24
+	DefaultCodingToolIterations = 60
+	MaxToolIterations           = 100
 )
 
 // Default returns the shipped configuration.
@@ -1584,14 +1567,12 @@ func Default() Settings {
 			Files:    false,
 			Commands: false,
 		},
-		DefaultSystemPrompt:   PromptBody(PresetResearch, LangEnglish),
-		PromptPresets:         DefaultPresets(LangEnglish),
-		AutoTitle:             true,
-		ToolIterations:        DefaultToolIterations,
-		CodingToolIterations:  DefaultCodingToolIterations,
-		ToolTokenBudget:       DefaultToolTokenBudget,
-		CodingToolTokenBudget: DefaultCodingToolTokenBudget,
-		NativeTools:           true,
+		DefaultSystemPrompt:  PromptBody(PresetResearch, LangEnglish),
+		PromptPresets:        DefaultPresets(LangEnglish),
+		AutoTitle:            true,
+		ToolIterations:       DefaultToolIterations,
+		CodingToolIterations: DefaultCodingToolIterations,
+		NativeTools:          true,
 		// Image generation ships switched off. It is a second server the user has
 		// to be running — a WebUI is a several-gigabyte install of its own — so
 		// offering an address and probing it would report a failure for a feature
@@ -1995,8 +1976,8 @@ func (s *Settings) normalise() {
 	}
 	// A half-filled digest model is unset for the same reason, and the threshold is
 	// kept in the range where the feature can pay for itself: below a few hundred
-	// tokens the second request is all cost, and above the tool budget it could never
-	// fire.
+	// tokens the second request is all cost, and above the room a request has it could
+	// never fire.
 	if s.Digest.Model.Backend == "" || s.Digest.Model.Model == "" {
 		s.Digest.Model = llm.Ref{}
 	}
@@ -2042,15 +2023,6 @@ func (s *Settings) normalise() {
 	}
 	if s.CodingToolIterations > MaxToolIterations {
 		s.CodingToolIterations = MaxToolIterations
-	}
-	if s.ToolTokenBudget <= 0 {
-		s.ToolTokenBudget = DefaultToolTokenBudget
-	}
-	// The project's budget is repaired the same way: an absent field is what every
-	// installation upgrading to it carries, and a zero from an emptied text box means
-	// the default rather than "no tool results at all".
-	if s.CodingToolTokenBudget <= 0 {
-		s.CodingToolTokenBudget = DefaultCodingToolTokenBudget
 	}
 	if len(s.PromptPresets) == 0 {
 		s.PromptPresets = DefaultPresets(s.Language)

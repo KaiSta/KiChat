@@ -271,7 +271,7 @@ func TestTheToolCardIsToldHowMuchWasCut(t *testing.T) {
 }
 
 // TestAWithheldResultIsNotReportedAsASize is the case a reader hit: a search whose
-// results never reached the model, because the answer's tool budget was already spent.
+// results never reached the model, because the request had no room left for them.
 // The card used to print "4,374 → 41 tokens" for it — the 41 were the exhausted notice —
 // which reads as a summary the second model wrote. The record must say the result was
 // withheld, and the size the model actually read must not be the one it is compared to.
@@ -287,8 +287,8 @@ func TestAWithheldResultIsNotReportedAsASize(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	settings := digestSettings()
-	// No summary model: this is the budget alone, which is what a spent budget looks
-	// like in a chat that never switched the condensation on.
+	// No summary model: this is the room alone, which is what an exhausted request
+	// looks like in a chat that never switched the condensation on.
 	settings.Digest.Model = llm.Ref{}
 	scraper := research.NewScraper(st, research.ScrapeOptions{
 		AllowPrivateHosts: true, RespectRobots: false, Timeout: 5 * time.Second,
@@ -297,7 +297,7 @@ func TestAWithheldResultIsNotReportedAsASize(t *testing.T) {
 	engine := NewEngine(st, llm.NewRegistry(nil), tools.New(st, nil, scraper),
 		func() config.Settings { return settings }, log.emit)
 
-	// One token of budget: nothing of the page can fit, so the model gets the notice.
+	// One token of room: nothing of the page can fit, so the model gets the notice.
 	budget := &toolOutputBudget{remaining: 1}
 	engine.runTool(context.Background(), "chat-1", store.Message{ID: "m1", ChatID: "chat-1"},
 		scrapeCall(srv.URL), budget, tools.TurnRef{BackendID: "fake"})
@@ -1605,7 +1605,7 @@ func TestWithheldCondensationDoesNotConsumePageEscape(t *testing.T) {
 	engine.finishTool(context.Background(), "chat-1", row, call, record, out,
 		&toolOutputBudget{remaining: 1}, tools.TurnRef{BackendID: "fake"})
 	if engine.condensations().has(condensedIdentity("chat-1", call, bigPage())) {
-		t.Fatal("a summary withheld by the tool budget consumed the escape hatch")
+		t.Fatal("a summary withheld by the room left consumed the escape hatch")
 	}
 	result, condensed := engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(),
 		tools.TurnRef{BackendID: "fake"}, "")

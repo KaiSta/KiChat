@@ -1402,8 +1402,8 @@ func TestAToolRoundFoldsBeforeItsNextRequestCrossesTheCeiling(t *testing.T) {
 	}
 }
 
-// TestAToolResultIsCutToWhatTheRequestCanCarry is the failure the tool budget's
-// ceiling half exists for, in the shape it was reported: the model thinks, asks for a
+// TestAToolResultIsCutToWhatTheRequestCanCarry is the failure the measured room
+// exists for, in the shape it was reported: the model thinks, asks for a
 // web search, and the round that reads the result is refused because the result alone
 // is bigger than the account's whole per-request allowance.
 //

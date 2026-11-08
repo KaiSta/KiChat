@@ -40,7 +40,7 @@ import (
 // the read used, and because a test asserting a bound should not restate it.
 const (
 	// MaxReadLines is the largest window one read returns. A bigger window is not a
-	// favour: it is charged against the turn's tool budget, and a file that does not
+	// favour: it is charged against the room the request has left, and a file that does not
 	// fit is better read in two calls the model chose than in one it did not.
 	MaxReadLines = 2000
 	// DefaultReadLines is the window a read with no `limit` returns. Exported for the same
@@ -554,7 +554,7 @@ type Hit struct {
 
 // MaxHitLine bounds one hit's text. A line is not a useful unit for a minified bundle or a
 // one-line JSON export: those are megabytes on one line, and a search that returned them whole
-// would spend the answer's entire tool budget on one match while holding 200 of them in memory.
+// would spend the request's entire room on one match while holding 200 of them in memory.
 // A hit is a pointer to a place in a file, and 300 bytes of it locate that place.
 const MaxHitLine = 300
 

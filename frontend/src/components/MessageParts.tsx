@@ -388,7 +388,7 @@ function CopyLine({ text, label }: { text: string; label: string }) {
 /** Why a tool result is the size it is, in the words the numbers need.
  *
  * Three causes produce the same pair of sizes and only one of them is a setting the user
- * switched on: the summary model, this answer's tool budget, or neither. The inline line
+ * switched on: the summary model, the room left in the request, or neither. The inline line
  * carries the sizes, so the tooltip is where the cause can be named without making every
  * card three lines taller.
  */

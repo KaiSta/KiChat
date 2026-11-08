@@ -1264,8 +1264,6 @@ Available tools: {{tool_list}}`,
     autoTitle: true,
     toolIterations: 24,
     codingToolIterations: 60,
-    toolTokenBudget: 60000,
-    codingToolTokenBudget: 120000,
     nativeTools: true,
     // Both off, like the shipped default: a fixture that granted a permission would hide
     // the very state the coding tab's switches are about.
@@ -2348,7 +2346,7 @@ Available tools: {{tool_list}}`,
     createdAt: now(),
   }
   // The third cause of a smaller context size, and the reason the tooltip exists: this
-  // result was cut by the answer's tool budget, not by the summary model, so the card
+  // result was cut by the room left in the request, not by the summary model, so the card
   // shows the same arrow with a different explanation.
   const budgetToolCall = {
     id: 'call-search-3',

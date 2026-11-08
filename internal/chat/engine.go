@@ -229,22 +229,6 @@ func maxToolRounds(chat store.Chat, settings config.Settings) int {
 	return settings.ToolIterations
 }
 
-// maxToolResultTokens is how much tool-result text one reply may carry into its next
-// request, and it is chosen by mode for the same reason the rounds are.
-//
-// The material differs more than the size of the reply does: a chat's budget is spent on
-// scraped pages and search results, a project's on source files and the output of a build.
-// A whole read of `app.go` measures 24 429 tokens, so two of them spent most of the chat's
-// 60 000 — and the budget is per answer, so a project still working through its rounds then
-// read notices instead of file contents. A project therefore has its own figure, which is
-// still bounded and still cut to the room the next request has (`chat.roomForToolResults`).
-func maxToolResultTokens(chat store.Chat, settings config.Settings) int {
-	if chat.IsProject() && settings.CodingToolTokenBudget > 0 {
-		return settings.CodingToolTokenBudget
-	}
-	return settings.ToolTokenBudget
-}
-
 // runTurn performs one full exchange, including any tool iterations.
 func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	started := time.Now()
