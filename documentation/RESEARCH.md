@@ -433,6 +433,13 @@ The measurements behind that are pinned from both sides: `TestIsDDGChallengeOnRe
 ([internal/research/scrape.go:168](../internal/research/scrape.go#L168)). It is guarded, and
 each guard exists because of a specific way this can be abused.
 
+**The request asks for the app's language.** `Accept-Language` is built from the window's
+setting — `de-DE,de;q=0.9,en;q=0.8`, `en-US,en;q=0.9` or `zh-CN,zh;q=0.9,en;q=0.8` — rather
+than the fixed German header it used to send, so a server that negotiates by language answers
+the reader's language where it can. The value comes from the raw setting, not
+`config.ModelLanguage`, because a Chinese window has a Chinese header even though the
+model-facing sentences fall back to English.
+
 **SSRF is refused at two layers.** `guardHost` rejects `localhost`, anything ending in
 `.local` or `.internal`, and any loopback, private, link-local or unspecified address; for
 a name it resolves it and checks **every** address it maps to. On top of that, the dialer

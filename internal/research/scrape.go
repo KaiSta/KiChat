@@ -85,16 +85,35 @@ type Scraper struct {
 	robotsMu    sync.Mutex
 	robotsCache map[string]robotsRules
 
-	// Lang answers the interface language, so the sentences this package writes into a
-	// result or an error follow it (config.ModelLanguage). It is a supplier rather than a
-	// string because a settings save must reach the next scrape, not the next restart, and
-	// it is set after construction so Configure — which runs on every save — leaves it alone.
-	// Nil means English, which is config.Default()'s language and what a test's scraper speaks.
+	// Lang answers the interface language. The sentences this package writes into a result
+	// or an error follow its resolved form (lang, config.ModelLanguage); the request's
+	// Accept-Language follows the raw setting (appLang), because a Chinese window asks for
+	// Chinese pages even though there is no Chinese wording for the model-facing sentences.
+	// It is a supplier rather than a string because a settings save must reach the next
+	// scrape, not the next restart, and it is set after construction so Configure — which
+	// runs on every save — leaves it alone. Nil means English, which is config.Default()'s
+	// language and what a test's scraper speaks.
 	Lang func() string
 }
 
 // lang is the resolved model language for the text this scraper writes.
 func (s *Scraper) lang() string { return config.LangOf(s.Lang) }
+
+// appLang is the raw interface language, for a header that names the language the reader
+// asked for rather than the language this package's sentences are translated into. It keeps
+// Chinese, which config.ModelLanguage collapses to English, and an unrecognised setting is
+// English so the header cannot claim a language the app does not offer.
+func (s *Scraper) appLang() string {
+	if s.Lang == nil {
+		return config.LangEnglish
+	}
+	switch lang := strings.ToLower(strings.TrimSpace(s.Lang())); lang {
+	case config.LangGerman, config.LangEnglish, config.LangChinese:
+		return lang
+	default:
+		return config.LangEnglish
+	}
+}
 
 // NewScraper builds a scraper.
 func NewScraper(st *store.Store, opts ScrapeOptions, pdf pdfExtractor) *Scraper {
@@ -268,7 +287,9 @@ func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 	}
 	req.Header.Set("User-Agent", browserUserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/pdf,application/json,text/plain;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "de-DE,de;q=0.9,en;q=0.8")
+	// The request asks in the language the window is set to; a fixed German header from an
+	// English or Chinese window was a pair no browser produces.
+	req.Header.Set("Accept-Language", acceptLanguage(s.appLang()))
 
 	client := s.client
 	if client == nil {

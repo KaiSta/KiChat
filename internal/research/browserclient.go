@@ -259,9 +259,9 @@ func isDuckDuckGoHost(host string) bool {
 	return host == "duckduckgo.com" || strings.HasSuffix(host, ".duckduckgo.com")
 }
 
-// acceptLanguage renders the search language the way a browser sends it, so the header agrees
-// with the query rather than with the operating system of the machine pretending to be
-// Windows: a German search from a "Windows" client that asks for en-US pages is a pair that
+// acceptLanguage renders the language the way a browser sends it, so the header agrees with
+// the query or page rather than with the operating system of the machine pretending to be
+// Windows: a German request from a "Windows" client that asks for en-US pages is a pair that
 // does not occur.
 func acceptLanguage(lang string) string {
 	switch lang = strings.ToLower(strings.TrimSpace(lang)); lang {
