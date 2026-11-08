@@ -282,6 +282,10 @@ export function ResolveToolApprovalWith(arg1, arg2, arg3) {
   return window['go']['main']['App']['ResolveToolApprovalWith'](arg1, arg2, arg3);
 }
 
+export function RestoreDatabase(arg1, arg2, arg3) {
+  return window['go']['main']['App']['RestoreDatabase'](arg1, arg2, arg3);
+}
+
 export function RevertFileChange(arg1, arg2) {
   return window['go']['main']['App']['RevertFileChange'](arg1, arg2);
 }

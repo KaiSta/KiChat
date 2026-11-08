@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -311,6 +314,249 @@ func (a *App) startFresh() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// RestoreDatabase asks for a copied database and its matching key, proves that the
+// pair opens, and installs it as this installation's database.
+//
+// The two files are chosen separately because they may have been copied anywhere; the
+// fixed names are what identify them. Nothing replaces the current database until the
+// pair has been opened in a temporary directory, so a wrong passphrase, a key from
+// another database, or a cancelled dialog leaves the current history exactly where it
+// was.
+func (a *App) RestoreDatabase(passphrase, databaseTitle, keyTitle string) error {
+	if err := a.ensureInit(); err != nil {
+		return err
+	}
+	a.dbMu.Lock()
+	locked := a.locked
+	a.dbMu.Unlock()
+	if !locked {
+		return uimsg.Errorf("db.restoreLocked")
+	}
+	if a.ctx == nil {
+		return uimsg.Errorf("app.notReady")
+	}
+	dbPath, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{Title: databaseTitle})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(dbPath) == "" {
+		return nil // Dialog closed; not an error.
+	}
+	keyPath, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{Title: keyTitle})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(keyPath) == "" {
+		return nil
+	}
+	return a.restoreDatabase(dbPath, keyPath, passphrase)
+}
+
+// restoreDatabase is the part of RestoreDatabase that does not need a window. It is
+// split out so the tests can install a fixture without a file dialog.
+func (a *App) restoreDatabase(dbPath, keyPath, passphrase string) error {
+	if err := a.ensureInit(); err != nil {
+		return err
+	}
+	if passphrase == "" {
+		return uimsg.Errorf("db.wrongPassphrase")
+	}
+	a.dbMu.Lock()
+	locked := a.locked
+	targetDB := a.dbPath
+	targetKey := a.keys.Path()
+	a.dbMu.Unlock()
+	if !locked {
+		return uimsg.Errorf("db.restoreLocked")
+	}
+
+	// Stage inside the data directory, so installing is a rename on the same
+	// filesystem and a failed restore can be discarded without touching the real files.
+	stage, err := os.MkdirTemp(a.dataDir, ".restore-")
+	if err != nil {
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	defer os.RemoveAll(stage)
+	stagedDB := filepath.Join(stage, filepath.Base(targetDB))
+	stagedKey := filepath.Join(stage, filepath.Base(targetKey))
+	if err := copyRestoreFile(dbPath, stagedDB); err != nil {
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	// A copy taken while KiChat was running may have a -wal beside it. Copying it keeps
+	// uncheckpointed chats; the validation open below checkpoints them into the staged
+	// database so only the database and key need installing. The -shm is deliberately
+	// not copied: it is a cache SQLite rebuilds, and a stale copy can disagree with the
+	// log that travelled beside it.
+	source := dbPath + "-wal"
+	if _, err := os.Stat(source); err == nil {
+		if err := copyRestoreFile(source, stagedDB+"-wal"); err != nil {
+			return uimsg.Errorf("db.restoreFailed", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return uimsg.Errorf("db.restoreKeyMissing")
+		}
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	if err := copyRestoreFile(keyPath, stagedKey); err != nil {
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	encrypted, err := store.IsEncrypted(stagedDB)
+	if err != nil {
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	if !encrypted {
+		return uimsg.Errorf("db.restoreNotEncrypted")
+	}
+
+	// Prove the whole pair before anything is moved aside: the passphrase must unwrap
+	// the key, the key must open this database, and the database must survive a
+	// checkpoint. This is also where a database from a newer schema is migrated.
+	stagedKeys := dbkey.NewIsolated(stage)
+	key, err := stagedKeys.OpenRecovery(passphrase)
+	switch {
+	case errors.Is(err, dbkey.ErrWrongPassphrase):
+		return uimsg.Errorf("db.wrongPassphrase")
+	case errors.Is(err, dbkey.ErrNoRecovery):
+		return uimsg.Errorf("db.restoreKeyMissing")
+	case errors.Is(err, dbkey.ErrDamaged):
+		return uimsg.Errorf("db.restoreKeyDamaged")
+	case err != nil:
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	stagedStore, err := store.OpenKeyed(stagedDB, key)
+	if errors.Is(err, store.ErrWrongKey) {
+		return uimsg.Errorf("db.restoreWrongKey")
+	}
+	if err != nil {
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	if err := stagedStore.Checkpoint(); err != nil {
+		stagedStore.Close()
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	if err := stagedStore.Close(); err != nil {
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	_ = os.Remove(stagedDB + "-wal")
+	_ = os.Remove(stagedDB + "-shm")
+
+	a.dbMu.Lock()
+	if !a.locked {
+		a.dbMu.Unlock()
+		return uimsg.Errorf("db.restoreLocked")
+	}
+	stamp := time.Now().UTC().Format("20060102-150405.000000000")
+	moved, err := moveRestoreAside([]string{
+		targetDB, targetDB + "-wal", targetDB + "-shm", targetKey, targetKey + ".tmp",
+	}, stamp)
+	if err != nil {
+		undoRestoreMoves(moved)
+		a.dbMu.Unlock()
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	if err := installRestoreFiles(stagedDB, targetDB, stagedKey, targetKey); err != nil {
+		undoRestoreMoves(moved)
+		a.dbMu.Unlock()
+		return uimsg.Errorf("db.restoreFailed", err)
+	}
+	a.store, a.dbKey = nil, nil
+	a.locked, a.lockSetup, a.staleKeyring, a.lockReason = true, false, false, ""
+	a.keys = a.newKeys(a.dataDir)
+	a.dbMu.Unlock()
+	return a.UnlockDatabase(passphrase)
+}
+
+// copyRestoreFile copies a regular file into the staging directory. The source is not
+// renamed or modified: a failed restore must leave the files the user chose untouched.
+func copyRestoreFile(source, target string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", source)
+	}
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(target)
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(target)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(target)
+		return err
+	}
+	return nil
+}
+
+// restoreMove records a file that was moved out of the way for a restore, so a failed
+// install can put it back.
+type restoreMove struct {
+	original string
+	aside    string
+}
+
+// moveRestoreAside renames every existing path with the timestamp, like StartFresh does.
+// The caller undoes the moves if the install does not finish.
+func moveRestoreAside(paths []string, stamp string) ([]restoreMove, error) {
+	moves := make([]restoreMove, 0, len(paths))
+	for _, path := range paths {
+		if _, err := os.Stat(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return moves, err
+		}
+		aside := path + "." + stamp + ".orphaned"
+		if err := os.Rename(path, aside); err != nil {
+			return moves, err
+		}
+		moves = append(moves, restoreMove{original: path, aside: aside})
+	}
+	return moves, nil
+}
+
+// undoRestoreMoves puts the moved files back. The target is removed first so this also
+// replaces a file that a half-finished install wrote on Windows, where rename does not
+// overwrite an existing file.
+func undoRestoreMoves(moves []restoreMove) {
+	for i := len(moves) - 1; i >= 0; i-- {
+		_ = os.Remove(moves[i].original)
+		_ = os.Rename(moves[i].aside, moves[i].original)
+	}
+}
+
+// installRestoreFiles renames the validated database and key into place. A failure after
+// the database is installed removes that copy again, so the caller's undo sees only the
+// files that were there before.
+func installRestoreFiles(stagedDB, targetDB, stagedKey, targetKey string) error {
+	if err := os.Rename(stagedDB, targetDB); err != nil {
+		return err
+	}
+	if err := os.Rename(stagedKey, targetKey); err != nil {
+		_ = os.Remove(targetDB)
+		return err
+	}
+	return nil
 }
 
 // SetDatabasePassphrase writes (or replaces) the wrapped copy of the key.

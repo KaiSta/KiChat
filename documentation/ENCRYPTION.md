@@ -165,6 +165,14 @@ restored database therefore asks once on the new machine and starts silently aft
 failed keyring write is logged and does not fail the unlock, because the database is already
 open and the next launch can simply ask again.
 
+A copied installation can also be restored from the database screen: choose the copied
+`kichat.db` and `kichat.key`, then enter the passphrase that protects the key. The pair is
+opened in a temporary directory before anything is moved, so a wrong passphrase, a key from
+another database, or a plaintext file leaves the current installation untouched. A
+successful restore moves the previous database, key and sidecars aside with `.orphaned`
+names, installs the validated files, and unlocks them through the normal passphrase path.
+The keyring write described above then applies to the restored key as well.
+
 The keyring is read once per run, not once per question. The start asks for the key while
 it opens the database and again for the status the unlock screen reads, and on macOS a read
 is the `/usr/bin/security` process `go-keyring` spawns — so `dbkey` memoises the answer,

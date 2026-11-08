@@ -150,6 +150,8 @@ export function ResolveToolApproval(arg1:string,arg2:string):Promise<boolean>;
 
 export function ResolveToolApprovalWith(arg1:string,arg2:string,arg3:string):Promise<boolean>;
 
+export function RestoreDatabase(arg1:string,arg2:string,arg3:string):Promise<void>;
+
 export function RevertFileChange(arg1:string,arg2:string):Promise<void>;
 
 export function RevokeChatConsent(arg1:string,arg2:string):Promise<main.ChatConsent>;
