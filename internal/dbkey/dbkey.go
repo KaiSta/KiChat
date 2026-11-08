@@ -107,6 +107,13 @@ func NewIsolated(dir string) *Store {
 	return newStore(dir, false)
 }
 
+// NewWithKeyring returns a store wired to the given keyring calls and marks the keyring
+// usable. It is the seam tests use for the keyring path, because the real keyring is a
+// per-user global resource; production uses New or NewIsolated.
+func NewWithKeyring(dir string, get func(service, user string) (string, error), set func(service, user, password string) error, del func(service, user string) error) *Store {
+	return &Store{dir: dir, get: get, set: set, delete: del, keyringUsable: true}
+}
+
 func newStore(dir string, probe bool) *Store {
 	s := &Store{
 		dir:    dir,

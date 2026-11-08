@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zalando/go-keyring"
+
 	"kichat/internal/config"
 	"kichat/internal/dbkey"
 	"kichat/internal/secret"
@@ -223,6 +225,86 @@ func TestPassphraseActionsRefuseToStrandTheDatabase(t *testing.T) {
 	}
 	if err := b.UnlockDatabase("another passphrase here"); err != nil {
 		t.Fatalf("the new passphrase does not open the database: %v", err)
+	}
+}
+
+// TestAPassphraseUnlockRemembersTheKey: a database restored on a new machine has its
+// key only in kichat.key, so the first launch asks for the passphrase. Once that
+// passphrase has proved the key, it belongs in the keyring, and the next launch is
+// silent instead of asking again.
+func TestAPassphraseUnlockRemembersTheKey(t *testing.T) {
+	newApp := databaseTestEnv(t)
+	entries := map[string]string{}
+	newKeys := func(dir string) *dbkey.Store {
+		return dbkey.NewWithKeyring(dir,
+			func(_, user string) (string, error) {
+				value, ok := entries[user]
+				if !ok {
+					return "", keyring.ErrNotFound
+				}
+				return value, nil
+			},
+			func(_, user, value string) error { entries[user] = value; return nil },
+			func(_, user string) error { delete(entries, user); return nil },
+		)
+	}
+
+	// The source installation: a database with a recovery copy, as a user who is about
+	// to copy the data directory has.
+	source := newApp()
+	source.newKeys = newKeys
+	if err := source.init(); err != nil {
+		t.Fatalf("source init: %v", err)
+	}
+	const passphrase = "a passphrase long enough"
+	if err := source.SetDatabasePassphrase(passphrase); err != nil {
+		t.Fatalf("SetDatabasePassphrase: %v", err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := source.store.DB().Exec(
+		`INSERT INTO chats(id,title,created_at,updated_at) VALUES('restored','Restored',?,?)`, now, now); err != nil {
+		t.Fatalf("insert chat: %v", err)
+	}
+	if err := source.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The copy lands on a machine whose keyring does not know this database.
+	clear(entries)
+	target := newApp()
+	target.newKeys = newKeys
+	if err := target.init(); err != nil {
+		t.Fatalf("target init: %v", err)
+	}
+	status := target.GetDatabaseStatus()
+	if !status.Locked || status.Reason != "db.reason.needsPassphrase" || status.Remembered {
+		t.Fatalf("restored database status = %+v, want locked with a passphrase and no remembered key", status)
+	}
+	if err := target.UnlockDatabase(passphrase); err != nil {
+		t.Fatalf("UnlockDatabase: %v", err)
+	}
+	if got := target.GetDatabaseStatus(); !got.Remembered {
+		t.Errorf("status after the passphrase unlock = %+v, want the key remembered", got)
+	}
+	if err := target.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The launch after that finds the key in the keyring and needs no passphrase.
+	next := newApp()
+	next.newKeys = newKeys
+	if err := next.init(); err != nil {
+		t.Fatalf("next init: %v", err)
+	}
+	if got := next.GetDatabaseStatus(); got.Locked {
+		t.Fatalf("next launch status = %+v, want it opened from the keyring", got)
+	}
+	chats, err := next.ListChats(false)
+	if err != nil {
+		t.Fatalf("ListChats: %v", err)
+	}
+	if len(chats) != 1 || chats[0].Title != "Restored" {
+		t.Fatalf("chats after the silent launch = %+v, want the restored chat", chats)
 	}
 }
 

@@ -141,7 +141,9 @@ func (a *App) lock(reason string) {
 // UnlockDatabase opens the database with a passphrase.
 //
 // In setup mode the passphrase creates the key and wraps it; otherwise it unwraps the
-// copy beside the database. A wrong passphrase and a stale keyring entry both answer
+// copy beside the database. A successful unwrap also stores the proven key in the OS
+// keyring when one is available, so a database restored on a new machine asks once
+// rather than on every launch. A wrong passphrase and a stale keyring entry both answer
 // with the same sentence, because the user's next step is the same in either case.
 func (a *App) UnlockDatabase(passphrase string) error {
 	if err := a.ensureInit(); err != nil {
@@ -202,11 +204,13 @@ func (a *App) unlock(passphrase string) (bool, error) {
 		return false, err
 	}
 	a.store, a.dbKey = st, key
-	// A stale entry may be replaced now that an open has proved this key is the right
-	// one. A failure to write it is not a failed unlock: the database is open, and the
-	// only consequence is that the next launch asks for the passphrase again — which is
-	// worth a line in the log, not a password prompt the user cannot get past.
-	if a.staleKeyring && a.keys.KeyringAvailable() {
+	// The passphrase has just proved this key is the right one, so it is the one to
+	// remember. A stale entry may be replaced now; a machine with no entry — the
+	// restored database — gets one, so later launches are silent. A failure to write it
+	// is not a failed unlock: the database is open, and the only consequence is that
+	// the next launch asks for the passphrase again — worth a line in the log, not a
+	// password prompt the user cannot get past.
+	if a.keys.KeyringAvailable() {
 		if err := a.keys.SaveKeyring(key); err != nil {
 			runtime.LogWarningf(a.ctx, "Datenbankschlüssel im Schlüsselbund ablegen: %v", err)
 		}

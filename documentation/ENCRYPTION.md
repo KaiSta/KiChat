@@ -160,6 +160,11 @@ prompt is instant. The wrapped copy is what makes a keyring reset, an OS reinsta
 new machine recoverable rather than fatal; without it, "the key lives in the keyring"
 means "the key is lost with the keyring".
 
+A passphrase unlock writes the recovered key into the OS keyring when one is available. A
+restored database therefore asks once on the new machine and starts silently afterwards; a
+failed keyring write is logged and does not fail the unlock, because the database is already
+open and the next launch can simply ask again.
+
 The keyring is read once per run, not once per question. The start asks for the key while
 it opens the database and again for the status the unlock screen reads, and on macOS a read
 is the `/usr/bin/security` process `go-keyring` spawns — so `dbkey` memoises the answer,
@@ -359,9 +364,10 @@ its cost is the policy (how often, how much data, how much churn), not the crypt
   gap: a keyring reset with no copy now ends at `db.reason.noKey` and a database moved
   aside. The argument for forcing it — the choice is free only once — still holds, and it
   is the first thing to add if the gap turns out to bite.
-- **"Do not remember" is persistent, not per launch.** Removing the keyring key in Settings
-  makes every launch ask; there is no checkbox on the unlock screen to skip the keyring for
-  one session while keeping it.
+- **"Do not remember" lasts until the next unlock.** Removing the keyring key in Settings
+  makes the next launch ask; once the passphrase has opened the database, the key is stored
+  in the keyring again and the launch after that is silent. There is no checkbox on the
+  unlock screen to skip the keyring for one session while keeping it.
 - Does the encrypted file need an **export to plaintext** for a user who wants their data
   back without KiChat, or is the encrypted archive (`internal/backup`) enough? Unchanged;
   the backup archive is still the only export.
