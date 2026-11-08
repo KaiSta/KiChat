@@ -24,10 +24,11 @@ import (
 	"kichat/internal/uimsg"
 )
 
-// browserUserAgent is what the page fetcher presents to an arbitrary site: a browser name over
-// Go's own TLS identity. The DuckDuckGo provider cannot do that, because the host judges the
-// handshake (browserclient.go); a page fetched for its text is judged by its robots rules and
-// its size instead, so the cheaper client is what it uses.
+// browserUserAgent is what the page fetcher presents to an arbitrary site by default: a
+// browser name over Go's own TLS identity. The DuckDuckGo provider cannot do that, because the
+// host judges the handshake (browserclient.go); a page fetched for its text is normally judged
+// by its robots rules and its size instead, so the cheaper client is the default. A 403 or 503
+// is retried once over the browser identity (fetchWithBrowser).
 const browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
 // ScrapeOptions configures the scraper.
@@ -192,6 +193,41 @@ func proxyConfigured() bool {
 	return err == nil && probe != nil
 }
 
+// browserRetryStatus reports the two refusals a browser identity can plausibly fix. A 429 is a
+// rate limit, not a verdict on the client, and is left to the caller rather than dodged with a
+// new handshake.
+func browserRetryStatus(status int) bool {
+	return status == http.StatusForbidden || status == http.StatusServiceUnavailable
+}
+
+// fetchWithBrowser retries a refused page as the browser profile. It is one attempt, with the
+// same guards as the ordinary fetch: guardHost and robots rules on the URL and every redirect
+// hop, and the dial-time private-address check on the connection. A configured HTTP proxy
+// disables the retry, because this client speaks to the origin directly and would otherwise
+// bypass the proxy the ordinary client honours.
+func (s *Scraper) fetchWithBrowser(ctx context.Context, target *url.URL, opts ScrapeOptions) (*http.Response, bool) {
+	if proxyConfigured() {
+		return nil, false
+	}
+	client := newBrowserClient(chromeWindows)
+	client.timeout = opts.Timeout
+	client.dialer.Control = privateDialControl(opts.AllowPrivateHosts, s.lang())
+	guard := func(u *url.URL) error {
+		if err := s.guardHost(ctx, u, opts); err != nil {
+			return err
+		}
+		if opts.RespectRobots {
+			return s.checkRobots(ctx, u)
+		}
+		return nil
+	}
+	resp, err := client.get(ctx, target, s.appLang(), guard)
+	if err != nil {
+		return nil, false
+	}
+	return resp, true
+}
+
 // privateDialControl rejects a connection whose target is a loopback, private or
 // link-local address. It runs on the resolved address that is actually being
 // dialled, which is what makes it immune to a host that answers the second
@@ -299,6 +335,15 @@ func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 	if err != nil {
 		return ScrapeResult{}, fmt.Errorf(text(s.lang(),
 			"Abruf fehlgeschlagen: %w", "the fetch failed: %w"), err)
+	}
+	// A 403 or 503 is often the client identity rather than the page. One retry as the
+	// browser profile costs one request and keeps both guards; the ordinary client stays the
+	// default because it is faster and reuses connections.
+	if browserRetryStatus(resp.StatusCode) {
+		if next, ok := s.fetchWithBrowser(ctx, parsed, opts); ok {
+			_ = resp.Body.Close()
+			resp = next
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

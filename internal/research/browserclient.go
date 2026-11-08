@@ -58,7 +58,8 @@ var chromeWindows = browserProfile{
 	secChUaPlatform: `"Windows"`,
 }
 
-// browserClient sends one form POST per call as the profile's browser would.
+// browserClient sends one request per call as the profile's browser would: a form POST for
+// DuckDuckGo, or a GET navigation for the scraper's retry after a refusal.
 //
 // It writes the request itself rather than handing it to http.Transport, because the header
 // order is part of the fingerprint and net/http sorts header names. Only the request is
@@ -93,15 +94,75 @@ func (c *browserClient) postForm(ctx context.Context, endpoint string, form url.
 	if err != nil {
 		return nil, err
 	}
+	ctx, cancel := c.withTimeout(ctx)
+	resp, err := c.do(ctx, target, c.requestText(target, form, lang))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	resp.Request = &http.Request{Method: http.MethodPost, URL: target}
+	resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
+}
+
+// get performs one browser navigation and follows redirects. guard is called for the URL named
+// and for every hop: a fallback that skipped it would be a way around the scraper's own SSRF
+// checks. One request per connection, as in postForm — a redirect chain is a handful of
+// navigations, not a session.
+func (c *browserClient) get(ctx context.Context, target *url.URL, lang string, guard func(*url.URL) error) (*http.Response, error) {
+	ctx, cancel := c.withTimeout(ctx)
+	current := target
+	var previous *url.URL
+	for hop := 0; ; hop++ {
+		if guard != nil {
+			if err := guard(current); err != nil {
+				cancel()
+				return nil, err
+			}
+		}
+		resp, err := c.do(ctx, current, c.navigationText(current, previous, lang))
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		resp.Request = &http.Request{Method: http.MethodGet, URL: current}
+		location := resp.Header.Get("Location")
+		if !isRedirect(resp.StatusCode) || location == "" {
+			resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
+			return resp, nil
+		}
+		_ = resp.Body.Close()
+		if hop >= maxRedirects {
+			cancel()
+			return nil, fmt.Errorf("research: too many redirects")
+		}
+		next, err := current.Parse(location)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("research: bad redirect target: %w", err)
+		}
+		if next.Scheme != "https" && next.Scheme != "http" {
+			cancel()
+			return nil, fmt.Errorf("research: unsupported redirect scheme %q", next.Scheme)
+		}
+		previous, current = current, next
+	}
+}
+
+// withTimeout applies the client's per-request bound. The cancel is handed to the response
+// body rather than deferred here, because the body is read after this call returns.
+func (c *browserClient) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.timeout > 0 {
+		return context.WithTimeout(ctx, c.timeout)
+	}
+	return context.WithCancel(ctx)
+}
+
+// do writes one request and reads its response. It is the part postForm and get share; the
+// request text, and therefore the method and header order, is the caller's.
+func (c *browserClient) do(ctx context.Context, target *url.URL, request string) (*http.Response, error) {
 	if target.Scheme != "https" && target.Scheme != "http" {
 		return nil, fmt.Errorf("research: unsupported scheme %q", target.Scheme)
-	}
-
-	var cancel context.CancelFunc
-	if c.timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, c.timeout)
-	} else {
-		ctx, cancel = context.WithCancel(ctx)
 	}
 
 	addr := target.Host
@@ -114,7 +175,6 @@ func (c *browserClient) postForm(ctx context.Context, endpoint string, form url.
 	}
 	conn, err := c.dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
 	if deadline, ok := ctx.Deadline(); ok {
@@ -135,7 +195,6 @@ func (c *browserClient) postForm(ctx context.Context, endpoint string, form url.
 	cleanup := func() {
 		once.Do(func() {
 			close(stopped)
-			cancel()
 			_ = conn.Close()
 		})
 	}
@@ -151,7 +210,7 @@ func (c *browserClient) postForm(ctx context.Context, endpoint string, form url.
 	}
 
 	writer := bufio.NewWriter(wire)
-	if _, err := writer.WriteString(c.requestText(target, form, lang)); err != nil {
+	if _, err := writer.WriteString(request); err != nil {
 		cleanup()
 		return nil, err
 	}
@@ -251,6 +310,57 @@ func (c *browserClient) requestText(target *url.URL, form url.Values, lang strin
 	return b.String()
 }
 
+// navigationText renders a top-level GET navigation in Chrome's order. It differs from a form
+// submission only where the browser does: no Origin, Content-Type or Content-Length, and the
+// fetch metadata describes a navigation rather than a same-site form post.
+func (c *browserClient) navigationText(target, previous *url.URL, lang string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "GET %s HTTP/1.1\r\n", target.RequestURI())
+	fmt.Fprintf(&b, "Host: %s\r\n", target.Host)
+	b.WriteString("Cache-Control: max-age=0\r\n")
+	fmt.Fprintf(&b, "sec-ch-ua: %s\r\n", c.profile.secChUa)
+	b.WriteString("sec-ch-ua-mobile: ?0\r\n")
+	fmt.Fprintf(&b, "sec-ch-ua-platform: %s\r\n", c.profile.secChUaPlatform)
+	b.WriteString("Upgrade-Insecure-Requests: 1\r\n")
+	fmt.Fprintf(&b, "User-Agent: %s\r\n", c.profile.userAgent)
+	b.WriteString("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\r\n")
+	fmt.Fprintf(&b, "Sec-Fetch-Site: %s\r\n", secFetchSite(target, previous))
+	b.WriteString("Sec-Fetch-Mode: navigate\r\n")
+	b.WriteString("Sec-Fetch-User: ?1\r\n")
+	b.WriteString("Sec-Fetch-Dest: document\r\n")
+	if previous != nil {
+		fmt.Fprintf(&b, "Referer: %s\r\n", previous.String())
+	}
+	b.WriteString("Accept-Encoding: gzip, deflate, br, zstd\r\n")
+	fmt.Fprintf(&b, "Accept-Language: %s\r\n", acceptLanguage(lang))
+	b.WriteString("\r\n")
+	return b.String()
+}
+
+// secFetchSite describes the relationship a navigation hop has to the one before it. The first
+// navigation is "none" (the user typed or pasted the address); a redirect is judged against the
+// page that redirected. "same-site" is deliberately not guessed from the host alone, because it
+// needs the registrable domain; "cross-site" is the conservative answer for a different one.
+func secFetchSite(target, previous *url.URL) string {
+	if previous == nil {
+		return "none"
+	}
+	if target.Scheme == previous.Scheme && target.Host == previous.Host {
+		return "same-origin"
+	}
+	return "cross-site"
+}
+
+// isRedirect reports the statuses a browser navigation follows.
+func isRedirect(status int) bool {
+	switch status {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
+}
+
 // isDuckDuckGoHost reports whether host is one of the search endpoints' names. It is checked by
 // suffix rather than equality so a subdomain DuckDuckGo adds tomorrow still counts, and it is
 // checked at all so the Origin header is only ever claimed for the site it describes.
@@ -329,5 +439,19 @@ type connectionBody struct {
 func (b *connectionBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.once.Do(b.cleanup)
+	return err
+}
+
+// cancelBody releases a request's context when its response body is closed. The response has to
+// outlive the call that produced it, so the cancel cannot be deferred in postForm or get.
+type cancelBody struct {
+	io.ReadCloser
+	once   sync.Once
+	cancel context.CancelFunc
+}
+
+func (b *cancelBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.cancel)
 	return err
 }

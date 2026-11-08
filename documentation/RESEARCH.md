@@ -440,6 +440,17 @@ the reader's language where it can. The value comes from the raw setting, not
 `config.ModelLanguage`, because a Chinese window has a Chinese header even though the
 model-facing sentences fall back to English.
 
+**A refusal is retried once as the browser.** A **403** or **503** from the ordinary fetch is
+retried once over the Chrome profile in `browserclient.go`: the same ClientHello and header
+conventions as the DuckDuckGo request. The retry follows redirects with `guardHost`
+and the robots rules applied to every hop, and the connection keeps the dial-time
+private-address check, so it is not a way around either guard. It is one attempt, and the
+original status is reported if it fails. A **429** is not retried: it is a rate limit, not a
+verdict on the client identity, and a second handshake does not make it true. A challenge
+page served with HTTP 200 still reaches the extractor as page text; only the two statuses
+trigger the retry. A configured HTTP proxy disables it, because this client speaks to the
+origin directly and would bypass the proxy the ordinary client honours.
+
 **SSRF is refused at two layers.** `guardHost` rejects `localhost`, anything ending in
 `.local` or `.internal`, and any loopback, private, link-local or unspecified address; for
 a name it resolves it and checks **every** address it maps to. On top of that, the dialer
