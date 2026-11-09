@@ -329,7 +329,9 @@ Encryption covers `kichat.db`, not the directory around it. In the same owner-on
 directory (`0700`) live `kichat.log` (the launch and why it ended, `0644`, rolled at
 1 MiB), `kichat.key` (the passphrase-wrapped copy of the key, useless without the
 passphrase, §4), and `kichat-trace.jsonl` (the diagnostic trace, `0600`, rolled at
-2 MiB with one previous file). The keyring entry is outside the directory altogether.
+2 MiB with one previous file), and one `llama-<id>.log` or `sd-<id>.log` per managed
+server — that program's own output, verbatim, `0600`, rolled at 4 MiB with one previous
+file, because it names the model's path and the arguments it was started with. The keyring entry is outside the directory altogether.
 
 The trace is the one that could have been a leak, so its schema is **closed rather than
 redacted**: `internal/trace.Event` has 21 fields, every one an identifier, a count, a

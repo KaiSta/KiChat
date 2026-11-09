@@ -793,6 +793,7 @@ func (a *App) serverFor(backendID string, settings config.Settings) *rt.Server {
 		// outlives the settings snapshot it was created from.
 		id := backendID
 		srv.SetStateHandler(func(st rt.Status) { a.onManagedState(id, st) })
+		a.attachServerLog(srv, "llama", backendID)
 		a.servers[backendID] = srv
 	}
 	srv.SetReadyTimeout(time.Duration(settings.Runtime.ReadySeconds) * time.Second)
@@ -1272,6 +1273,39 @@ func (a *App) captionImage(ctx context.Context, req images.CaptionRequest) (imag
 	return chat.Caption(ctx, provider, turn.ModelID, req)
 }
 
+// attachServerLog gives a supervisor the file its program's whole output is kept in.
+//
+// The panel shows twelve lines and the failure message quotes six, which is right for
+// a status row and wrong for a crash: llama.cpp's abort handler adds a twenty-frame
+// backtrace after the line that explains the abort. The file holds all of it, so the
+// row can name something that outlives the row. Failing to open it is a warning, not
+// a failed start: the server works without it.
+func (a *App) attachServerLog(srv *rt.Server, program, id string) {
+	if a.dataDir == "" {
+		return
+	}
+	path := a.serverLogPath(program, id)
+	if err := srv.SetServerLog(path); err != nil {
+		runtime.LogWarningf(a.ctx, "Serverprotokoll %s anlegen: %v", path, err)
+	}
+}
+
+// serverLogPath names that file inside the data directory. The id is sanitised
+// because it reaches this from saved settings, and a separator in it would put the
+// file outside the directory that is allowed to hold it.
+func (a *App) serverLogPath(program, id string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '-', r == '_', r == '.':
+			return r
+		}
+		return '_'
+	}, id)
+	return filepath.Join(a.dataDir, program+"-"+safe+".log")
+}
+
 // imageServerFor returns the supervisor of the managed picture server, creating it if
 // this is the first time it is needed.
 func (a *App) imageServerFor() *rt.Server {
@@ -1284,6 +1318,7 @@ func (a *App) imageServerFor() *rt.Server {
 	if !ok {
 		srv = rt.NewServer(imageServerID)
 		srv.SetStateHandler(a.onImageServerState)
+		a.attachServerLog(srv, "sd", imageServerID)
 		a.servers[imageServerID] = srv
 	}
 	// A diffusion model plus its VAE and text encoder is several gigabytes, and the CLI

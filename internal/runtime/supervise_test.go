@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -297,6 +298,63 @@ func TestStopIgnoresTheOldReadinessProbe(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if st := srv.Status(); st.State != StateStopped || st.PID != 0 || st.URL != "" {
 		t.Fatalf("stopped server became ready: %+v", st)
+	}
+}
+
+// The row cannot hold a crash, the file can. Every line of the program's output — the
+// frames the message drops included — is on disk, and the failed row names the file, so
+// the thing a user has to attach to a report survives the row that produced it.
+func TestAFailedServerNamesTheFileHoldingItsWholeOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a shell")
+	}
+	binary, _ := fakeServer(t, "echo 'ggml.c:1234: GGML_ASSERT(n_ctx > 0) failed'\n"+
+		"i=0\nwhile [ $i -lt 8 ]; do echo \"#$i  0x00007f0000 frame\"; i=$((i+1)); done\n"+
+		"exit 134\n")
+	path := filepath.Join(t.TempDir(), "llama-test.log")
+
+	srv := NewServer("test")
+	srv.readyTimeout = 10 * time.Second
+	srv.probe = func(context.Context, string) error { return context.DeadlineExceeded }
+	if err := srv.SetServerLog(path); err != nil {
+		t.Fatalf("SetServerLog: %v", err)
+	}
+	if err := srv.Start(Options{Binary: binary, Model: writeModel(t)}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return srv.Status().State == StateFailed }) {
+		t.Fatalf("state = %q, want failed: %+v", srv.Status().State, srv.Status())
+	}
+	st := srv.Status()
+	if !strings.Contains(st.Error, path) {
+		t.Errorf("error = %q, want it to name %s", st.Error, path)
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the server log: %v", err)
+	}
+	for _, want := range []string{"GGML_ASSERT(n_ctx > 0) failed", "#7  0x00007f0000 frame", "Aufruf:"} {
+		if !strings.Contains(string(written), want) {
+			t.Errorf("the log has no %q:\n%s", want, written)
+		}
+	}
+}
+
+// A line the program was still writing when it died has no newline, so it is only in
+// the writer's buffer — and on a crash that line is the assert itself.
+func TestALastLineWithoutItsNewlineIsKept(t *testing.T) {
+	r := newRing(10)
+	w := r.writer()
+	if _, err := w.Write([]byte("GGML_ASSERT(n_ctx > 0) failed")); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.tail(10); len(got) != 0 {
+		t.Fatalf("the ring already holds %v, want nothing until the line ends", got)
+	}
+	w.flush()
+	if got := r.tail(10); len(got) != 1 || got[0] != "GGML_ASSERT(n_ctx > 0) failed" {
+		t.Errorf("after flush the ring holds %v, want the unfinished line", got)
 	}
 }
 

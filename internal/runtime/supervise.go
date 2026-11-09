@@ -171,6 +171,10 @@ type Server struct {
 	stopRequested bool
 	status        Status
 	log           *ring
+	// output is the file every log line is appended to as well, with its own mutex so
+	// a failure message can name it without holding the state lock.
+	outputMu sync.Mutex
+	output   *ServerLog
 
 	// probe reports whether a server at url is answering yet. It is a field so a
 	// test can answer without a real server loading a real model.
@@ -206,6 +210,44 @@ func (s *Server) SetReadyTimeout(d time.Duration) { s.readyTimeout = d }
 
 // SetStateHandler registers the callback that reports state changes.
 func (s *Server) SetStateHandler(fn func(Status)) { s.onState = fn }
+
+// SetServerLog attaches the file every line of this server's output is also written
+// to, replacing one that was attached earlier. It is set once, before the first
+// start, by the caller that knows the data directory; the ring keeps the pointer, so
+// the file is written without another lock being taken on the way.
+//
+// A file that cannot be opened is an error rather than a silent no-op: diagnostics
+// are not worth failing a start over, but they are worth a line in the launch log.
+func (s *Server) SetServerLog(path string) error {
+	file, err := NewServerLog(path)
+	if err != nil {
+		return err
+	}
+	s.outputMu.Lock()
+	previous := s.output
+	s.output = file
+	s.outputMu.Unlock()
+	s.log.setOutput(file)
+	previous.Close()
+	return nil
+}
+
+// LogPath is the file the whole output is written to, empty when none is attached.
+func (s *Server) LogPath() string {
+	s.outputMu.Lock()
+	defer s.outputMu.Unlock()
+	return s.output.Path()
+}
+
+// logHint names that file on a failed row. The message already quotes the lines that
+// explain the failure when it can pick them out of a backtrace; this is where the
+// rest of it is, including the frames the message drops.
+func (s *Server) logHint() string {
+	if path := s.LogPath(); path != "" {
+		return fmt.Sprintf(" — vollständiges Protokoll: %s", path)
+	}
+	return ""
+}
 
 // probeHealth reports whether a llama-server at url is ready to answer.
 //
@@ -292,8 +334,10 @@ func (s *Server) Start(opts Options) error {
 	// user's own arguments, not for the loader.
 	cmd.Dir = dirOf(opts.Binary)
 	cmd.Env = serverEnv(opts.Binary)
-	cmd.Stdout = s.log.writer()
-	cmd.Stderr = s.log.writer()
+	// One writer for both streams: two would buffer a partial line each, and the
+	// order the program wrote its last words in is part of what explains a crash.
+	output := s.log.writer()
+	cmd.Stdout, cmd.Stderr = output, output
 	proc.StartInOwnGroup(cmd)
 
 	// A fresh Status rather than an update: the placement reading belongs to the
@@ -329,15 +373,19 @@ func (s *Server) Start(opts Options) error {
 
 	s.log.addf("%s gestartet (PID %d) auf %s", label, cmd.Process.Pid, url)
 	s.log.addf("Aufruf: %s %s", opts.Binary, strings.Join(args, " "))
-	go s.monitor(cmd, url, readyPath, waited)
+	go s.monitor(cmd, url, readyPath, waited, output)
 	return nil
 }
 
 // monitor waits for the process to become ready, then for it to exit.
-func (s *Server) monitor(cmd *exec.Cmd, url, readyPath string, waited chan struct{}) {
+func (s *Server) monitor(cmd *exec.Cmd, url, readyPath string, waited chan struct{}, output *lineWriter) {
 	exit := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
+		// Wait also waits for the goroutines that copied the two pipes, so nothing is
+		// writing now: a line a crash left without its newline — the assert itself, on a
+		// bad day — is flushed before the tail is read, into the ring and the file both.
+		output.flush()
 		close(waited)
 		exit <- err
 	}()
@@ -440,10 +488,10 @@ func (s *Server) finished(cmd *exec.Cmd, err error) {
 		}
 	case err != nil:
 		s.status.State = StateFailed
-		s.status.Error = fmt.Sprintf("%s wurde beendet: %v%s", label, err, formatTail(tail))
+		s.status.Error = fmt.Sprintf("%s wurde beendet: %v%s%s", label, err, formatTail(tail), s.logHint())
 	default:
 		s.status.State = StateFailed
-		s.status.Error = fmt.Sprintf("%s hat sich beendet", label)
+		s.status.Error = fmt.Sprintf("%s hat sich beendet%s", label, s.logHint())
 	}
 	s.status.PID, s.status.Port, s.status.URL = 0, 0, ""
 	s.status.Offload = Offload{}
@@ -590,9 +638,10 @@ func (s *Server) setState(state string) {
 }
 
 func (s *Server) fail(message string) {
+	hint := s.logHint()
 	s.mu.Lock()
 	s.status.State = StateFailed
-	s.status.Error = message
+	s.status.Error = message + hint
 	s.status.PID = 0
 	// The reading described the process that just died, whether it died while
 	// loading or hours later. A failed row that still says which device the layers
@@ -859,6 +908,12 @@ type ring struct {
 	mu    sync.Mutex
 	lines []string
 	max   int
+	// out, when set, is the file every line is appended to as well. It is the whole
+	// output rather than the window, which is what makes a crash readable afterwards;
+	// outBroken stops a file that stopped accepting writes from reporting that once
+	// per line.
+	out       *ServerLog
+	outBroken bool
 	// watch, when set, is handed every line as it arrives, outside the lock. It is
 	// for the readings that have to survive the window being small — the placement
 	// of a model's layers is printed early and the log after it is long. It must
@@ -878,9 +933,15 @@ func (r *ring) add(line string) {
 		return
 	}
 	r.mu.Lock()
-	r.lines = append(r.lines, line)
-	if len(r.lines) > r.max {
-		r.lines = r.lines[len(r.lines)-r.max:]
+	r.push(line)
+	// Under the ring's lock, so the file carries the lines in the order the program
+	// wrote them. A write that fails does not stop the server: the notice goes into
+	// the window instead, once, and the file is left alone from then on.
+	if r.out != nil {
+		if _, err := r.out.Write([]byte(line + "\n")); err != nil && !r.outBroken {
+			r.outBroken = true
+			r.push(fmt.Sprintf("Protokolldatei nicht beschreibbar: %v", err))
+		}
 	}
 	watch := r.watch
 	r.mu.Unlock()
@@ -889,6 +950,22 @@ func (r *ring) add(line string) {
 	// would be a deadlock waiting for a log line.
 	if watch != nil {
 		watch(line)
+	}
+}
+
+// setOutput attaches the file the lines are also written to.
+func (r *ring) setOutput(file *ServerLog) {
+	r.mu.Lock()
+	r.out = file
+	r.outBroken = false
+	r.mu.Unlock()
+}
+
+// push appends one line to the window, dropping the oldest. The caller holds the lock.
+func (r *ring) push(line string) {
+	r.lines = append(r.lines, line)
+	if len(r.lines) > r.max {
+		r.lines = r.lines[len(r.lines)-r.max:]
 	}
 }
 
@@ -924,6 +1001,17 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+// flush adds the line the program was in the middle of writing, if any. It is called
+// once the process is reaped and nothing can write any more.
+func (w *lineWriter) flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.part.Len() > 0 {
+		w.r.add(w.part.String())
+		w.part.Reset()
+	}
 }
 
 // writer is the io.Writer both output streams share, so the order of a server's

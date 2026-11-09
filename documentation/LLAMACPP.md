@@ -405,6 +405,16 @@ lines wiped by the reset, and a start whose exec fails puts the row back to stop
 than leaving a "loading" row the panel would poll forever
 (`TestLateOutputFromAStoppedServerIsIgnored`, `TestAFailedExecLeavesNoLoadingRow`).
 
+**The ring is a window, not a record.** On an abort llama.cpp forks gdb, so the line that
+explains the crash is followed by twenty-odd frames and gdb's notes about sources it could
+not find; the ring holds 40, the panel shows 12, and the failure message quotes six. Every
+line is therefore also appended to `<dataDir>/llama-<backendID>.log` (the managed picture
+server's to `sd-images.log`) — owner-only, rolled at 4 MiB with one previous file — and a
+failed row names that path after its own quote of the reason
+(`internal/runtime/serverlog.go`, `TestAFailedServerNamesTheFileHoldingItsWholeOutput`).
+The message itself drops gdb's shapes before quoting, so the assert is what a red row
+shows instead of `__libc_start_call_main` (`failureTail`).
+
 ### 3.7 GPU offload
 
 `-ngl, --gpu-layers, --n-gpu-layers` documents "either an exact number, 'auto', or 'all'
