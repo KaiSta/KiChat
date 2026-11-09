@@ -38,10 +38,6 @@ Every release is built by CI from its tag and attached to a
 | Windows 10/11 | `kichat-amd64-installer.exe` (or `kichat-arm64-installer.exe`) | run it; WebView2 is already there on Windows 11 and on 10 from 21H2 |
 | macOS | `kichat_<version>_universal.dmg` | drag it to Applications, then clear quarantine once — it is ad-hoc signed, not notarized |
 
-```sh
-xattr -dr com.apple.quarantine /Applications/KiChat.app   # macOS only, once
-```
-
 No package for your system? [Build from source](#build-from-source) — the `Makefile` produces the
 same artifacts locally.
 
@@ -388,6 +384,7 @@ ceiling and the rate-limit remainder really are readable from a live response.
 
 | Symptom | Cause and fix |
 | --- | --- |
+| "KiChat" cannot be opened because the developer cannot be verified — on newer macOS the alert reads Apple could not verify "KiChat" is free of malware | the `.dmg` is ad-hoc signed, not notarized, so Gatekeeper has no developer identity to trust — the download itself is intact. Trust it once: `xattr -dr com.apple.quarantine /Applications/KiChat.app`, or click **Open Anyway** under **System Settings → Privacy & Security** |
 | `Cannot find native binding` from Vite | npm 9 skipped the Tailwind binding during install — see the npm 9 trap above, or run `make deps` |
 | Link error about webkit2gtk | built without `-tags webkit2_41` on a 4.1-only system |
 | `pattern all:frontend/dist: no matching files found` | `go build` before the frontend was built — run `make build` |
