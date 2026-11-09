@@ -383,6 +383,21 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	outcome := foldNothing
 	if genErr != nil && ctx.Err() == nil {
 		if too, ok := llm.RequestTooLarge(genErr); ok {
+			// A refusal that names the model's window is a measurement of this
+			// deployment, and for a backend that publishes none it is the only one
+			// that ever arrives. It is used for this turn at once — the recovery
+			// fold cannot run without a window — and the provider keeps it for the
+			// listings that follow, so the next turn plans against it before it is
+			// refused instead of after.
+			if too.Window > 0 && too.Window != modelInfo.ContextLimit {
+				modelInfo.ContextLimit = too.Window
+				in.Model = modelInfo
+				if e.Registry != nil {
+					// The catalogue is cached; without this the next turn would keep
+					// resolving the old number until the listing expired.
+					e.Registry.Invalidate()
+				}
+			}
 			outcome = e.foldForSize(ctx, &chat, provider, backendID, modelID, modelInfo, settings, too)
 			if outcome == foldFolded {
 				result, genErr = e.generate(ctx, in)

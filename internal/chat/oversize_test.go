@@ -1183,6 +1183,63 @@ func TestASizeRefusalThroughTheSharedClientIsClassified(t *testing.T) {
 	}
 }
 
+// TestAClaimedWindowMakesTheRecoveryFoldPossible pins what learning the window
+// unlocks. Before it, a model that reported no window could not be compacted at all,
+// so a refusal that named the window still ended the turn: the one number needed to
+// fold the history had been read and thrown away. Now the fold aims at the number the
+// deployment stated, and the retried request answers.
+func TestAClaimedWindowMakesTheRecoveryFoldPossible(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedLongHistory(t, st, 8)
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", State: llm.StateLoaded},
+		refusals: []error{&llm.RequestTooLargeError{
+			Cause: &llm.HTTPError{
+				StatusCode: http.StatusBadRequest,
+				Status:     "400 Bad Request",
+				Body:       "This model's maximum context length is 20000 tokens. Please reduce the length of the messages or completion.",
+			},
+			Window: 20000,
+		}},
+		// A refusal still consumes the reply at its index in this fake, so the
+		// first entry is unused: the summary and the answered retry follow it.
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDone}},
+			{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}},
+			{{Type: llm.EventDelta, Text: "Antwort nach der Kompression"}, {Type: llm.EventDone}},
+		},
+	}
+	engine, captured := newTestEngine(t, st, provider)
+
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Eine neue Frage"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
+		t.Fatal("the turn did not finish")
+	}
+
+	for _, ev := range captured.snapshot() {
+		if ev.name == events.Error {
+			t.Fatalf("the turn failed after the refusal named the window: %v", ev.payload["error"])
+		}
+	}
+	if got := len(summariesOf(t, st)); got != 1 {
+		t.Fatalf("compactions = %d, want the recovery fold the stated window enables", got)
+	}
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newest := messages[len(messages)-1]
+	if newest.Role != "assistant" || newest.Status != store.StatusComplete ||
+		!strings.Contains(newest.Content, "Antwort nach der Kompression") {
+		t.Fatalf("newest row = %s/%s %q, want a complete answer after the fold",
+			newest.Role, newest.Status, newest.Content)
+	}
+}
+
 // settingsWithOverride is an engine's settings with one model override added, built the
 // way the settings panel leaves it. It is a function because Engine.Settings is one: the
 // engine reads the current snapshot on every call, so a test cannot hand it a value once.

@@ -51,6 +51,16 @@ type RequestTooLargeError struct {
 	// Requested is what this request was counted at, or 0 when the refusal did not
 	// say.
 	Requested int
+	// Window is the model's context window as the refusal stated it — vLLM's
+	// "This model's maximum context length is 131072 tokens" — or 0 when the
+	// refusal named only a per-request budget.
+	//
+	// It is kept apart from Limit because the two are different quantities: Groq's
+	// refusal states the account's per-request allowance, which is smaller than the
+	// window its listing publishes, while vLLM states the window the deployment is
+	// actually serving. Reading one as the other would plan a chat against a number
+	// the endpoint never promised.
+	Window int
 }
 
 func (e *RequestTooLargeError) Error() string { return e.Cause.Error() }
@@ -99,6 +109,21 @@ var (
 	// that did not fit.
 	llamaCppLimit     = regexp.MustCompile(`(?i)available context size \(([0-9]+) tokens\)`)
 	llamaCppRequested = regexp.MustCompile(`(?i)\brequest \(([0-9]+) tokens\)`)
+
+	// The window a refusal states, in the wordings OpenAI-compatible servers use.
+	// vLLM's is the one that matters here: a hosted deployment that publishes no
+	// window on its listing still names it in the refusal (`This model's maximum
+	// context length is 131072 tokens`), which makes one rejected request the price
+	// of knowing the number. Only phrases about context are accepted — Groq's plain
+	// "Limit 10000" is the per-request budget above, not a window.
+	windowInBody = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)maximum context length (?:is|of)\s+([0-9][0-9,]*)\s*tokens?`),
+		regexp.MustCompile(`(?i)maximum context length\s*\(([0-9][0-9,]*)\)`),
+		regexp.MustCompile(`(?i)max_model_len\s*[=:]\s*([0-9][0-9,]*)`),
+		regexp.MustCompile(`(?i)context length is only\s+([0-9][0-9,]*)\s*tokens?`),
+		regexp.MustCompile(`(?i)exceeds maximum allowed token size\s+([0-9][0-9,]*)`),
+		regexp.MustCompile(`(?i)available context size\s*\(([0-9][0-9,]*)\s*tokens?\)`),
+	}
 )
 
 // malformedToolCallPhrase matches the refusal a backend returns when the call the
@@ -151,13 +176,33 @@ func classifyRequestTooLarge(err error) error {
 	if !tooLargePhrase.MatchString(body) && !reducePhrase.MatchString(body) {
 		return err
 	}
-	return &RequestTooLargeError{
-		Cause: err,
-		Limit: first(firstNumber(limitInBody, body),
-			firstNumber(llamaCppLimit, body)),
-		Requested: first(firstNumber(requestedInBody, body),
-			firstNumber(llamaCppRequested, body)),
+	limit := first(firstNumber(limitInBody, body), firstNumber(llamaCppLimit, body))
+	requested := 0
+	if limit > 0 {
+		// "requested N" is the request's own count only where a limit is stated
+		// beside it. vLLM writes "you requested 65535 output tokens" in a window
+		// refusal, and there N is the completion cap: keeping it as the vendor's
+		// count would mis-calibrate the fold that follows the refusal.
+		requested = first(firstNumber(requestedInBody, body), firstNumber(llamaCppRequested, body))
 	}
+	return &RequestTooLargeError{
+		Cause:     err,
+		Limit:     limit,
+		Requested: requested,
+		Window:    firstWindowNumber(body),
+	}
+}
+
+// firstWindowNumber reads the model's own context window out of a refusal, or 0 when
+// the refusal does not state one. The patterns are tried in order, so the wordings
+// that name the window most explicitly win over the ones that merely mention it.
+func firstWindowNumber(body string) int {
+	for _, re := range windowInBody {
+		if n := firstNumber(re, body); n > 0 {
+			return n
+		}
+	}
+	return 0
 }
 
 // A requests-per-minute refusal is the same envelope as the token throttle and a
@@ -259,7 +304,9 @@ func firstNumber(re *regexp.Regexp, body string) int {
 	if m == nil {
 		return 0
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(m[1]))
+	// Providers that write a thousands separator mean the number, not a list:
+	// vLLM's cards spell 131,072, and the refusal can carry the same formatting.
+	n, err := strconv.Atoi(strings.ReplaceAll(strings.TrimSpace(m[1]), ",", ""))
 	if err != nil || n <= 0 {
 		return 0
 	}

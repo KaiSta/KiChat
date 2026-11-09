@@ -88,6 +88,84 @@ func TestNvidiaListingCarriesWhatThePlanningNeeds(t *testing.T) {
 	}
 }
 
+// nvidiaNIMListing is what a self-hosted NIM container answers with: the same
+// envelope as the hosted catalogue, with vLLM's `max_model_len` — the window the
+// server is actually serving — added to each entry.
+const nvidiaNIMListing = `{"object":"list","data":[
+	{"id":"nvidia/nemotron-3-nano-30b","object":"model","created":1745870402,"owned_by":"nvidia","max_model_len":262144},
+	{"id":"meta/llama-3.1-8b-instruct","object":"model","created":1745870402,"owned_by":"meta","max_model_len":16384}
+]}`
+
+// TestNvidiaListingUsesTheWindowASelfHostedNIMPublishes: pointing this backend at
+// a local NIM is an address edit, not a different kind, and that server states
+// the window it serves. Discarding the field would cost every local model the
+// meter and pre-emptive compaction for a number the server had already sent.
+//
+// The hosted catalogue is unaffected: it omits `max_model_len`, so the test above
+// keeps asserting a window of 0 for it.
+func TestNvidiaListingUsesTheWindowASelfHostedNIMPublishes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, nvidiaNIMListing)
+	}))
+	defer srv.Close()
+
+	models, err := newNvidiaProvider("nvidia", "NVIDIA", srv.URL, "k").ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	byID := map[string]ModelInfo{}
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+	if got := byID["nvidia/nemotron-3-nano-30b"].ContextLimit; got != 262144 {
+		t.Errorf("context window = %d, want the served 262144", got)
+	}
+	if got := byID["meta/llama-3.1-8b-instruct"].ContextLimit; got != 16384 {
+		t.Errorf("context window = %d, want the served 16384", got)
+	}
+}
+
+// TestNvidiaLearnsTheWindowItsRefusalNames is the automatic replacement for the
+// per-model override on the hosted catalogue. The listing never carries a window,
+// but the deployment's own refusal does, and one refused request is enough to plan
+// every later turn against it. The refusal is not retried, so the price is paid once.
+func TestNvidiaLearnsTheWindowItsRefusalNames(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"message":"This model's maximum context length is 131072 tokens. Please reduce the length of the messages or completion.","type":"BadRequestError","code":400}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, nvidiaListing)
+	}))
+	defer srv.Close()
+
+	p := newNvidiaProvider("nvidia", "NVIDIA", srv.URL, "k")
+	if _, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "openai/gpt-oss-20b",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}); !errors.Is(err, ErrRequestTooLarge) {
+		t.Fatalf("Chat error = %v, want an oversized-request refusal", err)
+	}
+
+	models, err := p.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	byID := map[string]ModelInfo{}
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+	if got := byID["openai/gpt-oss-20b"].ContextLimit; got != 131072 {
+		t.Errorf("context window = %d, want the 131072 the refusal named", got)
+	}
+	if got := byID["meta/llama-3.2-11b-vision-instruct"].ContextLimit; got != 0 {
+		t.Errorf("context window for a model that was never refused = %d, want 0", got)
+	}
+}
+
 // TestNvidiaListingKeepsModelsTheAccountMayNotReach is the decision this provider
 // makes and Mistral's does not, pinned so it cannot be quietly reversed.
 //

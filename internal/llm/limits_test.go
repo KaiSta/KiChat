@@ -50,6 +50,7 @@ func TestAnOversizedRequestIsToldApartFromAThrottle(t *testing.T) {
 		want      bool
 		limit     int
 		requested int
+		window    int
 	}{
 		{
 			name:      "groq: the request alone exceeds the allowance",
@@ -88,6 +89,36 @@ func TestAnOversizedRequestIsToldApartFromAThrottle(t *testing.T) {
 			want:      true,
 			limit:     16384,
 			requested: 20016,
+			window:    16384,
+		},
+		{
+			// vLLM's sentence is what a hosted deployment that publishes no window
+			// on its listing still says when a request is too big. The window is the
+			// answer; there is no per-request budget in it, so Limit stays 0.
+			name:   "vllm: the deployed window was named",
+			status: http.StatusBadRequest,
+			body:   `{"error":{"message":"This model's maximum context length is 131072 tokens. Please reduce the length of the messages or completion.","type":"BadRequestError","code":400}}`,
+			want:   true,
+			window: 131072,
+		},
+		{
+			// An older vLLM spells the same number inside parentheses, beside the
+			// max_tokens value that made the request too large.
+			name:   "vllm: the window in parentheses",
+			status: http.StatusBadRequest,
+			body:   `{"error":{"message":"'max_tokens' (2049) cannot be greater than the model's maximum context length (2048). (parameter=max_tokens, value=2049)","type":"BadRequestError","code":400}}`,
+			want:   true,
+			window: 2048,
+		},
+		{
+			// The number after "requested" in this sentence is the output cap, not
+			// the vendor's count of the request. No limit is stated here, so
+			// Requested has to stay 0 or the recovery fold calibrates on it.
+			name:   "vllm: the output cap is not the request count",
+			status: http.StatusBadRequest,
+			body:   `{"error":{"message":"This model's maximum context length is 131072 tokens. However, you requested 65535 output tokens and your prompt contains at least 62466 input tokens, for a total of at least 128001 tokens.","type":"BadRequestError","code":400}}`,
+			want:   true,
+			window: 131072,
 		},
 		{
 			name:   "an invalid key",
@@ -128,8 +159,9 @@ func TestAnOversizedRequestIsToldApartFromAThrottle(t *testing.T) {
 			if !errors.Is(err, ErrRequestTooLarge) {
 				t.Error("errors.Is(err, ErrRequestTooLarge) is false for a classified refusal")
 			}
-			if too.Limit != tc.limit || too.Requested != tc.requested {
-				t.Errorf("limit/requested = %d/%d, want %d/%d", too.Limit, too.Requested, tc.limit, tc.requested)
+			if too.Limit != tc.limit || too.Requested != tc.requested || too.Window != tc.window {
+				t.Errorf("limit/requested/window = %d/%d/%d, want %d/%d/%d",
+					too.Limit, too.Requested, too.Window, tc.limit, tc.requested, tc.window)
 			}
 			// The vendor's own words travel with it: the chat layer replaces the
 			// message it shows, and a log still has to carry what the backend said.

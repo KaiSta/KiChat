@@ -8,8 +8,9 @@ import (
 )
 
 // newCustomProvider builds a provider for any OpenAI-compatible server (llama.cpp,
-// vLLM, a remote gateway). It has no native metadata namespace, so context
-// limits have to come from the user's per-model overrides.
+// vLLM, a remote gateway). It has no native metadata namespace, so a context
+// window comes from the plain listing when the server publishes one — vLLM's
+// `max_model_len` — and from the user's per-model overrides when it does not.
 func newCustomProvider(id, name, baseURL, apiKey string) *openAICompatProvider {
 	baseURL = strings.TrimRight(baseURL, "/")
 	chatPaths := []string{baseURL + "/v1/chat/completions"}
@@ -117,7 +118,43 @@ func NewRegistry(configs []BackendConfig) *Registry {
 }
 
 // Reconfigure swaps the provider set, e.g. after the user edits settings.
+//
+// A context window learned from a refusal is carried across the rebuild when the
+// backend still names the same kind and address. A settings save replaces every
+// provider, so without this a theme change would throw away a number the backend
+// had already stated and make the next oversized request pay for it again. A
+// changed address or kind is a different deployment, and nothing is carried.
 func (r *Registry) Reconfigure(configs []BackendConfig) {
+	type measuredAt struct {
+		kind, baseURL string
+		windows       map[string]int
+	}
+	carried := map[string]measuredAt{}
+	r.mu.RLock()
+	previousProviders := append([]Provider(nil), r.providers...)
+	previousConfigs := append([]BackendConfig(nil), r.configs...)
+	r.mu.RUnlock()
+	previousByID := map[string]BackendConfig{}
+	for _, c := range previousConfigs {
+		previousByID[c.ID] = c
+	}
+	for _, p := range previousProviders {
+		compat, ok := p.(*openAICompatProvider)
+		if !ok {
+			continue
+		}
+		old, known := previousByID[p.ID()]
+		if !known {
+			// Registered directly rather than configured: there is no address to
+			// compare, so attaching its measurement to a configured row would be a
+			// guess about which deployment it came from.
+			continue
+		}
+		if snapshot := compat.learnedWindowSnapshot(); len(snapshot) > 0 {
+			carried[p.ID()] = measuredAt{kind: old.Kind, baseURL: old.BaseURL, windows: snapshot}
+		}
+	}
+
 	providers := make([]Provider, 0, len(configs))
 	for _, c := range configs {
 		if !c.Enabled {
@@ -148,6 +185,28 @@ func (r *Registry) Reconfigure(configs []BackendConfig) {
 		case "mlx":
 			providers = append(providers, newMLXProvider(c.ID, c.Name, c.BaseURL, c.APIKey))
 		}
+	}
+	// Only a provider whose configuration still names the deployment the measurement
+	// came from inherits it; the kind and the raw address are what "the same" means
+	// here, because those are what the request is actually sent to.
+	configuredByID := map[string]BackendConfig{}
+	for _, c := range configs {
+		configuredByID[c.ID] = c
+	}
+	for _, p := range providers {
+		compat, ok := p.(*openAICompatProvider)
+		if !ok {
+			continue
+		}
+		measurement, ok := carried[p.ID()]
+		if !ok {
+			continue
+		}
+		now := configuredByID[p.ID()]
+		if now.Kind != measurement.kind || now.BaseURL != measurement.baseURL {
+			continue
+		}
+		compat.adoptLearnedWindows(measurement.windows)
 	}
 	r.mu.Lock()
 	r.providers = providers
