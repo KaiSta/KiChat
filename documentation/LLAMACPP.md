@@ -412,8 +412,10 @@ line is therefore also appended to `<dataDir>/llama-<backendID>.log` (the manage
 server's to `sd-images.log`) — owner-only, rolled at 4 MiB with one previous file — and a
 failed row names that path after its own quote of the reason
 (`internal/runtime/serverlog.go`, `TestAFailedServerNamesTheFileHoldingItsWholeOutput`).
-The message itself drops gdb's shapes before quoting, so the assert is what a red row
-shows instead of `__libc_start_call_main` (`failureTail`).
+The message quotes the last line that looked like a failure, recorded as it arrived
+because gdb's output outruns the ring, and drops gdb's shapes, so the assert is what a red
+row shows instead of `__libc_start_call_main` or the `wait4` frame gdb stops on
+(`failureTail`, `isReasonLine`, `Ring.failureReason`).
 
 ### 3.7 GPU offload
 

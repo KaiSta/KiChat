@@ -318,9 +318,12 @@ func TestACrashIsReportedByItsReasonAndNotItsBacktrace(t *testing.T) {
 		"warning: 360\t../csu/libc-start.c: No such file or directory",
 		"#18 0x000055ad805d12a5 in _start ()",
 		"[Inferior 1 (process 8315) detached]",
+		"0x00007f8bba110913 in __GI___wait4 (pid=69280, stat_loc=0x0, options=0, usage=0x0) at ../sysdeps/unix/sysv/linux/wait4.c:30",
+		"30\tin ../sysdeps/unix/sysv/linux/wait4.c",
+		"Thread 1 (process 69280):",
 	}
-	got := formatTail(failureTail(lines))
-	if strings.Contains(got, "#0  0x") || strings.Contains(got, "[Inferior") {
+	got := formatTail(failureTail(lines, ""))
+	if strings.Contains(got, "#0  0x") || strings.Contains(got, "[Inferior") || strings.Contains(got, "wait4") {
 		t.Errorf("the report still carries the backtrace: %q", got)
 	}
 	if !strings.Contains(got, "GGML_ASSERT(ptr != nullptr) failed") {
@@ -329,7 +332,7 @@ func TestACrashIsReportedByItsReasonAndNotItsBacktrace(t *testing.T) {
 
 	// A log with nothing to strip is reported as before: the last six lines.
 	plain := []string{"one", "two", "three", "four", "five", "six", "seven"}
-	if tail := failureTail(plain); strings.Join(tail, ",") != "two,three,four,five,six,seven" {
+	if tail := failureTail(plain, ""); strings.Join(tail, ",") != "two,three,four,five,six,seven" {
 		t.Errorf("plain tail = %v, want the last six lines", tail)
 	}
 
@@ -337,8 +340,48 @@ func TestACrashIsReportedByItsReasonAndNotItsBacktrace(t *testing.T) {
 	// own and has to survive: only gdb's numbered frame and numbered-source shapes are
 	// dropped.
 	own := []string{"# configuration loaded", "warning: no usable GPU found, using the CPU"}
-	if kept := failureTail(own); len(kept) != 2 {
+	if kept := failureTail(own, ""); len(kept) != 2 {
 		t.Errorf("the program's own lines were dropped: %v", kept)
+	}
+
+	// The report this was written for: forty lines of gdb outran the ring, so the assert
+	// is not in the lines at all. The reason recorded as it arrived is what the message
+	// quotes, on its own, because nothing left in the window explains anything.
+	assert := "/src/ggml-cuda/ggml-cuda.cu:96: GGML_ASSERT(ptr != nullptr) failed"
+	gdbOnly := []string{
+		"0x00007f8bba110913 in __GI___wait4 (pid=69280, stat_loc=0x0, options=0, usage=0x0) at ../sysdeps/unix/sysv/linux/wait4.c:30",
+		"30\tin ../sysdeps/unix/sysv/linux/wait4.c",
+		"#0  0x00007f8bba1f0c1a in ggml_abort (file=…, line=96, fmt=…) at ggml.c:1234",
+	}
+	if quoted := failureTail(gdbOnly, assert); len(quoted) != 1 || quoted[0] != assert {
+		t.Errorf("quoted = %v, want the recorded assert alone", quoted)
+	}
+}
+
+// The whole path with a window too small to hold the crash: sixty frames means 120 lines
+// of gdb after the assert, which is more than the ring keeps. The row still has to name
+// the assert, which is what the second report showed it did not.
+func TestACrashKeepsItsReasonWhenTheBacktraceOutrunsTheWindow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a shell")
+	}
+	binary, _ := fakeServer(t, "echo 'ggml-cuda.cu:96: GGML_ASSERT(ptr != nullptr) failed'\n"+
+		"i=0\nwhile [ $i -lt 60 ]; do echo \"#$i  0x00007f0000 frame\"; "+
+		"echo 'warning: 58\t../sysdeps/x.h: No such file or directory'; i=$((i+1)); done\n"+
+		"exit 134\n")
+
+	srv := NewServer("test")
+	srv.readyTimeout = 10 * time.Second
+	srv.probe = func(context.Context, string) error { return context.DeadlineExceeded }
+
+	if err := srv.Start(Options{Binary: binary, Model: writeModel(t)}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return srv.Status().State == StateFailed }) {
+		t.Fatalf("state = %q, want failed: %+v", srv.Status().State, srv.Status())
+	}
+	if st := srv.Status(); !strings.Contains(st.Error, "GGML_ASSERT(ptr != nullptr) failed") {
+		t.Errorf("error = %q, want the assert in it although the backtrace outran the ring", st.Error)
 	}
 }
 

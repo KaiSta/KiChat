@@ -244,7 +244,7 @@ func (s *Server) LogPath() string {
 // rest of it is, including the frames the message drops.
 func (s *Server) logHint() string {
 	if path := s.LogPath(); path != "" {
-		return fmt.Sprintf(" — vollständiges Protokoll: %s", path)
+		return fmt.Sprintf("\n— vollständiges Protokoll: %s", path)
 	}
 	return ""
 }
@@ -464,6 +464,7 @@ func (s *Server) finished(cmd *exec.Cmd, err error) {
 	// whole ring rather than its last six lines, because a crash pads the end with a
 	// backtrace and the reason sits above it — see failureTail.
 	tail := s.log.snapshot()
+	reason := s.log.failureReason()
 	s.mu.Lock()
 	if s.cmd != cmd {
 		s.mu.Unlock()
@@ -490,7 +491,7 @@ func (s *Server) finished(cmd *exec.Cmd, err error) {
 		}
 	case err != nil:
 		s.status.State = StateFailed
-		s.status.Error = fmt.Sprintf("%s wurde beendet: %v%s%s", label, err, formatTail(failureTail(tail)), s.logHint())
+		s.status.Error = fmt.Sprintf("%s wurde beendet: %v%s%s", label, err, formatTail(failureTail(tail, reason)), s.logHint())
 	default:
 		s.status.State = StateFailed
 		s.status.Error = fmt.Sprintf("%s hat sich beendet%s", label, s.logHint())
@@ -897,7 +898,14 @@ func SplitArgs(s string) []string {
 // exactly the report this function was written from. The frames are dropped and the
 // last six lines that are the program's own are kept, so the assert is in the
 // message.
-func failureTail(lines []string) []string {
+func failureTail(lines []string, reason string) []string {
+	// A reason recorded as it arrived outlives the window, and on an abort it has to:
+	// gdb prints the stop location, then a frame and a warning about the source file it
+	// cannot find for every frame, so forty lines are gone before the process is even
+	// reaped. The assert that explains the crash was already off the end of the ring.
+	if reason != "" {
+		return []string{reason}
+	}
 	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if !isCrashFrame(line) {
@@ -912,6 +920,26 @@ func failureTail(lines []string) []string {
 		kept = kept[len(kept)-6:]
 	}
 	return kept
+}
+
+// reasonMarkers are how a program says why it is about to die. They are substrings
+// rather than a grammar because there is no grammar: ggml asserts, CUDA and HIP report,
+// the C++ runtime unwinds, and every one of them has its own phrasing.
+var reasonMarkers = []string{
+	"GGML_ASSERT", "GGML_ABORT", "assertion failed",
+	"terminate called", "what():", "std::bad_alloc",
+	"CUDA error", "HIP error", "out of memory", "failed to allocate",
+	"failed to load", "error loading", "error:",
+}
+
+// isReasonLine reports whether a line is the program's own explanation of a failure.
+func isReasonLine(line string) bool {
+	for _, marker := range reasonMarkers {
+		if strings.Contains(line, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // isCrashFrame reports whether a line belongs to the backtrace a crash handler adds
@@ -947,7 +975,37 @@ func isCrashFrame(line string) bool {
 			return true
 		}
 	}
+	// gdb's attach stop, which carries no frame number: `0x00007f… in __GI___wait4 (…)
+	// at …`, followed by the source line it stopped on (`30\tin ../sysdeps/…`) and the
+	// thread it belongs to. The aborting process is inside gdb's own wait4 when gdb
+	// looks at it, which is why this pair was the whole message in the second report.
+	if strings.HasPrefix(line, "0x") && strings.Contains(line, " in ") {
+		return true
+	}
+	if sourceLineNumber(line) > 0 {
+		return true
+	}
+	if strings.HasPrefix(line, "Thread ") && strings.Contains(line, "(process ") {
+		return true
+	}
 	return strings.Contains(line, "libthread_db")
+}
+
+// sourceLineNumber is the number of gdb's `30\tin ../sysdeps/…`, the source line it
+// prints for the frame it stopped on, and 0 for anything else.
+func sourceLineNumber(line string) int {
+	i := 0
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i == 0 || !strings.HasPrefix(strings.TrimLeft(line[i:], " \t"), "in ") {
+		return 0
+	}
+	n, err := strconv.Atoi(line[:i])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func formatTail(lines []string) string {
@@ -979,6 +1037,11 @@ type ring struct {
 	// per line.
 	out       *ServerLog
 	outBroken bool
+	// reason is the last line that looked like the program's explanation of a failure.
+	// It is kept beside the window rather than in it because the crash handler's own
+	// output is longer than the window: by the time the process is reaped, the sentence
+	// that names the crash has been evicted.
+	reason string
 	// watch, when set, is handed every line as it arrives, outside the lock. It is
 	// for the readings that have to survive the window being small — the placement
 	// of a model's layers is printed early and the log after it is long. It must
@@ -999,6 +1062,9 @@ func (r *ring) add(line string) {
 	}
 	r.mu.Lock()
 	r.push(line)
+	if isReasonLine(line) {
+		r.reason = line
+	}
 	// Under the ring's lock, so the file carries the lines in the order the program
 	// wrote them. A write that fails does not stop the server: the notice goes into
 	// the window instead, once, and the file is left alone from then on.
@@ -1024,6 +1090,13 @@ func (r *ring) setOutput(file *ServerLog) {
 	r.out = file
 	r.outBroken = false
 	r.mu.Unlock()
+}
+
+// failureReason is the last explanation the program gave, empty when it gave none.
+func (r *ring) failureReason() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reason
 }
 
 // push appends one line to the window, dropping the oldest. The caller holds the lock.
