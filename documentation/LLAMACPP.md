@@ -236,6 +236,17 @@ Every one of them was resolved against the live listing (linux/amd64): **CPU 17.
 Vulkan 31.8, ROCm 244.9, CUDA 152.8, SYCL 55.5, OpenVINO 110.7**, with the arm64 and macOS
 rows correctly offering fewer.
 
+**A CUDA suite has a card floor as well as a driver floor.** CUDA 13.0 removed offline
+compilation and library support for Maxwell, Pascal and Volta — everything below Turing,
+compute capability 7.5 — so a 13.x build carries no kernel for such a card. Measured on
+this machine (GTX 860M, compute capability 5.0, driver 580.178.04): `b12224-cuda-13.5`
+aborts inside `common_init_from_params` with `CUDA error: no kernel image is available for
+execution on the device` at `ggml-cuda.cu:111`, called from `ggml_cuda_kernel_can_use_pdl`,
+while the 12.8 suite of the same release runs. `SuiteUsable` therefore weighs the card's
+capability as well as the driver (`cudaMinCapability`, `nvidiaComputeCapabilities`) and
+refuses the suite with a sentence naming both numbers, instead of downloading 153 MB of a
+backend whose first kernel aborts.
+
 **Adding a family or a source means touching lists in step, and a test holds them
 together.** For a family: `config.Accelerators()`, `runtime.Accelerators()` and the
 `settings.managed.accel*` labels in all three dictionaries. For a source:

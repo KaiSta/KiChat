@@ -36,6 +36,14 @@ import (
 // mismatches are silent: llama.cpp reports no device and no error, and the model
 // runs on the CPU. The checks below refuse such an install *before* the download
 // instead, and name what does not match.
+//
+// A third mismatch is not silent, which is what made it easy to miss: CUDA 13.0
+// removed compilation and library support for Maxwell, Pascal and Volta — every
+// compute capability below Turing, 7.5 — so its build carries no kernel for such a
+// card and aborts at the first one. Measured here on a GTX 860M (compute capability
+// 5.0, driver 580.178.04) with `b12224-cuda-13.5`: "CUDA error: no kernel image is
+// available for execution on the device", ggml-cuda.cu:111, from
+// ggml_cuda_kernel_can_use_pdl. The driver floor alone does not catch it.
 
 // cudaMinDriverMajor is the oldest NVIDIA driver branch each CUDA major version
 // runs on, from NVIDIA's own compatibility tables: CUDA 11.x goes back to 450,
@@ -43,6 +51,15 @@ import (
 // machine's driver does not meet cannot initialise at all, whatever the minor
 // version is.
 var cudaMinDriverMajor = map[int]int{11: 450, 12: 525, 13: 580}
+
+// cudaMinCapability is the oldest compute capability each CUDA major can still
+// target, in tenths so `5.0` is 50, from NVIDIA's own release notes: 13.0 "removed
+// support for Maxwell, Pascal, and Volta GPUs, corresponding to compute
+// capabilities earlier than Turing" (7.5), while the 12.x series still builds for
+// Maxwell (5.0) and 11.x reaches Kepler (3.5). A build of a major whose floor this
+// machine's card does not meet aborts on its first kernel rather than reporting an
+// unusable device.
+var cudaMinCapability = map[int]int{11: 35, 12: 50, 13: 75}
 
 // hipMajorFor reads which libamdhip64.so major version a ROCm suite needs.
 //
@@ -83,17 +100,17 @@ func SuiteUsable(variant, suite string) (bool, string) {
 	}
 	switch variant {
 	case AcceleratorCUDA:
-		return cudaUsableFor(suite, readProcFile("/proc/driver/nvidia/version"), loaderCache())
+		return cudaUsableFor(suite, readProcFile("/proc/driver/nvidia/version"), loaderCache(), nvidiaComputeCapabilities())
 	case AcceleratorROCm:
 		return rocmUsableFor(suite, hipRuntimeMajors())
 	}
 	return true, ""
 }
 
-// cudaUsableFor judges one CUDA suite against a driver version and a loader index.
-// Both are passed in so the judgement can be pinned without the hardware: they are
-// what the machine would answer.
-func cudaUsableFor(suite, driverText, cache string) (bool, string) {
+// cudaUsableFor judges one CUDA suite against a driver version, a loader index and
+// the cards' compute capabilities. All three are passed in so the judgement can be
+// pinned without the hardware: they are what the machine would answer.
+func cudaUsableFor(suite, driverText, cache string, caps []int) (bool, string) {
 	major, ok := majorOf(suite)
 	if !ok {
 		return true, ""
@@ -107,14 +124,32 @@ func cudaUsableFor(suite, driverText, cache string) (bool, string) {
 		if !pointsAtCUDADriver(cache) {
 			return false, "es ist kein NVIDIA-Treiber installiert (libcuda.so.1 fehlt) — ohne ihn kann der CUDA-Backend nicht laden"
 		}
-		// A driver is there but its version could not be read: no verdict.
-		return true, ""
-	}
-	if driver < least {
+		// A driver is there but its version could not be read: no verdict from it,
+		// and the card below is still worth asking.
+	} else if driver < least {
 		return false, fmt.Sprintf("der NVIDIA-Treiber ist %d, CUDA %d braucht mindestens %d", driver, major, least)
+	}
+	// The card, not only the driver. The newest suite is the one the picker would
+	// take, and on a pre-Turing card it loads, aborts on the first kernel and leaves
+	// the user with a backtrace instead of a model.
+	if floor, judged := cudaMinCapability[major]; judged && len(caps) > 0 {
+		best := caps[0]
+		for _, cc := range caps[1:] {
+			if cc > best {
+				best = cc
+			}
+		}
+		if best < floor {
+			return false, fmt.Sprintf("die NVIDIA-Grafikkarte kann Compute Capability %s, CUDA %d braucht mindestens %s (Turing)",
+				capabilityText(best), major, capabilityText(floor))
+		}
 	}
 	return true, ""
 }
+
+// capabilityText prints a compute capability held in tenths the way NVIDIA writes
+// it: 50 is "5.0", 86 is "8.6".
+func capabilityText(cc int) string { return fmt.Sprintf("%d.%d", cc/10, cc%10) }
 
 // rocmUsableFor judges one ROCm suite against the HIP runtimes a machine has.
 func rocmUsableFor(suite string, have []int) (bool, string) {
@@ -173,6 +208,62 @@ func nvidiaDriverFromProc(text string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// nvidiaComputeCapabilities lists the compute capabilities of this machine's NVIDIA
+// cards in tenths — 5.0 is 50 — and is empty when they cannot be asked.
+//
+// `nvidia-smi --query-gpu=compute_cap` is the only place a driver states it, and it
+// is a property of the machine that does not change while the app runs, so the
+// process is paid once. An empty answer is "not looked at", never "no card": every
+// caller then leaves the suite alone.
+var (
+	nvidiaCapsOnce sync.Once
+	nvidiaCapsList []int
+)
+
+func nvidiaComputeCapabilities() []int {
+	nvidiaCapsOnce.Do(func() {
+		if runtime.GOOS != "linux" {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader,nounits")
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.WaitDelay = 2 * time.Second
+		_ = cmd.Run()
+		nvidiaCapsList = parseComputeCapabilities(out.String())
+	})
+	return nvidiaCapsList
+}
+
+// parseComputeCapabilities reads nvidia-smi's answer, one `major.minor` per card.
+// A line that is not one — a driver too old for the query answers nothing, and an
+// unsupported field answers `N/A` — is skipped rather than guessed at.
+func parseComputeCapabilities(text string) []int {
+	var caps []int
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		majorText, minorText, ok := strings.Cut(line, ".")
+		if !ok {
+			continue
+		}
+		major, err := strconv.Atoi(majorText)
+		if err != nil {
+			continue
+		}
+		minor, err := strconv.Atoi(minorText)
+		if err != nil {
+			continue
+		}
+		caps = append(caps, major*10+minor)
+	}
+	return caps
 }
 
 // majorOf reads the leading number of a version-like segment: "13.4" is 13, "5.7"

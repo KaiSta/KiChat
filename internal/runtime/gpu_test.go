@@ -65,6 +65,7 @@ func TestCUDAUsableJudgesTheDriver(t *testing.T) {
 		suite   string
 		driver  string
 		cache   string
+		caps    []int
 		usable  bool
 		wantsIn string
 	}{
@@ -107,10 +108,36 @@ func TestCUDAUsableJudgesTheDriver(t *testing.T) {
 			name: "an unknown CUDA major", suite: "14.0", driver: "",
 			cache: "", usable: true,
 		},
+		{
+			// The card this was written from: driver 580 satisfies CUDA 13, and a GTX
+			// 860M is compute capability 5.0, which CUDA 13 no longer targets. It
+			// loads and aborts on the first kernel instead.
+			name: "a Maxwell card cannot run CUDA 13", suite: "13.5", driver: nvidiaProcText,
+			cache: loaderIndexText, caps: []int{50}, usable: false, wantsIn: "Compute Capability 5.0",
+		},
+		{
+			name: "the same card runs the 12.8 suite", suite: "12.8", driver: nvidiaProcText,
+			cache: loaderIndexText, caps: []int{50}, usable: true,
+		},
+		{
+			name: "a Turing card runs 13", suite: "13.5", driver: nvidiaProcText,
+			cache: loaderIndexText, caps: []int{75}, usable: true,
+		},
+		{
+			// Two cards and one of them is new enough: the build can run here, so
+			// the install is offered rather than refused.
+			name: "one of two cards is new enough", suite: "13.5", driver: nvidiaProcText,
+			cache: loaderIndexText, caps: []int{50, 86}, usable: true,
+		},
+		{
+			// A card that cannot be asked is not judged, but the driver still is.
+			name: "an unreadable card version", suite: "13.5", driver: nvidiaProcText,
+			cache: loaderIndexText, usable: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			usable, why := cudaUsableFor(tc.suite, tc.driver, tc.cache)
+			usable, why := cudaUsableFor(tc.suite, tc.driver, tc.cache, tc.caps)
 			if usable != tc.usable {
 				t.Fatalf("usable = %v (%s), want %v", usable, why, tc.usable)
 			}
@@ -127,6 +154,22 @@ func TestCUDAUsableJudgesTheDriver(t *testing.T) {
 // TestHIPMajorForFollowsTheSoname: measured at both ends — ROCm 5.7 provides
 // libamdhip64.so.5, the ROCm 10.0 build of b11538 asks for .so.7, and the soname has
 // not moved again since ROCm 7.
+// TestParseComputeCapabilities pins the shape nvidia-smi answers with, including the
+// two ways it answers nothing: a field the driver does not know prints N/A.
+func TestParseComputeCapabilities(t *testing.T) {
+	if got := parseComputeCapabilities("5.0\n"); len(got) != 1 || got[0] != 50 {
+		t.Errorf("caps = %v, want the one 5.0 card as 50", got)
+	}
+	if got := parseComputeCapabilities(" 8.6 \n12.0\n"); len(got) != 2 || got[0] != 86 || got[1] != 120 {
+		t.Errorf("caps = %v, want 86 and 120", got)
+	}
+	for _, text := range []string{"", "N/A\n", "not a version\n"} {
+		if got := parseComputeCapabilities(text); len(got) != 0 {
+			t.Errorf("caps of %q = %v, want none", text, got)
+		}
+	}
+}
+
 func TestHIPMajorForFollowsTheSoname(t *testing.T) {
 	cases := map[string]int{"5.7": 5, "6.4": 6, "7.0": 7, "10.0": 7}
 	for suite, want := range cases {
