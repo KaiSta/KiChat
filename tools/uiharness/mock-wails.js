@@ -2508,6 +2508,15 @@ Available tools: {{tool_list}}`,
   }
 
   let braveKeySet = false
+  // The app-update reading Settings -> About starts from: checked and current, so a
+  // harness build never claims a newer release exists. The URL is the release list,
+  // which is where a download is either way.
+  const mockAppUpdate = {
+    checked: true,
+    available: false,
+    current: '0.1.0-harness',
+    url: 'https://github.com/KaiSta/KiChat/releases',
+  }
 
   /*
    * Which backends have a key in the secret store, mirroring
@@ -4182,6 +4191,13 @@ Available tools: {{tool_list}}`,
         goVersion: 'go mock',
         platform: 'mock/harness',
       }),
+    // The app-update row, which reads the cached answer first and spends a request only
+    // when there is none. The mock starts checked and current, so a harness build never
+    // claims a newer release exists; the Check button and the row's states are exercised
+    // by the real lookup. The URL is the release list, which is what the download link
+    // opens when a newer release does exist.
+    GetAppUpdate: () => Promise.resolve(mockAppUpdate),
+    CheckAppUpdate: () => Promise.resolve(mockAppUpdate),
     // The terminal the coding hand-off would open, as the About row shows it. A fake program
     // name on purpose: the row exists so a person can check their own platform's launcher, and
     // a fixture that named one of them would look like a claim about this machine.

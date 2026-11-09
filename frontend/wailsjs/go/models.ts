@@ -568,6 +568,20 @@ export namespace config {
 	        this.scrapeCacheHours = source["scrapeCacheHours"];
 	    }
 	}
+	export class UpdateSettings {
+	    checkDaily: boolean;
+	    lastCheckUnix?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.checkDaily = source["checkDaily"];
+	        this.lastCheckUnix = source["lastCheckUnix"];
+	    }
+	}
 	export class Settings {
 	    language: string;
 	    location: string;
@@ -590,6 +604,7 @@ export namespace config {
 	    images: ImageSettings;
 	    imageProfiles?: ImageProfile[];
 	    autoApprove: AutoApproveSettings;
+	    updates: UpdateSettings;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -618,6 +633,7 @@ export namespace config {
 	        this.images = this.convertValues(source["images"], ImageSettings);
 	        this.imageProfiles = this.convertValues(source["imageProfiles"], ImageProfile);
 	        this.autoApprove = this.convertValues(source["autoApprove"], AutoApproveSettings);
+	        this.updates = this.convertValues(source["updates"], UpdateSettings);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -821,6 +837,34 @@ export namespace main {
 	        this.date = source["date"];
 	        this.goVersion = source["goVersion"];
 	        this.platform = source["platform"];
+	    }
+	}
+	export class AppUpdate {
+	    checked: boolean;
+	    available: boolean;
+	    current?: string;
+	    latest?: string;
+	    url?: string;
+	    publishedAt?: string;
+	    notes?: string;
+	    devBuild?: boolean;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AppUpdate(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.checked = source["checked"];
+	        this.available = source["available"];
+	        this.current = source["current"];
+	        this.latest = source["latest"];
+	        this.url = source["url"];
+	        this.publishedAt = source["publishedAt"];
+	        this.notes = source["notes"];
+	        this.devBuild = source["devBuild"];
+	        this.error = source["error"];
 	    }
 	}
 	export class AttachmentInput {

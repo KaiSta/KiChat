@@ -89,6 +89,8 @@ export namespace runtime {
 
 export namespace main {
   export type AppInfo = Plain<Gen.main.AppInfo>
+  /** Whether a newer release exists, and the release page its download is on. */
+  export type AppUpdate = Plain<Gen.main.AppUpdate>
   /** The terminal the coding hand-off would open, or empty when there is none. */
   export type TerminalStatus = Plain<Gen.main.TerminalStatus>
   /**

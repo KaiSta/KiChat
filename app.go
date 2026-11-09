@@ -31,6 +31,7 @@ import (
 	"kichat/internal/tools"
 	"kichat/internal/trace"
 	"kichat/internal/uimsg"
+	"kichat/internal/update"
 	"kichat/internal/version"
 	"kichat/internal/workspace"
 )
@@ -183,6 +184,13 @@ type App struct {
 	// changes once a day.
 	updateMu sync.Mutex
 	update   RuntimeUpdate
+
+	// appUpdate is the last look at KiChat's own releases, cached for the reason above
+	// and read by Settings -> About. appUpdateLookup is the seam a test replaces with a
+	// release instead of reaching GitHub; nil is the real lookup.
+	appUpdateMu     sync.Mutex
+	appUpdate       AppUpdate
+	appUpdateLookup func(ctx context.Context) (update.Release, error)
 
 	// install tracks a download in progress. It is read by the UI through a
 	// bound method rather than pushed, because a download outlives the call that

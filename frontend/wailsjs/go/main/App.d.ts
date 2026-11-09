@@ -14,6 +14,8 @@ export function ActiveGenerations():Promise<Array<string>>;
 
 export function AddAttachment(arg1:main.AttachmentInput):Promise<store.Attachment>;
 
+export function CheckAppUpdate():Promise<main.AppUpdate>;
+
 export function CheckLlamaRuntimeUpdate():Promise<main.RuntimeUpdate>;
 
 export function ClearChat(arg1:string):Promise<void>;
@@ -37,6 +39,8 @@ export function DetectTerminal():Promise<main.TerminalStatus>;
 export function ExportBackup(arg1:main.BackupExportRequest):Promise<main.BackupExportResult>;
 
 export function GetAppInfo():Promise<main.AppInfo>;
+
+export function GetAppUpdate():Promise<main.AppUpdate>;
 
 export function GetAttachmentImage(arg1:string):Promise<string>;
 

@@ -10,6 +10,10 @@ export function AddAttachment(arg1) {
   return window['go']['main']['App']['AddAttachment'](arg1);
 }
 
+export function CheckAppUpdate() {
+  return window['go']['main']['App']['CheckAppUpdate']();
+}
+
 export function CheckLlamaRuntimeUpdate() {
   return window['go']['main']['App']['CheckLlamaRuntimeUpdate']();
 }
@@ -56,6 +60,10 @@ export function ExportBackup(arg1) {
 
 export function GetAppInfo() {
   return window['go']['main']['App']['GetAppInfo']();
+}
+
+export function GetAppUpdate() {
+  return window['go']['main']['App']['GetAppUpdate']();
 }
 
 export function GetAttachmentImage(arg1) {
