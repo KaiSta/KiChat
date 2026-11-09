@@ -2511,12 +2511,31 @@ Available tools: {{tool_list}}`,
   // The app-update reading Settings -> About starts from: checked and current, so a
   // harness build never claims a newer release exists. The URL is the release list,
   // which is where a download is either way.
-  const mockAppUpdate = {
-    checked: true,
-    available: false,
-    current: '0.1.0-harness',
-    url: 'https://github.com/KaiSta/KiChat/releases',
-  }
+  //
+  // `?appupdate=1` is the other state — the one the sidebar badge and the notes exist
+  // for — and it is a flag because an update offered in every screenshot would be a
+  // fixture pretending to be news. Its notes are the shape a real release body has: a
+  // short bullet list.
+  const mockAppUpdate = new URLSearchParams(location.search).get('appupdate')
+    ? {
+        checked: true,
+        available: true,
+        current: '0.1.0-harness',
+        latest: '0.7.17',
+        url: 'https://github.com/KaiSta/KiChat/releases/tag/0.7.17',
+        publishedAt: '2026-11-09T20:08:57Z',
+        notes:
+          '- A badge in the sidebar when a newer release exists\n' +
+          '- A daily check for releases, once a day, that can be switched off\n' +
+          '- The release notes shown before the download link\n' +
+          '- Fixes for the picture server and the model picker',
+      }
+    : {
+        checked: true,
+        available: false,
+        current: '0.1.0-harness',
+        url: 'https://github.com/KaiSta/KiChat/releases',
+      }
 
   /*
    * Which backends have a key in the secret store, mirroring

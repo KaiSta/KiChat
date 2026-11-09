@@ -177,7 +177,7 @@ export function GeneralTab({
         </Field>
       </Section>
 
-      <AboutSection info={info} />
+      <AboutSection info={info} draft={draft} patch={patch} />
     </>
   )
 }
@@ -191,7 +191,15 @@ export function GeneralTab({
  * in a bug report. The copy button exists because the usual way to answer "what
  * version are you on?" is a screenshot — this makes it one click of text.
  */
-function AboutSection({ info }: { info: main.AppInfo | null }) {
+function AboutSection({
+  info,
+  draft,
+  patch,
+}: {
+  info: main.AppInfo | null
+  draft: config.Settings
+  patch: (c: Partial<config.Settings>) => void
+}) {
   const t = useStore((s) => s.t)
   const [copied, setCopied] = useState(false)
   const [copiedTrace, setCopiedTrace] = useState(false)
@@ -347,6 +355,28 @@ function AboutSection({ info }: { info: main.AppInfo | null }) {
           </div>
         </div>
       )}
+      {/* On by default, and still a switch: the check is one request a day, so this is
+          how it is turned *off* rather than opted into. It is saved with the rest of the
+          panel, which is why the hint says a change takes effect on Save. */}
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+        <input
+          id="settings-update-daily"
+          type="checkbox"
+          checked={draft.updates?.checkDaily ?? false}
+          onChange={(e) =>
+            patch({
+              updates: {
+                checkDaily: e.target.checked,
+                lastCheckUnix: draft.updates?.lastCheckUnix ?? 0,
+              },
+            })
+          }
+        />
+        <label htmlFor="settings-update-daily" className="faint">
+          {t('settings.updateDaily')}
+        </label>
+        <span className="faint">{t('settings.updateDailyHint')}</span>
+      </div>
 
       <button
         type="button"

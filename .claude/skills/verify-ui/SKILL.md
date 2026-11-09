@@ -64,6 +64,7 @@ Query flags, each of which exists because the state is otherwise unreachable:
 | `?locked=setup` | the first launch with no keyring: the screen that creates the key, its length rule and the mismatch line |
 | `?locked=noKey` | an encrypted database whose key is gone: the reason line and the move-aside button |
 | `?locked=stale` | a keyring entry that does not open the database: the reason line, and the unlock screen rather than a failed start |
+| `?appupdate=1` | a newer release found: the dot beside the sidebar's Settings button, and in Settings → About the tag pair, the Download link and the release notes (faint, three lines). Without the flag the reading is checked and current, because a badge in every screenshot would be a fixture pretending to be news |
 
 `?server=restart` is computed from the stored command line rather than stored,
 which is what makes a save under a running server raise the badge. The runtime and

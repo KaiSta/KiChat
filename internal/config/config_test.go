@@ -1380,6 +1380,41 @@ func TestAutoApproveShipsOffAndStaysOffWhenAbsent(t *testing.T) {
 	}
 }
 
+// The daily update check ships on — the deliberate exception to "a switch costing a
+// request ships off" — and an explicit no stays a no. The default being the migration is
+// what carries the field to installations that predate it, so the case this pins is the
+// one that matters: a person who turned it off must not be switched back on by a restart.
+func TestTheDailyUpdateCheckShipsOnAndRemembersANo(t *testing.T) {
+	if s := Default(); !s.Updates.CheckDaily || s.Updates.LastCheckUnix != 0 {
+		t.Fatalf("Default() = %+v, want the daily check on and never run", s.Updates)
+	}
+
+	// An older blob has no `updates` object at all; it arrives on, which is the intended
+	// price of the default being the whole migration story.
+	older := Default()
+	if err := json.Unmarshal([]byte(`{"language":"en","toolIterations":6}`), &older); err != nil {
+		t.Fatalf("unmarshal an older blob: %v", err)
+	}
+	if !older.Updates.CheckDaily {
+		t.Errorf("an older blob arrived with the check off although that is now the default: %+v", older.Updates)
+	}
+
+	// The no the user gave is stored, and survives into the next process.
+	stored := Default()
+	stored.Updates = UpdateSettings{CheckDaily: false, LastCheckUnix: 1762700000}
+	blob, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	again := Default()
+	if err := json.Unmarshal(blob, &again); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if again.Updates.CheckDaily || again.Updates.LastCheckUnix != 1762700000 {
+		t.Errorf("the stored switch came back as %+v", again.Updates)
+	}
+}
+
 func TestDefaultLeavesImageGenerationOff(t *testing.T) {
 	s := Default()
 	if s.Images.Enabled {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"kichat/internal/config"
 	"kichat/internal/update"
 	"kichat/internal/version"
 )
@@ -144,6 +146,73 @@ func TestADevBuildIsNotComparedWithARelease(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Errorf("a development build spent %d requests, want none", calls)
+	}
+}
+
+// The daily check waits out the day: a look that has just happened is not repeated
+// because the app started again.
+func TestTheDailyCheckWaitsOutTheDay(t *testing.T) {
+	setVersion(t, "0.7.16")
+	calls := 0
+	a := &App{settings: config.Default()}
+	a.settings.Updates.CheckDaily = true
+	a.settings.Updates.LastCheckUnix = time.Now().Unix()
+	a.appUpdateLookup = releaseLookup(t, update.Release{Tag: "0.7.17"}, nil, &calls)
+
+	a.startUpdateCheck()
+	// The not-due path starts no goroutine at all, so there is nothing to wait for.
+	if calls != 0 {
+		t.Errorf("a check made %d requests although one had just been made", calls)
+	}
+}
+
+// A switch that is off looks at nothing, whatever the clock says.
+func TestTheDailyCheckDoesNothingWhenSwitchedOff(t *testing.T) {
+	setVersion(t, "0.7.16")
+	calls := 0
+	a := &App{settings: config.Default()}
+	a.appUpdateLookup = releaseLookup(t, update.Release{Tag: "0.7.17"}, nil, &calls)
+
+	a.startUpdateCheck()
+	if calls != 0 {
+		t.Errorf("a switched-off daily check made %d requests", calls)
+	}
+}
+
+// A day after the last look it asks, once, and the reading it leaves behind is what the
+// sidebar badge and the About row are set from.
+func TestTheDailyCheckLooksWhenADayHasPassed(t *testing.T) {
+	setVersion(t, "0.7.16")
+	asked := make(chan struct{}, 1)
+	a := &App{settings: config.Default()}
+	a.settings.Updates.CheckDaily = true
+	a.settings.Updates.LastCheckUnix = time.Now().Add(-25 * time.Hour).Unix()
+	a.appUpdateLookup = func(context.Context) (update.Release, error) {
+		asked <- struct{}{}
+		return update.Release{
+			Tag: "0.7.17",
+			URL: "https://github.com/KaiSta/KiChat/releases/tag/0.7.17",
+		}, nil
+	}
+
+	a.startUpdateCheck()
+	select {
+	case <-asked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the daily check never asked")
+	}
+
+	// The goroutine continues after the request; the cached reading is what the window
+	// reads, so that is what has to arrive.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if reading := a.GetAppUpdate(); reading.Available && reading.Latest == "0.7.17" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the check ran but the reading is %+v", a.GetAppUpdate())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

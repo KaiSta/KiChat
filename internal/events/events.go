@@ -49,6 +49,10 @@ const (
 	ImageProgress = "image:progress"
 	// ChatsChanged reports that the chat list itself changed.
 	ChatsChanged = "chats:changed"
+	// AppUpdate carries the result of a background look at KiChat's own releases, so
+	// the sidebar can show that a newer version exists without the user opening
+	// Settings. It is not a `chat:` name because it is about the installation.
+	AppUpdate = "app:update"
 )
 
 // All lists every event name, so a test can check the set as a whole rather
@@ -57,6 +61,6 @@ func All() []string {
 	return []string{
 		Delta, Reasoning, Start, Done, Message, Tool, Status,
 		Error, Warning, Budget, Compaction, Title, Attachments, ChatsChanged,
-		ImageProgress, Approval, ToolOutput,
+		ImageProgress, Approval, ToolOutput, AppUpdate,
 	}
 }

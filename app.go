@@ -303,6 +303,9 @@ func (a *App) startup(ctx context.Context) {
 	// most installs; see ImageSettings.StartWithApp for why it is not implied by
 	// choosing the kind.
 	a.startEnabledImages()
+	// The daily release check, when the user switched it on. It runs in the background
+	// because nobody is waiting for its answer: the badge appears when it lands.
+	a.startUpdateCheck()
 }
 
 func (a *App) shutdown(ctx context.Context) {

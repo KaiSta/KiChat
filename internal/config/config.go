@@ -111,6 +111,32 @@ type Settings struct {
 	// starts out silent about what it changes is an install whose first surprise is a file
 	// it did not expect.
 	AutoApprove AutoApproveSettings `json:"autoApprove"`
+	// Updates configures KiChat's own release check: at most one request a day, on by
+	// default so a newer release is offered rather than waited for. It is the one switch
+	// here that both costs a request and is on out of the box, and it earns that by being
+	// cheap and silent — one unauthenticated request a day, no account, nothing about the
+	// user sent — with a switch in Settings -> About for anyone who disagrees.
+	Updates UpdateSettings `json:"updates"`
+}
+
+// UpdateSettings is the app's own release check: whether it looks on its own, and when
+// it last did.
+//
+// It ships on, which is a deliberate exception to the rule that a switch costing a request
+// ships off. The cost is one unauthenticated request a day, the answer is only "a newer
+// version exists" plus its release page, and nothing about the user travels; the other
+// side is a person sitting on a build with a fixed bug and no way to learn of the fix.
+// A blob written before this object existed therefore arrives with it on — the default is
+// the migration — and the switch in Settings -> About is how it is turned off. The manual
+// Check works either way.
+type UpdateSettings struct {
+	// CheckDaily looks for a newer release at start, at most once a day. On by default;
+	// see above for why this one is.
+	CheckDaily bool `json:"checkDaily"`
+	// LastCheckUnix is when the last look was made, in Unix seconds, 0 never. It is
+	// the app's own record rather than a control in the panel, which is why
+	// SaveSettings keeps it from the live snapshot instead of taking the draft's.
+	LastCheckUnix int64 `json:"lastCheckUnix,omitempty"`
 }
 
 // AutoApproveSettings is which of a project's guarded tools skip the question.
@@ -1567,6 +1593,10 @@ func Default() Settings {
 			Files:    false,
 			Commands: false,
 		},
+		Updates: UpdateSettings{
+			// On, once a day, and nothing checked yet: see UpdateSettings.
+			CheckDaily: true,
+		},
 		DefaultSystemPrompt:  PromptBody(PresetResearch, LangEnglish),
 		PromptPresets:        DefaultPresets(LangEnglish),
 		AutoTitle:            true,
@@ -1773,6 +1803,11 @@ func (s *Settings) normalise() {
 	}
 	if s.Location == "" {
 		s.Location = DefaultLocation
+	}
+	if s.Updates.LastCheckUnix < 0 {
+		// A clock that jumped, or a hand-edited blob. Zero is "never checked", which
+		// a negative number would otherwise defer by decades.
+		s.Updates.LastCheckUnix = 0
 	}
 	if len(s.Backends) == 0 {
 		s.Backends = llm.DefaultBackendConfigs()

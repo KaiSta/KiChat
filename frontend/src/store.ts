@@ -124,6 +124,11 @@ interface State {
   lang: Lang
   theme: 'dark' | 'light'
   view: 'chat' | 'settings'
+  /**
+   * The last look at KiChat's own releases, from the daily background check or from the
+   * panel's own Check. Null means none has been made in this session.
+   */
+  appUpdate: main.AppUpdate | null
 
   settings: config.Settings | null
   models: llm.ModelInfo[]
@@ -339,6 +344,7 @@ export const useStore = create<State>((set, get) => {
     lang: 'en',
     theme: 'dark',
     view: 'chat',
+    appUpdate: null,
 
     settings: null,
     models: [],
@@ -410,6 +416,11 @@ export const useStore = create<State>((set, get) => {
         // the buffer twice and the reply would read double. Subscriptions are app-wide,
         // not per bootstrap, so this is guarded.
         wireEventsOnce(set, get, clearStreaming, upsertMessage)
+        // The daily check runs on the Go side and may finish before or after this point:
+        // the cached reading covers the first case, and the app:update event the second.
+        void App.GetAppUpdate()
+          .then((update) => set({ appUpdate: update.checked ? update : null }))
+          .catch(() => undefined)
 
         // The chat list is a local query; health and the catalogue are probes that ask
         // every backend over the network, one behind another (see Registry.Health and
@@ -839,6 +850,10 @@ function wireEvents(
   upsertMessage: (message: storeTypes.Message) => void,
 ) {
   const active = () => get().activeChatId
+
+  // A newer release, found in the background. Nothing here is filtered by chat: the
+  // badge is about the installation, and it stays until a later check says otherwise.
+  on<main.AppUpdate>(EV.appUpdate, (p) => set({ appUpdate: p }))
 
   on<{ chatId: string; messageId: string; text: string }>(EV.start, (p) => {
     if (p.chatId !== active()) return

@@ -19,6 +19,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"kichat/internal/events"
 	"kichat/internal/update"
 	"kichat/internal/version"
 )
@@ -59,6 +62,65 @@ type AppUpdate struct {
 // request that has not answered in ten seconds is not worth the panel waiting for.
 const appUpdateTimeout = 10 * time.Second
 
+// updateCheckInterval is how often the background check looks. A release is at most a
+// weekly event for this project, and one look costs a request out of GitHub's 60-an-hour
+// unauthenticated budget; a day is often enough to tell someone about a new version
+// without making the app chatty.
+const updateCheckInterval = 24 * time.Hour
+
+// startUpdateCheck looks for a newer release in the background, at most once a day, and
+// tells the window when one exists.
+//
+// It runs at start and after a settings save — the two moments the switch can have just
+// been turned on — because the point of the badge is to be seen in the sidebar, without
+// anyone opening the screen that would already show the answer. A check that is not due
+// costs nothing and starts no goroutine.
+func (a *App) startUpdateCheck() {
+	settings := a.Settings()
+	if !settings.Updates.CheckDaily {
+		return
+	}
+	// Unix(0) is 1970, so "never checked" is due rather than a special case. A clock
+	// that moved backwards makes the interval negative and holds the check until it is
+	// due again, which is the harmless direction.
+	if time.Since(time.Unix(settings.Updates.LastCheckUnix, 0)) < updateCheckInterval {
+		return
+	}
+	go func() {
+		reading, err := a.CheckAppUpdate()
+		if err != nil {
+			// The reading already carries the reason, and the panel shows it when asked;
+			// there is nothing here worth a toast.
+			return
+		}
+		a.emit(events.AppUpdate, reading)
+	}()
+}
+
+// recordUpdateCheck stores when the last look was made, so the next start does not ask
+// again the same day. A lookup that failed is recorded too: it was an attempt, and
+// retrying on every start because the network was down would be worse than a day's wait.
+//
+// It writes nothing when there is no database yet or it is still locked — the answer was
+// already given to the window, which is what it was asked for, and a timestamp with
+// nowhere to live is not worth failing a check over.
+func (a *App) recordUpdateCheck() {
+	if a.store == nil {
+		return
+	}
+	if err := a.ensure(); err != nil {
+		return
+	}
+	a.settingsMu.Lock()
+	settings := a.settings.Clone()
+	settings.Updates.LastCheckUnix = time.Now().Unix()
+	a.settings = settings
+	a.settingsMu.Unlock()
+	if err := a.sanitize(settings).Save(a.store); err != nil && a.ctx != nil {
+		runtime.LogWarningf(a.ctx, "Zeitpunkt der Update-Prüfung speichern: %v", err)
+	}
+}
+
 // CheckAppUpdate asks GitHub for the newest release and reports whether it is newer
 // than this build.
 //
@@ -93,10 +155,15 @@ func (a *App) CheckAppUpdate() (AppUpdate, error) {
 	}
 	release, err := lookup(ctx)
 	if err != nil {
+		a.recordUpdateCheck()
 		reading := AppUpdate{Checked: true, Current: current, URL: update.PageURL, Error: err.Error()}
 		a.setAppUpdate(reading)
 		return reading, nil
 	}
+	// The attempt is recorded whether it found anything or not: the switch buys one
+	// look a day, and a network that was down is not a reason to look again on every
+	// start.
+	a.recordUpdateCheck()
 	reading := AppUpdate{
 		Checked:   true,
 		Current:   current,

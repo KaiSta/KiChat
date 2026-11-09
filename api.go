@@ -95,6 +95,10 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	// last sweep would otherwise put every hidden model back into the picker on the
 	// next unrelated save.
 	s.HiddenModels = recorded.HiddenModels
+	// The time of the last release check is the app's record in the same way: a draft
+	// read before one would otherwise put the older time back and make the next start
+	// ask GitHub again. The switch beside it is the draft's, because that is a control.
+	s.Updates.LastCheckUnix = recorded.Updates.LastCheckUnix
 	// The per-model overrides are written by SetModelOverride, which is also outside
 	// this form, so the same rule applies: a draft read before the last override save
 	// would put the older map back — silently losing a per-request ceiling the user
@@ -127,6 +131,11 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	a.settings = s
 	a.settingsMu.Unlock()
 	a.rebuildServices(s)
+	// Saving is also what applies this switch, in both directions: without it, turning
+	// the daily check on would wait for the next start to show its badge, and turning it
+	// off would leave a look already under way in place. A check that is off, or not due,
+	// returns immediately.
+	a.startUpdateCheck()
 	return a.sanitize(s), nil
 }
 

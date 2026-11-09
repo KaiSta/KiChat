@@ -278,6 +278,9 @@ export const EV = {
   compaction: 'chat:compaction',
   title: 'chat:title',
   chatsChanged: 'chats:changed',
+  // The result of a background look at the app's own releases; not a `chat:` name
+  // because it is about the installation rather than a conversation.
+  appUpdate: 'app:update',
   attachments: 'chat:attachments',
   approval: 'chat:approval',
   // Not a `chat:` name, because a draw is not something a chat engine does: it is the
