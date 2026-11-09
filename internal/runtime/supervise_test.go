@@ -301,6 +301,76 @@ func TestStopIgnoresTheOldReadinessProbe(t *testing.T) {
 	}
 }
 
+// A crash is explained by the line before the backtrace, not by the frames after it.
+// llama.cpp forks gdb on SIGABRT, so the process's last lines are `#16 0x… in
+// __libc_start_call_main` and gdb's notes about sources it could not find — and the
+// assert that says what went wrong is above all of them. The output below is the tail of
+// a real aborted load, which the panel used to report in full and with no reason in it.
+func TestACrashIsReportedByItsReasonAndNotItsBacktrace(t *testing.T) {
+	lines := []string{
+		"llama-server gestartet (PID 8315) auf http://127.0.0.1:9931",
+		"ggml_cuda_host_malloc: failed to allocate 4096.00 MiB on the host",
+		"/src/ggml-cuda/ggml-cuda.cu:96: GGML_ASSERT(ptr != nullptr) failed",
+		"#0  0x00007f2641c4f1ca in ggml_abort (file=…) at ggml.c:1234",
+		"#1  0x00007f2641c4f2c5 in ggml_cuda_host_malloc (size=4294967296) at ggml-cuda.cu:96",
+		"#16 0x00007f2641a2a1ca in __libc_start_call_main (main=…, argc=21, argv=…) at ../sysdeps/nptl/libc_start_call_main.h:58",
+		"warning: 58\t../sysdeps/nptl/libc_start_call_main.h: No such file or directory",
+		"warning: 360\t../csu/libc-start.c: No such file or directory",
+		"#18 0x000055ad805d12a5 in _start ()",
+		"[Inferior 1 (process 8315) detached]",
+	}
+	got := formatTail(failureTail(lines))
+	if strings.Contains(got, "#0  0x") || strings.Contains(got, "[Inferior") {
+		t.Errorf("the report still carries the backtrace: %q", got)
+	}
+	if !strings.Contains(got, "GGML_ASSERT(ptr != nullptr) failed") {
+		t.Errorf("the report has no reason in it: %q", got)
+	}
+
+	// A log with nothing to strip is reported as before: the last six lines.
+	plain := []string{"one", "two", "three", "four", "five", "six", "seven"}
+	if tail := failureTail(plain); strings.Join(tail, ",") != "two,three,four,five,six,seven" {
+		t.Errorf("plain tail = %v, want the last six lines", tail)
+	}
+
+	// A message that merely starts with a hash, or a warning in prose, is the program's
+	// own and has to survive: only gdb's numbered frame and numbered-source shapes are
+	// dropped.
+	own := []string{"# configuration loaded", "warning: no usable GPU found, using the CPU"}
+	if kept := failureTail(own); len(kept) != 2 {
+		t.Errorf("the program's own lines were dropped: %v", kept)
+	}
+}
+
+// The whole path, through a real process and the ring: twelve frames after the assert
+// must not push it out of the report.
+func TestAFailedServerQuotesTheAssertAndNotTheFrames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a shell")
+	}
+	binary, _ := fakeServer(t, "echo 'ggml.c:1234: GGML_ASSERT(n_ctx > 0) failed'\n"+
+		"i=0\nwhile [ $i -lt 12 ]; do echo \"#$i  0x00007f0000 frame\"; i=$((i+1)); done\n"+
+		"echo '[Inferior 1 (process 8315) detached]'\nexit 134\n")
+
+	srv := NewServer("test")
+	srv.readyTimeout = 10 * time.Second
+	srv.probe = func(context.Context, string) error { return context.DeadlineExceeded }
+
+	if err := srv.Start(Options{Binary: binary, Model: writeModel(t)}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return srv.Status().State == StateFailed }) {
+		t.Fatalf("state = %q, want failed: %+v", srv.Status().State, srv.Status())
+	}
+	st := srv.Status()
+	if !strings.Contains(st.Error, "GGML_ASSERT(n_ctx > 0) failed") {
+		t.Errorf("error = %q, want the assert in it", st.Error)
+	}
+	if strings.Contains(st.Error, "#11  0x") || strings.Contains(st.Error, "[Inferior") {
+		t.Errorf("error = %q, want no backtrace in it", st.Error)
+	}
+}
+
 // The row cannot hold a crash, the file can. Every line of the program's output — the
 // frames the message drops included — is on disk, and the failed row names the file, so
 // the thing a user has to attach to a report survives the row that produced it.

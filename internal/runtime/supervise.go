@@ -460,8 +460,10 @@ func (s *Server) program() string {
 
 // finished records the exit of a process that is no longer running.
 func (s *Server) finished(cmd *exec.Cmd, err error) {
-	// Take the log tail before the state lock: the log watcher also takes it.
-	tail := s.log.tail(6)
+	// Take the log tail before the state lock: the log watcher also takes it. The
+	// whole ring rather than its last six lines, because a crash pads the end with a
+	// backtrace and the reason sits above it — see failureTail.
+	tail := s.log.snapshot()
 	s.mu.Lock()
 	if s.cmd != cmd {
 		s.mu.Unlock()
@@ -488,7 +490,7 @@ func (s *Server) finished(cmd *exec.Cmd, err error) {
 		}
 	case err != nil:
 		s.status.State = StateFailed
-		s.status.Error = fmt.Sprintf("%s wurde beendet: %v%s%s", label, err, formatTail(tail), s.logHint())
+		s.status.Error = fmt.Sprintf("%s wurde beendet: %v%s%s", label, err, formatTail(failureTail(tail)), s.logHint())
 	default:
 		s.status.State = StateFailed
 		s.status.Error = fmt.Sprintf("%s hat sich beendet%s", label, s.logHint())
@@ -885,6 +887,69 @@ func SplitArgs(s string) []string {
 	return args
 }
 
+// failureTail is the part of a dead process's log worth quoting in the message.
+//
+// The last lines of an abort are not the reason for it. llama.cpp's crash handler
+// forks gdb on SIGABRT, so a failed assert — the line that says what went wrong —
+// is followed by twenty-odd frames and gdb's notes about the sources it could not
+// find. Reporting the raw tail of that leaves the user with "signal: aborted (core
+// dumped)" and a stack trace that starts at __libc_start_call_main, which is
+// exactly the report this function was written from. The frames are dropped and the
+// last six lines that are the program's own are kept, so the assert is in the
+// message.
+func failureTail(lines []string) []string {
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !isCrashFrame(line) {
+			kept = append(kept, line)
+		}
+	}
+	// Everything was backtrace: report what there is rather than nothing.
+	if len(kept) == 0 {
+		kept = lines
+	}
+	if len(kept) > 6 {
+		kept = kept[len(kept)-6:]
+	}
+	return kept
+}
+
+// isCrashFrame reports whether a line belongs to the backtrace a crash handler adds
+// to the log, rather than to the program's own report of what happened.
+//
+// The shapes are gdb's: `#16 0x00007f… in __libc_start_call_main (…) at …`,
+// `warning: 58	../sysdeps/nptl/libc_start_call_main.h: No such file or directory`,
+// and the `[Inferior 1 (process 8315) detached]` gdb writes as it lets go.
+func isCrashFrame(line string) bool {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "#") {
+		// A frame is a number, then the address: `#0  0x00007f…`. A log line that
+		// merely starts with a hash has a word there instead.
+		i := 1
+		for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+			i++
+		}
+		if i > 1 && strings.HasPrefix(strings.TrimSpace(line[i:]), "0x") {
+			return true
+		}
+	}
+	if strings.HasPrefix(line, "[") && strings.Contains(line, "process") {
+		return true
+	}
+	if strings.HasPrefix(line, "[New LWP") || strings.HasPrefix(line, "[Thread debugging") {
+		return true
+	}
+	if strings.HasPrefix(line, "warning:") {
+		// gdb numbers the source file it could not find: `warning: 58\t../…`.
+		// llama.cpp's own warnings are prose after the colon and stay.
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "warning:"))
+		if rest != "" && rest[0] >= '0' && rest[0] <= '9' && strings.ContainsRune(rest, '\t') {
+			return true
+		}
+	}
+	return strings.Contains(line, "libthread_db")
+}
+
 func formatTail(lines []string) string {
 	if len(lines) == 0 {
 		return ""
@@ -967,6 +1032,16 @@ func (r *ring) push(line string) {
 	if len(r.lines) > r.max {
 		r.lines = r.lines[len(r.lines)-r.max:]
 	}
+}
+
+// snapshot copies every line the ring still holds; a failure has to look further
+// back than the tail the panel shows.
+func (r *ring) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.lines))
+	copy(out, r.lines)
+	return out
 }
 
 func (r *ring) tail(n int) []string {
