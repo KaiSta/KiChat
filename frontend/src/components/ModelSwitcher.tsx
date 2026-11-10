@@ -1234,7 +1234,11 @@ export function ModelSwitcher() {
                     <input className="input mono" type="number" min={managedCandidate ? 2048 : 0} step={1024} value={contextSize} onChange={(e) => { setPreview(null); setContextSize(e.target.value) }} />
                   </label>
                   <div className="mt-1 flex flex-wrap gap-1">
-                    {[8192, 16384, 32768, 65536].map((n) => <button key={n} type="button" className="btn btn-sm btn-ghost" onClick={() => { if (n !== contextNumber) { setPreview(null); setContextSize(String(n)) } }}>{n / 1024}K</button>)}
+                    {/* 96K and 128K are here because a long-context model's window is not a
+                        power of two in practice and 64K is no longer the top of the
+                        range; 96K is the useful middle step that does not jump the
+                        whole way to 128K. */}
+                    {[8192, 16384, 32768, 65536, 98304, 131072].map((n) => <button key={n} type="button" className="btn btn-sm btn-ghost" onClick={() => { if (n !== contextNumber) { setPreview(null); setContextSize(String(n)) } }}>{n / 1024}K</button>)}
                     {ollamaCandidate && <button type="button" className="btn btn-sm btn-ghost" onClick={() => { if (contextNumber !== 0) { setPreview(null); setContextSize('0') } }}>{t('model.contextDefault')}</button>}
                   </div>
                   <div className="faint">{t(managedCandidate ? 'model.contextManagedHint' : 'model.contextOllamaHint')}</div>
