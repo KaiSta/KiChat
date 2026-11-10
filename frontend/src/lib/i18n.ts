@@ -600,6 +600,9 @@ const de = {
     'Die Gewichte ({{model}}) sind größer als der freie Speicher der erkannten Geräte ({{free}}) — das Modell passt nicht vollständig auf die GPU und wird ganz oder teilweise auf der CPU gerechnet. Eine stärker quantisierte Datei passt eher.',
   'settings.managed.ctx': 'Kontextfenster (-c)',
   'settings.managed.extra': 'Weitere Argumente',
+  'settings.managed.singleSlot': 'Nur eine Sitzung (--parallel 1)',
+  'settings.managed.singleSlotHint':
+    'Startet llama-server mit einem Slot statt mit mehreren — das senkt den Speicherbedarf deutlich, wenn nur eine Sitzung gebraucht wird. Eine zweite gleichzeitige Anfrage wartet dann. Wirkt ab dem nächsten Start.',
   'settings.managed.start': 'Starten',
   'settings.managed.stop': 'Beenden',
   'settings.managed.state.stopped': 'beendet',
@@ -2137,6 +2140,9 @@ const en: Record<keyof typeof de, string> = {
     'The weights ({{model}}) are larger than the free memory the reported devices have ({{free}}) — the model does not fit on the GPU in full and will be computed on the CPU, wholly or partly. A more strongly quantised file is more likely to fit.',
   'settings.managed.ctx': 'Context window (-c)',
   'settings.managed.extra': 'Further arguments',
+  'settings.managed.singleSlot': 'Single session (--parallel 1)',
+  'settings.managed.singleSlotHint':
+    'Runs llama-server with one slot instead of several, which cuts memory use significantly when only one session is needed. A second simultaneous request then waits its turn. Applies from the next start.',
   'settings.managed.start': 'Start',
   'settings.managed.stop': 'Stop',
   'settings.managed.state.stopped': 'stopped',
@@ -3598,6 +3604,9 @@ const zh: Record<keyof typeof de, string> = {
     '权重（{{model}}）大于所识别设备的可用显存（{{free}}）——模型无法完整放入 GPU，将全部或部分在 CPU 上计算。量化程度更高的文件更有可能放得下。',
   'settings.managed.ctx': '上下文窗口（-c）',
   'settings.managed.extra': '其他参数',
+  'settings.managed.singleSlot': '单会话（--parallel 1）',
+  'settings.managed.singleSlotHint':
+    '让 llama-server 只用一个槽位而不是多个——只需要一个会话时，这样能显著降低内存占用。第二个同时到达的请求则需要等待。修改从下次启动起生效。',
   'settings.managed.start': '启动',
   'settings.managed.stop': '停止',
   'settings.managed.state.stopped': '已停止',

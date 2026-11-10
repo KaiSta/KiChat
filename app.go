@@ -593,6 +593,7 @@ func (a *App) startManagedModel(backendID string) (err error) {
 		MTPConfidence:  mtpConfidence,
 		MTPKVOverride:  mtpOverride,
 		Trace:          verboseTrace,
+		Parallel:       mm.Parallel,
 		Extra:          rt.SplitArgs(mm.ExtraArgs),
 	})
 	if err == nil {

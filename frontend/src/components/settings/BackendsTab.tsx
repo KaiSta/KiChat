@@ -1163,6 +1163,24 @@ function LocalModelSection({
         </label>
       </div>
 
+      {/* One slot rather than the four llama.cpp allocates when it is told nothing, and
+          that is the default: a slot that is never used still reserves its own compute
+          buffers, so a single-session machine pays for parallelism it does not get —
+          1.35 GiB of it on the file measured in documentation/LLAMACPP.md. Unticking is
+          the opt-in for concurrency: a second simultaneous request then runs beside the
+          first. Applies from the next start, like the two controls below. */}
+      <label
+        className="mb-2 flex items-center gap-2 text-[12px]"
+        title={t('settings.managed.singleSlotHint')}
+      >
+        <input
+          type="checkbox"
+          checked={!model.parallel}
+          onChange={(e) => update({ parallel: !e.target.checked })}
+        />
+        {t('settings.managed.singleSlot')}
+      </label>
+
       {/* Flash attention and a quantised KV cache trade memory for precision, and
           the choice only takes effect on the next start — a running server is
           not reconfigured from here. */}

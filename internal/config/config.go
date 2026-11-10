@@ -842,6 +842,19 @@ type ManagedModel struct {
 	// ExtraArgs is the rest of the command line, for the flags this app has no
 	// field for (--n-gpu-layers 24, a chat template).
 	ExtraArgs string `json:"extraArgs"`
+	// Parallel keeps llama.cpp's own several server slots. Left off — which is what every
+	// entry decodes to, including those written before the field existed — a start passes
+	// `--parallel 1`, so a machine that serves one session at a time pays for one slot's
+	// buffers instead of four: measured at 1.35 GiB on a 27B file with MTP
+	// (documentation/LLAMACPP.md), and the context window is unaffected because `-c`
+	// sizes the pool once rather than per slot. Turning it on passes no slot flag at all,
+	// which is llama.cpp's auto default of four, and lets a second simultaneous request
+	// run beside the first instead of waiting.
+	//
+	// Stored this way round, and not as a "single slot" switch, because the default has to
+	// be the one-slot answer while an absent bool decodes to false: the field can only be
+	// the opt-in for concurrency.
+	Parallel bool `json:"parallel"`
 	// MLX carries the options only an Apple-silicon run has, because the program
 	// is not llama.cpp and its flags are not llama.cpp's. Nil for every other
 	// kind, which is what keeps a llama.cpp entry from growing a section of

@@ -513,6 +513,34 @@ override would make llama.cpp reinterpret trunk layers.
 One caveat belongs with the flags: MTP is documented for a single slot, so a `--parallel` above 1
 typed into the further arguments is outside what llama.cpp measures for it.
 
+**Slots cost memory, but as buffers rather than as cache, and the price is large enough to matter.**
+Measured in use on 2026-11-10, same 27B IQ3_S MTP file: the four slots of the auto default held
+18.45 GiB after two or three messages, and `-np 1` held **17.10 GiB** through the same kind of
+conversation and stayed there — **1.35 GiB, about 7 %**. Read straight after start-up the single slot
+shows 15.80 GiB, but that is before any decode: the missing 1.3 GiB arrives with the first request,
+so a load-time reading overstates the saving by exactly that much, which is worth knowing because it
+is the reading everybody takes first. The gap is compute and scheduler buffers sized for a
+multi-sequence graph, not KV — `-c` sizes the pool once, whatever the slot count, and with the
+unified cache (the default when slots are auto) one slot may reach all of it, so `-np 1` gives back
+memory without giving back usable context. It is the same allocation llama.cpp issue #23903 ran out
+of, where a *second* slot wanted ~983 MiB of PP buffer on a 35B-A3B with MTP. What a single user pays
+instead is concurrency: a second simultaneous request is deferred, not refused. The panel
+sets it with *Single session (--parallel 1)* beside the context field and ships it **ticked** —
+a managed start asks for one slot, so unticking it is the opt-in for concurrency — while a
+`-np` typed into the further arguments still wins over either.
+
+**`--ctx-checkpoints` buys time with host RAM, not VRAM.** `-ctxcp, --ctx-checkpoints` (alias
+`--swa-checkpoints`, default 32, with `-cms` spacing it at 8 192 tokens) caps how many copies of the
+state a prefix would otherwise lose one slot keeps: originally the sliding-window part of the cache
+(PR #15293), extended to hybrid and recurrent models (PR #16382). One is taken when a prompt finishes
+processing and restored when a later request shares that prefix, which is what keeps a SWA or hybrid
+model from reprocessing thousands of tokens before every turn; they are made only when `--swa-full`
+is unset, and `0` disables them. The copies live in system RAM — so this is the lever for the RAM
+bloat and OOM that unchecked checkpointing caused (issue #21690, where 1 or 0 was the workaround),
+not for a VRAM ceiling, which only the context size, the cache dtype and MTP move. A file with no
+sliding-window or recurrent layers never creates one, and a small `-c` never reaches the 8 192-token
+spacing, so on those the setting changes nothing either way.
+
 **MTP costs memory of its own, and a quantized V cache needs flash attention.** Measured on that 27B
 IQ3_S file, CPU, 4096 tokens of context: 13 061 MiB without MTP and 15 213 with it — about 2.1 GiB
 for the draft context — and the same gap at 16 384 tokens (13 803 against 16 029), so it is the
@@ -523,6 +551,13 @@ measured q8_0 pair came out no better here (15 110 MiB), so the app does not pas
 refuse is the one pair llama.cpp cannot load at all — a quantized V cache with flash attention
 *off*, where the server answers `quantized V cache requires flash_attn to be enabled` and exits —
 which is why that combination is a sentence in the panel rather than a failed load.
+
+Those two readings also price one token of context on this file: 742 MiB across the 12 288 tokens
+between 4 096 and 16 384 is **~62 KiB a token** (0.060 MiB) without MTP, and 816 MiB across the same
+span with it (0.066 MiB, the draft's own cache included) — so the 1.35 GiB a one-slot start frees is
+worth roughly **23 000 more tokens** of window, or about 21 000 with MTP on. A q8_0 cache with flash
+attention on cuts that price to 8.5 bits a value, which is why the same memory buys about 43 000
+tokens with K and V both quantized.
 
 An exact count stays a *further argument* (`-ngl 24`), which is where a number only one
 model needs belongs, and it wins over the mode because the user's arguments go last on the

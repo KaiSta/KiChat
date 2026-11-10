@@ -1138,6 +1138,37 @@ func TestRememberedModelFoldersAreThinnedAndBounded(t *testing.T) {
 // where llama-server would reject it at startup. The GPU offload of the same test
 // is the third of those fields and follows the same rule: the two explicit words
 // are passed on, everything else means "as many layers as fit".
+// One slot is the default, and it is stored as the absence of the parallel opt-in — so a
+// blob written before the field existed arrives on one slot, which is the whole migration.
+// A parallel choice that was made has to survive the save like any other answer.
+func TestOneSlotIsTheDefaultAndParallelIsRemembered(t *testing.T) {
+	s := Default()
+	if err := json.Unmarshal([]byte(`{"runtime":{"models":{"llamacpp":{"modelPath":"/a.gguf"}}}}`), &s); err != nil {
+		t.Fatalf("unmarshal an older blob: %v", err)
+	}
+	s.normalise()
+	if s.Runtime.Models["llamacpp"].Parallel {
+		t.Error("an older blob arrived opting into parallel sessions")
+	}
+
+	stored := Default()
+	stored.Runtime = RuntimeSettings{Models: map[string]ManagedModel{
+		"llamacpp": {ModelPath: "/a.gguf", Parallel: true},
+	}}
+	blob, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	again := Default()
+	if err := json.Unmarshal(blob, &again); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	again.normalise()
+	if !again.Runtime.Models["llamacpp"].Parallel {
+		t.Error("the stored parallel choice came back off")
+	}
+}
+
 func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 	// Absent fields keep their meaning: "auto" and f16, the server's own defaults.
 	s := Default()

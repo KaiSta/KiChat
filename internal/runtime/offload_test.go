@@ -147,6 +147,38 @@ func TestOffloadAndTraceReachTheCommandLine(t *testing.T) {
 	}
 }
 
+// One slot is this app's default and has to be asked for: llama.cpp's own default is
+// auto, which resolves to four, so leaving the flag out is the parallel case. A slot
+// count the user typed into *Further arguments* still wins, because theirs is last.
+func TestAManagedStartAsksForOneSlotUnlessParallelIsChosen(t *testing.T) {
+	argsOf := func(o Options) []string { return o.args() }
+	// The pair rather than the bare flag: `--parallel` alone is a count llama.cpp would
+	// read from the next argument, and a test that accepted the flag with no value would
+	// pass on a command line that never had one.
+	hasPair := func(args []string, flag, value string) bool {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == flag && args[i+1] == value {
+				return true
+			}
+		}
+		return false
+	}
+
+	one := argsOf(Options{Model: "/m.gguf"})
+	if !hasPair(one, "--parallel", "1") {
+		t.Errorf("a default start = %v, want --parallel 1", one)
+	}
+	// The opt-in sends no slot flag at all: naming a number would be this app inventing a
+	// count llama.cpp owns, and its auto is the four this choice is asking for.
+	if shared := argsOf(Options{Model: "/m.gguf", Parallel: true}); contains(shared, "--parallel") {
+		t.Errorf("a parallel start sent a slot count of its own: %v", shared)
+	}
+	theirs := argsOf(Options{Model: "/m.gguf", Extra: []string{"-np", "2"}})
+	if len(theirs) < 2 || theirs[len(theirs)-2] != "-np" || theirs[len(theirs)-1] != "2" {
+		t.Errorf("the user's own slot count is not last: %v", theirs)
+	}
+}
+
 // The measured lines, on both release sources. The device is named before the layer
 // count, so the reading is carried forward rather than rebuilt from one line.
 func TestThePlacementIsReadFromTheServersOwnLines(t *testing.T) {

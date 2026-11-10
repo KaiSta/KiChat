@@ -231,6 +231,11 @@ export function defaultManagedModel(): config.ManagedModel {
     expertLayers: 0,
     experts: {},
     extraArgs: '',
+    // llama.cpp's several slots, off: a managed start asks for one (`--parallel 1`),
+    // which is what a single-session machine wants and the combination MTP is
+    // documented for. Turning it on leaves the server's own count, so a second
+    // simultaneous request runs beside the first.
+    parallel: false,
     // The MLX-only section. Its zeros mean "the server's own default", and the
     // field is present for every entry because the bridge's JSON carries it; only
     // a kind that reads it acts on it.

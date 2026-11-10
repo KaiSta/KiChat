@@ -585,7 +585,10 @@ func TestArgsCarryFlashAttentionAndCacheTypes(t *testing.T) {
 	full := base
 	full.FlashAttention = FlashAttentionOn
 	full.CacheTypeK, full.CacheTypeV = "q8_0", "q4_0"
-	want := "-m /m.gguf --host 127.0.0.1 --port 8080 --flash-attn on --cache-type-k q8_0 --cache-type-v q4_0"
+	// The slot flag is part of the line too: this asserts the whole command line, and one
+	// slot is what a start nobody tuned asks for. The three fields above are what the
+	// test is about; --parallel 1 is here so the pin stays an exact line.
+	want := "-m /m.gguf --host 127.0.0.1 --port 8080 --flash-attn on --cache-type-k q8_0 --cache-type-v q4_0 --parallel 1"
 	if got := strings.Join(full.args(), " "); got != want {
 		t.Errorf("args = %q, want %q", got, want)
 	}

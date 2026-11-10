@@ -403,6 +403,7 @@ export namespace config {
 	    mtp?: Record<string, number>;
 	    mtpConfidence?: Record<string, number>;
 	    extraArgs: string;
+	    parallel: boolean;
 	    mlx?: MLXOptions;
 	
 	    static createFrom(source: any = {}) {
@@ -425,6 +426,7 @@ export namespace config {
 	        this.mtp = source["mtp"];
 	        this.mtpConfidence = source["mtpConfidence"];
 	        this.extraArgs = source["extraArgs"];
+	        this.parallel = source["parallel"];
 	        this.mlx = this.convertValues(source["mlx"], MLXOptions);
 	    }
 	

@@ -122,6 +122,12 @@ type Options struct {
 	// TraceVerbosity. It is placed before Extra, so a verbosity the user typed
 	// themselves still wins.
 	Trace bool
+	// Parallel leaves llama.cpp its own several slots. Off, a start passes
+	// `--parallel 1`: a slot keeps prompt-processing and compute buffers of its own,
+	// so slots nobody uses are memory nobody gets back — measured at about 1.35 GiB
+	// over three of them on a 27B file with MTP. The KV cache is not part of that:
+	// `-c` sizes the pool once and one slot may reach all of it.
+	Parallel bool
 	// Extra is the rest of the user's command line, already split.
 	Extra []string
 	// Host defaults to 127.0.0.1. A server is only ever started on the loopback
@@ -778,6 +784,13 @@ func (o Options) args() []string {
 	}
 	if v := strings.TrimSpace(o.CacheTypeV); v != "" && v != CacheTypeF16 {
 		args = append(args, "--cache-type-v", v)
+	}
+	// One slot is the default here and has to be asked for: llama.cpp's own default is
+	// auto, which resolves to four. `Parallel` therefore sends no slot flag at all —
+	// naming a number would be this app inventing a count llama.cpp owns. Before Extra,
+	// so a `-np` typed into the further arguments is still the one that counts.
+	if !o.Parallel {
+		args = append(args, "--parallel", "1")
 	}
 	// The projector is the other half of a vision model. Before Extra, like every
 	// flag above: a user who names a different one themselves types it as an extra
