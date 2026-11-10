@@ -541,6 +541,16 @@ not for a VRAM ceiling, which only the context size, the cache dtype and MTP mov
 sliding-window or recurrent layers never creates one, and a small `-c` never reaches the 8 192-token
 spacing, so on those the setting changes nothing either way.
 
+**The prefill graph is the other allocation a flag moves, and it is the one `--ubatch-size` owns.**
+`-ub, --ubatch-size` (default 512, against `-b, --batch-size` at 2048) is the physical batch,
+and llama.cpp sizes the prompt-processing compute buffer from it — the same class of buffer each
+slot was reserving, which is why the draft's twin is documented as "use a smaller value to spare
+VRAM" (`--spec-draft-n-ubatch`). Halving `-ub` lowers the peak reached while a prompt is processed
+and slows that processing, because the prompt is then fed in more passes; the weights, the KV cache
+and the decode path are untouched, so it is a lever for a card that runs out of memory on a long
+*first* turn rather than one short of cache. Not measured here — the honest read is the `compute
+buffer size` line llama.cpp prints at load, before and after the change.
+
 **MTP costs memory of its own, and a quantized V cache needs flash attention.** Measured on that 27B
 IQ3_S file, CPU, 4096 tokens of context: 13 061 MiB without MTP and 15 213 with it — about 2.1 GiB
 for the draft context — and the same gap at 16 384 tokens (13 803 against 16 029), so it is the
