@@ -60,7 +60,16 @@ type Settings struct {
 	DefaultModel        llm.Ref        `json:"defaultModel"`
 	DefaultSystemPrompt string         `json:"defaultSystemPrompt"`
 	PromptPresets       []PromptPreset `json:"promptPresets"`
-	AutoTitle           bool           `json:"autoTitle"`
+	// ChatPromptPreset is the prompt a new chat starts on, named by preset id. Every prompt a
+	// conversation can start on therefore has a name in the settings view. An empty value is
+	// a blob from before the selector existed; normalise turns it into a named preset, moving
+	// an edited default prompt into one of its own (PresetCustom) rather than dropping it.
+	ChatPromptPreset string `json:"chatPromptPreset"`
+	// CodingPromptPreset is the prompt a new project starts on. The coding-agent preset is
+	// the default, so a project created before the selector existed starts on exactly the
+	// text it used to, and a selection whose preset has been removed falls back to it.
+	CodingPromptPreset string `json:"codingPromptPreset"`
+	AutoTitle          bool   `json:"autoTitle"`
 	// ToolIterations is the round budget of an ordinary chat's reply, and
 	// CodingToolIterations the one a project replies on. There are two fields because
 	// the two turns are different shapes: a chat's answer ends when the model stops
@@ -1610,8 +1619,11 @@ func Default() Settings {
 			// On, once a day, and nothing checked yet: see UpdateSettings.
 			CheckDaily: true,
 		},
-		DefaultSystemPrompt:  PromptBody(PresetResearch, LangEnglish),
-		PromptPresets:        DefaultPresets(LangEnglish),
+		DefaultSystemPrompt: PromptBody(PresetResearch, LangEnglish),
+		PromptPresets:       DefaultPresets(LangEnglish), // Both modes name a prompt from the list above, so everything a conversation can start
+		// on is one of the named prompts the settings view shows.
+		ChatPromptPreset:     PresetResearch,
+		CodingPromptPreset:   PresetCodingAgent,
 		AutoTitle:            true,
 		ToolIterations:       DefaultToolIterations,
 		CodingToolIterations: DefaultCodingToolIterations,
@@ -1655,6 +1667,10 @@ const (
 	// so an installation that edits one does not silently retype the other.
 	PresetCodingAgent = "coding-agent"
 	PresetBlank       = "blank"
+	// PresetCustom is not shipped. normalise creates it to keep an edited default prompt under
+	// a name, because the mode selectors pick prompts by name; the settings view translates
+	// that name through preset.custom.
+	PresetCustom = "custom"
 )
 
 // DefaultPresets are the system prompts available out of the box, written in
@@ -2094,6 +2110,35 @@ func (s *Settings) normalise() {
 	// Last, so that a preset appended just above is left alone and only the
 	// ones already stored are moved to the interface language.
 	s.LocalisePrompts()
+	// The default prompt used to be edited in a textarea that had no name, and it was the text
+	// a new chat started on. Both modes now name a stored prompt, so an edited default is moved
+	// into one — the preset that already holds exactly that text if there is one, a
+	// PresetCustom otherwise — rather than being dropped. The field itself then goes back to the
+	// shipped body, which is what makes the move run once: nothing in the settings view writes
+	// this field any more, so finding it edited is an older blob and not a choice made since.
+	// A default that is still a shipped body needs no preset; the research one already has a
+	// name. The chat selection follows the text only while it is still the unnamed default: a
+	// user who has named a prompt since keeps starting there.
+	if s.DefaultSystemPrompt != "" && !isShippedPrompt(PresetResearch, s.DefaultSystemPrompt) {
+		id := presetWithPrompt(s.PromptPresets, s.DefaultSystemPrompt)
+		if id == "" && !hasPromptPreset(s.PromptPresets, PresetCustom) {
+			s.PromptPresets = append(s.PromptPresets, PromptPreset{
+				ID:     PresetCustom,
+				Name:   "Custom prompt",
+				Prompt: s.DefaultSystemPrompt,
+			})
+			id = PresetCustom
+		}
+		if id != "" && (s.ChatPromptPreset == "" || s.ChatPromptPreset == PresetResearch) {
+			s.ChatPromptPreset = id
+		}
+		s.DefaultSystemPrompt = PromptBody(PresetResearch, s.Language)
+	}
+	// The mode selections are repaired against the list that was just completed: a stored
+	// selection naming a preset this blob does not carry would leave a mode with no prompt at
+	// all, and an absent one is the default.
+	s.ChatPromptPreset = promptPresetChoice(s.ChatPromptPreset, PresetResearch, s.PromptPresets)
+	s.CodingPromptPreset = promptPresetChoice(s.CodingPromptPreset, PresetCodingAgent, s.PromptPresets)
 }
 
 // LocalisePrompts moves the built-in system prompts into the language the
@@ -2116,6 +2161,40 @@ func (s *Settings) LocalisePrompts() {
 	if s.DefaultSystemPrompt == "" || isShippedPrompt(PresetResearch, s.DefaultSystemPrompt) {
 		s.DefaultSystemPrompt = PromptBody(PresetResearch, s.Language)
 	}
+}
+
+// promptPresetChoice repairs one mode's prompt selection: fallback is the shipped prompt that
+// mode uses when nothing is chosen or the chosen preset is gone.
+func promptPresetChoice(id, fallback string, presets []PromptPreset) string {
+	if id == "" {
+		return fallback
+	}
+	for _, p := range presets {
+		if p.ID == id {
+			return id
+		}
+	}
+	return fallback
+}
+
+// presetWithPrompt is the id of the preset holding exactly this text, or "".
+func presetWithPrompt(presets []PromptPreset, prompt string) string {
+	for _, p := range presets {
+		if p.Prompt == prompt {
+			return p.ID
+		}
+	}
+	return ""
+}
+
+// hasPromptPreset reports whether the list already carries this id.
+func hasPromptPreset(presets []PromptPreset, id string) bool {
+	for _, p := range presets {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // IsAccelerator reports whether a value names a build family this app knows.

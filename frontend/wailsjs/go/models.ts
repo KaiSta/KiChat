@@ -597,6 +597,8 @@ export namespace config {
 	    defaultModel: llm.Ref;
 	    defaultSystemPrompt: string;
 	    promptPresets: PromptPreset[];
+	    chatPromptPreset: string;
+	    codingPromptPreset: string;
 	    autoTitle: boolean;
 	    toolIterations: number;
 	    codingToolIterations: number;
@@ -626,6 +628,8 @@ export namespace config {
 	        this.defaultModel = this.convertValues(source["defaultModel"], llm.Ref);
 	        this.defaultSystemPrompt = source["defaultSystemPrompt"];
 	        this.promptPresets = this.convertValues(source["promptPresets"], PromptPreset);
+	        this.chatPromptPreset = source["chatPromptPreset"];
+	        this.codingPromptPreset = source["codingPromptPreset"];
 	        this.autoTitle = source["autoTitle"];
 	        this.toolIterations = source["toolIterations"];
 	        this.codingToolIterations = source["codingToolIterations"];

@@ -1679,8 +1679,7 @@ func (a *App) CreateChat(backend, model string) (store.Chat, error) {
 	newChat.ID = newID()
 	newChat.Backend = backend
 	newChat.Model = model
-	newChat.SystemPrompt = settings.DefaultSystemPrompt
-	newChat.SystemPromptPreset = config.PresetResearch
+	newChat.SystemPrompt, newChat.SystemPromptPreset = chatPrompt(settings)
 	if err := a.store.CreateChat(newChat); err != nil {
 		return store.Chat{}, err
 	}
@@ -1689,7 +1688,7 @@ func (a *App) CreateChat(backend, model string) (store.Chat, error) {
 }
 
 // CreateProject makes a new coding project: a chat that works in a folder the user
-// picked, on the prompt written for working in one.
+// picked, on the prompt chosen for code.
 //
 // The folder is resolved *here* rather than on the first tool call, and the resolved
 // path is what is stored. Three things follow from that. The user finds out immediately
@@ -1738,8 +1737,7 @@ func (a *App) CreateProject(workspacePath string) (store.Chat, error) {
 	project.Title = filepath.Base(root.Path())
 	project.Backend = backend
 	project.Model = model
-	project.SystemPrompt = codingAgentPrompt(settings)
-	project.SystemPromptPreset = config.PresetCodingAgent
+	project.SystemPrompt, project.SystemPromptPreset = projectPrompt(settings)
 	project.Mode = store.ModeCoding
 	project.Workspace = root.Path()
 
@@ -1782,6 +1780,34 @@ func codingAgentPrompt(settings config.Settings) string {
 		}
 	}
 	return config.PromptBody(config.PresetCodingAgent, settings.Language)
+}
+
+// chatPrompt is the prompt a new chat starts on: the preset the settings name for chat. The
+// fallback is the default prompt field, which only a blob normalise could not repair still
+// carries (an older settings row opened without a normalise pass); an edited one of those has
+// a name by then, so the fallback is a safety net rather than a choice.
+//
+// A selected preset's text is used even when it is empty: "Empty" is a preset somebody can
+// choose, and a chat with no system prompt is exactly what choosing it asks for.
+func chatPrompt(settings config.Settings) (string, string) {
+	for _, preset := range settings.PromptPresets {
+		if settings.ChatPromptPreset != "" && preset.ID == settings.ChatPromptPreset {
+			return preset.Prompt, preset.ID
+		}
+	}
+	return settings.DefaultSystemPrompt, config.PresetResearch
+}
+
+// projectPrompt is the prompt a new project starts on, selected the same way. An empty
+// selection is the coding-agent preset, so a project created before the selector existed
+// starts on exactly the text it used to.
+func projectPrompt(settings config.Settings) (string, string) {
+	for _, preset := range settings.PromptPresets {
+		if settings.CodingPromptPreset != "" && preset.ID == settings.CodingPromptPreset {
+			return preset.Prompt, preset.ID
+		}
+	}
+	return codingAgentPrompt(settings), config.PresetCodingAgent
 }
 
 // sameFolder reports whether two paths name the same directory on this machine.

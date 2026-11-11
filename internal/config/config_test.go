@@ -593,12 +593,18 @@ func TestSwitchingTheLanguageKeepsEditedAndCustomPrompts(t *testing.T) {
 	s.Language = LangEnglish
 	s.normalise()
 
-	if got := s.DefaultSystemPrompt; got != "mein eigener Standard-Prompt" {
-		t.Errorf("the edited default prompt was overwritten: %q", got)
-	}
+	// An edited default prompt opens a chat in whatever language it was written in, so it moves
+	// into a named prompt of its own and the field returns to the shipped body. The switch must
+	// not translate the text on its way there, and it must not drop it either.
 	byID := map[string]string{}
 	for _, p := range s.PromptPresets {
 		byID[p.ID] = p.Prompt
+	}
+	if got := s.DefaultSystemPrompt; got != PromptBody(PresetResearch, LangEnglish) {
+		t.Errorf("the edited default prompt was not moved out of the field: %q", got)
+	}
+	if got := byID[PresetCustom]; got != "mein eigener Standard-Prompt" {
+		t.Errorf("the edited default prompt was translated or lost: %q", got)
 	}
 	if got := byID[PresetCoding]; got != "mein eigener Coding-Prompt" {
 		t.Errorf("the preset the user edited was rewritten: %q", got)

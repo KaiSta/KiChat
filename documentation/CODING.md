@@ -33,10 +33,17 @@ filesystem (`os.SameFile`) rather than comparing strings, because a symlink and 
 one folder with two names. Archived projects do not claim one: an archived chat is one the
 user has finished with.
 
-The prompt a project starts on is the user's **coding-agent preset** when they have edited it
-(`codingAgentPrompt` in `app.go`), and the shipped body otherwise — the textarea under
-Settings → Prompts is where those instructions are meant to live, so a rewritten one has to be
-what the next project starts with.
+The prompt a project starts on is chosen under **Settings → Prompts → Code project**: one of
+the named stored prompts, with the coding-agent one as the default (`projectPrompt` in
+`app.go`). That default is what every project created before the selector existed still gets,
+so a rewritten coding-agent prompt is what the next project starts with unless somebody picks
+another name. Chats are chosen the same way, and default to the research prompt (`chatPrompt`).
+The tab edits one named prompt at a time — the list beside the textarea chooses which — so every
+prompt a conversation can start on has a name the selectors can show. A default prompt edited
+before the selectors existed had no name; `normalise` moves it into a `custom` preset and selects
+that for chat, rather than dropping the text. Neither selector moves an existing conversation —
+a project stores its prompt in `store.Chat.SystemPrompt` — and a project's own instructions
+still belong in the folder's `AGENTS.md`.
 
 ## 2. The folder boundary
 
