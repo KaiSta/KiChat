@@ -627,19 +627,33 @@ system message of every later request. Its rules, for the English contract:
 - Carry names, numbers, dates, prices, legal references and URLs over **WORD FOR WORD** —
   do not shorten or paraphrase them.
 - Invent nothing. Anything that stayed unclear goes under "Open questions".
-- Be terse: bullets, no prose, no repetition.
+- Carry findings — what was examined, what came of it, the file, the line and what is wrong
+  there — as one bullet each, with identifiers and paths word for word, and keep the brevity
+  rule off them.
+- Be brief: bullets, no prose, no repetition.
 
 and it fixes the output structure, omitting empty sections:
 
 ```
-## Festgestellte Fakten      ## Entscheidungen        ## Offene Punkte
-## Quellen                   ## Dateien & Dokumente  ## Vorgaben & Präferenzen
+## Festgestellte Fakten      ## Entscheidungen        ## Befunde & offene Arbeit
+## Offene Punkte             ## Quellen              ## Dateien & Dokumente
+## Vorgaben & Präferenzen
 ```
 
 The German contract is shown above; the English and Chinese contracts carry the same
-sections in their own language. This is a research-memory schema: what was established,
-what was decided, what is still open, which sources back it, which files are in play, and
-the user's standing preferences.
+sections in their own language. This is a memory schema: what was established, what was
+decided, what is still open, which sources back it, which files are in play, and the
+user's standing preferences.
+
+**Findings are carried as findings, not folded into "facts".** The section exists because of
+a reported failure: a review produced a list of defects with file and line, the fold that
+followed folded the answer away, and the next request — *"fix what you found"* — was
+answered by a model that no longer had them. The contract's own brevity rule is what
+finished them off: "Stichpunkte, keine Prosa" over a 1 200-token memory turns ten findings
+into one vague sentence. So the rule that carries names and numbers verbatim now names
+findings too, and says the brevity rule does not apply to them — a finding that cannot be
+acted on from the memory alone has been lost, the same standard the contract already sets
+for a URL. Pinned by `TestTheMemoryKeepsFindingsActionable`.
 
 ### 9.2 The user message
 

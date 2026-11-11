@@ -70,6 +70,36 @@ func TestSummariseWrapperSpeaksTheAppLanguage(t *testing.T) {
 	}
 }
 
+// TestTheMemoryKeepsFindingsActionable pins the section a review's findings land in.
+//
+// A review produces a list of defects with file and line, the fold that follows folds the
+// answer away, and the next request — "fix what you found" — was answered by a model that
+// no longer had them. Two rules in the contract caused it: it had no section for findings,
+// and it asked for brevity over the whole memory, which turns ten findings into one vague
+// sentence long before the 1 200-token target is reached. So the section exists, and the
+// rule that carries names and numbers verbatim names findings too.
+func TestTheMemoryKeepsFindingsActionable(t *testing.T) {
+	cases := []struct{ lang, heading, rule string }{
+		{config.LangEnglish, "## Findings & work in progress", "does not apply to them"},
+		{config.LangGerman, "## Befunde & offene Arbeit", "gilt für sie nicht"},
+		{config.LangChinese, "## 发现与未完成的工作", "不适用于它们"},
+	}
+	for _, tc := range cases {
+		got := summarySystemPrompt(tc.lang)
+		if !strings.Contains(got, tc.heading) {
+			t.Errorf("the %q memory has no findings section:\n%s", tc.lang, got)
+		}
+		if !strings.Contains(got, tc.rule) {
+			t.Errorf("the %q memory does not exempt findings from brevity:\n%s", tc.lang, got)
+		}
+	}
+	// The contract is no longer addressed to research alone: a project's review, its
+	// findings and the work in progress are what a coding chat folds away.
+	if strings.Contains(summarySystemPrompt(config.LangEnglish), "research chat") {
+		t.Error("the English contract still describes itself as a research memory")
+	}
+}
+
 func TestDigestPromptSpeaksTheAppLanguage(t *testing.T) {
 	if got := digestSystemPrompt(config.LangEnglish); !strings.Contains(got, "Write in English.") ||
 		strings.Contains(got, "Schreibe") {

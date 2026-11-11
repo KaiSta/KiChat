@@ -571,12 +571,13 @@ func summarySystemPrompt(lang string) string {
 
 // summaryPromptDE is the original memory contract. Its headings are part of the
 // German interface, because a German window's memory has always read this way.
-const summaryPromptDE = `Du komprimierst den Verlauf eines Recherche-Chats zu einem dauerhaften Gedächtnis.
+const summaryPromptDE = `Du komprimierst den Verlauf eines Chats zu einem dauerhaften Gedächtnis.
 
 Regeln:
 - Schreibe auf Deutsch.
 - Übernimm Namen, Zahlen, Daten, Preise, Gesetzesangaben und URLs WÖRTLICH. Kürze oder paraphrasiere sie nicht.
 - Erfinde nichts. Wenn etwas unklar blieb, schreibe es unter "Offene Punkte".
+- Befunde — was geprüft wurde, was dabei herauskam, mit Datei, Zeile und dem, was daran falsch ist — übernimm als je einen Stichpunkt, Bezeichner und Pfade WÖRTLICH. Die Kürze unten gilt für sie nicht: ein Befund, den man aus diesem Gedächtnis nicht mehr umsetzen kann, ist verloren.
 - Fasse dich kurz: Stichpunkte, keine Prosa, keine Wiederholungen.
 
 Antworte ausschließlich mit Markdown in genau dieser Struktur:
@@ -584,6 +585,8 @@ Antworte ausschließlich mit Markdown in genau dieser Struktur:
 ## Festgestellte Fakten
 - ...
 ## Entscheidungen
+- ...
+## Befunde & offene Arbeit
 - ...
 ## Offene Punkte
 - ...
@@ -596,12 +599,13 @@ Antworte ausschließlich mit Markdown in genau dieser Struktur:
 
 Lasse einen Abschnitt weg, wenn er leer ist.`
 
-const summaryPromptEN = `You compact the history of a research chat into a durable memory.
+const summaryPromptEN = `You compact the history of a chat into a durable memory.
 
 Rules:
 - Write in English.
 - Copy names, numbers, dates, prices, legal references and URLs VERBATIM. Do not shorten or paraphrase them.
 - Invent nothing. If something stayed unclear, write it under "Open questions".
+- Carry findings — what was examined, what came of it, the file, the line and what is wrong there — as one bullet each, with identifiers and paths VERBATIM. The brevity rule below does not apply to them: a finding that cannot be acted on from this memory alone has been lost.
 - Be brief: bullet points, no prose, no repetition.
 
 Answer only with Markdown in exactly this structure:
@@ -609,6 +613,8 @@ Answer only with Markdown in exactly this structure:
 ## Established facts
 - ...
 ## Decisions
+- ...
+## Findings & work in progress
 - ...
 ## Open questions
 - ...
@@ -621,12 +627,13 @@ Answer only with Markdown in exactly this structure:
 
 Omit a section when it is empty.`
 
-const summaryPromptZH = `你将一段研究对话的历史压缩为持久记忆。
+const summaryPromptZH = `你将一段对话的历史压缩为持久记忆。
 
 规则：
 - 用中文书写。
 - 名称、数字、日期、价格、法律条款和 URL 必须逐字保留，不得缩写或改写。
 - 不要编造。仍不清楚的内容写入“未决问题”。
+- 发现——检查了什么、结果如何、哪个文件的哪一行、那里错在哪里——每条发现单独一条要点，标识符与路径必须逐字保留。下方的“简明”规则不适用于它们：如果无法仅凭这份记忆着手处理，这条发现就已经丢失。
 - 简明：用要点，不写散文，不重复。
 
 只输出以下结构的 Markdown：
@@ -634,6 +641,8 @@ const summaryPromptZH = `你将一段研究对话的历史压缩为持久记忆�
 ## 已确认的事实
 - ...
 ## 决定
+- ...
+## 发现与未完成的工作
 - ...
 ## 未决问题
 - ...
