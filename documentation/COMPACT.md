@@ -120,7 +120,8 @@ fold can be decided by and hands both to the planner in one call
 - the **user's threshold**, read from `settings.Compact.Enabled` **and** the per-chat
   `AutoCompact`, and passed as **0 when either of them is off** — 0 meaning *no bound at all*
   rather than *a default*, which is why nothing defaults it on the way in. `Force` stays false,
-  so `Target` is 0 unless the ceiling below supplies one.
+  so `Target` is 0 unless the ceiling below supplies one — or the chat is a **project**, whose
+  automatic run always aims at its own threshold (§5.3).
 - the **backend's per-request ceiling** (`llm.RequestCeiling` — Groq, GROQ.md §6). It is a number
   the vendor published rather than a preference, so it folds whether or not the user asked for
   automatic compaction; it is 0 for a backend that publishes none, which is why this function
@@ -317,6 +318,18 @@ further: to the ceiling itself, through the same target walk a manual "→ 60 %"
 is decided by the ceiling's own fold point rather than by which bound fired, because a fold
 triggered by a *lower* threshold on a chat that is already at the ceiling has to reach it as well.
 
+There is one exception, and it is the floor under the threshold: when the **projected request is
+already over the effective limit**, keeping the recent turns is not a saving. The fold aims at the
+bound that fired, through the same walk, because a cut at the keep-turns boundary can leave a
+request that still does not fit. That is the shape a **project** has — a few long work sessions,
+often fewer turns than `KeepRecentTurns` — and without the aim the fold either refused (nothing
+older to fold) and the oversized request went out, or trimmed one turn and left the kept turns
+several windows large. Measured: a two-turn project priced at 23 031 estimated tokens against a
+16 384-token window folded nothing before the turn and only folded after the first tool round;
+the same fixture now folds before the request and every request it sends fits. Pinned by
+`TestPlanCompactionFoldsPastTheKeptTurnsWhenTheRequestWouldNotFit` and
+`TestAProjectFoldsAnOverfullRequestBeforeItGoesOut`.
+
 A ceiling that cannot bind cannot fold early either: it is expressed against the limit the planner
 measures with, so a ceiling above the window becomes a bound above the window's own (1.1 windows is
 0.99 of it), and one more than `1/0.9` windows away is no bound at all — at any projection that
@@ -358,11 +371,18 @@ Two rules make this well-behaved:
 ### 5.3 The forced-short-chat rule
 
 When the cut lands before `fromSeq` (the chat holds fewer turns than `keepTurns`), three outcomes
-exist — they fire in this order (the `toSeq < fromSeq` branch, then the escape hatch):
-
-- **automatic, no target**: `Needed: false` with reason `nichts zu komprimieren` (or the existing
-  reason plus `— aber kein Verlauf zum Komprimieren`). Nothing is worth doing, and nothing may be:
+exist — they fire in this order (the `toSeq < fromSeq` branch, then the escape hatch):- **automatic, no target**: `Needed: false` with reason `nichts zu komprimieren` (or the existing
+  reason plus ` — aber kein Verlauf zum Komprimieren`). Nothing is worth doing, and nothing may be:
   an automatic fold has nobody to promise anything to.
+- **automatic, on a project, with a target**: a project's automatic run always aims at its own
+  threshold (`autoFold`, `Target`), before a turn as much as between its rounds, so it takes the
+  same cut a manual run would: everything before the newest user turn. A project is the shape this
+  branch used to swallow — its history is a few long work sessions, so a cut that keeps
+  `KeepRecentTurns` turns either does not exist (fewer turns than that) or leaves more context than
+  the threshold allows. A chat without an aim keeps the rule above, because it has a fold point
+  between two messages; a project's reply is the work, and its next round may never come.
+  Pinned by `TestAProjectFoldsAtItsThresholdBeforeTheTurn`, against
+  `TestABetweenRoundCheckFoldsAChatShorterThanKeepRecentTurns` for the chat's half.
 - **any run with a target, and every manual one**: fold up to the **newest user turn** — the last
   turn that could contain a tool exchange that must not be split. For a manual run the comment
   names the motive: *"A manual compaction is a promise that the context gets compacted, so it must

@@ -213,19 +213,27 @@ func (e *Engine) autoFold(ctx context.Context, chat *store.Chat, provider llm.Pr
 	// created compaction is irrelevant here — an automatic run has nobody to report back
 	// to, and "nothing to fold" is already the silent outcome.
 	opts := CompactOptions{Threshold: threshold, Ceiling: ceiling}
-	if midTurn && threshold > 0 {
-		// Between the rounds of one answer the threshold is also the aim, and that is what
-		// lets the planner fold a history shorter than KeepRecentTurns. Without an aim it
-		// refuses any automatic fold whose cut would keep every turn — so the between-rounds
-		// switch did nothing in the chats it exists for, because a turn that grows through
-		// tool calls is usually one of a few long turns and not one of many short ones. The
-		// growth then became a fold only after the backend refused the request for its size,
-		// which costs that round the whole answer it had already produced.
-		//
-		// The fold still stops before the newest user turn, so the question being answered
-		// and the tool results it is working from stay verbatim; only settled history becomes
-		// memory. The check before a turn keeps its own behaviour: there the user has a fold
-		// point between two messages, so a short chat is left alone rather than folded early.
+	// When the threshold is also the aim, and why two callers ask for it.
+	//
+	// Between the rounds of one answer the aim is what lets the planner fold a history
+	// shorter than KeepRecentTurns. Without one it refuses any automatic fold whose cut
+	// would keep every turn — so the between-rounds switch did nothing in the chats it
+	// exists for, because a turn that grows through tool calls is usually one of a few long
+	// turns and not one of many short ones. The growth then became a fold only after the
+	// backend refused the request for its size, which costs that round the whole answer it
+	// had already produced.
+	//
+	// A **project** asks for the aim before its turn as well, and for the same reason: it is
+	// the shape whose history is a few long work sessions, so the targetless cut either finds
+	// nothing older than its keep-turns boundary to fold or keeps turns that are over the
+	// threshold. It cannot wait for a between-rounds check either, because a reply that never
+	// calls a tool has no next round — and a project has no moment between answers to fold at.
+	// A chat keeps the old rule before a turn: there the user has a fold point between two
+	// messages, so a short chat is left alone rather than folded early.
+	//
+	// The fold still stops before the newest user turn, so the question being answered and
+	// the tool results it is working from stay verbatim; only settled history becomes memory.
+	if threshold > 0 && (midTurn || chat.IsProject()) {
 		opts.Target = threshold
 	}
 	_, err := e.compactWith(ctx, chat, provider, backendID, modelID, modelInfo, settings, opts)

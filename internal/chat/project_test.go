@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1025,6 +1026,167 @@ func TestAProjectChecksBetweenRoundsWithoutTheChatSwitch(t *testing.T) {
 	// Not an override of the feature: automatic compaction switched off is still no fold.
 	if summaries, _ := run(t, func(s *config.Settings) { s.Compact.Enabled = false }); summaries != 0 {
 		t.Fatalf("compactions with automatic compaction off = %d, want none", summaries)
+	}
+}
+
+// TestAProjectFoldsAnOverfullRequestBeforeItGoesOut pins the shape the automatic threshold
+// used to miss. A project is a few long turns, often fewer than KeepRecentTurns, so the fold
+// before the turn either refused (nothing older to fold) or trimmed to a boundary that kept
+// turns larger than the whole window — and the oversized request went out, to be refused or
+// silently truncated by the backend. The fold has to happen before that request, not after
+// a tool round has produced something else to fold.
+func TestAProjectFoldsAnOverfullRequestBeforeItGoesOut(t *testing.T) {
+	const window = 16384
+	folder := t.TempDir()
+	workspace.ForgetAgentDocs()
+
+	st := newTestStore(t)
+	project := store.Chat{
+		ID: "chat-1", Title: "Projekt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.\nVerfügbare Tools: {{tool_list}}",
+		Temperature:  0.7, TopP: 0.9, AutoCompact: true,
+		Mode: store.ModeCoding, Workspace: folder,
+	}
+	if err := st.CreateChat(project); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	// Two work sessions, each one far over the window by itself.
+	report := strings.Repeat("Der Bericht ist lang und wird länger. ", 500)
+	for i := 0; i < 2; i++ {
+		for _, role := range []string{"user", "assistant"} {
+			if _, err := st.AppendMessage(store.Message{
+				ID: fmt.Sprintf("%s-%d", role, i), ChatID: "chat-1", Role: role,
+				Content: report, Status: store.StatusComplete, CreatedAt: time.Now(),
+			}); err != nil {
+				t.Fatalf("seed %s %d: %v", role, i, err)
+			}
+		}
+	}
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: window, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}},
+			{{Type: llm.EventDelta, Text: "Fertig."}, {Type: llm.EventDone}},
+		},
+	}
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.Compact.MidTurnCheck = false
+	settings.Compact.Threshold = 0.8
+	engine := NewEngine(st, registry, &tools.Service{Store: st},
+		func() config.Settings { return settings }, (&eventLog{}).emit)
+
+	// The premise: the request as it stands is already over the window, so a fold is the
+	// only thing that makes it sendable rather than a refused or truncated turn.
+	before, _, err := engine.buildAssembly(context.Background(), &project, "fake", "fake-model",
+		settings, provider.model, tools.TextProtocolHint(config.LangEnglish), "", "")
+	if err != nil {
+		t.Fatalf("buildAssembly: %v", err)
+	}
+	if before.Budget.Projected <= before.Budget.EffectiveLimit {
+		t.Fatalf("the fixture is not over the window: projected %d of %d",
+			before.Budget.Projected, before.Budget.EffectiveLimit)
+	}
+
+	turn(t, engine, project.ID, "Eine neue Frage")
+
+	for i := 0; i < provider.requestCount(); i++ {
+		if got := llm.EstimateMessagesTokens(provider.requestAt(i).Messages); got > window {
+			t.Errorf("request %d carried %d tokens into a %d-token window", i, got, window)
+		}
+	}
+	if got := len(summariesOf(t, st)); got != 1 {
+		t.Fatalf("compactions = %d, want the one that made the request sendable", got)
+	}
+}
+
+// TestAProjectFoldsAtItsThresholdBeforeTheTurn is the project's half of the threshold rule.
+// Its history is a few long work sessions, so a targetless automatic fold either finds nothing
+// older than KeepRecentTurns to fold or keeps turns that are themselves over the threshold —
+// and a project's reply may never reach a between-rounds check, because a reply that calls no
+// tool has no next round. So its automatic run aims at its own threshold from the start, before
+// a turn as much as between its rounds.
+func TestAProjectFoldsAtItsThresholdBeforeTheTurn(t *testing.T) {
+	const window = 20000
+	folder := t.TempDir()
+	workspace.ForgetAgentDocs()
+
+	st := newTestStore(t)
+	project := store.Chat{
+		ID: "chat-1", Title: "Projekt", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Backend: "fake", Model: "fake-model",
+		SystemPrompt: "Du bist ein Assistent.\nVerfügbare Tools: {{tool_list}}",
+		Temperature:  0.7, TopP: 0.9, AutoCompact: true,
+		Mode: store.ModeCoding, Workspace: folder,
+	}
+	if err := st.CreateChat(project); err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+	// Two work sessions, sized so the next request is over the threshold but still inside the
+	// window. Over the window is the other case, pinned by the test above; this one is the
+	// threshold doing its job on its own.
+	report := strings.Repeat("Der Bericht ist lang und wird länger. ", 330)
+	for i := 0; i < 2; i++ {
+		for _, role := range []string{"user", "assistant"} {
+			if _, err := st.AppendMessage(store.Message{
+				ID: fmt.Sprintf("%s-%d", role, i), ChatID: "chat-1", Role: role,
+				Content: report, Status: store.StatusComplete, CreatedAt: time.Now(),
+			}); err != nil {
+				t.Fatalf("seed %s %d: %v", role, i, err)
+			}
+		}
+	}
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: window, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}},
+			{{Type: llm.EventDelta, Text: "Fertig."}, {Type: llm.EventDone}},
+		},
+	}
+	registry := llm.NewRegistry(nil)
+	registry.Register(provider)
+	settings := config.Default()
+	settings.AutoTitle = false
+	settings.Compact.MidTurnCheck = false
+	settings.Compact.Threshold = 0.8
+	engine := NewEngine(st, registry, &tools.Service{Store: st},
+		func() config.Settings { return settings }, (&eventLog{}).emit)
+
+	// The premise: over the threshold, and still sendable as it stands.
+	before, _, err := engine.buildAssembly(context.Background(), &project, "fake", "fake-model",
+		settings, provider.model, tools.TextProtocolHint(config.LangEnglish), "", "")
+	if err != nil {
+		t.Fatalf("buildAssembly: %v", err)
+	}
+	if before.Budget.ProjectedRatio < settings.Compact.Threshold {
+		t.Fatalf("the fixture is below the threshold: projected %d of %d",
+			before.Budget.Projected, before.Budget.EffectiveLimit)
+	}
+	if before.Budget.Projected > before.Budget.EffectiveLimit {
+		t.Fatalf("the fixture is over the window (%d of %d); that case is pinned above",
+			before.Budget.Projected, before.Budget.EffectiveLimit)
+	}
+
+	turn(t, engine, project.ID, "Eine neue Frage")
+
+	list := summariesOf(t, st)
+	if len(list) != 1 {
+		t.Fatalf("compactions = %d, want the one the threshold asked for before the turn", len(list))
+	}
+	if list[0].Trigger != triggerAuto {
+		t.Errorf("trigger = %q, want %q", list[0].Trigger, triggerAuto)
+	}
+	// The question being answered stays verbatim: the fold ends before it.
+	if list[0].ToSeq != 4 {
+		t.Errorf("folded to #%d, want #4 (the message before the newest user turn)", list[0].ToSeq)
+	}
+	if n := provider.requestCount(); n != 2 {
+		t.Errorf("backend calls = %d, want 2 — the summary, then the answer", n)
 	}
 }
 

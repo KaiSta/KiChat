@@ -229,6 +229,42 @@ func TestPlanCompactionCutsOnlyAtUserBoundaries(t *testing.T) {
 	}
 }
 
+// TestPlanCompactionFoldsPastTheKeptTurnsWhenTheRequestWouldNotFit is the floor under
+// the automatic threshold. Keeping the recent turns is only a saving while a kept turn is
+// small; a project's history is the opposite shape — a few long work sessions rather than
+// many short questions — so the kept turns alone can be over the window. A fold that
+// stopped at the keep-turns boundary there would leave the request exactly as unsendable
+// as it found it.
+func TestPlanCompactionFoldsPastTheKeptTurnsWhenTheRequestWouldNotFit(t *testing.T) {
+	const window = 20000
+	messages := bigConversation(12, 8000)
+	budget := ContextBudget{
+		Limit: window, EffectiveLimit: window,
+		Projected: 40000, ProjectedRatio: 2.0,
+		System: 200, ToolSchemas: 100, Reserve: 1024,
+	}
+	plan := PlanCompaction(PlanInput{
+		Messages: messages, Budget: budget, Threshold: 0.80, KeepRecentTurns: 6,
+	})
+	if !plan.Needed {
+		t.Fatalf("a request twice the window must fold: %+v", plan)
+	}
+	// The keep-turns boundary is the 7th user message, seq 13. A fold that stopped there
+	// would keep six turns of 4000 tokens each against a 16000-token aim.
+	if plan.KeepFromSeq <= 13 {
+		t.Fatalf("KeepFromSeq = %d, want a cut past the keep-turns boundary (13)", plan.KeepFromSeq)
+	}
+	kept := 0
+	for _, m := range messages {
+		if m.Seq >= plan.KeepFromSeq {
+			kept += llm.EstimateTokens(m.Content)
+		}
+	}
+	if total := kept + budget.System + budget.ToolSchemas + budget.Reserve + 1200; total > int(0.80*window) {
+		t.Fatalf("the fold left %d tokens, over the 80%% aim of %d", total, int(0.80*window))
+	}
+}
+
 func TestPlanCompactionWithTooFewTurnsFoldsNothing(t *testing.T) {
 	plan := PlanCompaction(PlanInput{
 		Messages:  conversation(2),

@@ -301,6 +301,24 @@ func PlanCompaction(in PlanInput) CompactPlan {
 		// ordinary case — the ceiling is the tighter bound, so it is what fired.
 		if atCeiling(in) {
 			target = ceilingTarget(in.Ceiling, in.Budget.Limit)
+		} else if projection(in) > effectiveLimit(in) {
+			// The same argument without a published ceiling: the next request would not
+			// fit the window as it stands. Folding to the keep-turns boundary is only
+			// enough while a kept turn is small, and a **project**'s history is the
+			// opposite shape — a few long work sessions rather than many short questions.
+			// There the kept turns alone can be several windows, so a targetless fold
+			// either refuses (fewer turns than KeepRecentTurns: nothing to fold, and the
+			// oversized request goes out) or trims one turn's worth and leaves the rest
+			// over the line. Aiming at the bound that fired is what turns the fold into
+			// one that makes the request sendable.
+			//
+			// It is the bound, not a ceiling: the user's threshold is the fullness they
+			// asked the context to come down to, and this branch only decides to honour it
+			// when leaving it alone would send a request the window cannot hold.
+			// Measured: a two-turn project priced 23 031 tokens against a 16 384-token
+			// window, folded nothing before the turn, and only folded once the first tool
+			// round had produced something else to fold.
+			target = bound
 		}
 	} else {
 		plan.Reason = "manuell ausgelöst"
