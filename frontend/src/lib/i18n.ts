@@ -1512,6 +1512,7 @@ const de = {
   'err.tools.outsideWorkspace':
     '{{1}} liegt außerhalb des Projektordners. Pfade müssen innerhalb des Projekts liegen.',
   'err.tools.fileUnreadable': '{{1}} ist nicht lesbar',
+  'err.tools.searchFailed': 'Die Suche ließ sich nicht ausführen: {{1}}',
   'err.project.badFolder':
     '{{1}} ist kein Ordner, den ein Projekt verwenden kann.',
   'err.project.alreadyOpen':
@@ -3023,6 +3024,7 @@ const en: Record<keyof typeof de, string> = {
   'err.tools.outsideWorkspace':
     '{{1}} is outside the project folder. Paths have to be inside the project.',
   'err.tools.fileUnreadable': '{{1}} cannot be read',
+  'err.tools.searchFailed': 'The search could not be run: {{1}}',
   'err.project.badFolder': '{{1}} is not a folder a project can use.',
   'err.project.alreadyOpen':
     'The project "{{1}}" already works in this folder. Open it in the sidebar — or use /clear there to start over.',
@@ -4398,6 +4400,7 @@ const zh: Record<keyof typeof de, string> = {
   'err.tools.workspaceGone': '无法打开项目文件夹 {{1}} —— 它还存在吗？',
   'err.tools.outsideWorkspace': '{{1}} 位于项目文件夹之外。路径必须位于项目内部。',
   'err.tools.fileUnreadable': '无法读取 {{1}}',
+  'err.tools.searchFailed': '无法执行搜索：{{1}}',
   'err.project.badFolder': '{{1}} 不是项目可以使用的文件夹。',
   'err.project.alreadyOpen': '这个文件夹中已有项目“{{1}}”。请在侧边栏中打开它 —— 或在那里用 /clear 清空上下文重新开始。',
   'err.project.noTerminal': '找不到 KiChat 可以打开的终端。请自行打开一个并进入项目文件夹。',
