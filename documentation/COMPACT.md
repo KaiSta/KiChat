@@ -1443,11 +1443,25 @@ saving, so the meter keeps describing what is sent.
 the other bound is what the request that reads the result can still hold.
 `roomForToolResults` measures it — the effective limit less what the assembly priced, the
 reserve for the answer and the reply this round wrote — and `take` charges a result what it
-actually used, so a small one leaves its room to the round's other results. There is no
-per-answer token figure any more: the old 60 000/120 000 setting had to be raised as windows
-grew, and once spent it withheld *new* results while ageing would have kept them and stubbed
-the oldest — a long reply read notices with room still in the request
-(`TestToolOutputBudgetHasNoPerAnswerCeiling`).
+actually used, so a small one leaves its room to the round's other results.
+
+**And the room is asked again every round.** `setRoom` assigns it rather than keeping the
+smallest one the answer ever measured, because that is what the number is: the assembly it is
+measured against already carries the earlier rounds' results in the cut form they were handed
+over in, so the free space it reports is free. Ageing is what can hand some of it back — stubbing
+the reply's older results makes the next request smaller. A high-water mark instead turned one
+squeezed round into the rest of the answer. A reported coding turn shows the shape: a 65 536-token
+window, the default 1 024-token reserve, a 5 419-token reply and a card reading
+`933 → 777 tokens (context)` — so the request that round priced was 58 316 tokens — and then
+`3 975 tokens discarded` for the `app.go` read that followed, by which point ageing had brought
+the request down to 44 694, where 14 399 tokens were free. The model re-read the same file round
+after round, paying a round each time for text it never received.
+`TestToolOutputBudgetIsTheRoomsOfItsOwnRound` walks those two rounds.
+
+There is no per-answer token figure any more: the old 60 000/120 000 setting had to be
+raised as windows grew, and once spent it withheld *new* results while ageing would have
+kept them and stubbed the oldest — a long reply read notices with room still in the
+request (`TestToolOutputBudgetHasNoPerAnswerCeiling`).
 
 **The one number that survives.** The tool service's own byte bound, because it is a fact
 about a result rather than about a window: a full 24 kB `read_file` prices at about 7 800
@@ -1455,7 +1469,8 @@ tokens and a 30 kB command result at about 10 800 (the app's own 64 kB command m
 halved), and no single result may exceed `tools.MaxToolResultBytes` (32 KiB, measured at
 10 347 tokens of source), applied once where the result leaves the tool service. Pinned by
 `TestToolOutputBudgetIsTheRoomTheRequestHasLeft` (unmeasured passes, measured cuts, nothing
-left withholds) and `TestToolOutputBudgetNeverLoosens`.
+left withholds) and `TestToolOutputBudgetIsTheRoomsOfItsOwnRound` (the squeezed round and the
+one after it).
 
 **The coupling that makes it safe.** Dropping a `read_file` result would otherwise be a trap:
 the app remembers which file each turn has read, and a model asking again for a range it already

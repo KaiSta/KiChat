@@ -1246,7 +1246,7 @@ func TestToolOutputBudgetIsTheRoomTheRequestHasLeft(t *testing.T) {
 	}
 
 	budget = newToolOutputBudget()
-	budget.capTo(400)
+	budget.setRoom(400)
 	got, withheld := budget.take(whole)
 	if tokens := llm.EstimateTokens(got); tokens > 400 {
 		t.Errorf("a result cut to the room left is %d tokens, want at most 400", tokens)
@@ -1259,7 +1259,7 @@ func TestToolOutputBudgetIsTheRoomTheRequestHasLeft(t *testing.T) {
 	}
 	// A withheld result is reported rather than handed over as empty text, and it is
 	// the one outcome a tool card must not render as a size.
-	budget.capTo(0)
+	budget.setRoom(0)
 	if next, didWithhold := budget.take("kurz"); next != exhaustedNotice || !didWithhold {
 		t.Errorf("a request with no room left got %q (withheld %v), want the notice and true",
 			next, didWithhold)
@@ -1272,7 +1272,7 @@ func TestToolOutputBudgetIsTheRoomTheRequestHasLeft(t *testing.T) {
 // carries only what its window has room for and the oldest results are stubbed instead.
 func TestToolOutputBudgetHasNoPerAnswerCeiling(t *testing.T) {
 	budget := newToolOutputBudget()
-	budget.capTo(200_000)
+	budget.setRoom(200_000)
 	for i := 0; i < 12; i++ {
 		got, withheld := budget.take(strings.Repeat("wort ", 5000))
 		if withheld {
@@ -1287,17 +1287,53 @@ func TestToolOutputBudgetHasNoPerAnswerCeiling(t *testing.T) {
 	}
 }
 
-// TestToolOutputBudgetNeverLoosens keeps the cap pointing one way: a later round with
-// more room than an earlier one must not hand back what the earlier round had to give
-// up, because the rounds of one answer produce one history between them.
-func TestToolOutputBudgetNeverLoosens(t *testing.T) {
-	budget := newToolOutputBudget()
-	budget.capTo(100)
-	budget.capTo(5000)
+// TestToolOutputBudgetIsTheRoomsOfItsOwnRound is the change itself: every round is priced
+// against the request that will read its results, so room that ageing hands back is usable.
+//
+// The two rounds are the reported case. A 65 536-token window, the default 1 024-token
+// reserve and a 5 419-token reply leave 777 tokens when the request has reached 58 316 — the
+// card read `933 → 777 tokens (context)`, and the cut used every one of them. Ageing then
+// stubbed the reply's older results, the request fell to 44 694, and 14 399 tokens were free
+// for the next read. Keeping the tightest figure of the answer withheld that one too — the
+// `3 975 tokens discarded` card — and the model re-read the file round after round instead.
+func TestToolOutputBudgetIsTheRoomsOfItsOwnRound(t *testing.T) {
+	window := ContextBudget{Limit: 65_536, EffectiveLimit: 65_536, Reserve: 1_024}
+	const reply = 5_419
 
-	got, _ := budget.take(strings.Repeat("wort ", 5000))
-	if tokens := llm.EstimateTokens(got); tokens > 100 {
-		t.Fatalf("a cap of 5000 loosened the 100-token room: %d tokens", tokens)
+	budget := newToolOutputBudget()
+
+	room, bounded := roomForToolResults(window, 58_316, reply)
+	if !bounded || room != 777 {
+		t.Fatalf("room = %d (bounded %v) for the squeezed round, want 777", room, bounded)
+	}
+	budget.setRoom(room)
+	css := strings.Repeat("wort ", 690) // ~934 tokens: the 50-line CSS window
+	cut, withheld := budget.take(css)
+	if withheld {
+		t.Fatal("the squeezed round withheld a result it had 777 tokens of room for")
+	}
+	if tokens := llm.EstimateTokens(cut); tokens > 777 {
+		t.Fatalf("the cut is %d tokens, want at most the 777 the round had", tokens)
+	}
+	if budget.remaining != 0 {
+		t.Fatalf("the cut left %d tokens of the round's room, want all of them used", budget.remaining)
+	}
+
+	// Ageing stubbed the reply's older results, so the request is smaller and the round after
+	// it has room again.
+	room, bounded = roomForToolResults(window, 44_694, reply)
+	if !bounded || room != 14_399 {
+		t.Fatalf("room = %d (bounded %v) for the round after ageing, want 14 399", room, bounded)
+	}
+	budget.setRoom(room)
+	appGo := strings.Repeat("wort ", 2_939) // ~3 975 tokens: the read that was discarded
+	delivered, withheld := budget.take(appGo)
+	if withheld {
+		t.Fatalf("a read was withheld with %d tokens of room in its round", room)
+	}
+	if delivered != appGo {
+		t.Fatalf("a %d-token read was cut to %d tokens with %d tokens of room",
+			llm.EstimateTokens(appGo), llm.EstimateTokens(delivered), room)
 	}
 }
 

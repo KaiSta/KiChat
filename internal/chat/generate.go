@@ -464,6 +464,10 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 		// The prompt the backend just described is its own count when it reports one, and
 		// that is worth more than the assembly's estimate here: an estimate that runs low
 		// leaves too much room, and the room is the whole point.
+		//
+		// Asked again every round rather than kept at the tightest figure the answer ever
+		// measured: the room is this request's free space, and ageing can free more of it
+		// than the round before had (toolOutputBudget.setRoom).
 		promptTokens := 0
 		if usage != nil {
 			promptTokens = usage.PromptTokens
@@ -472,7 +476,7 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			Role: llm.RoleAssistant, Content: text, Reasoning: reasoning, ToolCalls: calls,
 		}, assembly.ReplayToolReasoning)
 		if room, bounded := roomForToolResults(assembly.Budget, promptTokens, replyTokens); bounded {
-			toolBudget.capTo(room)
+			toolBudget.setRoom(room)
 		}
 
 		e.emitStatus(in.Chat.ID, "tool")
@@ -774,7 +778,7 @@ func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, 
 // There is no per-answer figure. A reply's older results are handled by ageing
 // (toolhistory.go), which keeps the newest 32 000 tokens verbatim and stubs the rest, so
 // what a reply carries is bounded by what its request can hold rather than by a number the
-// user has to keep raising as windows grow. The room capTo receives is the only bound the
+// user has to keep raising as windows grow. The room setRoom receives is the only bound the
 // window does not already imply.
 type toolOutputBudget struct {
 	// remaining is what this round may still add. Negative means no room was measured —
@@ -794,7 +798,7 @@ func newToolOutputBudget() *toolOutputBudget {
 // its bound is the tool service's own byte cap.
 func (b *toolOutputBudget) hasRoom() bool { return b.remaining != 0 }
 
-// capTo tightens the round's allowance to the room its request has left.
+// setRoom makes the round's allowance the room its request has left.
 //
 // This is the bound the backend imposes, and ignoring it costs the whole turn rather than
 // one request: on Groq the per-minute token allowance is also the largest single request
@@ -802,17 +806,30 @@ func (b *toolOutputBudget) hasRoom() bool { return b.remaining != 0 }
 // history fold can take back either — it belongs to the turn being answered, which the
 // fold keeps verbatim — so the cut has to happen where the result is handed to the model.
 //
-// It only ever tightens. Once a result was cut, a later round cannot hand back what it
-// gave up, because the rounds of one answer build one history between them. A model whose
-// limit nobody reported never reaches this call at all, which leaves the budget
-// unmeasured and the result whole.
-func (b *toolOutputBudget) capTo(room int) {
+// It is assigned rather than tightened, because the room is a property of one request and
+// every round has its own. The assembly the number is measured against already carries what
+// the earlier rounds handed over — in the cut form they were handed over in — so what it
+// reports as free is free.
+//
+// Holding the smallest figure of the answer instead was the first version, and it turned one
+// squeezed round into the rest of the answer: a reply large enough to leave 777 tokens cut
+// the next read to those, the cut used every one of them, and every later result arrived as
+// the notice — even after ageing had stubbed the reply's older results and the request was
+// tens of thousands of tokens lighter. The model then re-read the same file round after
+// round, paying a round each time for text it never received. That is what a card reading
+// `933 → 777 tokens (context)` followed by `3,975 tokens discarded` was about.
+//
+// Ageing, not a high-water mark, is what keeps this bounded: the reply's tool text is priced
+// into the prompt before the room is measured, so a round can only use room its request
+// actually has, and the next assembly stubs whatever no longer fits.
+//
+// A model whose limit nobody reported never reaches this call at all, which leaves the
+// budget unmeasured and the result whole.
+func (b *toolOutputBudget) setRoom(room int) {
 	if room < 0 {
 		room = 0
 	}
-	if b.remaining < 0 || room < b.remaining {
-		b.remaining = room
-	}
+	b.remaining = room
 }
 
 // roomForToolResults is how much of one request this round's tool results may fill,

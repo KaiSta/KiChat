@@ -449,11 +449,14 @@ turn. `internal/chat/oversize.go`:
    reserve for the answer and the reply this round wrote, and the backend's **own count** of the
    prompt in place of the estimate as soon as it reports one: the estimate is a heuristic, and an
    underestimate is exactly what leaves a result cut too late (item 1 above corrects the same
-   error for a fold). `toolOutputBudget.capTo` only ever tightens, so a model whose window is
-   larger than the room its request has behaves as before; a window *smaller* than it caps too,
-   because a request there was already unsendable and the fold that answers a refusal cannot
-   touch the result. A result cut this way carries the shared `…[gekürzt]` marker, so the model
-   can read a narrower page range instead of re-scraping the same URL. Measured: a 13 480-token
+   error for a fold). `toolOutputBudget.setRoom` assigns that room afresh every round rather
+   than keeping the answer's tightest figure, so a model whose window is larger than the room
+   its request has behaves as before, and a window *smaller* than it cuts too, because a request
+   there was already unsendable and the fold that answers a refusal cannot touch the result. A
+   later round is priced against its own request, which already carries the earlier results in
+   the form they were admitted in, and ageing can make that request smaller again. A result
+   cut this way carries the shared `…[gekürzt]` marker, so the model can read a narrower page
+   range instead of re-scraping the same URL. Measured: a 13 480-token
    document read back through `read_pages` under a 6000-token ceiling reaches the model cut, and
    the second request fits (`TestAToolResultIsCutToWhatTheRequestCanCarry`); a backend that states
    the same prompt at 1200 tokens gets its result cut to 3776 of that ceiling, where the estimate
