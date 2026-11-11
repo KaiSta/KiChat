@@ -371,7 +371,9 @@ Two rules make this well-behaved:
 ### 5.3 The forced-short-chat rule
 
 When the cut lands before `fromSeq` (the chat holds fewer turns than `keepTurns`), three outcomes
-exist — they fire in this order (the `toSeq < fromSeq` branch, then the escape hatch):- **automatic, no target**: `Needed: false` with reason `nichts zu komprimieren` (or the existing
+exist — they fire in this order (the `toSeq < fromSeq` branch, then the escape hatch):
+
+- **automatic, no target**: `Needed: false` with reason `nichts zu komprimieren` (or the existing
   reason plus ` — aber kein Verlauf zum Komprimieren`). Nothing is worth doing, and nothing may be:
   an automatic fold has nobody to promise anything to.
 - **automatic, on a project, with a target**: a project's automatic run always aims at its own
