@@ -1214,6 +1214,8 @@ const de = {
     'Schreibt die Datei so zurück, wie dieser Chat sie vorgefunden hat. Eine Datei, die seitdem selbst bearbeitet wurde, bleibt unangetastet.',
   'changes.blockedOutside': 'Seit der Änderung selbst bearbeitet — bleibt unangetastet.',
   'changes.blockedBinary': 'Keine Textdatei — nicht sicherbar, deshalb kein Zurücksetzen.',
+  'changes.blockedUnreadable':
+    'Datei nicht lesbar — ihr aktueller Inhalt lässt sich nicht prüfen, deshalb kein Zurücksetzen.',
   'changes.truncated': 'Diff gekürzt.',
   'changes.close': 'Schließen',
 
@@ -2732,6 +2734,8 @@ const en: Record<keyof typeof de, string> = {
     'Writes the file back the way this chat found it. A file edited since then is left alone.',
   'changes.blockedOutside': 'Edited since the change — left alone.',
   'changes.blockedBinary': 'Not a text file — it cannot be saved, so there is no undo.',
+  'changes.blockedUnreadable':
+    'Cannot be read — its current content cannot be checked, so there is no undo.',
   'changes.truncated': 'Diff shortened.',
   'changes.close': 'Close',
 
@@ -4141,6 +4145,7 @@ const zh: Record<keyof typeof de, string> = {
   'changes.revertHint': '把这个对话找到它时的内容写回文件。此后被编辑过的文件保持原样。',
   'changes.blockedOutside': '更改后被编辑过 —— 保持原样。',
   'changes.blockedBinary': '不是文本文件 —— 无法保存，因此不能还原。',
+  'changes.blockedUnreadable': '无法读取 —— 无法检查其当前内容，因此不能还原。',
   'changes.truncated': '差异已截短。',
   'changes.close': '关闭',
 

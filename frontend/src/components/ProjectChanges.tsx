@@ -126,8 +126,9 @@ function Row({
       </div>
 
       {/* Nothing to compare against: a file this app will not read as text has no diff, and
-          "no line differs" beside "not a text file" would be two answers to one question. */}
-      {change.blocked !== 'not-text' && (
+          "no line differs" beside "not a text file" would be two answers to one question. The
+          same holds for a file it could not read at all — there is no second side to show. */}
+      {change.blocked !== 'not-text' && change.blocked !== 'unreadable' && (
         <div
           className="mt-2 max-h-56 overflow-auto rounded p-2"
           style={{ background: 'var(--code-bg)', border: '1px solid var(--border)' }}
@@ -156,7 +157,11 @@ function Row({
           // Why the button is not there, in the row rather than in a tooltip: a person who came
           // to undo a change needs to know whether it is done or impossible.
           <span className="ml-auto" style={{ color: 'var(--warn)' }}>
-            {change.blocked === 'outside' ? t('changes.blockedOutside') : t('changes.blockedBinary')}
+            {change.blocked === 'outside'
+              ? t('changes.blockedOutside')
+              : change.blocked === 'unreadable'
+                ? t('changes.blockedUnreadable')
+                : t('changes.blockedBinary')}
           </span>
         )}
       </div>

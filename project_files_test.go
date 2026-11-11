@@ -266,6 +266,37 @@ func TestAFileThatIsNotTextHasNoUndo(t *testing.T) {
 	}
 }
 
+// TestAFileThatCannotBeReadDoesNotBecomeABinary keeps the panel honest about the one failure
+// that is not the file's shape. A permission this app no longer has, or a folder where the file
+// was, is not "not a text file": the row used to explain an unreadable file as one the app
+// would not save, which is a claim about the user's own file that is simply false.
+func TestAFileThatCannotBeReadDoesNotBecomeABinary(t *testing.T) {
+	a, st, folder := filesTestApp(t)
+	recordChange(t, st, "locked.go", "package mine\n", "package mine\n// changed\n", true)
+	// A folder where the file was is a read that fails for a reason the snapshot cannot see.
+	if err := os.Mkdir(filepath.Join(folder, "locked.go"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	changes, err := a.ProjectFileChanges("p1")
+	if err != nil {
+		t.Fatalf("ProjectFileChanges: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("%d changes listed, want 1", len(changes))
+	}
+	if changes[0].Blocked != revertBlockedUnreadable {
+		t.Errorf("blocked = %q, want %q", changes[0].Blocked, revertBlockedUnreadable)
+	}
+	if changes[0].CanRevert {
+		t.Error("a file the app cannot read offers a revert")
+	}
+	// And the button behind the row would fail rather than put anything back.
+	if err := a.RevertFileChange("p1", "locked.go"); err == nil {
+		t.Error("a revert of an unreadable file succeeded")
+	}
+}
+
 // TestAnEmptyListIsNotNil is the trap AGENTS.md names: a nil Go slice marshals to JSON null, and
 // the window maps over this list. A project nobody has changed must send [], not nothing.
 func TestAnEmptyListIsNotNil(t *testing.T) {
