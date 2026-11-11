@@ -160,7 +160,10 @@ export function Confirmation() {
           className="text-[11px] underline decoration-dotted"
           style={{ color: 'var(--text-dim)' }}
           title={t('confirm.stopAskingHint')}
-          disabled={disabled}
+          // The click also allows the change on screen, so an emptied command field blocks it
+          // exactly as it blocks Allow: the answer would otherwise run the model's line — the
+          // one thing the person just deleted from the card.
+          disabled={disabled || (approval.kind === 'command' && line.trim() === '')}
           onClick={() => void never()}
         >
           {approval.kind === 'command'

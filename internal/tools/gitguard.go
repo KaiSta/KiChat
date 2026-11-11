@@ -151,18 +151,10 @@ func parseDestructiveGit(line string) (destructiveGit, bool) {
 		if strings.ContainsAny(segment, "\"'") {
 			continue
 		}
-		words := strings.Fields(segment)
-		// Leading assignments are not the command: `GIT_DIR=. git reset --hard` names git only
-		// after them, and `env …` one word later.
-		for len(words) > 0 && isAssignment(words[0]) {
-			words = words[1:]
-		}
-		if len(words) > 0 && strings.ToLower(words[0]) == "env" {
-			words = words[1:]
-			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
-				words = words[1:]
-			}
-		}
+		// Assignments and `env` are not the command: `GIT_DIR=. git reset --hard` names git only
+		// after them, and `env …` one word later — in either order, which is the part a copy of
+		// the elevation parser got wrong until both read the prefix through one function.
+		words := stripCommandPrefix(strings.Fields(segment))
 		if len(words) == 0 {
 			continue
 		}
@@ -186,7 +178,9 @@ func parseDestructiveGit(line string) (destructiveGit, bool) {
 func parseGitArguments(args []string) (destructiveGit, bool) {
 	for len(args) > 0 {
 		switch arg := args[0]; {
-		case arg == "-C", arg == "--exec-path", strings.HasPrefix(arg, "--git-dir"),
+		// `-C../elsewhere` is the same option with its value attached. Reading only the
+		// separated `-C` measured *this* folder for a command that runs in another one.
+		case strings.HasPrefix(arg, "-C"), arg == "--exec-path", strings.HasPrefix(arg, "--git-dir"),
 			strings.HasPrefix(arg, "--work-tree"):
 			return destructiveGit{}, false
 		case arg == "-c":
@@ -310,6 +304,13 @@ func parseGitClean(args []string) (destructiveGit, bool) {
 		case arg == "--":
 			specs = append(specs, args[i+1:]...)
 			i = len(args)
+		case arg == "-e" || arg == "--exclude":
+			// The pattern is a filter, not a pathspec: `git clean -f -e node_modules` deletes
+			// everything except it. Taking the pattern as the scope measured the wrong list —
+			// usually an empty one, which let the whole clean through.
+			i++
+		case strings.HasPrefix(arg, "--exclude="), len(arg) > 2 && strings.HasPrefix(arg, "-e"):
+			// The pattern is attached to the flag; there is no next word to skip.
 		case strings.HasPrefix(arg, "--"):
 			switch arg {
 			case "--force":

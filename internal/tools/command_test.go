@@ -363,6 +363,10 @@ func TestBuffersOutputPinsWhatCountsAsHoldingOutputBack(t *testing.T) {
 		"go test ./...",
 		"go test ./... 2>&1",
 		"go vet ./... || echo failed",
+		// A pipe or a redirect inside an argument is part of the argument: this line prints
+		// as it goes, and blaming a pipe here would send the model to fix what it did not write.
+		"go test ./... -run 'TestA|TestB'",
+		`echo "fail > log"`,
 	} {
 		if buffersOutput(line) {
 			t.Errorf("%q was treated as buffering, and it captures everything", line)
@@ -552,6 +556,10 @@ func TestElevationIsDetectedWhereItIsAskedAndNowhereElse(t *testing.T) {
 		{"make && sudo make install", "sudo"},
 		{"echo ready | sudo tee /etc/motd", "sudo"},
 		{"DEBIAN_FRONTEND=noninteractive sudo apt-get install -y x", "sudo"},
+		// The assignment can come after the `env`, which is the order the parser used to read
+		// past: the program was then the assignment, not sudo.
+		{"env DEBIAN_FRONTEND=noninteractive sudo apt-get install -y x", "sudo"},
+		{"A=1 env B=2 sudo -v", "sudo"},
 		{"env sudo id", "sudo"},
 		{"env -i sudo id", "sudo"},
 		{"doas pkg_add curl", "doas"},
