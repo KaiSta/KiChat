@@ -351,14 +351,37 @@ Effective values, most specific first (`maintenance.go:463`, `:473`):
 | --- | --- | --- | --- |
 | threshold | `chats.compact_threshold` (0 < v < 1) | `Compact.Threshold` | 0.80 |
 | turns kept verbatim | `chats.keep_recent_turns` | `Compact.KeepRecentTurns` | 6 |
+| size kept verbatim | — | `Compact.KeepRecentTokens` | 0 → a quarter of the effective limit, clamped to 2000–15000 |
 
 ### 5.2 The range
 
 ```
 fromSeq  = (largest existing compaction.ToSeq) + 1   → clamped to the first message
 keepFrom = the user message that leaves keepTurns turns verbatim above it
+         → then walked forward while the kept span exceeds KeepRecentTokens
 toSeq    = keepFrom − 1
 ```
+
+**The kept tail is a size as well as a count.** `KeepRecentTurns` says how much of the
+conversation stays verbatim; it cannot say how much of the window that costs, because a
+turn is a unit of conversation and not of size. Six turns are a few hundred tokens of short
+questions and several windows of tool traffic. So the cut is walked forward one user turn
+at a time — oldest first — until the messages above it fit `KeepRecentTokens`, and it stops
+before the newest user turn, which is the exchange being answered.
+
+Measured before this existed: 1 910-token turns in an 8 192-token window, auto fold at the
+80 % threshold, and the chat came out at **179 % of the window** still over it, because the
+six kept turns alone were in the kept set. That is the shape the size bound is for. It is
+an upper bound and not a target — the smaller of the two keep rules wins — and a turn is
+never split to reach it (invariant 3), so one turn larger than the budget leaves the tail
+over it. That last case is the one the walk cannot fix, and it is recorded in §15 rather
+than papered over.
+
+The default is derived rather than fixed (a quarter of the effective limit, clamped to
+2000–15000) because the right figure is a share of what the model can hold: 15 000 tokens
+is most of an 8k window and a tenth of a 131k one. The clamp's ends are opencode's own
+(`keep.tokens` 15000, clamped 2000–15000) — the only evidence available, since this app has
+no measurement of its own for either end.
 
 Two rules make this well-behaved:
 
@@ -586,11 +609,63 @@ motivated the cap; the unit tests pin the bound, the figure itself is not re-mea
 
 Before rendering, inline text documents in the folded range are loaded into the transcript. A fold is refused if a document cannot be read or does not fit in full; inline images are also refused because a text-only summary cannot describe them faithfully. An empty transcript is refused rather than stored as a memory of unread messages. Ordinary conversation text remains subject to the deliberate trimming described below.
 
-`RenderTranscript` (`compact.go:632`) flattens the folded messages into plain text, bounded
-at **two levels**: every message is cut to `Block`, and the finished transcript is cut to
-`Total` (both cut with the `…[gekürzt]` marker). Two levels because a per-message cap
-bounds each message, not the transcript: *"enough messages still add up past the window of
-the model that has to read them."*
+`RenderTranscript` (`compact.go`) flattens the folded messages into plain text, bounded at
+**two levels**: every message is cut to `Block`, and the finished transcript to `Total`. Two
+levels because a per-message cap bounds each message, not the transcript: *"enough messages
+still add up past the window of the model that has to read them."*
+
+The second level is a **ladder**, and it replaced one cut of the finished text. That cut kept
+the beginning of the transcript, so overflowing it removed its tail — the newest folded
+messages, which are exactly the ones that join the memory to the turns kept verbatim. Now
+messages are shortened oldest first to a quarter of their block, every message reaches that
+rung before any is left out, and whole messages are dropped oldest first with a note
+(`[7 ältere Nachrichten ausgelassen]`) saying how many. **The newest message is shortened
+but never left out**, and the note's cost is taken off the budget before what to keep is
+chosen, so the sentence that reports a cut cannot be the thing that overshoots it.
+
+The tail of a *block* is kept too: `clipToTokens` shares the allowance between the beginning
+and the end of every message, because a build log's failure line and a test run's summary
+are at the end of the text. `cutToTokens` still cuts at the end only, and that is a second
+function rather than the same one because its callers say *"the first N tokens were read,
+and the rest was not"* — a document condensed for the summariser (§17) and a tool result cut
+to the room a request has left. A cut that carried the end would make that sentence false.
+
+### 8.1 The prefix path: re-sending the request instead of a transcript
+
+`summarisationPrefix` offers the summarisation the chat's own request up to the fold
+boundary — the system message, the memory in force, and the folded messages exactly as they
+were sent — and `compactWith` takes it when the request it makes still fits beside the
+output cap and the estimator margin (§7).
+
+Why: prompt caching. The user's turn has just sent that prefix, so a summary request that
+opens with the same bytes is a hit on any server that caches a prefix; on a CPU-hosted
+llama.cpp server that is the difference between reading the history and evaluating it again,
+which is most of the minutes a fold takes there. It is also lossless in a way a rendering is
+not — no search-payload distillation, no block clipping, no `(nur Reasoning)` substitution.
+
+The transcript path stays the fallback, and it is what is sent when any of these holds:
+
+| condition | why the transcript instead |
+| --- | --- |
+| prefix + the output cap + margin does not fit the window | fitting is the one thing the transcript path guarantees unconditionally |
+| the summariser is not the chat's own model (§6) | another model never processed those bytes, so the prefix is a full evaluation of a larger request |
+| the boundary cannot be named | `Assembly.MessageSeqs` is nil once a rewrite changed the request's shape (`sanitiseToolHistory`, `ageToolResults`, a continuation), and a guessed boundary would cut the history in the wrong place |
+| the prefix would be the system message alone | there is no history in it to summarise |
+| the prefix carries an image | a summarisation is a text request; the pictures belong to the conversation |
+
+**The memory is carried once.** On this path the memory in force is already the system
+message's `<conversation_memory>`, so the instruction refers to it — *"the memory in the
+system prompt above already covers the older messages; merge it with the following history"*
+— instead of quoting it again as `<existing_memory>`. The transcript path keeps the quoted
+block, because its request has no system message of its own carrying the memory. That is a
+second wording of the merge sentence in each language, and it is worth paying for: the
+sentence is what stops a fold from silently dropping the old memory, since a model told only
+"compact the following history" writes a memory of the new messages.
+
+Pinned by `TestTheSummaryResendsTheRequestPrefixWhenItFits`,
+`TestTheSummaryFallsBackToATranscriptWhenThePrefixDoesNotFit`,
+`TestThePrefixIsOnlyOfferedWhenItCanBeNamed`, `TestThePrefixRequestCarriesTheMemoryOnce` and
+`TestThePrefixTailRefersToTheMemoryAboveInsteadOfRepeatingIt`.
 
 | role | rendered as | rule |
 | --- | --- | --- |
@@ -631,6 +706,9 @@ system message of every later request. Its rules, for the English contract:
   there — as one bullet each, with identifiers and paths word for word, and keep the brevity
   rule off them.
 - Be brief: bullets, no prose, no repetition.
+- Record the state of the work as far as the transcript shows it: what is done, what is still open, and what the next step is.
+- Leave out what the next request carries anyway: the system instructions, the project's AGENTS.md files, and the tool descriptions. What the user asked for themselves belongs in the memory.
+- Do not mention the compaction or that context was compacted.
 
 and it fixes the output structure, omitting empty sections:
 
@@ -680,7 +758,51 @@ Besonderer Fokus des Nutzers: …            ← only when a focus was given
 ```
 
 The merge instruction is the whole of invariant 2 in one sentence, and the `<conversation>`
-wrapper keeps the transcript distinguishable from the instructions around it.
+wrapper keeps the transcript distinguishable from the instructions around it. On the prefix
+path (§8.1) the `<existing_memory>` block is absent and the same sentence becomes *"the
+memory in the system prompt above already covers the older messages"* — the memory is in the
+request already, and quoting it twice charged the fold for it twice.
+
+### 9.3 One restructure when the shape was ignored
+
+A memory that comes back as flat prose is not an error — it still knows things — but every
+later turn has to search it instead of scanning it. So a summary that carries **none** of the
+section headings the contract asks for is sent once more, and what travels on that second
+request is the answer, not the conversation (`summaryRestructure`, per language):
+
+```
+Recast the memory below into the structure the contract above requires:
+
+<draft>
+…the first answer…
+</draft>
+
+Answer with only the memory: the ## headings the contract defines, no preamble.
+Leave no fact out and add nothing.
+```
+
+The shape check fires only when the answer carried no heading at all, so the sections it is
+missing **are** the structure, and the material for them is what the model already wrote.
+That is why the retry is cheap. It used to re-send the transcript or the prefix with one
+sentence appended — up to 80 % of the window, minutes of prompt on a CPU-hosted model, and a
+request no prefix cache can hit because of the appended sentence — to ask for headings that
+could be added to the draft. Now the draft is bounded by the summariser's output cap instead
+of by the window, so the second call is a fraction of the first rather than a second full
+pass over the history.
+
+Two things limit what this can cost further. The restructure is only sent when the shapeless
+answer is at least `summaryStructureMinTokens` (400) tokens: a model that answered a
+page-long instruction with three words is fixed by choosing another model, not by asking
+again. And nothing is rejected: a retry that also comes back shapeless leaves the first
+answer in place, because a memory with the wrong shape still carries more than no memory at
+all.
+
+The headings are matched across all three contract languages, because a model may answer in
+the transcript's language instead of the interface's, and that memory followed the structure
+even though it is not the one that was requested. Pinned by
+`TestAShapelessMemoryIsAskedOnceMore` (which also asserts the second request carries the
+draft and not `### Nutzer`), `TestAShortShapelessMemoryIsNotAskedAgain` and
+`TestARestructureAsksForTheShapeWithoutTheHistory`.
 
 ---
 
@@ -899,6 +1021,7 @@ approximate. Two things happen with it:
 | `MidTurnCheck` | `false` | ask the threshold again between the tool rounds of one answer. Off because it costs a summary inside an answer somebody waits for; it is the only mid-turn check a backend with no published ceiling gets, and a **project** asks it regardless — its reply has no fold point between two messages (§4) |
 | `Threshold` | `0.80` | projected ratio at which the threshold bound fires |
 | `KeepRecentTurns` | `6` | turns kept verbatim; also the floor for the forced-short-chat rule |
+| `KeepRecentTokens` | `0` (derived) | size budget for the kept tail; 0 means a quarter of the effective limit, clamped to 2000–15000. The smaller of the two keep rules wins (§5.2) |
 | `ReserveForResponse` | `1024` | headroom the budget keeps for the answer |
 | `SummaryTemperature` | `0.2` | near-deterministic extraction rather than creative rewriting |
 | `MaxSummaryTokens` | `1200` | **only raises** the effective 8192 output cap; the escape hatch for "spent everything on reasoning" |
@@ -989,16 +1112,18 @@ service what the unit tests can only assert about the request.
 Recorded deliberately, in the spirit of `PLAN.md` — these are the parts a reader should not
 assume are covered.
 
-- **The stored summary is not validated.** Nothing rejects or shrinks a summary that ignores
-  the structure instruction, omits sections or comes back as long prose. The only bounds are
-  the output cap (§7) and the prompt. There is no "summary too long → re-summarise" pass.
+- **The stored summary is validated for its shape only, and only once.** One restructure asks again
+  when a long answer carried no section at all (§9.3); nothing rejects or shrinks a summary
+  that omits sections, invents headings or comes back as long prose under the 400-token gate.
+  There is no "summary too long → re-summarise" pass, and none of this inspects the content.
 - **Only four thinking tag names are stripped.** `<scratchpad>`, or untagged prose emitted
   before the markdown, is not detected and lands in the memory. The prompt is front-loaded
   so the memory is still present, but it is not clean.
-- **`PlanInput.MeasuredTokens` is declared but never populated or read** (`compact.go:85`).
-  Its comment calls it "the authoritative used-token figure", which today it is not: the
-  stored `TokensBefore` is the estimated size of the folded span. Either wiring it up or
-  deleting the field would remove the discrepancy.
+- **`PlanInput.MeasuredTokens` is gone.** It was declared and never read; the authoritative
+  figure reaches the planner through `ContextBudget`, which `Assemble` builds from the last
+  response's `prompt_tokens` plus an estimate of what came after it (§11.3) — so the trigger
+  is anchored on a measurement already, and `TokensBefore` remains the estimate of the folded
+  span because that is what a fold reports.
 - **`CompactOptions.FromSeq`/`ToSeq` are plumbed end-to-end but no UI sends them.** The
   bound RPC accepts a pinned range; every caller currently passes 0/0
   (`ModelSwitcher.tsx:136`, `:394`), so the planner always decides.
@@ -1006,14 +1131,14 @@ assume are covered.
   crossing folds the keep-turns cut without aiming at a ratio; `Target > 0` on an automatic run
   means the ceiling bound decided it (§5.1, §5.4). Easy to misread from the two callers that were
   separate before the merge, one of which always passed a target.
-- **The threshold's fold cannot rescue a chat the keep-turns cut leaves over the window.** The cut
-  is the floor for that bound, so a chat whose last `KeepRecentTurns` turns alone exceed the limit
-  is compacted *and stays over it*: measured with 1 910-token turns in an 8 192-token window, auto
-  folded to 179 % of the window and reported the chat as still over limit (576-token turns land at
-  82 %, which is the case the threshold was designed for). A published **ceiling** does fold past
-  the floor, because a request at one would be refused rather than merely be full — but for the
-  window alone the walk of §5.4 is still not run with a target of 1.0, since that trades the
-  keep-turns guarantee for the window: a policy decision, not an arithmetic one.
+- **A single turn larger than the size budget still leaves the tail over it.** The walk of §5.2
+  shrinks the kept history by folding whole turns, so the shape that defeated the keep-turns
+  boundary — six 1 910-token turns against an 8 192-token window, folded to 179 % of the window
+  — is now bounded by tokens instead of by count. What it cannot do is split a turn (invariant
+  3), so a chat whose *newest* turn alone exceeds `KeepRecentTokens` keeps that whole turn and
+  the fold cannot bring it under. Saying so is the honest end of it: the alternative is a prompt
+  that begins on an assistant message, or a target of 1.0 that trades the keep-turns guarantee
+  for the window.
 - **The meter's attachment figure is the stored count, not a re-derivation.** A document's
   `TokenCount` is what ingestion measured, and it is charged to `budget.Attachments`
   (`context.go:255`) on the way to `Estimated`; the `<document …>` wrapper and the base64

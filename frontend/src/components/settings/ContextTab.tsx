@@ -73,6 +73,16 @@ export function ContextTab({
               onChange={(e) => patch({ compact: { ...compact, keepRecentTurns: Number(e.target.value) } })}
             />
           </Field>
+          <Field label={t('settings.keepTokens')} hint={t('settings.keepTokensHint')}>
+            <input
+              className="input"
+              type="number"
+              min="0"
+              step="1000"
+              value={compact.keepRecentTokens}
+              onChange={(e) => patch({ compact: { ...compact, keepRecentTokens: Number(e.target.value) } })}
+            />
+          </Field>
           <Field label={t('settings.reserve')}>
             <input
               className="input"

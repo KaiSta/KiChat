@@ -523,7 +523,7 @@ func DigestToolOutput(ctx context.Context, p llm.Provider, model string, opts Di
 	// second read of it returns the full text. A fold's memory is the opposite case and
 	// still rejects a truncated answer: it replaces history, so nothing can be read
 	// again.
-	return extractWithBudget(ctx, p, model, system,
+	return extractWithBudget(ctx, p, model, nil, system,
 		prompt+"\n\n"+noThinkTag, extractionOptions{
 			Temperature:     0.2,
 			MaxTokens:       opts.MaxTokens,

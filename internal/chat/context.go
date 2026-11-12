@@ -154,7 +154,14 @@ type Assembly struct {
 	// MaxIncludedSeq is the highest stored message sequence present in the
 	// request. It lets a backend's reported prompt_tokens be tied to an exact
 	// conversation state.
-	MaxIncludedSeq      int
+	MaxIncludedSeq int
+	// MessageSeqs is aligned with Messages and names the stored message each one came
+	// from, 0 for a part the assembly synthesised (the system message, the trailing turn
+	// notes, a continuation). It exists for one caller: a summarisation that wants to
+	// re-send this request's prefix unchanged instead of rendering a transcript of it
+	// (summarisationPrefix). It is nil when a helper rewrote the request's shape and the
+	// alignment no longer holds, so that caller falls back rather than guessing.
+	MessageSeqs         []int
 	ReplayToolReasoning bool
 
 	// AgedReads are the files whose `read_file` result was dropped from the request's tail
@@ -352,6 +359,9 @@ func Assemble(in AssemblyInput) Assembly {
 
 	msgs := make([]llm.Message, 0, len(in.Messages)+1)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: strings.Join(systemParts, "\n\n")})
+	// seqs follows msgs (see Assembly.MessageSeqs). The system message is the assembly's
+	// own, which is what the leading 0 says.
+	seqs := []int{0}
 
 	// The newest user message opens the reply being assembled, and that boundary is what tool
 	// ageing is scoped to: the results of *this* answer are the ones that grow between the
@@ -450,6 +460,7 @@ func Assemble(in AssemblyInput) Assembly {
 		budget.History += historyTokens
 		historyCount++
 		msgs = append(msgs, lm)
+		seqs = append(seqs, m.Seq)
 		currentReply = append(currentReply, m.Seq > newestUserSeq)
 		applied = append(applied, lm.Role == llm.RoleTool && m.Status == store.ToolOK)
 	}
@@ -616,8 +627,17 @@ func Assemble(in AssemblyInput) Assembly {
 		budget.OverLimit = budget.Projected > budget.EffectiveLimit
 	}
 
+	// The two slices are aligned only while nothing after the loop changed the count.
+	// sanitiseToolHistory and ageToolResults rewrite messages in place, and the trailing
+	// continuation appends one; a shape this function did not build is one a caller must
+	// not use to name a boundary, so it is reported as unknown instead of off by one.
+	if len(seqs) != len(msgs) {
+		seqs = nil
+	}
+
 	return Assembly{
 		Messages:            msgs,
+		MessageSeqs:         seqs,
 		Budget:              budget,
 		FirstVerbatimSeq:    firstVerbatim,
 		MemorySummary:       memorySummary,

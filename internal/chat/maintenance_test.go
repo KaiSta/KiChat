@@ -717,6 +717,317 @@ func seedTurns(t *testing.T, st *store.Store) {
 	}
 }
 
+// TestAShapelessMemoryIsAskedOnceMore pins the cheap half of validating a summary. A
+// long answer that ignored every section the contract asks for is prose, and prose is what
+// each later turn has to search instead of scan — so it is asked once more with the shape
+// named. Nothing rejects a summary: a retry that also comes back shapeless leaves the
+// first answer in place, because a memory with the wrong shape still knows more than none.
+func TestAShapelessMemoryIsAskedOnceMore(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedLongHistory(t, st, 4)
+
+	shapeless := strings.Repeat("Das ist eine Zusammenfassung ohne einen einzigen Abschnitt. ", 60)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: shapeless}, {Type: llm.EventDone}},
+			{{Type: llm.EventDelta, Text: "## Festgestellte Fakten\n- Der Kessel braucht 1,5 bar."}, {Type: llm.EventDone}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	got, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !got.Created {
+		t.Fatal("nothing was compacted")
+	}
+	if n := provider.requestCount(); n != 2 {
+		t.Fatalf("backend calls = %d, want the summary and its one nudge", n)
+	}
+	if !strings.Contains(got.Compaction.Summary, "Festgestellte Fakten") {
+		t.Errorf("the second answer did not replace the shapeless memory: %q", got.Compaction.Summary)
+	}
+	// What the retry sends is the draft, not the history: the folded transcript must not
+	// travel a second time just to ask for headings.
+	second := provider.requestAt(1)
+	retry := second.Messages[len(second.Messages)-1].Content
+	if !strings.Contains(retry, "ohne einen einzigen Abschnitt") {
+		t.Errorf("the retry does not carry the answer it is recasting: %q", truncateForTest(retry, 300))
+	}
+	if strings.Contains(retry, "<conversation>") || strings.Contains(retry, "### Nutzer") {
+		t.Errorf("the retry re-sends the folded transcript instead of the draft: %q", truncateForTest(retry, 300))
+	}
+}
+
+// TestAShortShapelessMemoryIsNotAskedAgain is the other half, and the reason the nudge is
+// gated on size: a second summary request is minutes on a CPU-hosted model, and a model
+// that answered a page-long instruction with three words is not fixed by asking again. The
+// memory is kept as it is, without a retry.
+func TestAShortShapelessMemoryIsNotAskedAgain(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedLongHistory(t, st, 4)
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "Zusammenfassung"}, {Type: llm.EventDone}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	got, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if got.Compaction.Summary != "Zusammenfassung" {
+		t.Errorf("stored memory = %q, want the answer as it came", got.Compaction.Summary)
+	}
+	if n := provider.requestCount(); n != 1 {
+		t.Fatalf("backend calls = %d, want no retry for a three-word answer", n)
+	}
+}
+
+// TestTheSummaryResendsTheRequestPrefixWhenItFits pins the prompt-cache path: with room for
+// it, the summarisation carries the chat's own system message and the folded messages as they
+// were actually sent, instead of a re-rendered transcript. Those bytes are what the server
+// already holds for the user's turn, so on a local llama.cpp server the fold reads them
+// rather than evaluating the history again; a transcript is different text and always a miss.
+func TestTheSummaryResendsTheRequestPrefixWhenItFits(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	seedLongHistory(t, st, 4)
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "## Festgestellte Fakten\n- etwas"}, {Type: llm.EventDone}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if n := provider.requestCount(); n != 1 {
+		t.Fatalf("backend calls = %d, want the summary alone", n)
+	}
+
+	request := provider.requestAt(0)
+	if len(request.Messages) < 3 {
+		t.Fatalf("the summarisation sent %d messages, want the request and an instruction", len(request.Messages))
+	}
+	// The chat's own system message, unchanged: that is where the cache hit starts.
+	if got := request.Messages[0].Content; !strings.HasPrefix(got, chat.SystemPrompt) {
+		t.Errorf("the request does not open with the chat's own system message: %q", got)
+	}
+	last := request.Messages[len(request.Messages)-1]
+	if last.Role != llm.RoleUser {
+		t.Fatalf("last message role = %q, want the instruction as a user turn", last.Role)
+	}
+	joined := ""
+	for _, m := range request.Messages {
+		joined += m.Content + "\n"
+	}
+	if strings.Contains(joined, "### Nutzer") || strings.Contains(joined, "### Assistent") {
+		t.Errorf("a rendered transcript was sent where the request prefix fits: %q",
+			truncateForTest(joined, 400))
+	}
+	// The folded turns travel verbatim, which is the whole point of the path.
+	if !strings.Contains(joined, "Frage 0:") {
+		t.Errorf("the folded history is missing from the prefix: %q", truncateForTest(joined, 400))
+	}
+}
+
+// TestThePrefixRequestCarriesTheMemoryOnce pins the saving on a chat that already has a
+// memory. The prefix carries it in the system message it rides in, and the merge instruction
+// names it there instead of quoting it again — before this the fold paid for the memory twice
+// on every crossing turn, once to carry it and once to ask for it to be merged.
+func TestThePrefixRequestCarriesTheMemoryOnce(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedLongHistory(t, st, 4)
+
+	const memory = "## Festgestellte Fakten\n- MAG-Fülldruck 1,5 bar."
+	if err := st.CreateCompaction(store.Compaction{
+		ID: "c1", ChatID: "chat-1", Trigger: triggerManual,
+		FromSeq: 1, ToSeq: 2, Summary: memory, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed compaction: %v", err)
+	}
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "## Festgestellte Fakten\n- neu"}, {Type: llm.EventDone}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	joined := ""
+	for _, m := range provider.requestAt(0).Messages {
+		joined += m.Content + "\n"
+	}
+	if strings.Contains(joined, "<existing_memory>") {
+		t.Errorf("the prefix request still quotes the memory it carries: %q", truncateForTest(joined, 500))
+	}
+	if !strings.Contains(joined, "<conversation_memory>") {
+		t.Errorf("the prefix does not carry the memory at all: %q", truncateForTest(joined, 500))
+	}
+	if got := strings.Count(joined, memory); got != 1 {
+		t.Errorf("the memory appears %d times in the summarisation request, want the system message's once: %q",
+			got, truncateForTest(joined, 500))
+	}
+}
+
+// TestThePrefixPathDoesNotReadTheDocumentAgain pins the fix that stops a fold from reading
+// attachments it is about to re-send verbatim. The assembled request already carries the
+// inlined text, so a document that has gone since the turn is not the fold's problem —
+// before this the prefix path could still fail with chat.compactionAttachment over a record
+// it never needed, and did a store round trip per attachment on every fold.
+func TestThePrefixPathDoesNotReadTheDocumentAgain(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedLongHistory(t, st, 4)
+	messages, err := st.ListMessages("chat-1")
+	if err != nil || len(messages) == 0 {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := st.CreateAttachment(store.Attachment{
+		ID: "a1", ChatID: "chat-1", MessageID: messages[0].ID, Filename: "facts.txt",
+		Placement: store.PlacementInline, DocumentID: "gone",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "## Festgestellte Fakten\n- etwas"}, {Type: llm.EventDone}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("the fold read a document the request already carried: %v", err)
+	}
+	joined := ""
+	for _, m := range provider.requestAt(0).Messages {
+		joined += m.Content + "\n"
+	}
+	if strings.Contains(joined, "<conversation>") {
+		t.Fatalf("the fold did not take the prefix path, so this test proves nothing: %q",
+			truncateForTest(joined, 300))
+	}
+}
+
+// TestTheSummaryFallsBackToATranscriptWhenThePrefixDoesNotFit is the guard on the path above:
+// re-sending the request is an improvement only while the request it makes still fits beside
+// the answer the call may write. When it does not, the transcript is what goes out.
+func TestTheSummaryFallsBackToATranscriptWhenThePrefixDoesNotFit(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	// Twelve turns whose prefix is several times the window.
+	seedLongHistory(t, st, 12)
+
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "## Festgestellte Fakten\n- etwas"}, {Type: llm.EventDone}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	if _, err := engine.Compact(context.Background(), "chat-1", CompactOptions{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	joined := ""
+	for _, m := range provider.requestAt(0).Messages {
+		joined += m.Content + "\n"
+	}
+	if !strings.Contains(joined, "### Nutzer") {
+		t.Errorf("the summariser was sent the request instead of a transcript it cannot fit: %q",
+			truncateForTest(joined, 400))
+	}
+}
+
+// TestThePrefixIsOnlyOfferedWhenItCanBeNamed pins the conditions summarisationPrefix refuses
+// on: a boundary that is not in the request, an alignment that a rewrite invalidated, and a
+// picture — a summarisation is a text request, and the images belong to the conversation.
+func TestThePrefixIsOnlyOfferedWhenItCanBeNamed(t *testing.T) {
+	assembly := Assembly{
+		Messages: []llm.Message{
+			{Role: llm.RoleSystem, Content: "Vorgaben"},
+			{Role: llm.RoleUser, Content: "Frage eins"},
+			{Role: llm.RoleAssistant, Content: "Antwort eins"},
+			{Role: llm.RoleUser, Content: "Frage zwei"},
+		},
+		MessageSeqs: []int{0, 1, 2, 3},
+	}
+	plan := CompactPlan{Needed: true, FromSeq: 1, ToSeq: 2, KeepFromSeq: 3}
+
+	prefix := summarisationPrefix(assembly, plan)
+	if len(prefix) != 3 || prefix[1].Content != "Frage eins" {
+		t.Fatalf("prefix = %+v, want the three messages above the kept turn", prefix)
+	}
+	if got := summarisationPrefix(assembly, CompactPlan{KeepFromSeq: 9}); got != nil {
+		t.Errorf("a boundary outside the request produced a prefix: %+v", got)
+	}
+	if got := summarisationPrefix(Assembly{Messages: assembly.Messages}, plan); got != nil {
+		t.Errorf("an assembly whose alignment was lost produced a prefix: %+v", got)
+	}
+	withImage := Assembly{Messages: append([]llm.Message(nil), assembly.Messages...), MessageSeqs: []int{0, 1, 2, 3}}
+	withImage.Messages[1].Images = []string{"base64…"}
+	if got := summarisationPrefix(withImage, plan); got != nil {
+		t.Errorf("a prefix carrying an image was offered to a text summarisation: %+v", got)
+	}
+}
+
+// TestEffectiveKeepTokens pins the resolution of the size bound, which nothing else covers:
+// a configured value is used as typed, and 0 derives a quarter of the limit the plan is
+// priced against, held inside 2000-15000. The clamp is the whole point of the derivation —
+// it is what stops one number from meaning "most of an 8k window" on a small model and "a
+// tenth" on a 131k one — and the ends are opencode's rather than measured here, so what they
+// mean has to be stated by a test rather than assumed.
+func TestEffectiveKeepTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configured int
+		limit      int
+		want       int
+	}{
+		// A configured value wins outright: it is the user's number, not a share of anything,
+		// so the clamp below does not apply to it.
+		{"configured", 4000, 131072, 4000},
+		{"configured below the floor is still the user's answer", 500, 131072, 500},
+		{"configured without a known limit", 4000, 0, 4000},
+		// 0 derives a quarter of the effective limit...
+		{"a quarter of a middle window", 0, 32000, 8000},
+		{"a quarter of a small window", 0, 8192, 2048},
+		// ...and is held at both ends.
+		{"clamped to the ceiling", 0, 131072, 15000},
+		{"the ceiling itself is a quarter, so it stands", 0, 60000, 15000},
+		{"clamped to the floor", 0, 4000, 2000},
+		// No limit is no quarter to take, and 0 is what leaves the walk off (PlanCompaction).
+		{"unknown limit", 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings := config.Default()
+			settings.Compact.KeepRecentTokens = tc.configured
+			if got := effectiveKeepTokens(settings, tc.limit); got != tc.want {
+				t.Fatalf("effectiveKeepTokens(configured %d, limit %d) = %d, want %d",
+					tc.configured, tc.limit, got, tc.want)
+			}
+		})
+	}
+}
+
 func summariesOf(t *testing.T, st *store.Store) []store.Compaction {
 	t.Helper()
 	list, err := st.ListCompactions("chat-1")

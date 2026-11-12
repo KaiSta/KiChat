@@ -271,6 +271,7 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		Threshold:         opts.Threshold,
 		Ceiling:           opts.Ceiling,
 		KeepRecentTurns:   effectiveKeepTurns(*chat, settings),
+		KeepRecentTokens:  effectiveKeepTokens(settings, assembly.Budget.EffectiveLimit),
 		Reserve:           settings.Compact.ReserveForResponse,
 		MaxSummaryTokens:  settings.Compact.MaxSummaryTokens,
 		Force:             opts.Force,
@@ -408,10 +409,42 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		outputTokens = 1
 	}
 	budget := PlanTranscriptBudget(limit, outputTokens+margin, overhead)
+	// The summarisation can re-send the chat's own request up to the fold boundary instead
+	// of a transcript of it (summarisationPrefix), which is what turns a fold on a local
+	// server from a full re-evaluation of the history into a cache hit. It is taken only
+	// when the request it makes still fits beside the answer the call may write: fitting is
+	// the one thing the transcript path guarantees unconditionally, so it stays the default
+	// and the prefix is the improvement, never the requirement.
+	// Only for the chat's own model. Another model never processed those bytes, so the
+	// prefix would be a full evaluation of a request larger than the transcript — the
+	// cache argument that justifies this path is exactly the argument against it there.
+	prefix := summarisationPrefix(assembly, plan)
+	if target.Backend != backendID || target.Model != modelID {
+		prefix = nil
+	}
+	usePrefix := false
+	if len(prefix) > 0 {
+		// Priced as it will be sent: the chat's messages, then the instruction alone, in
+		// the prefix path's wording, which no longer repeats the memory. The shape retry
+		// needs no allowance here — it carries the answer, not the transcript
+		// (summaryRestructure).
+		tail := summariseTail(SummarizeOptions{PreviousSummary: previous, Focus: opts.Focus, Lang: lang}, lang, true)
+		cost := llm.EstimateMessagesTokens(prefix) + llm.EstimateMessagesTokens([]llm.Message{
+			{Role: llm.RoleUser, Content: tail + "\n\n" + noThinkTag},
+		})
+		usePrefix = cost+outputTokens+margin <= limit
+	}
 	transcriptMessages := append([]store.Message(nil), toFold...)
 	type documentBlock struct{ filename, text string }
 	var documents []documentBlock
+	// Only the transcript path needs the attachment text in the blocks it renders. On the
+	// prefix path the assembled request already carries it as the text the turn sent, so
+	// reading the document again only adds a store round trip per attachment — and, when
+	// the document has gone, a failure the fold does not have any need to hit.
 	for i := range transcriptMessages {
+		if usePrefix {
+			break
+		}
 		m := &transcriptMessages[i]
 		for _, a := range m.Attachments {
 			if a.Placement != store.PlacementInline {
@@ -434,25 +467,28 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 			m.Content += "\n\n" + block
 		}
 	}
-	// Leave room for the actual transcript, not merely its role headings.
-	if budget.Total <= 0 || budget.Block <= llm.EstimateTokens(truncationMarker) {
+	// Leave room for the actual transcript, not merely its role headings. This guard, the
+	// one below it and the document check are all about the transcript path, so a run that
+	// re-sends the request instead is not refused by them.
+	if !usePrefix && (budget.Total <= 0 || budget.Block <= llm.EstimateTokens(clipMarker)) {
 		return nil, uimsg.Errorf("chat.compactionNoTranscript")
 	}
 	transcript := RenderTranscript(transcriptMessages, budget)
 	usable := false
 	for _, line := range strings.Split(transcript, "\n") {
-		switch strings.TrimSpace(line) {
-		case "", "…[gekürzt]", "### Nutzer", "### Assistent", "### Tool-Ergebnis", "### Websuche":
-		default:
+		if !transcriptIsFiller(line) {
 			usable = true
+			break
 		}
 	}
-	if !usable {
+	if !usePrefix && !usable {
 		return nil, uimsg.Errorf("chat.compactionNoTranscript")
 	}
-	for _, document := range documents {
-		if !strings.Contains(transcript, document.text) {
-			return nil, uimsg.Errorf("chat.compactionAttachmentTooLarge", document.filename)
+	if !usePrefix {
+		for _, document := range documents {
+			if !strings.Contains(transcript, document.text) {
+				return nil, uimsg.Errorf("chat.compactionAttachmentTooLarge", document.filename)
+			}
 		}
 	}
 
@@ -471,9 +507,10 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	if t, ok := target.Provider.(llm.ThinkingToggle); ok && t.CanToggleThinking() {
 		disableThinking = true
 	}
-	summary, err := Summarize(ctx, target.Provider, target.Model, SummarizeOptions{
+	summaryOptions := SummarizeOptions{
 		PreviousSummary: previous,
 		Transcript:      transcript,
+		Prefix:          prefixOrNil(prefix, usePrefix),
 		Focus:           opts.Focus,
 		Lang:            lang,
 		Temperature:     settings.Compact.SummaryTemperature,
@@ -481,9 +518,30 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		NumCtx:          target.NumCtx,
 		DisableThinking: disableThinking,
 		ContextLimit:    limit,
-	})
+	}
+	summary, err := Summarize(ctx, target.Provider, target.Model, summaryOptions)
 	if err != nil {
 		return nil, err
+	}
+	// A memory that ignored the structure it was asked for is prose, and prose is what
+	// every later turn has to search instead of scan. One restructure is cheap against
+	// that, and it is only half a validation: nothing here rejects or shortens a summary,
+	// because a memory with the wrong shape still knows more than none. A retry that
+	// also comes back shapeless leaves the first answer in place.
+	//
+	// The size gate is what stops this from doubling the cost of every fold: a second
+	// request is minutes on a CPU-hosted model, and it buys nothing for an answer short
+	// enough that its shape does not matter (summaryStructureMinTokens).
+	//
+	// The retry sends the first answer back, not the history (summaryRestructure): it asks
+	// for headings the model can add to what it already wrote, so the request that asks a
+	// second time carries a draft bounded by the output cap instead of a transcript bounded
+	// by the window — the reason a fold on a long history no longer pays twice.
+	if llm.EstimateTokens(summary) >= summaryStructureMinTokens && !summaryHasStructure(summary) {
+		if second, retryErr := Restructure(ctx, target.Provider, target.Model, summary, summaryOptions); retryErr == nil &&
+			summaryHasStructure(second) {
+			summary = second
+		}
 	}
 
 	trigger := triggerName(opts.Force)
@@ -633,6 +691,38 @@ func effectiveThreshold(chat store.Chat, settings config.Settings) float64 {
 		return settings.Compact.Threshold
 	}
 	return 0.80
+}
+
+// prefixOrNil is the prefix a run actually sends: nil when the transcript path was chosen,
+// so Summarize has one condition to test rather than two.
+func prefixOrNil(prefix []llm.Message, use bool) []llm.Message {
+	if !use {
+		return nil
+	}
+	return prefix
+}
+
+// effectiveKeepTokens is how much of the newest history a fold leaves verbatim, in
+// tokens. A configured value wins; 0 derives it from the limit the plan is priced
+// against, because the right figure is a share of what the model can hold rather than
+// one number for every backend — 15 000 tokens is most of an 8k window and a tenth of a
+// 131k one. Deriving it from EffectiveLimit rather than the window is what keeps the
+// value and the plan from disagreeing on a backend whose request ceiling binds.
+func effectiveKeepTokens(settings config.Settings, limit int) int {
+	if configured := settings.Compact.KeepRecentTokens; configured > 0 {
+		return configured
+	}
+	if limit <= 0 {
+		return 0
+	}
+	quarter := limit / 4
+	if quarter < keepTokensMin {
+		return keepTokensMin
+	}
+	if quarter > keepTokensMax {
+		return keepTokensMax
+	}
+	return quarter
 }
 
 func effectiveKeepTurns(chat store.Chat, settings config.Settings) int {

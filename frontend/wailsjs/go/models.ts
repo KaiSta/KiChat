@@ -146,6 +146,7 @@ export namespace config {
 	    midTurnCheck: boolean;
 	    threshold: number;
 	    keepRecentTurns: number;
+	    keepRecentTokens: number;
 	    reserveForResponse: number;
 	    summaryTemperature: number;
 	    maxSummaryTokens: number;
@@ -161,6 +162,7 @@ export namespace config {
 	        this.midTurnCheck = source["midTurnCheck"];
 	        this.threshold = source["threshold"];
 	        this.keepRecentTurns = source["keepRecentTurns"];
+	        this.keepRecentTokens = source["keepRecentTokens"];
 	        this.reserveForResponse = source["reserveForResponse"];
 	        this.summaryTemperature = source["summaryTemperature"];
 	        this.maxSummaryTokens = source["maxSummaryTokens"];

@@ -86,7 +86,19 @@ type PlanInput struct {
 	// form the backend publishes it in; automaticBound converts it into a ratio.
 	Ceiling int
 
-	KeepRecentTurns  int
+	KeepRecentTurns int
+	// KeepRecentTokens bounds the same kept tail by size. A turn is a unit of
+	// conversation, not of size: six of them are a few hundred tokens of short
+	// questions and several windows of tool traffic, so a keep-turns boundary alone
+	// cannot say how large the request after the fold will be. Measured: 1 910-token
+	// turns in an 8 192-token window folded to 179 % of the window, because keeping
+	// six turns is no saving at all when each turn is a quarter of the window.
+	//
+	// Zero leaves the walk off, so a caller that models only turns — every test that
+	// predates this field — gets exactly the cut it got before. It is an upper bound
+	// on the kept history and not a target: the fold never keeps more than
+	// KeepRecentTurns turns and never more than this many tokens, whichever is smaller.
+	KeepRecentTokens int
 	Reserve          int
 	MaxSummaryTokens int
 
@@ -102,10 +114,6 @@ type PlanInput struct {
 	// it would answer the question with a summary of itself while leaving the request
 	// exactly as large.
 	ProtectNewestTurn bool
-
-	// MeasuredTokens is the authoritative used-token figure, used for the
-	// before/after reporting.
-	MeasuredTokens int
 }
 
 // CompactPlan is the decision of what to fold.
@@ -354,6 +362,40 @@ func PlanCompaction(in PlanInput) CompactPlan {
 	}
 	toSeq := keepFrom - 1
 
+	// The kept tail is a size as well as a count. A turn says how much of the
+	// conversation stays verbatim, not how much of the window it costs, so the walk
+	// below folds whole turns — oldest first — until the tail that is left is inside the
+	// token budget. Folding a turn moves the cut forward, towards the newest message; it
+	// stops before that message's own turn, because that is the exchange being answered
+	// and folding it would take the question into the memory.
+	//
+	// The cut stays on user boundaries (invariant 3), so a turn is not split to make
+	// room and a single turn larger than the budget leaves the tail over it. That is the
+	// one shape this cannot fix, and the honest answer there is the fold plus whatever the
+	// target walk does — not a prompt that begins on an assistant message.
+	if in.KeepRecentTokens > 0 && toSeq >= fromSeq {
+		spans := turnTokenSpans(in.Messages, userSeqs)
+		kept := 0
+		for _, m := range in.Messages {
+			if m.Seq >= keepFrom {
+				kept += llm.EstimateTokens(m.Content) + llm.EstimateTokens(m.Reasoning)/2
+			}
+		}
+		idx := 0
+		for i, seq := range userSeqs {
+			if seq >= keepFrom {
+				idx = i
+				break
+			}
+		}
+		for kept > in.KeepRecentTokens && idx+1 < len(userSeqs) {
+			idx++
+			keepFrom = userSeqs[idx]
+			kept -= spans[idx-1]
+			toSeq = keepFrom - 1
+		}
+	}
+
 	// A fold exists to make a request smaller, so it has to produce a real cut even
 	// when the chat is shorter than keepTurns: otherwise the run reports "nothing to
 	// compact" while there is history that could be summarised.
@@ -579,6 +621,9 @@ Regeln:
 - Erfinde nichts. Wenn etwas unklar blieb, schreibe es unter "Offene Punkte".
 - Befunde — was geprüft wurde, was dabei herauskam, mit Datei, Zeile und dem, was daran falsch ist — übernimm als je einen Stichpunkt, Bezeichner und Pfade WÖRTLICH. Die Kürze unten gilt für sie nicht: ein Befund, den man aus diesem Gedächtnis nicht mehr umsetzen kann, ist verloren.
 - Fasse dich kurz: Stichpunkte, keine Prosa, keine Wiederholungen.
+- Halte den Stand der Arbeit fest, soweit er aus dem Verlauf hervorgeht: was erledigt ist, was noch offen ist und was der nächste Schritt ist.
+- Lass weg, was der nächsten Anfrage ohnehin mitgeht: die Systemvorgaben, die AGENTS.md-Dateien des Projekts und die Tool-Beschreibungen. Was der Nutzer selbst verlangt hat, gehört ins Gedächtnis.
+- Erwähne die Kompaktierung nicht und schreibe nicht, dass Kontext verdichtet wurde.
 
 Antworte ausschließlich mit Markdown in genau dieser Struktur:
 
@@ -607,6 +652,9 @@ Rules:
 - Invent nothing. If something stayed unclear, write it under "Open questions".
 - Carry findings — what was examined, what came of it, the file, the line and what is wrong there — as one bullet each, with identifiers and paths VERBATIM. The brevity rule below does not apply to them: a finding that cannot be acted on from this memory alone has been lost.
 - Be brief: bullet points, no prose, no repetition.
+- Record the state of the work as far as the transcript shows it: what is done, what is still open, and what the next step is.
+- Leave out what the next request carries anyway: the system instructions, the project's AGENTS.md files, and the tool descriptions. What the user asked for themselves belongs in the memory.
+- Do not mention the compaction or that context was compacted.
 
 Answer only with Markdown in exactly this structure:
 
@@ -635,6 +683,9 @@ const summaryPromptZH = `你将一段对话的历史压缩为持久记忆。
 - 不要编造。仍不清楚的内容写入“未决问题”。
 - 发现——检查了什么、结果如何、哪个文件的哪一行、那里错在哪里——每条发现单独一条要点，标识符与路径必须逐字保留。下方的“简明”规则不适用于它们：如果无法仅凭这份记忆着手处理，这条发现就已经丢失。
 - 简明：用要点，不写散文，不重复。
+- 记录工作进展（以记录所及为限）：已完成什么、还欠什么、下一步是什么。
+- 省略下一次请求本来就会带上的内容：系统提示、项目的 AGENTS.md 文件和工具说明。用户自己提出的要求属于记忆。
+- 不要提及压缩，也不要说明上下文曾被压缩。
 
 只输出以下结构的 Markdown：
 
@@ -654,6 +705,87 @@ const summaryPromptZH = `你将一段对话的历史压缩为持久记忆。
 - ...
 
 某一节为空时省略。`
+
+// summaryRestructure is the second request: the first answer sent back for the shape it did
+// not have. The check that asks for it only fires when the answer carried none of the
+// contract's sections, so the sections it is missing are the structure itself — and the
+// material for it is the answer, not the conversation it was distilled from.
+//
+// Sending the draft instead of the transcript is the whole point. The retry used to re-send
+// the fold's history — up to 80% of the window, minutes of prompt on a CPU-hosted model, and
+// a request no prefix cache could hit because of the appended sentence — to ask for headings
+// that the model could add to what it had already written. The draft is bounded by the
+// summariser's output cap, so the second call costs a fraction of the first.
+func summaryRestructure(draft, lang string) string {
+	var sb strings.Builder
+	switch promptLanguage(lang) {
+	case config.LangGerman:
+		sb.WriteString("Übernimm das folgende Gedächtnis in die Struktur, die der Vertrag oben verlangt:\n\n")
+		sb.WriteString("<draft>\n")
+		sb.WriteString(draft)
+		sb.WriteString("\n</draft>\n\n")
+		sb.WriteString("Antworte nur mit dem Gedächtnis: ##-Überschriften wie im Vertrag, keine Vorrede. ")
+		sb.WriteString("Lass keine Tatsache weg und erfinde nichts hinzu.")
+	case config.LangChinese:
+		sb.WriteString("请将下面的记忆改写成上面约定要求的结构：\n\n")
+		sb.WriteString("<draft>\n")
+		sb.WriteString(draft)
+		sb.WriteString("\n</draft>\n\n")
+		sb.WriteString("只输出记忆：使用约定要求的 ## 标题，不要前言。不要遗漏任何事实，也不要添加任何内容。")
+	default:
+		sb.WriteString("Recast the memory below into the structure the contract above requires:\n\n")
+		sb.WriteString("<draft>\n")
+		sb.WriteString(draft)
+		sb.WriteString("\n</draft>\n\n")
+		sb.WriteString("Answer with only the memory: the ## headings the contract defines, no preamble. ")
+		sb.WriteString("Leave no fact out and add nothing.")
+	}
+	return sb.String()
+}
+
+// summaryHeadings are the section titles the three contracts ask for. They are listed
+// together rather than per language because a model may answer in the transcript's
+// language instead of the interface's, and a memory that used the other language's
+// headings followed the structure even though it is not the one that was requested.
+var summaryHeadings = map[string]bool{
+	"Festgestellte Fakten": true, "Entscheidungen": true,
+	"Befunde & offene Arbeit": true, "Offene Punkte": true, "Quellen": true,
+	"Dateien & Dokumente": true, "Vorgaben & Präferenzen": true,
+
+	"Established facts": true, "Decisions": true,
+	"Findings & work in progress": true, "Open questions": true, "Sources": true,
+	"Files & documents": true, "Requirements & preferences": true,
+
+	"已确认的事实": true, "决定": true, "发现与未完成的工作": true,
+	"未决问题": true, "来源": true, "文件与文档": true, "要求与偏好": true,
+}
+
+// summaryStructureMinTokens is how long a shapeless memory has to be before it is worth
+// asking again. The nudge costs a second summary request, and on a CPU-hosted local model
+// that is minutes: worth paying for a page of prose that every later turn has to search,
+// not worth paying for the three words a model that ignored the instruction usually
+// produces — there the answer is a different model, not a different prompt. It is also
+// about two thirds of the default memory target (MaxSummaryTokens 1200), so a memory of
+// the size the contract asks for is the one this rule is about.
+const summaryStructureMinTokens = 400
+
+// summaryHasStructure reports whether a memory carries at least one of the sections it
+// was asked for. It deliberately does not judge the content: the question worth asking
+// is whether the shape was followed at all, because one retry fixes that, while drifting
+// prose is not something a second request reliably repairs — and a memory with the wrong
+// shape still knows more than no memory at all.
+func summaryHasStructure(summary string) bool {
+	for _, line := range strings.Split(summary, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "##") {
+			continue
+		}
+		if summaryHeadings[strings.TrimSpace(strings.TrimLeft(line, "#"))] {
+			return true
+		}
+	}
+	return false
+}
 
 // summaryOutputTokens is the summariser's default output cap. It is deliberately
 // generous and independent of the target summary size: `max_tokens` bounds a
@@ -710,6 +842,51 @@ func stripThinking(text string) (answer, thinking string) {
 	return strings.TrimSpace(answer), strings.TrimSpace(strings.Join(blocks, "\n"))
 }
 
+// summarisationPrefix returns the chat's own request up to the fold boundary — the system
+// message, the memory in force and the history before the fold — so a summarisation can
+// re-send it unchanged instead of writing a transcript of those messages.
+//
+// It exists for the prompt cache, and the arithmetic is the whole argument. The user's last
+// turn sent exactly this prefix; a summary request that opens with the same bytes is a hit
+// for it on any server that caches a prefix, which on a CPU-hosted llama.cpp server is the
+// difference between reading the history and evaluating it again — most of the minutes a
+// fold takes. A re-rendered transcript is different bytes (its own headings, distilled
+// search payloads, clipped blocks), so it is always a miss.
+//
+// It is also lossless in a way the transcript is not: no distillation, no clipping, no
+// `(nur Reasoning)` substitution. That is why it is offered first, with the transcript kept
+// as the fallback for the request that would not fit.
+//
+// Nothing is returned when the boundary cannot be named — `MessageSeqs` is nil after a
+// rewrite that changed the request's shape — when the kept range does not begin inside the
+// request, when the prefix would be the system message alone (no history to summarise), or
+// when it carries an image: a summarisation is a text request, and the pictures belong to
+// the conversation, not to the instruction asking about it.
+func summarisationPrefix(assembly Assembly, plan CompactPlan) []llm.Message {
+	seqs := assembly.MessageSeqs
+	if plan.KeepFromSeq <= 0 || len(seqs) != len(assembly.Messages) {
+		return nil
+	}
+	end := -1
+	for i, seq := range seqs {
+		if seq == plan.KeepFromSeq {
+			end = i
+			break
+		}
+	}
+	// end <= 1 would leave the system message alone above the instruction, which carries no
+	// history at all — the transcript path is the honest answer there.
+	if end <= 1 {
+		return nil
+	}
+	for _, m := range assembly.Messages[:end] {
+		if len(m.Images) > 0 {
+			return nil
+		}
+	}
+	return append([]llm.Message(nil), assembly.Messages[:end]...)
+}
+
 // Summarize folds the plan's range into a memory summary. When a previous
 // summary exists it is merged in, which keeps the cost of repeated compaction
 // linear in the number of messages rather than quadratic.
@@ -722,24 +899,51 @@ func stripThinking(text string) (answer, thinking string) {
 // back. The content itself stays bounded: the extra budget goes to the thinking,
 // not to a larger memory.
 func Summarize(ctx context.Context, p llm.Provider, model string, opts SummarizeOptions) (string, error) {
+	lang := promptLanguage(opts.Lang)
+	var userPrompt string
+	if len(opts.Prefix) > 0 {
+		// The prefix path: the chat's own request up to the fold boundary, then the
+		// instruction on its own. No `<conversation>` wrapper and no transcript, because
+		// the prefix already is the conversation — unchanged, which is what lets a server
+		// holding it in its prompt cache read it instead of evaluating those tokens again.
+		userPrompt = summariseTail(opts, lang, true)
+	} else {
+		userPrompt = summarisePrompt(opts)
+	}
 	// Ask the model not to think. A summary is a mechanical task, and `max_tokens`
 	// bounds thinking and answer together, so a reasoning model that thinks first
 	// can spend the whole budget before writing a word. `/no_think` is the in-prompt
 	// soft switch — the only lever that reaches a local backend with no reasoning
 	// parameter (LM Studio). A model that does not know the tag treats it as an
 	// ignorable trailing note.
-	return extractWithBudget(ctx, p, model, summarySystemPrompt(opts.Lang),
-		summarisePrompt(opts)+"\n\n"+noThinkTag, extractionOptions{
-			Temperature:     opts.Temperature,
-			MaxTokens:       opts.MaxTokens,
-			NumCtx:          opts.NumCtx,
-			DisableThinking: opts.DisableThinking,
-			ContextLimit:    opts.ContextLimit,
-			FailureCode:     "chat.summaryFailed",
-			EmptyCode:       "chat.summaryEmpty",
-			BudgetCode:      "chat.summaryBudgetSpent",
-			TruncatedError:  uimsg.Errorf("chat.summaryTruncated"),
-		})
+	return extractWithBudget(ctx, p, model, opts.Prefix, summarySystemPrompt(opts.Lang),
+		userPrompt+"\n\n"+noThinkTag, summaryExtraction(opts))
+}
+
+// Restructure asks for the shape again, and only for the shape. It is a separate entry point
+// rather than a flag on Summarize because it summarises nothing: there is no transcript and
+// no prefix to send, only the first answer to recast (summaryRestructure), which is what makes
+// the second call cheaper than the first instead of a second full pass over the history.
+func Restructure(ctx context.Context, p llm.Provider, model, draft string, opts SummarizeOptions) (string, error) {
+	return extractWithBudget(ctx, p, model, nil, summarySystemPrompt(opts.Lang),
+		summaryRestructure(draft, opts.Lang)+"\n\n"+noThinkTag, summaryExtraction(opts))
+}
+
+// summaryExtraction is the half the two summary requests share: the same temperature, cap and
+// failure codes, so a restructure fails the way the call it repairs would have failed instead
+// of inventing a second set of outcomes for the same work.
+func summaryExtraction(opts SummarizeOptions) extractionOptions {
+	return extractionOptions{
+		Temperature:     opts.Temperature,
+		MaxTokens:       opts.MaxTokens,
+		NumCtx:          opts.NumCtx,
+		DisableThinking: opts.DisableThinking,
+		ContextLimit:    opts.ContextLimit,
+		FailureCode:     "chat.summaryFailed",
+		EmptyCode:       "chat.summaryEmpty",
+		BudgetCode:      "chat.summaryBudgetSpent",
+		TruncatedError:  uimsg.Errorf("chat.summaryTruncated"),
+	}
 }
 
 // extractionOptions are what a bounded, prompted extraction needs regardless of
@@ -775,8 +979,8 @@ type extractionOptions struct {
 // both have exactly the same failure to survive and neither should reinvent the
 // arithmetic for it: the retry grows the budget by the reasoning that actually came
 // back, measured rather than guessed.
-func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt, userPrompt string,
-	opts extractionOptions) (string, error) {
+func extractWithBudget(ctx context.Context, p llm.Provider, model string, prefix []llm.Message,
+	systemPrompt, userPrompt string, opts extractionOptions) (string, error) {
 	if p == nil {
 		return "", uimsg.Errorf("chat.noBackend")
 	}
@@ -784,9 +988,20 @@ func extractWithBudget(ctx context.Context, p llm.Provider, model, systemPrompt,
 	if temp <= 0 {
 		temp = 0.2
 	}
-	messages := []llm.Message{
-		{Role: llm.RoleSystem, Content: systemPrompt},
-		{Role: llm.RoleUser, Content: userPrompt},
+	// A prefix is the caller's own request, resent as it stands; without one this is the
+	// system-prompt + transcript shape both callers share. Either way the instruction is
+	// the last message, so the prompt's own tokens are what the retry arithmetic below
+	// measures.
+	var messages []llm.Message
+	if len(prefix) > 0 {
+		messages = make([]llm.Message, 0, len(prefix)+1)
+		messages = append(messages, prefix...)
+		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: userPrompt})
+	} else {
+		messages = []llm.Message{
+			{Role: llm.RoleSystem, Content: systemPrompt},
+			{Role: llm.RoleUser, Content: userPrompt},
+		}
 	}
 	promptTokens := llm.EstimateMessagesTokens(messages)
 
@@ -884,15 +1099,35 @@ func emptyExtractionError(out completion, emptyCode, budgetCode string) error {
 	return uimsg.Errorf(emptyCode)
 }
 
-// summarisePrompt builds the user message of a summarisation call. It is split
-// out of Summarize so the transcript budget can be measured against exactly the
-// text that will be sent: the wrappers, the existing memory it has to merge and
-// the focus line all share the window with the transcript, so they are charged
-// before its allowance is set.
-func summarisePrompt(opts SummarizeOptions) string {
-	lang := promptLanguage(opts.Lang)
+// summariseTail is the instruction that follows the history: the existing memory it has to
+// merge, the request itself, and the focus line. It is split out of summarisePrompt because
+// the two paths place it differently — the transcript path wraps it around a rendered
+// `<conversation>`, while the prefix path appends it to the chat's own messages, where the
+// history is already above it.
+//
+// memoryAbove says the memory in force is already in the request: on the prefix path it is
+// the system message's `<conversation_memory>`, so quoting it again as `<existing_memory>`
+// would charge the fold for it twice and ask the model to "merge both" about one text. The
+// instruction then names where it is instead. That costs a second wording of the merge
+// sentence per language, which is worth paying: it is the sentence that keeps a fold from
+// silently dropping the old memory, because a model told only "compact the following
+// history" writes a memory of the new messages.
+func summariseTail(opts SummarizeOptions, lang string, memoryAbove bool) string {
 	var sb strings.Builder
-	if opts.PreviousSummary != "" {
+	switch {
+	case opts.PreviousSummary != "" && memoryAbove:
+		switch lang {
+		case config.LangGerman:
+			sb.WriteString("Das Gedächtnis im System-Prompt oben deckt die älteren Nachrichten ab. ")
+			sb.WriteString("Führe es mit dem folgenden Verlauf zu EINEM Gedächtnis zusammen, ohne Informationen zu verlieren.\n\n")
+		case config.LangChinese:
+			sb.WriteString("系统提示中上方的记忆已涵盖较早的消息。")
+			sb.WriteString("请将其与以下记录合并为一份记忆，不要丢失任何信息。\n\n")
+		default:
+			sb.WriteString("The memory in the system prompt above already covers the older messages. ")
+			sb.WriteString("Merge it with the following history into ONE memory without losing information.\n\n")
+		}
+	case opts.PreviousSummary != "":
 		sb.WriteString("<existing_memory>\n")
 		sb.WriteString(opts.PreviousSummary)
 		sb.WriteString("\n</existing_memory>\n\n")
@@ -906,7 +1141,7 @@ func summarisePrompt(opts SummarizeOptions) string {
 			sb.WriteString("The following transcript continues the existing memory. ")
 			sb.WriteString("Merge both into ONE memory without losing information.\n\n")
 		}
-	} else {
+	default:
 		switch lang {
 		case config.LangGerman:
 			sb.WriteString("Komprimiere den folgenden Verlauf zu einem Gedächtnis.\n\n")
@@ -928,6 +1163,18 @@ func summarisePrompt(opts SummarizeOptions) string {
 		sb.WriteString(opts.Focus)
 		sb.WriteString("\n\n")
 	}
+	return sb.String()
+}
+
+// summarisePrompt builds the user message of a transcript-path summarisation: the tail
+// instruction with the rendered transcript inside it. It is split out of Summarize so the
+// transcript budget can be measured against exactly the text that will be sent — the
+// wrappers, the existing memory it has to merge and the focus line all share the window
+// with the transcript, so they are charged before its allowance is set.
+func summarisePrompt(opts SummarizeOptions) string {
+	lang := promptLanguage(opts.Lang)
+	var sb strings.Builder
+	sb.WriteString(summariseTail(opts, lang, false))
 	sb.WriteString("<conversation>\n")
 	sb.WriteString(opts.Transcript)
 	sb.WriteString("\n</conversation>")
@@ -938,7 +1185,13 @@ func summarisePrompt(opts SummarizeOptions) string {
 type SummarizeOptions struct {
 	PreviousSummary string
 	Transcript      string
-	Focus           string
+	// Prefix is the chat's own request up to the fold boundary, to be re-sent as it stands
+	// instead of a transcript of it (summarisationPrefix). It is there for the prompt
+	// cache: a local server has just processed exactly these tokens for the user's turn, so
+	// a request that starts with the same bytes reads them instead of evaluating them —
+	// minutes of prompt on a CPU-hosted model. An empty Prefix keeps the transcript path.
+	Prefix []llm.Message
+	Focus  string
 	// Lang is the app's language (Settings → Language), which decides the
 	// language of the memory and of the prompt that asks for it. It is the
 	// setting rather than the transcript's language: the user chose it for the
@@ -973,6 +1226,24 @@ const (
 	// page-sized payload cannot claim all of it. Four holds a single block to a
 	// quarter, which is what stops a fold from becoming a summary of a web page.
 	transcriptBlockDivisor = 4
+	// transcriptShortDivisor is the second rung of the ladder: when the whole
+	// transcript does not fit, every message is first shortened to a quarter of its
+	// block before any message is left out, so detail leaves the oldest history first
+	// and whole messages disappear only as a last resort. Four rather than a larger
+	// divisor because shortening is uniform text loss here: a sixteenth would turn every
+	// message into a fragment before a single one was dropped.
+	transcriptShortDivisor = 4
+)
+
+const (
+	// keepTokensMin and keepTokensMax bound the tail derived from the window when no
+	// size was configured. Below the floor a fold keeps so little that the memory
+	// carries the exchange the user is working on; above the ceiling it keeps more
+	// than a conversation usually holds, so the fold would save nothing. Both numbers
+	// are opencode's (keep.tokens 15000, clamped to 2000-15000), which is the only
+	// evidence available — this app has no measurement of its own for either end.
+	keepTokensMin = 2000
+	keepTokensMax = 15000
 )
 
 // PlanTranscriptBudget derives the summarisation transcript's allowance from the
@@ -1009,46 +1280,146 @@ func PlanTranscriptBudget(contextLimit, reserveTokens, overheadTokens int) Trans
 // RenderTranscript flattens messages into a plain transcript for summarisation,
 // marking tool activity so the summary can record what was actually looked up.
 //
-// The budget bounds it at both levels: every message is cut to budget.Block, and
-// the finished transcript to budget.Total.
+// The budget bounds it at two levels: every message is cut to budget.Block, and the
+// finished transcript to budget.Total. The second level is a ladder rather than one cut
+// of the finished text, because that cut dropped the text's tail — the newest folded
+// messages, which are exactly the ones that join the memory to the turns kept verbatim.
+// So messages are shortened oldest first, every message reaches the shorter rung before
+// any is left out, and the newest one is shortened but never left out.
 func RenderTranscript(messages []store.Message, budget TranscriptBudget) string {
-	var sb strings.Builder
+	shortLimit := budget.Block / transcriptShortDivisor
+	blocks := make([][2]string, 0, len(messages))
 	for _, m := range messages {
-		switch m.Role {
-		case "system":
-			// A seeded search message is a system message, and it is usually the
-			// largest thing a fold removes. Only its sources are worth carrying
-			// into the memory, so the payload is distilled to them rather than
-			// excerpted — see renderSearchSources.
-			sources := renderSearchSources(m.Content, budget.Block)
-			if sources == "" {
-				continue
-			}
-			fmt.Fprintf(&sb, "\n### Websuche\n%s\n", sources)
-		case "user":
-			if m.Content == "" {
-				continue
-			}
-			fmt.Fprintf(&sb, "\n### Nutzer\n%s\n", cutToTokens(m.Content, budget.Block))
-		case "assistant":
-			body := m.Content
-			if m.Reasoning != "" && body == "" {
-				body = "(nur Reasoning)"
-			}
-			if body == "" && m.ToolCallsJSON == "" {
-				continue
-			}
-			fmt.Fprintf(&sb, "\n### Assistent\n%s\n", cutToTokens(body, budget.Block))
-			if m.ToolCallsJSON != "" {
-				fmt.Fprintf(&sb, "(Tool-Aufruf: %s)\n", m.ToolCallsJSON)
-			}
-		case "tool":
-			fmt.Fprintf(&sb, "\n### Tool-Ergebnis\n%s\n", cutToTokens(m.Content, budget.Block))
+		whole := renderTranscriptMessage(m, budget.Block)
+		if whole == "" {
+			continue
+		}
+		short := renderTranscriptMessage(m, shortLimit)
+		if short == "" || llm.EstimateTokens(short) >= llm.EstimateTokens(whole) {
+			short = whole
+		}
+		blocks = append(blocks, [2]string{whole, short})
+	}
+	if len(blocks) == 0 {
+		return ""
+	}
+
+	// The note a cut transcript carries is paid for before what to keep is chosen, so
+	// the sentence that says how much was left out cannot be the thing that overshoots
+	// the budget. A note that would cost more than half the budget is dropped instead:
+	// on a transcript that small the note is most of what the model would read.
+	note := omissionNote(len(blocks))
+	budgetCarriesNote := llm.EstimateTokens(note)*2 <= budget.Total
+	if !budgetCarriesNote {
+		note = ""
+	}
+	room := budget.Total - llm.EstimateTokens(note)
+
+	// 0 whole, 1 shortened, 2 left out.
+	level := make([]int, len(blocks))
+	total := 0
+	for _, b := range blocks {
+		total += llm.EstimateTokens(b[0])
+	}
+	for i := range blocks {
+		if total <= room {
+			break
+		}
+		total += llm.EstimateTokens(blocks[i][1]) - llm.EstimateTokens(blocks[i][0])
+		level[i] = 1
+	}
+	for i := 0; i < len(blocks)-1 && total > room; i++ {
+		total -= llm.EstimateTokens(blocks[i][level[i]])
+		level[i] = 2
+	}
+
+	var sb strings.Builder
+	omitted := 0
+	for _, l := range level {
+		if l == 2 {
+			omitted++
 		}
 	}
-	// The per-message cap bounds each message, not the transcript: enough
-	// messages still add up past the window of the model that has to read them.
-	return cutToTokens(sb.String(), budget.Total)
+	if omitted > 0 && budgetCarriesNote {
+		// Not written when the note itself did not fit: a transcript that small is
+		// mostly note, and the count is worth less than the request's budget being
+		// respected — the older messages are gone either way, and the blocks that did
+		// survive are what the model has to work with.
+		sb.WriteString(omissionNote(omitted))
+		sb.WriteString("\n")
+	}
+	for i, b := range blocks {
+		if level[i] == 2 {
+			continue
+		}
+		sb.WriteString(b[level[i]])
+	}
+	return sb.String()
+}
+
+// renderTranscriptMessage renders one stored message as a transcript block at a body
+// allowance of limit tokens. An empty string means the message contributes nothing.
+func renderTranscriptMessage(m store.Message, limit int) string {
+	var sb strings.Builder
+	switch m.Role {
+	case "system":
+		// A seeded search message is a system message, and it is usually the
+		// largest thing a fold removes. Only its sources are worth carrying
+		// into the memory, so the payload is distilled to them rather than
+		// excerpted — see renderSearchSources.
+		sources := renderSearchSources(m.Content, limit)
+		if sources == "" {
+			return ""
+		}
+		fmt.Fprintf(&sb, "\n### Websuche\n%s\n", sources)
+	case "user":
+		if m.Content == "" {
+			return ""
+		}
+		fmt.Fprintf(&sb, "\n### Nutzer\n%s\n", clipToTokens(m.Content, limit))
+	case "assistant":
+		body := m.Content
+		if m.Reasoning != "" && body == "" {
+			body = "(nur Reasoning)"
+		}
+		if body == "" && m.ToolCallsJSON == "" {
+			return ""
+		}
+		fmt.Fprintf(&sb, "\n### Assistent\n%s\n", clipToTokens(body, limit))
+		if m.ToolCallsJSON != "" {
+			// The arguments are bounded too: a write_file call carries a whole file,
+			// which used to reach the summariser unbounded at the end of a block.
+			fmt.Fprintf(&sb, "(Tool-Aufruf: %s)\n", clipToTokens(m.ToolCallsJSON, limit))
+		}
+	case "tool":
+		fmt.Fprintf(&sb, "\n### Tool-Ergebnis\n%s\n", clipToTokens(m.Content, limit))
+	}
+	return sb.String()
+}
+
+// omissionNote is how a shortened transcript says how much of it was left out. It is
+// model-facing text, like the section headings, so it follows them rather than the
+// interface language.
+func omissionNote(omitted int) string {
+	switch omitted {
+	case 0:
+		return ""
+	case 1:
+		return "[1 ältere Nachricht ausgelassen]"
+	default:
+		return fmt.Sprintf("[%d ältere Nachrichten ausgelassen]", omitted)
+	}
+}
+
+// transcriptIsFiller reports whether a transcript line is one of the notes a fold adds
+// rather than something the conversation said. It is what tells "the transcript said
+// nothing" apart from "it said only that it had been cut".
+func transcriptIsFiller(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "### ") {
+		return true
+	}
+	return strings.HasPrefix(line, "…[gekürzt]") || strings.HasSuffix(line, "ausgelassen]")
 }
 
 // searchSourceHeading matches the line that opens one source in a seeded search
@@ -1119,19 +1490,32 @@ func renderSearchSources(content string, maxTokens int) string {
 	return cutToTokens(out, maxTokens)
 }
 
-// truncationMarker closes a cut block. Its cost is counted inside the budget,
-// not added on top of it: the budget is what bounds the request, so a block that
+// truncationMarker closes a block that was cut at its end. Its cost is counted inside the
+// budget, not added on top of it: the budget is what bounds the request, so a block that
 // overshoots it by the marker is exactly the overshoot the bound exists to stop.
 const truncationMarker = "\n…[gekürzt]"
 
-// cutToTokens trims s to a token budget, cutting between runes and marking the
-// cut so the summariser can tell a short message from a shortened one. The result
-// never estimates above budget.
+// clipMarker sits between the two halves of a block that was cut in the middle. It is a
+// second marker rather than the same one twice because the two cuts mean different
+// things: truncationMarker says the text continues after this point, which is true of a
+// document summarised from its beginning (clipToTokens is not used there for that
+// reason), while this one says text was removed from the middle.
+const clipMarker = "\n…[gekürzt]…\n"
+
+// cutToTokens trims s to a token budget from the end, cutting between runes and marking
+// the cut so the reader can tell a short text from a shortened one. The result never
+// estimates above budget.
 //
-// The cut position is found by bisecting against llm.EstimateTokens rather than
-// by converting tokens into characters: the budget is expressed in the
-// estimator's own unit, and a characters-per-token constant would only
-// approximate the number it was derived from.
+// It keeps the beginning, which is the right cut whenever the text is a prefix of
+// something larger: a document condensed for the summariser, a tool result cut to the
+// room a request has left. Those callers say "the first N tokens were read", and a cut
+// that also carried the end would make that sentence false. Transcript blocks want the
+// other cut — see clipToTokens.
+//
+// The cut position is found by bisecting against llm.EstimateTokens rather than by
+// converting tokens into characters: the budget is expressed in the estimator's own unit,
+// and a characters-per-token constant would only approximate the number it was derived
+// from.
 func cutToTokens(s string, budget int) string {
 	if budget <= 0 {
 		return ""
@@ -1145,19 +1529,79 @@ func cutToTokens(s string, budget int) string {
 	if room < 0 {
 		return ""
 	}
-	// Bisecting over runes means a cut can never split one, so the result is
-	// always valid UTF-8. EstimateTokens counts per character class and is
-	// additive across a concatenation, and the marker opens with a newline, so
-	// the cut text plus the marker cannot exceed the budget it was given.
 	runes := []rune(s)
+	head := longestPrefix(runes, room)
+	if head == 0 {
+		return ""
+	}
+	return string(runes[:head]) + truncationMarker
+}
+
+// clipToTokens trims s to a token budget, keeping both its beginning and its end.
+//
+// A head-only cut of a tool result drops the part that usually carries the answer: a build
+// log's failure line, a test run's summary, the last entries of a listing. In a transcript
+// block there is no "rest of the document" for the marker to point at — the block is the
+// whole message — so losing the end loses the conclusion, and the two halves share the
+// allowance instead.
+func clipToTokens(s string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	if llm.EstimateTokens(s) <= budget {
+		return s
+	}
+	room := budget - llm.EstimateTokens(clipMarker)
+	if room < 0 {
+		return ""
+	}
+	runes := []rune(s)
+	head := longestPrefix(runes, room/2)
+	// The tail gets whatever the head did not need, so the marker is paid for once and
+	// the two halves still fit the budget they were given.
+	tail := longestSuffix(runes, room-llm.EstimateTokens(string(runes[:head])))
+	if head+tail > len(runes) {
+		// Two allowances that fit separately can still cover the whole text between them,
+		// and then the same runes would be printed twice around the marker. The head's
+		// cut is the one that was measured first; the tail gives the overlap back.
+		tail = len(runes) - head
+	}
+	if head == 0 && tail == 0 {
+		return ""
+	}
+	return string(runes[:head]) + clipMarker + string(runes[len(runes)-tail:])
+}
+
+// longestPrefix is the largest n whose first n runes estimate within budget.
+func longestPrefix(runes []rune, budget int) int {
+	if budget <= 0 {
+		return 0
+	}
 	lo, hi := 0, len(runes)
 	for lo < hi {
 		mid := lo + (hi-lo+1)/2
-		if llm.EstimateTokens(string(runes[:mid])) <= room {
+		if llm.EstimateTokens(string(runes[:mid])) <= budget {
 			lo = mid
 		} else {
 			hi = mid - 1
 		}
 	}
-	return string(runes[:lo]) + truncationMarker
+	return lo
+}
+
+// longestSuffix is the largest n whose last n runes estimate within budget.
+func longestSuffix(runes []rune, budget int) int {
+	if budget <= 0 {
+		return 0
+	}
+	lo, hi := 0, len(runes)
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		if llm.EstimateTokens(string(runes[len(runes)-mid:])) <= budget {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo
 }

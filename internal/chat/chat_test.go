@@ -807,6 +807,181 @@ func TestCutToTokensKeepsItsBudgetAndItsRunes(t *testing.T) {
 	}
 }
 
+// TestClipToTokensKeepsBothEnds is the difference between a transcript block and a
+// document. A block is the whole message, so its end is the conclusion — a build log's
+// failure line, a test run's summary — and cutting only the head summarised the setup and
+// none of the result.
+func TestClipToTokensKeepsBothEnds(t *testing.T) {
+	text := strings.Repeat("Anfang. ", 300) +
+		strings.Repeat("Mitte. ", 300) +
+		"Das Protokoll endet mit Exit-Code 2."
+	clip := clipToTokens(text, 80)
+	if !utf8.ValidString(clip) {
+		t.Fatalf("clipToTokens produced invalid UTF-8: %q", clip)
+	}
+	if !strings.HasPrefix(clip, "Anfang.") {
+		t.Errorf("the beginning was lost: %q", clip)
+	}
+	if !strings.HasSuffix(clip, "Exit-Code 2.") {
+		t.Errorf("the end — the line the block exists for — was lost: %q", clip)
+	}
+	if !strings.Contains(clip, "…[gekürzt]…") {
+		t.Errorf("the cut was not marked: %q", clip)
+	}
+	if est := llm.EstimateTokens(clip); est > 80 {
+		t.Errorf("clipToTokens returned %d tokens for an 80-token budget: %q", est, clip)
+	}
+}
+
+// TestRenderTranscriptDropsTheOldestAndKeepsTheNewest pins the order of the ladder.
+// The cut this replaced ran over the finished text, so a transcript that overflowed lost
+// its tail — the newest folded messages, which are the ones that join the memory to the
+// turns kept verbatim. The oldest history has to go first, and the newest message may not
+// go at all.
+func TestRenderTranscriptDropsTheOldestAndKeepsTheNewest(t *testing.T) {
+	var messages []store.Message
+	for i := 1; i <= 40; i++ {
+		messages = append(messages, msg(i, "user",
+			fmt.Sprintf("Frage %d: ", i)+strings.Repeat("x", 400)))
+	}
+	budget := TranscriptBudget{Total: 300, Block: 75}
+	out := RenderTranscript(messages, budget)
+	if !strings.Contains(out, "Frage 40:") {
+		t.Fatalf("the newest message was cut out of the transcript: %q", out)
+	}
+	if strings.Contains(out, "Frage 1:") {
+		t.Errorf("the oldest message survived a transcript several times its budget: %q", out)
+	}
+	if !strings.Contains(out, "ältere Nachrichten ausgelassen") {
+		t.Errorf("the transcript does not say what it left out: %q", out)
+	}
+	if est := llm.EstimateTokens(out); est > budget.Total {
+		t.Errorf("the transcript is %d tokens against a %d-token budget", est, budget.Total)
+	}
+}
+
+// TestTheKeptTailIsABudgetNotATurnCount pins the size half of the keep rule. A turn says
+// how much of the conversation stays verbatim, not how much of the window it costs, so a
+// keep-turns boundary alone cannot say how large the request after the fold will be:
+// measured, 1 910-token turns in an 8 192-token window folded at 80 % and left 179 % of
+// the window, because six turns are no saving when each turn is a quarter of it.
+func TestTheKeptTailIsABudgetNotATurnCount(t *testing.T) {
+	const limit = 8192
+	messages := bigConversation(10, 2000)
+	plan := PlanCompaction(PlanInput{
+		Messages: messages,
+		Budget: ContextBudget{
+			Limit: limit, EffectiveLimit: limit,
+			Projected: 7500, ProjectedRatio: 7500.0 / limit,
+		},
+		Threshold: 0.80, KeepRecentTurns: 6, KeepRecentTokens: 2500,
+	})
+	if !plan.Needed {
+		t.Fatalf("expected a fold at 91%% of the window: %+v", plan)
+	}
+	kept, span := 0, 0
+	for _, m := range messages {
+		if m.Seq < plan.KeepFromSeq {
+			continue
+		}
+		if m.Role == "user" {
+			kept++
+		}
+		span += llm.EstimateTokens(m.Content)
+	}
+	if kept >= 6 {
+		t.Fatalf("kept %d turns costing %d tokens, want fewer than the 6 the count allows",
+			kept, span)
+	}
+	if kept == 0 {
+		t.Fatal("the newest turn was folded, which is the exchange being answered")
+	}
+	// A turn is never split to reach the budget, so one turn larger than it is allowed;
+	// keeping two in that state would mean the budget was ignored.
+	if span > 2500 && kept > 1 {
+		t.Fatalf("kept %d turns costing %d tokens against a 2500-token budget", kept, span)
+	}
+}
+
+// TestTheSizeBudgetNeverFoldsTheNewestTurn is the floor under the walk above: however
+// small the budget, the exchange being answered stays verbatim — folding it would take
+// the question with the memory and leave the request exactly as large.
+func TestTheSizeBudgetNeverFoldsTheNewestTurn(t *testing.T) {
+	messages := bigConversation(8, 2000)
+	plan := PlanCompaction(PlanInput{
+		Messages:         messages,
+		Budget:           ContextBudget{Limit: 8192, EffectiveLimit: 8192, Projected: 8100, ProjectedRatio: 0.99},
+		Threshold:        0.80,
+		KeepRecentTurns:  6,
+		KeepRecentTokens: 1,
+	})
+	if !plan.Needed {
+		t.Fatalf("expected a fold: %+v", plan)
+	}
+	users := userSeqsOf(messages)
+	if plan.KeepFromSeq != users[len(users)-1] {
+		t.Fatalf("kept history starts at %d, want the newest user turn %d",
+			plan.KeepFromSeq, users[len(users)-1])
+	}
+}
+
+// TestThePrefixTailRefersToTheMemoryAboveInsteadOfRepeatingIt pins the wording the prefix path
+// needs. There the memory in force is already the system message's `<conversation_memory>`, so
+// the instruction names it instead of quoting it again — the second copy cost the fold for the
+// memory on every crossing turn. The transcript path keeps the quoted block, because its
+// request has no system message of its own carrying the memory.
+func TestThePrefixTailRefersToTheMemoryAboveInsteadOfRepeatingIt(t *testing.T) {
+	const memory = "## Festgestellte Fakten\n- MAG-Fülldruck 1,5 bar."
+	for _, tc := range []struct{ lang, refers string }{
+		{"de", "System-Prompt oben"},
+		{"en", "system prompt above"},
+		{"zh", "上方的记忆"},
+	} {
+		above := summariseTail(SummarizeOptions{PreviousSummary: memory, Lang: tc.lang}, tc.lang, true)
+		if strings.Contains(above, "<existing_memory>") || strings.Contains(above, memory) {
+			t.Errorf("lang %q: the prefix tail repeats the memory it is merging: %q", tc.lang, above)
+		}
+		if !strings.Contains(above, tc.refers) {
+			t.Errorf("lang %q: the tail does not say where the memory is: %q", tc.lang, above)
+		}
+		below := summariseTail(SummarizeOptions{PreviousSummary: memory, Lang: tc.lang}, tc.lang, false)
+		if !strings.Contains(below, "<existing_memory>") || !strings.Contains(below, memory) {
+			t.Errorf("lang %q: the transcript path lost the memory it has to merge: %q", tc.lang, below)
+		}
+	}
+}
+
+// TestARestructureAsksForTheShapeWithoutTheHistory pins what the second request carries: the
+// first answer and the shape it lacked, not the conversation it came from. The retry used to
+// re-send the whole transcript with a sentence appended, which made a long fold pay twice —
+// and made the second request one no prefix cache could hit. The draft is bounded by the
+// summariser's output cap, so the retry costs a fraction of the call it repairs.
+func TestARestructureAsksForTheShapeWithoutTheHistory(t *testing.T) {
+	const draft = "Das ist eine Zusammenfassung ohne einen einzigen Abschnitt."
+	for _, tc := range []struct{ lang, want string }{
+		{"de", "##-Überschriften wie im Vertrag"},
+		{"en", "## headings the contract defines"},
+		{"zh", "## 标题"},
+	} {
+		prompt := summaryRestructure(draft, tc.lang)
+		if !strings.Contains(prompt, draft) {
+			t.Errorf("lang %q: the retry does not carry the answer it is recasting: %q", tc.lang, prompt)
+		}
+		if !strings.Contains(prompt, tc.want) {
+			t.Errorf("lang %q: the retry does not name the structure it wants: %q", tc.lang, prompt)
+		}
+		if strings.Contains(prompt, "<conversation>") || strings.Contains(prompt, "### Nutzer") {
+			t.Errorf("lang %q: the retry re-sends the transcript: %q", tc.lang, prompt)
+		}
+	}
+	if !summaryHasStructure("## Festgestellte Fakten\n- Kessel: 1,5 bar") {
+		t.Error("a contracted heading was not recognised")
+	}
+	if summaryHasStructure("Nur ein Absatz ohne Abschnitt.") {
+		t.Error("prose was read as a structured memory")
+	}
+}
+
 // --- context assembly ------------------------------------------------------
 
 func asmChat(prompt string) store.Chat {

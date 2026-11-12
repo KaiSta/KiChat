@@ -752,6 +752,9 @@ const de = {
     'Prüft die Größe vor jeder weiteren Tool-Runde erneut. Nötig für lokale Modelle, die kein Anfrage-Limit melden — kostet dafür eine Zusammenfassung mitten in der Antwort. Gilt für Chats; ein Projekt prüft immer, weil seine Antwort nicht zwischen zwei Nachrichten gefaltet werden kann.',
   'settings.threshold': 'Schwelle',
   'settings.keepTurns': 'Letzte Turns im Volltext',
+  'settings.keepTokens': 'Bleibender Verlauf (Tokens)',
+  'settings.keepTokensHint':
+    'Wie viel des jüngsten Verlaufs neben dem Gedächtnis im Volltext bleibt. 0 leitet den Wert aus dem Kontextfenster ab (ein Viertel, 2000–15000) — ein Wert, der auf jedem Modell dasselbe bedeutet. „Letzte Turns“ begrenzt weiterhin die Anzahl.',
   'settings.reserve': 'Reserve für Antwort',
   'settings.maxSummaryTokens': 'Max. Zusammenfassung (Tokens)',
   'settings.summaryModel': 'Modell für Zusammenfassungen',
@@ -2303,6 +2306,9 @@ const en: Record<keyof typeof de, string> = {
     'Re-checks the size before every further tool round. Needed for local models, which publish no per-request limit — at the cost of one summary in the middle of an answer. Applies to chats; a project always checks, because its reply cannot be folded between two messages.',
   'settings.threshold': 'Threshold',
   'settings.keepTurns': 'Recent turns kept verbatim',
+  'settings.keepTokens': 'History kept verbatim (tokens)',
+  'settings.keepTokensHint':
+    'How much of the newest history stays verbatim beside the memory. 0 derives it from the context window (a quarter, 2000–15000), which is a figure that means the same thing on every model. "Recent turns" still caps the count.',
   'settings.reserve': 'Response reserve',
   'settings.maxSummaryTokens': 'Max summary (tokens)',
   'settings.summaryModel': 'Summarisation model',
@@ -3770,6 +3776,9 @@ const zh: Record<keyof typeof de, string> = {
     '在每次继续工具轮次前重新检查大小。适用于不公布单次请求上限的本地模型——代价是回答中途多一次摘要。仅适用于对话；项目始终会检查，因为它的回答无法在两条消息之间折叠。',
   'settings.threshold': '阈值',
   'settings.keepTurns': '保留原文的最近轮数',
+  'settings.keepTokens': '保留原文的历史（tokens）',
+  'settings.keepTokensHint':
+    '记忆旁保留原文的最新历史数量。0 表示按上下文窗口推算（四分之一，2000–15000）——同一数值在每种模型上含义相同。“最近轮数”仍然限制轮数。',
   'settings.reserve': '为回答预留',
   'settings.maxSummaryTokens': '摘要上限（tokens）',
   'settings.summaryModel': '摘要使用的模型',

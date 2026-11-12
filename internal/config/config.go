@@ -1364,9 +1364,16 @@ type CompactSettings struct {
 	// on a window mid-answer costs a summarisation the user is waiting for. Hence a switch,
 	// and off by default. It is subordinate to Enabled and to the chat's own AutoCompact,
 	// exactly like the threshold it asks about.
-	MidTurnCheck       bool    `json:"midTurnCheck"`
-	Threshold          float64 `json:"threshold"`
-	KeepRecentTurns    int     `json:"keepRecentTurns"`
+	MidTurnCheck    bool    `json:"midTurnCheck"`
+	Threshold       float64 `json:"threshold"`
+	KeepRecentTurns int     `json:"keepRecentTurns"`
+	// KeepRecentTokens bounds the tail kept verbatim by size instead of by count. A
+	// turn says how much of the conversation stays, not how much of the window it
+	// costs, so six turns are a few hundred tokens of questions and several windows of
+	// tool traffic. Zero derives the figure from the window (a quarter, clamped to
+	// 2000-15000) — one number cannot mean the same thing on an 8k and a 131k model.
+	// KeepRecentTurns still caps the count, so the smaller bound wins.
+	KeepRecentTokens   int     `json:"keepRecentTokens"`
 	ReserveForResponse int     `json:"reserveForResponse"`
 	SummaryTemperature float64 `json:"summaryTemperature"`
 	MaxSummaryTokens   int     `json:"maxSummaryTokens"`
@@ -1590,9 +1597,11 @@ func Default() Settings {
 			// The mid-turn check ships off because it spends a request inside an
 			// answer the user is waiting for, and only a chat that is already folding
 			// at its threshold benefits from it.
-			MidTurnCheck:       false,
-			Threshold:          0.80,
-			KeepRecentTurns:    6,
+			MidTurnCheck:    false,
+			Threshold:       0.80,
+			KeepRecentTurns: 6,
+			// 0 derives the size bound from each model's window; see KeepRecentTokens.
+			KeepRecentTokens:   0,
 			ReserveForResponse: 1024,
 			SummaryTemperature: 0.2,
 			MaxSummaryTokens:   1200,
@@ -2025,6 +2034,9 @@ func (s *Settings) normalise() {
 	}
 	if s.Compact.KeepRecentTurns < 0 {
 		s.Compact.KeepRecentTurns = 6
+	}
+	if s.Compact.KeepRecentTokens < 0 {
+		s.Compact.KeepRecentTokens = 0
 	}
 	if s.Compact.ReserveForResponse <= 0 {
 		s.Compact.ReserveForResponse = 1024
