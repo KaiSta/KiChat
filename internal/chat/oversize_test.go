@@ -1459,16 +1459,18 @@ func TestAToolRoundFoldsBeforeItsNextRequestCrossesTheCeiling(t *testing.T) {
 	}
 }
 
-// TestAToolResultIsCutToWhatTheRequestCanCarry is the failure the measured room
-// exists for, in the shape it was reported: the model thinks, asks for a
-// web search, and the round that reads the result is refused because the result alone
-// is bigger than the account's whole per-request allowance.
+// TestAToolResultIsNotRationedAgainstTheRequest pins the policy that replaced the measured
+// room: a result reaches the model whole, bounded by the tool service's own byte cap and by
+// ageing, never by what the request has left. The ration used to withhold a result the turn
+// had just asked for — a page bigger than the account's per-request allowance arrived as
+// "nothing was delivered" — so the turn ended with text it could not verify.
 //
-// A history fold cannot repair that. The result belongs to the turn being answered and
-// a fold stops at the newest user turn, so the only thing that can make the round
-// sendable is cutting the result where it is handed to the model. The document below
-// is the offline twin of a scraped page — same verbatim body, same size, no network.
-func TestAToolResultIsCutToWhatTheRequestCanCarry(t *testing.T) {
+// What protects the request now is the recovery: a request a backend refuses for its size
+// is folded and sent once more (foldForSize). The consequence is visible here and is the
+// point of the test — the second request is *over* the published ceiling, because the
+// result is. The document is the offline twin of a scraped page: same verbatim body, same
+// size, no network.
+func TestAToolResultIsNotRationedAgainstTheRequest(t *testing.T) {
 	st := newTestStore(t)
 	makeChat(t, st)
 
@@ -1531,108 +1533,13 @@ func TestAToolResultIsCutToWhatTheRequestCanCarry(t *testing.T) {
 	if carried == "" {
 		t.Fatal("the second request carried no tool result")
 	}
-	if !strings.Contains(carried, "gekürzt") {
-		t.Fatalf("the tool result reached the model whole (%d tokens) although it is bigger "+
-			"than the %d-token ceiling", llm.EstimateTokens(carried), ceiling)
+	if got := llm.EstimateTokens(carried); got <= ceiling {
+		t.Fatalf("the result reached the model at %d tokens for a %d-token ceiling, so this "+
+			"fixture no longer outgrows the bound it is about", got, ceiling)
 	}
-	if used := llm.EstimateMessagesTokens(second.Messages); used > ceiling {
-		t.Fatalf("the second request estimates at %d tokens for a %d-token ceiling", used, ceiling)
-	}
-	for _, ev := range log.snapshot() {
-		if ev.name == events.Error {
-			t.Errorf("the turn failed although the result could be cut to fit: %v", ev.payload["error"])
-		}
-	}
-}
-
-// TestTheCutFollowsTheBackendsOwnPromptCount is the end-to-end half of the room's
-// arithmetic. A backend that states what the request cost must be believed over the
-// assembly's estimate, because the estimate runs low in the direction that lets a tool
-// result through that the request cannot carry — the same error §6.2 item 1 of GROQ.md
-// corrects when it aims a fold.
-//
-// The stated count is placed where the two answers differ by a lot: the estimate prices
-// this prompt at a few hundred tokens, so a room taken from it would be over a thousand
-// tokens larger than the one the backend's own number allows.
-func TestTheCutFollowsTheBackendsOwnPromptCount(t *testing.T) {
-	const (
-		ceiling        = 6000
-		reportedPrompt = 1200
-	)
-	st := newTestStore(t)
-	makeChat(t, st)
-
-	body := strings.Repeat("Ein langer Absatz mit Inhalt. ", 1600)
-	if tokens := llm.EstimateTokens(body); tokens < 2*ceiling {
-		t.Fatalf("the fixture's chunk is %d tokens; it has to exceed the %d-token ceiling by a wide margin",
-			tokens, ceiling)
-	}
-	if err := st.CreateDocument(store.Document{
-		ID: "doc-1", ChatID: "chat-1", Title: "bericht", Text: body,
-		TokenCount: llm.EstimateTokens(body),
-	}); err != nil {
-		t.Fatalf("create document: %v", err)
-	}
-	if err := st.InsertChunks([]store.Chunk{{
-		DocumentID: "doc-1", ChatID: "chat-1", Ordinal: 0, Text: body,
-		Tokens: llm.EstimateTokens(body),
-	}}); err != nil {
-		t.Fatalf("insert chunk: %v", err)
-	}
-
-	call := "```tool_call\n{\"name\": \"read_pages\", \"arguments\": " +
-		"{\"document\": \"bericht\", \"from\": 0, \"to\": 0}}\n```"
-	provider := &fakeProvider{
-		model:   llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 131072, State: llm.StateLoaded},
-		ceiling: ceiling,
-		replies: [][]llm.StreamEvent{
-			{
-				{Type: llm.EventDelta, Text: call},
-				{Type: llm.EventUsage, Usage: &llm.Usage{PromptTokens: reportedPrompt}},
-				{Type: llm.EventDone},
-			},
-			{{Type: llm.EventDelta, Text: "Antwort"}, {Type: llm.EventDone}},
-		},
-	}
-
-	settings := config.Default()
-	settings.AutoTitle = false
-	settings.ToolIterations = 3
-	registry := llm.NewRegistry(nil)
-	registry.Register(provider)
-	log := &eventLog{}
-	engine := NewEngine(st, registry, tools.New(st, nil, nil),
-		func() config.Settings { return settings }, log.emit)
-
-	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "Lies den Bericht."}); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if !waitFor(t, 5*time.Second, func() bool { return !engine.IsRunning("chat-1") }) {
-		t.Fatal("the turn did not finish")
-	}
-	// The round and the answer after it: a summarisation here would mean the tool result
-	// was never read, and the assertion below would be about the wrong request.
-	if got := provider.requestCount(); got != 2 {
-		t.Fatalf("backend calls = %d, want the round and the answer after it", got)
-	}
-
-	carried := ""
-	for _, m := range provider.requestAt(1).Messages {
-		if m.Role == llm.RoleTool {
-			carried = m.Content
-		}
-	}
-	if carried == "" {
-		t.Fatal("the second request carried no tool result")
-	}
-	// The limit, less the count the backend gave, less the reserve for the answer. The turn's
-	// clock rides on this very message and the fake backend's figure is a fixed 1200 rather than
-	// a count of the request it was sent — a real one counts the clock too, which is why the
-	// room it leaves is already that much smaller — so the result is measured as stored.
-	want := ceiling - reportedPrompt - settings.Compact.ReserveForResponse
-	if got := llm.EstimateTokens(withoutTurnState(carried)); got > want {
-		t.Fatalf("the tool result is %d tokens; with the backend's own count of %d the %d-token "+
-			"ceiling leaves %d", got, reportedPrompt, ceiling, want)
+	if used := llm.EstimateMessagesTokens(second.Messages); used <= ceiling {
+		t.Fatalf("the second request estimates at %d tokens for a %d-token ceiling; a whole "+
+			"result no longer outgrows it, so the recovery this relies on is never reached", used, ceiling)
 	}
 }
 
@@ -1748,9 +1655,9 @@ func TestABetweenRoundCheckFoldsAChatShorterThanKeepRecentTurns(t *testing.T) {
 // check is the one before the turn — and a tool round that grows past the window's
 // threshold is never noticed, because the growth does not exist yet when that check runs.
 //
-// The growth is the model's own report, deliberately: it is the one part of a round that
-// nothing cuts to fit (a tool result is budgeted against the room left), and it is what
-// the next round has to carry.
+// The growth is the model's own report, deliberately: a reply is the one part of a round
+// nothing bounds (a tool result is capped at 32 KiB, a reply is not), and it is what the
+// next round has to carry.
 func TestTheMidTurnCheckFoldsALocalToolTurnWhenTheUserAsks(t *testing.T) {
 	run := func(t *testing.T, midTurnCheck bool) (summaries int, carriedOldest bool) {
 		t.Helper()

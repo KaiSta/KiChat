@@ -329,14 +329,15 @@ type ToolCallRecord struct {
 	Error      string `json:"error"`
 	// SourceTokens is the size of what the tool returned; ContextTokens is the size
 	// of the text the model was given instead. They differ when a second model
-	// condensed the result or when the room left in the request cut it, and Condensed
-	// says which — a number the user cannot attribute is worse than no number.
+	// condensed the result, and Condensed says so — a number the user cannot
+	// attribute is worse than no number.
 	//
-	// Withheld is the third outcome, and the only one whose ContextTokens is not a
-	// size of the result at all: the budget had nothing left, so the model received
-	// the exhausted notice and none of the text. Without this flag the card showed
-	// "4,374 → 41 tokens" for a search whose results never arrived, which reads as a
-	// summary the model wrote.
+	// Withheld is historical: it recorded a result the app deliberately did not
+	// deliver because the request had no room left for it, which is the ration the
+	// chat no longer applies (COMPACT.md §17.6). Nothing writes it any more; rows
+	// recorded before that were kept as they were, because their ContextTokens is
+	// the exhausted notice's size rather than a size of the result and the card must
+	// not print it as one.
 	//
 	// They are 0 on a record written before migration 8, and on a call that failed,
 	// which is the honest reading of a row that never measured anything: a card

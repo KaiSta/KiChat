@@ -138,7 +138,7 @@ progress uses a name from `internal/events`.
 | A tool that changes the project folder | `internal/workspace/edit.go` (the `Describe*`/apply split), `internal/tools/change.go` (schema, `approveChange`, `WriteToolNames`), `internal/tools/snapshot.go` (the undo record), `tools.NeedsApproval` in the engine's gate, `api_changes.go` (the event and the bound answer), `Confirmation.tsx`, `ProjectChanges.tsx` | [`CODING.md`](CODING.md) |
 | A tool that runs something on this machine | `internal/tools/command.go` (schema, caps, timeout, result) plus `command_unix.go`/`command_windows.go` (the shell, the process group, the tree kill), `approveCommand`, the command half of `approvalPayload`, `Confirmation.tsx` | [`CODING.md`](CODING.md) |
 | A new chat mode (a different tool set or prompt per conversation) | `store.Chat.Mode` + a migration, `internal/chat/engine.go`'s tool gate, the branch that creates the chat in `app.go`, the sidebar's `newChat`/`newProject` controls | — |
-| A tool result condensed before the model reads it | `internal/chat/digest.go` (the gate, cache and escape hatch), `toolOutputBudget.take` in `generate.go`, `config.DigestSettings` | [`COMPACT.md`](COMPACT.md) §17 |
+| A tool result condensed before the model reads it | `internal/chat/digest.go` (the gate, cache and escape hatch), `finishTool` in `generate.go`, `config.DigestSettings` | [`COMPACT.md`](COMPACT.md) §17 |
 | A slash command the window answers instead of sending | `ChatView.tsx` (`submit`, where the command is matched) and the bridge method behind it | — |
 | A Wails event | `internal/events/events.go`, the emitter, the frontend listener | — |
 | A user-visible string | `frontend/src/lib/i18n.ts`, all three languages | — |

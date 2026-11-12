@@ -267,7 +267,7 @@ func TestTheWindowSeesACommandWhileItRuns(t *testing.T) {
 
 // lastToolResult is the text of the newest tool message in a chat: the result as the model
 // reads it, which is not the same thing as the record on the card (that one holds the whole
-// output, this one only what fitted the room left).
+// output, this one what the condensation left of it).
 func lastToolResult(t *testing.T, engine *Engine, chatID string) string {
 	t.Helper()
 	messages, err := engine.Store.ListMessages(chatID)

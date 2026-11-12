@@ -438,32 +438,29 @@ turn. `internal/chat/oversize.go`:
    131k window is one more oversized request, which is how a compaction that exists to fix this
    fails with the refusal it was folding away. `compactWith` clamps its budget to the ceiling
    the summariser publishes.
-4. **A tool result is cut to the room the next request has left.** This is the one growth no
-   fold can take back, and it is the shape the reported failure had: the model thinks, calls
-   `search_web` or `scrape_url`, and the round that reads the result is refused because the
-   result alone is bigger than the whole allowance. A fold cuts at user-turn boundaries, so the
-   reply and the tool traffic of the turn being answered stay verbatim — which is exactly the
-   material that has to shrink. There is no per-answer allowance to raise either: `generate`
-   budgets the result against what the next request can actually carry —
-   `roomForToolResults` is the effective limit less what the assembly already priced, the
-   reserve for the answer and the reply this round wrote, and the backend's **own count** of the
-   prompt in place of the estimate as soon as it reports one: the estimate is a heuristic, and an
-   underestimate is exactly what leaves a result cut too late (item 1 above corrects the same
-   error for a fold). `toolOutputBudget.setRoom` assigns that room afresh every round rather
-   than keeping the answer's tightest figure, so a model whose window is larger than the room
-   its request has behaves as before, and a window *smaller* than it cuts too, because a request
-   there was already unsendable and the fold that answers a refusal cannot touch the result. A
-   later round is priced against its own request, which already carries the earlier results in
-   the form they were admitted in, and ageing can make that request smaller again. A result
-   cut this way carries the shared `…[gekürzt]` marker, so the model can read a narrower page
-   range instead of re-scraping the same URL. Measured: a 13 480-token
-   document read back through `read_pages` under a 6000-token ceiling reaches the model cut, and
-   the second request fits (`TestAToolResultIsCutToWhatTheRequestCanCarry`); a backend that states
-   the same prompt at 1200 tokens gets its result cut to 3776 of that ceiling, where the estimate
-   alone would have allowed 4527 (`TestTheCutFollowsTheBackendsOwnPromptCount`).
-   A cut is the floor, not the only answer: a backend can ask for its oversized results to be
-   **condensed** by a second model before they are sent, so the model reads a complete (if
-   shorter) page instead of the first few thousand tokens of one. That switch lives on the
+4. **A tool result is delivered whole; a request it outgrows is folded once.** This is the one
+   growth no fold can take back, and it is the shape the reported failure had: the model thinks,
+   calls `search_web` or `scrape_url`, and the round that reads the result is refused because
+   the result alone is bigger than the whole allowance. A fold cuts at user-turn boundaries, so
+   the reply and the tool traffic of the turn being answered stay verbatim — which is exactly
+   the material that has to shrink.
+   This backend is the one that rule was written for, and the ration it carried is gone
+   (`COMPACT.md` §17.6): it cut a result to whatever the next request had left, so `read_pages`
+   on a 13 480-token document under a 6000-token ceiling arrived truncated and the second
+   request fitted — but it also withheld results a turn had just asked for, which is the failure
+   the ration was meant to prevent. A result is now bounded by the tool service's own byte cap
+   (32 KiB) and by ageing, and an oversized request is answered by folding and sending once
+   more.
+   The consequence here is the one to know about, and it is deliberate: a page larger than this
+   backend's per-request ceiling now makes the next round oversized, and because the result
+   belongs to the turn being answered the fold cannot shrink it, so the turn ends with the
+   refusal naming the limit rather than with a page the model cannot verify.
+   `TestAToolResultIsNotRationedAgainstTheRequest` pins that shape. The mitigations available
+   here are the condensation below and a typed ceiling, which makes the preventive fold run
+   before the request goes out.
+   A condensation is the mitigation that stays available: a backend can ask for its oversized
+   results to be **condensed** by a second model before they are sent, so the model reads a
+   complete (if shorter) page instead of a truncated one. That switch lives on the
    backend row, and the condensation model must sit on a different quota — this backend's
    allowance is the bucket both requests would draw from (COMPACT.md §17).
 5. **A refusal that survives all that is explained rather than quoted.** The vendor's sentence

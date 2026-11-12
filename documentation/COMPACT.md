@@ -231,10 +231,11 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   now `target`, so the cut stops as soon as the kept turns plus the prompt, the reserve and the
   summary fit the ceiling (`TestAnAutomaticCeilingFoldAimsAtTheCeiling`).
 
-  And a fold cannot make a turn sendable by itself when one *tool result* is the growth: the
-  result belongs to the turn being answered, so the cut may not touch it. That half is not
-  compaction's — the result is cut to the room the next request has left as it is handed to the
-  model (GROQ.md §6.2 item 4).
+  And a fold cannot make a turn sendable when one *tool result* is the growth: the result
+  belongs to the turn being answered, so the cut may not touch it. That half is not
+  compaction's either — a result is bounded where the tool returns it (32 KiB) and otherwise
+  delivered whole, so on a backend with a per-request ceiling below its window such a turn
+  ends with the refusal (GROQ.md §6.2 item 4, §17.6).
 
   Where that ceiling comes from is what decides which turn it can save. It is the vendor's own
   number, read from **the budget header of any response** — `x-ratelimit-limit-tokens`, which
@@ -1188,8 +1189,7 @@ tool result can be long — a scraped page and a file read out of the project fo
 
 ### 17.1 What it does
 
-After a tool returns and before its text is charged against the room the request has
-left, a second
+After a tool returns and before its text is stored as the message the model reads, a second
 model condenses the text. The chat's model reads the condensation; the tool-call card
 keeps what the tool actually returned. The message that is stored — and therefore
 replayed on every later turn — holds the condensation, which is the whole point: a page
@@ -1250,8 +1250,8 @@ worth a request, not the size of the page in hand, so a 40k-token page above a 2
 threshold can want far more than 2k tokens out. And `normalise` stored the capped value,
 so a chosen 3000 came back as 2000, was gone from the blob, and raising the threshold
 later did not restore it. Both are pinned by `TestTheDigestCapIsResolvedNotTrusted`. The
-bound that remains is the room the request has left: a condensation still passes through
-`toolOutputBudget.take` before the model reads it.
+bound that remains is the tool service's own byte cap on the result itself (§17.6): a
+condensation is delivered whole, and no longer cut to the room the request has left.
 
 ### 17.2 The rules that make it safe to switch on
 
@@ -1358,27 +1358,22 @@ Until now the transcript showed the condensation where the model read it and the
 output on the tool card, and nothing said *how much* was cut. The card now carries both
 sizes, and they are the backend's own measurements rather than a client-side estimate:
 `ToolCallRecord.SourceTokens` is `llm.EstimateTokens` of what the tool returned, and
-`ContextTokens` is the same estimate of the exact string `toolOutputBudget.take` handed
-to `appendToolResult` — so the second number already includes the digest notice and any
-cut the room left made *after* the condensation.
+`ContextTokens` is the same estimate of the exact string handed to `appendToolResult` — so
+the second number includes the digest notice and, where the tool service's own byte cap
+cut the text, that cut as well.
 
-Three outcomes produce those numbers and only one of them is a setting the user switched
-on, so the record keeps the cause rather than leaving it to be inferred from the sizes:
+Two outcomes produce those numbers and only one of them is a setting the user switched on,
+so the record keeps the cause rather than leaving it to be inferred from the sizes:
 
-| outcome | `Condensed` | `Withheld` | card |
-| --- | --- | --- | --- |
-| whole | false | false | `4,371 tokens` |
-| cut by the second model | true | false | `12,345 → 640 tokens` |
-| cut by the room left in the request | false | false | `31,280 → 2,048 tokens (context)` |
-| withheld: the budget was spent | false | true | `4,374 tokens discarded` |
+| outcome | `Condensed` | card |
+| --- | --- | --- |
+| whole | false | `4,371 tokens` |
+| condensed by the second model | true | `12,345 → 640 tokens` |
 
-The fourth row is the one that shipped wrong. `take` answers a spent budget with
-`exhaustedNotice` instead of a prefix, and the first version of the card printed it as a
-size: `4,374 → 41 tokens` for a search whose results never reached the model, which reads
-exactly like a summary the second model wrote. `take` now returns whether the result was
-withheld, so the card says so in words and in the warning colour — no arrow, because
-there is no second size of the result to show. `ContextTokens` still holds the notice's
-size for a withheld call: it is what the model read, not what it should be compared to.
+The `Withheld` column and the `4,374 tokens discarded` card are historical: they recorded a
+result the app deliberately did not deliver because the request had no room left (§17.6), and
+no row writes the flag any more. Rows written before that change still read as what they were,
+which is why the field and the card's wording stay.
 
 The numbers live in `tool_calls` (migrations 8 and 9, appended for the usual reason),
 because the card is rebuilt from the row after a reload and a number recomputed in the
@@ -1390,11 +1385,10 @@ A call is re-emitted once the condensation has run: the card was drawn while the
 was still executing, and a count that appeared only after reopening the chat would be a
 number the reader has to go looking for. `TestTheToolCardIsToldHowMuchWasCut` pins the
 cut and uncut shapes on the emitted event *and* on the row read back, over the same page
-under a threshold it clears and one it cannot reach; `TestAWithheldResultIsNotReportedAsASize`
-pins the fourth, with one token of budget and no summary model.
+under a threshold it clears and one it cannot reach.
 
-The harness fixture for the research chat carries all four, because three of them are
-only distinguishable by the words after the number.
+The harness fixture for the research chat carries all four shapes, including the two that
+no code writes any more, because they are only distinguishable by the words after the number.
 
 ### 17.6 Reading a file out of the folder
 
@@ -1578,38 +1572,38 @@ a re-read returns the file, because the write tools drop the turn's read memory 
 (`Service.forgetReads`). The sentence is charged to the history segment rather than reported as a
 saving, so the meter keeps describing what is sent.
 
-**What a result may add is the room the request has.** Ageing bounds what a reply *re-sends*;
-the other bound is what the request that reads the result can still hold.
-`roomForToolResults` measures it — the effective limit less what the assembly priced, the
-reserve for the answer and the reply this round wrote — and `take` charges a result what it
-actually used, so a small one leaves its room to the round's other results.
+**A result is not rationed against the request.** Ageing bounds what a reply *re-sends*; the
+other bound used to be the room the request that reads the result had left, measured every
+round against the effective limit, the reserve and the reply just written. It was removed, for
+the reason the cards showed: it withheld the results the turn had just asked for — a page, a
+read, even a 24-token `Replace text` acknowledgement — and what it protected against is a
+refusal the turn recovers from anyway. A result is now bounded by two things only: the tool
+service's own byte cap (`tools.MaxToolResultBytes`, 32 KiB, both ends kept) and ageing.
 
-**And the room is asked again every round.** `setRoom` assigns it rather than keeping the
-smallest one the answer ever measured, because that is what the number is: the assembly it is
-measured against already carries the earlier rounds' results in the cut form they were handed
-over in, so the free space it reports is free. Ageing is what can hand some of it back — stubbing
-the reply's older results makes the next request smaller. A high-water mark instead turned one
-squeezed round into the rest of the answer. A reported coding turn shows the shape: a 65 536-token
-window, the default 1 024-token reserve, a 5 419-token reply and a card reading
-`933 → 777 tokens (context)` — so the request that round priced was 58 316 tokens — and then
-`3 975 tokens discarded` for the `app.go` read that followed, by which point ageing had brought
-the request down to 44 694, where 14 399 tokens were free. The model re-read the same file round
-after round, paying a round each time for text it never received.
-`TestToolOutputBudgetIsTheRoomsOfItsOwnRound` walks those two rounds.
+**The refusal is the recovery.** A request the backend refuses for its own size is folded and
+sent once more (`foldForSize`, `oversize.go`), which is the shape opencode calls "compact and
+retry once". The cost of that trade is real and is pinned by
+`TestAToolResultIsNotRationedAgainstTheRequest`: on a backend whose per-request ceiling is far
+below its window — Groq's per-minute allowance is the one that case was written for — a page
+larger than the ceiling now makes the next request oversized instead of arriving as nothing.
+The turn then either folds (if there is older history to fold) or ends with the refusal, which
+names the limit. That was chosen deliberately over silent withholding: a run that cannot
+verify its own edits is worse than one that stops and says why.
 
-There is no per-answer token figure any more: the old 60 000/120 000 setting had to be
-raised as windows grew, and once spent it withheld *new* results while ageing would have
-kept them and stubbed the oldest — a long reply read notices with room still in the
-request (`TestToolOutputBudgetHasNoPerAnswerCeiling`).
+The earlier shape is worth remembering because it looked reasonable at the time. A 65 536-token
+window, the default 1 024-token reserve, a 5 419-token reply, and a card reading
+`933 → 777 tokens (context)`; then `3 975 tokens discarded` for the `app.go` read that followed,
+by which point ageing had brought the request down to 44 694 where 14 399 tokens were free. The
+high-water mark that caused that was replaced by a per-round measurement, and the measurement
+itself is gone now: the room was computed correctly and the round still had to be told "no".
 
 **The one number that survives.** The tool service's own byte bound, because it is a fact
 about a result rather than about a window: a full 24 kB `read_file` prices at about 7 800
 tokens and a 30 kB command result at about 10 800 (the app's own 64 kB command measurement,
 halved), and no single result may exceed `tools.MaxToolResultBytes` (32 KiB, measured at
-10 347 tokens of source), applied once where the result leaves the tool service. Pinned by
-`TestToolOutputBudgetIsTheRoomTheRequestHasLeft` (unmeasured passes, measured cuts, nothing
-left withholds) and `TestToolOutputBudgetIsTheRoomsOfItsOwnRound` (the squeezed round and the
-one after it).
+10 347 tokens of source), applied once where the result leaves the tool service. That bound
+is pinned by the tool service's own test (`TestOneResultCannotExceedTheCap`), because it is a
+property of a result and not of a window.
 
 **The coupling that makes it safe.** Dropping a `read_file` result would otherwise be a trap:
 the app remembers which file each turn has read, and a model asking again for a range it already

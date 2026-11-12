@@ -1473,8 +1473,8 @@ func (d DigestSettings) DigestThreshold() int {
 // being condensed, so a 40k-token page above a 2000-token threshold can want far more
 // than 2000 tokens out. Worse, normalise stored the capped value, so a chosen 3000 came
 // back as 2000, was gone from the blob, and raising the threshold later did not bring
-// it back. The remaining bound is the room the request has left: whatever comes back
-// still passes through toolOutputBudget.take.
+// it back. What bounds the result now is the same thing that bounds any other: the tool
+// service's own byte cap and ageing, not a share of the request (see COMPACT.md §17.6).
 func (d DigestSettings) DigestMaxTokens() int {
 	max := d.MaxTokens
 	if max <= 0 {
@@ -1551,9 +1551,9 @@ func LangOf(lang func() string) string { return ilang.Of(lang) }
 // separate field rather than one shared number, which is what stopped a project at ten
 // rounds when its chat setting said ten.
 //
-// How much tool text a round may add is not a figure here: it is the room the next request
-// actually has (`chat.roomForToolResults`), so a small local window cuts results where it
-// always did and a large one is not held to a number somebody had to raise.
+// How much tool text a round may add is not a figure here and never was: a result is
+// bounded by the tool service's own byte cap, and a request that outgrows the window is
+// folded and retried once rather than priced against an allowance.
 //
 // MaxToolIterations is the ceiling both round fields are repaired against, and it is a
 // bound rather than a default because a long autonomous run is a choice — and because each

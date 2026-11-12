@@ -30,9 +30,10 @@ reach:
   `MaxToolIterations` is the ceiling both are repaired against). Reading four files, editing
   two and running `make check` fits. They are separate figures because sharing them was the
   bug: a chat set to 10 rounds cut a project at 10. Tool-result text is no longer given a
-  per-answer token figure at all: the room the next request has left is the bound, and ageing
-  keeps a reply's newest 32 000 tokens verbatim, so a large window is not held to a number
-  somebody had to raise (`chat.maxToolRounds`, `chat.roomForToolResults`).
+  per-answer token figure at all, and no longer a share of the request either: a result is
+  bounded by the tool service's byte cap (32 KiB) and by ageing, which keeps a reply's newest
+  32 000 tokens verbatim, and a request that outgrows the window is folded and retried once
+  (`chat.maxToolRounds`, `COMPACT.md` §17.6).
 - **The working tree travels with the prompt.** A project whose folder is a git repository gets
   `<project_git>` on every turn: branch (or detached), ahead/behind, and every pending path with
   the staged half, the kind of change and its line counts — 40 entries and 4 KiB at most, charged
