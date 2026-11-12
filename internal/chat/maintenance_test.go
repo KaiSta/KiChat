@@ -1133,6 +1133,108 @@ func TestCompactRetriesAnAnswerThatWasOnlyThinking(t *testing.T) {
 	}
 }
 
+// TestATitleIsNotAskedAgainWhenReasoningAteTheBudget pins the fix for a title that could
+// never be produced. On a reasoning backend the output cap is spent thinking, so the reply
+// is `length` with an empty body — and the empty title is what made the guard send the same
+// request again on every turn of an untitled chat. The request now carries thinking off and
+// a cap a title can use, and an empty truncated answer names the chat from its message
+// instead of vanishing into another retry.
+func TestATitleIsNotAskedAgainWhenReasoningAteTheBudget(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192,
+			State: llm.StateLoaded, Capabilities: []string{llm.CapThink}},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "length"}}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+	settings := config.Default()
+
+	engine.autoTitle(context.Background(), &chat, provider, "fake", "fake-model", provider.model, settings,
+		"Prüfe den Kesseldruck und sag mir, ob 1,5 bar reicht")
+
+	req := provider.requestAt(0)
+	if req.Think == nil || *req.Think {
+		t.Error("the title asked a reasoning model to think")
+	}
+	if req.MaxTokens != titleMaxTokens {
+		t.Errorf("title budget = %d, want %d", req.MaxTokens, titleMaxTokens)
+	}
+	if !strings.Contains(req.Messages[0].Content, noThinkTag) {
+		t.Error("the title did not carry the in-prompt thinking switch")
+	}
+	if chat.Title == "" {
+		t.Fatal("the chat is still untitled, so the next turn asks again")
+	}
+	if !strings.Contains(chat.Title, "Kesseldruck") {
+		t.Errorf("title = %q, want the message it is named after", chat.Title)
+	}
+}
+
+// TestALongTitleIsCutRatherThanAskedAgain is the other endless retry: an answer over
+// titleMaxRunes used to be discarded, which left the chat untitled and the next turn asking
+// again for a title the model had already written.
+func TestALongTitleIsCutRatherThanAskedAgain(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	provider := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: strings.Repeat("Kesseldruck und Wartung prüfen ", 12)},
+				{Type: llm.EventDone}},
+		},
+	}
+	engine, _ := newTestEngine(t, st, provider)
+
+	engine.autoTitle(context.Background(), &chat, provider, "fake", "fake-model", provider.model,
+		config.Default(), "Prüfe den Kesseldruck")
+
+	if chat.Title == "" {
+		t.Fatal("a long answer left the chat untitled")
+	}
+	if n := len([]rune(chat.Title)); n > titleMaxRunes {
+		t.Errorf("title is %d runes, want at most %d", n, titleMaxRunes)
+	}
+}
+
+// TestATitleRunsOnTheSummaryModel is the cheap-routing half: a user who pointed summaries at
+// a smaller model meant the background work too, and naming a chat is that kind of work.
+func TestATitleRunsOnTheSummaryModel(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	own := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192, State: llm.StateLoaded},
+	}
+	cheap := &fakeProvider{
+		id:    "cheap",
+		model: llm.ModelInfo{ID: "cheap-model", Backend: "cheap", ContextLimit: 8192, State: llm.StateLoaded},
+		replies: [][]llm.StreamEvent{
+			{{Type: llm.EventDelta, Text: "Kesseldruck prüfen"}, {Type: llm.EventDone}},
+		},
+	}
+	settings := config.Default()
+	settings.Compact.SummaryModel = llm.Ref{Backend: "cheap", Model: "cheap-model"}
+	registry := llm.NewRegistry(nil)
+	registry.Register(own)
+	registry.Register(cheap)
+	engine := NewEngine(st, registry, nil, func() config.Settings { return settings }, func(string, any) {})
+
+	engine.autoTitle(context.Background(), &chat, own, "fake", "fake-model", own.model, settings,
+		"Prüfe den Kesseldruck")
+
+	if own.requestCount() != 0 {
+		t.Errorf("the chat's own model was asked for a title: %d calls", own.requestCount())
+	}
+	if cheap.requestCount() != 1 {
+		t.Fatalf("summary model calls = %d, want the title", cheap.requestCount())
+	}
+	if chat.Title != "Kesseldruck prüfen" {
+		t.Errorf("title = %q, want the summary model's answer", chat.Title)
+	}
+}
+
 // TestCompactRunsOnTheConfiguredSummaryModel pins the escape hatch for a model
 // that cannot be talked out of thinking: a user picks a different model for
 // summarisation, and it is that model's window that prices the call. A summary

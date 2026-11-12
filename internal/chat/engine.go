@@ -447,7 +447,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 
 	e.emitBudget(req.ChatID, &chat, backendID, modelID, settings, modelInfo)
 	if chat.Title == "" && settings.AutoTitle {
-		e.autoTitle(ctx, &chat, provider, modelID, req.Text)
+		e.autoTitle(ctx, &chat, provider, backendID, modelID, modelInfo, settings, req.Text)
 	}
 }
 

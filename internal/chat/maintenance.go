@@ -503,10 +503,7 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	// toggle (LM Studio's `enable_thinking`) is asked the same way. Either way the
 	// in-prompt soft switch goes out, and Summarize's retry covers a model that
 	// thinks regardless.
-	disableThinking := target.Info.Has(llm.CapThink)
-	if t, ok := target.Provider.(llm.ThinkingToggle); ok && t.CanToggleThinking() {
-		disableThinking = true
-	}
+	disableThinking := target.withoutThinking()
 	summaryOptions := SummarizeOptions{
 		PreviousSummary: previous,
 		Transcript:      transcript,
@@ -600,6 +597,21 @@ type summaryTarget struct {
 // the choice was not applied, or the fix for an empty summary stays hidden.
 // (Measured on a local reasoning model: 48 of 48 output tokens went to reasoning
 // and not a single message was produced.)
+// withoutThinking is how a background request asks a model not to reason. One rule rather
+// than two because a fold and a title have the same failure: `max_tokens` bounds reasoning
+// and answer together, so a model that thinks first produces nothing either job can use.
+// The model's own claim decides; a backend whose request accepts the toggle is asked even
+// when its listing says nothing (LM Studio's `enable_thinking`).
+func (t summaryTarget) withoutThinking() bool {
+	if t.Info.Has(llm.CapThink) {
+		return true
+	}
+	if toggle, ok := t.Provider.(llm.ThinkingToggle); ok && toggle.CanToggleThinking() {
+		return true
+	}
+	return false
+}
+
 func (e *Engine) summariser(ctx context.Context, provider llm.Provider, backendID, modelID string,
 	modelInfo llm.ModelInfo, chatLimit, numCtx int, settings config.Settings) (summaryTarget, error) {
 
@@ -735,9 +747,34 @@ func effectiveKeepTurns(chat store.Chat, settings config.Settings) int {
 	return 6
 }
 
-// autoTitle names a chat from its first message using the same model, cheaply.
+// titleMaxTokens is the output cap for a title, and it is not a title's size. `max_tokens`
+// bounds a reasoning model's private thinking and its answer together, so a cap sized to the
+// words is a cap that thinking can spend before the first word: 32 was that mistake, and on
+// a reasoning backend every title came back as `finish_reason: length` with an empty body.
+// 256 fits any title this prompt can produce once thinking is off, and leaves it a
+// background call.
+const titleMaxTokens = 256
+
+// titleMaxRunes is the longest title kept as it stands. A longer answer is cut rather than
+// thrown away: the cut still names the chat, and discarding it would leave the title empty
+// and the next turn asking again.
+const titleMaxRunes = 80
+
+// autoTitle names a chat from its first message. Best effort throughout: nothing here
+// reports to the user, so every way it can fail has to end somewhere other than the next
+// turn's copy of the same request.
+//
+// The model is the configured summariser's when one is set, because naming a chat is
+// background work of the same kind as folding one — a user who pointed summaries at a cheap
+// model meant this job too. A configured model that cannot be reached is not an error the
+// way it is for a fold: a title is optional and has nobody to report to, so the chat's own
+// model answers instead.
+//
+// Thinking is switched off wherever the backend allows it, for the same reason a summary
+// switches it off. Both the backend's control and the in-prompt soft switch go out, since a
+// local template with no reasoning parameter is only reachable by the tag.
 func (e *Engine) autoTitle(ctx context.Context, chat *store.Chat, provider llm.Provider,
-	modelID, firstMessage string) {
+	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings, firstMessage string) {
 
 	source := strings.TrimSpace(firstMessage)
 	if source == "" {
@@ -746,27 +783,50 @@ func (e *Engine) autoTitle(ctx context.Context, chat *store.Chat, provider llm.P
 	if len(source) > 600 {
 		source = source[:600]
 	}
+	target := e.titleTarget(provider, backendID, modelID, modelInfo, chat.NumCtx, settings)
 	titleCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	text, _, err := Complete(titleCtx, provider, llm.ChatRequest{
-		Model: modelID,
+	req := llm.ChatRequest{
+		Model: target.Model,
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: "Du erzeugst einen kurzen Titel für einen Chat. " +
 				"Antworte mit 3 bis 6 Wörtern, ohne Anführungszeichen, ohne Satzzeichen am Ende, " +
-				"in der Sprache der Nachricht."},
+				"in der Sprache der Nachricht." + "\n\n" + noThinkTag},
 			{Role: llm.RoleUser, Content: source},
 		},
 		Temperature: 0.2,
-		MaxTokens:   32,
-	})
+		MaxTokens:   titleMaxTokens,
+		NumCtx:      target.NumCtx,
+	}
+	if target.withoutThinking() {
+		off := false
+		req.Think = &off
+	}
+	out, err := runToCompletion(titleCtx, target.Provider, req)
 	if err != nil {
 		return
 	}
+	// A backend with no reasoning channel inlines the deliberation in the content, so a
+	// ` thinking` block has to go before the answer is read as a title.
+	text, _ := stripThinking(out.text)
 	title := strings.TrimSpace(text)
 	title = strings.Trim(title, "\"'`*# ")
 	title = strings.SplitN(title, "\n", 2)[0]
-	if title == "" || len(title) > 80 {
+	if strings.TrimSpace(title) == "" {
+		if !llm.Truncated(out.stopReason) {
+			return
+		}
+		// Structural, and the shape a reasoning model produces when thinking it was not
+		// asked about ate the whole budget: asking again produces the same nothing, on
+		// every turn, for as long as the chat has no title. The opening of the message
+		// names it instead, which ends that loop at the cost of a name nobody has to keep.
+		title = titleFromMessage(source)
+	}
+	if runes := []rune(title); len(runes) > titleMaxRunes {
+		title = titleFromMessage(title)
+	}
+	if title == "" {
 		return
 	}
 	if err := e.Store.SetChatTitle(chat.ID, title); err != nil {
@@ -774,4 +834,44 @@ func (e *Engine) autoTitle(ctx context.Context, chat *store.Chat, provider llm.P
 	}
 	chat.Title = title
 	e.emit(events.Title, map[string]any{"chatId": chat.ID, "title": title})
+}
+
+// titleTarget is the model that names a chat: the configured summariser when one is set and
+// its backend is reachable, the chat's own model otherwise.
+func (e *Engine) titleTarget(provider llm.Provider, backendID, modelID string, modelInfo llm.ModelInfo,
+	numCtx int, settings config.Settings) summaryTarget {
+
+	own := summaryTarget{Provider: provider, Backend: backendID, Model: modelID, Info: modelInfo, NumCtx: numCtx}
+	ref := settings.Compact.SummaryModel
+	if ref.Backend == "" || ref.Model == "" || (ref.Backend == backendID && ref.Model == modelID) {
+		return own
+	}
+	other, ok := e.Registry.Provider(ref.Backend)
+	if !ok {
+		return own
+	}
+	// No NumCtx, as for a fold: the per-chat override was chosen for the chat's model.
+	return summaryTarget{
+		Provider:   other,
+		Backend:    ref.Backend,
+		Model:      ref.Model,
+		Info:       e.resolveModelCached(ref.Backend, ref.Model, settings),
+		Configured: true,
+	}
+}
+
+// titleFromMessage names a chat after the message it is about: whitespace collapsed, then
+// either whole or cut to titleMaxRunes at a word boundary. It is the title a chat gets when
+// the model could not give one, and it exists to end the retry rather than to be good.
+func titleFromMessage(source string) string {
+	line := strings.Join(strings.Fields(source), " ")
+	runes := []rune(line)
+	if len(runes) <= titleMaxRunes {
+		return line
+	}
+	cut := string(runes[:titleMaxRunes-1])
+	if i := strings.LastIndex(cut, " "); i > len(cut)/2 {
+		cut = cut[:i]
+	}
+	return strings.TrimSpace(cut) + "…"
 }
