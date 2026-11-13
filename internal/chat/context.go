@@ -587,7 +587,7 @@ func Assemble(in AssemblyInput) Assembly {
 	// the messages that are now replaced by the summary, so it over-reports the
 	// window by their full size and has to be dropped as well.
 	measuredValid := budget.MeasuredValid && budget.Measured > 0 &&
-		in.MeasuredSeq >= firstVerbatim && in.MeasuredSeq >= 0
+		in.MeasuredSeq >= firstVerbatim
 	budget.MeasuredValid = measuredValid
 	if measuredValid {
 		// The measurement predates the newest messages, so add their estimated

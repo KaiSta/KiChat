@@ -424,7 +424,6 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 				PromptTokens:    usage.PromptTokens,
 				Seq:             assembly.MaxIncludedSeq,
 				ReplayReasoning: assembly.ReplayReasoning,
-				At:              time.Now(),
 			})
 		}
 

@@ -1045,23 +1045,32 @@ Every measuring request wrote its `prompt_tokens` onto the reply row it produced
 `measurementFromHistory` (`engine.go`) adopts it when the in-memory count is gone, and drops a
 row that cannot describe the prompt about to be sent: another backend/model's count (a different
 tokenizer), a reply written before the newest fold (its request still carried the messages that
-fold replaced — the same rule as `InvalidateMeasurement` in §11.1), and a zero `prompt_tokens`
-(no measurement rather than a size). `Seq` is the message before that reply, since a reply cannot
-be inside the prompt it answers, so the ordinary delta accounting of `Assemble` applies
-unchanged: the reply itself and everything after it are priced as the delta. A seq one message
-too far back only prices an extra message as the delta; a seq above where its request really
-ended would leave a message out of the accounting, so the row's predecessor is the right mark.
+fold replaced — the same rule as `InvalidateMeasurement` in §11.1), a zero `prompt_tokens`
+(no measurement rather than a size), and a prompt shape the provider cannot vouch for (below).
+`Seq` is the message before that reply, since a reply cannot be inside the prompt it answers, so
+the ordinary delta accounting of `Assemble` applies unchanged: the reply itself and everything
+after it are priced as the delta. A seq one message too far back only prices an extra message as
+the delta; a seq above where its request really ended would leave a message out of the
+accounting, so the row's predecessor is the right mark.
 
-Two shapes the recovery cannot see. Both are narrow, and neither can block a session the way the
-estimator did:
+What the recovery cannot see. Each is narrow:
 
 - **Reasoning replay.** A stored row does not record whether its request replayed a reply's
-  reasoning, so the flag is taken from the request being assembled. Only a backend that replays
-  reasoning at all (`llm.ReasoningReplayer` — Ollama always, DeepSeek beside tools) can be off by
-  it, and only by how much of each reply was thinking rather than conversation.
+  reasoning, so the shape is read from the provider (`llm.ReasoningReplayer`). Where the answer
+  cannot vary — Ollama always, every other local backend never — the row's count describes this
+  request too. Where it can (DeepSeek, beside tools), a count is adopted only for a request that
+  carries no reasoning either: the row may have carried some, which makes the count read too
+  large, while reasoning the row left out could not be recovered at all. A DeepSeek project
+  measured with tools and resumed with them still on is therefore priced by the estimator until
+  its next reply measures it — the over-reading this section exists to avoid, but with no local
+  model start to block.
 - **An undone compaction** (§11.4). Its messages are live again while the stored count still
   describes the folded shape, so the meter reads low until the next turn measures. The error is
   in the direction of missing a fold, and a request that does not fit is folded by `foldForSize`.
+- **A changed system prompt or tool list.** The count describes the prompt as it was sent, so a
+  session resumed after editing the system prompt or the tools its model is offered is priced by
+  a count taken against the old one. The error runs both ways; the first reply of the resumed
+  session measures the prompt again and replaces it.
 
 ---
 

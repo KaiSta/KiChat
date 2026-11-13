@@ -1214,6 +1214,46 @@ func TestARestartIgnoresACountThatCannotDescribeThePrompt(t *testing.T) {
 	}
 }
 
+// TestARestartOnlyAdoptsACountWhoseReasoningShapeItCanRead pins the recovery's one judgement call:
+// a row records the count its request reported, not whether that request replayed a reply's
+// reasoning. A provider whose answer cannot vary — Ollama always, every other local backend never
+// — can vouch for the shape. DeepSeek beside tools cannot, so a count is adopted there only for a
+// request that carries no reasoning either, where it can read too large but never too small.
+func TestARestartOnlyAdoptsACountWhoseReasoningShapeItCanRead(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	reply := []store.Message{
+		{ID: "m1", Seq: 1, Role: "user", Content: "Wie ist der Stand?", Status: store.StatusComplete,
+			CreatedAt: base},
+		{ID: "m2", Seq: 2, Role: "assistant", Content: "Antwort", Status: store.StatusComplete,
+			CreatedAt: base.Add(time.Second), Backend: "fake", Model: "fake-model", PromptTokens: 5000},
+		{ID: "m3", Seq: 3, Role: "user", Content: "Und weiter?", Status: store.StatusComplete,
+			CreatedAt: base.Add(2 * time.Second)},
+	}
+	toolsOnly := &reasoningReplayProvider{&fakeProvider{}}
+	always := &alwaysReasons{&fakeProvider{}}
+	for _, tc := range []struct {
+		name         string
+		provider     llm.Provider
+		toolsOffered bool
+		adopted      bool
+	}{
+		{name: "tools offered, so the count may have left reasoning out", provider: toolsOnly, toolsOffered: true},
+		{name: "no tools, so the count can only read too large", provider: toolsOnly, adopted: true},
+		{name: "a shape that cannot vary", provider: always, toolsOffered: true, adopted: true},
+		{name: "a backend that carries no reasoning", provider: &fakeProvider{}, toolsOffered: true, adopted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			measurement, ok := measurementFromHistory(reply, nil, "fake", "fake-model", tc.provider, tc.toolsOffered)
+			if ok != tc.adopted {
+				t.Fatalf("adopted = %v, want %v", ok, tc.adopted)
+			}
+			if tc.adopted && (measurement.PromptTokens != 5000 || measurement.Seq != 1) {
+				t.Errorf("measurement = %+v, want the row's count and the message before it", measurement)
+			}
+		})
+	}
+}
+
 // alwaysReasons is a backend whose message shape carries a reply's reasoning in every request,
 // the way Ollama's `thinking` field does (llm.ReasoningReplayer).
 type alwaysReasons struct{ *fakeProvider }

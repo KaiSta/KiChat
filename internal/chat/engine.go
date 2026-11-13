@@ -27,7 +27,6 @@ type Measurement struct {
 	PromptTokens    int
 	Seq             int
 	ReplayReasoning bool
-	At              time.Time
 }
 
 // TurnRequest asks the engine to produce one assistant reply.
@@ -341,7 +340,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	// or a custom endpoint) falls back to the text protocol, which works
 	// everywhere: sending `tools` a backend cannot honour degrades the reply
 	// rather than enabling tools, and the fallback is what makes that safe.
-	useNativeTools := settings.NativeTools && modelInfo.Has(llm.CapTools)
+	useNativeTools := nativeToolsEnabled(settings, modelInfo)
 
 	in := generateInput{
 		Chat:        chat,
@@ -579,13 +578,14 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 	}
 
 	provider, hasProvider := e.Registry.Provider(backendID)
-	toolsOffered := settings.NativeTools && model.Has(llm.CapTools) && len(toolDefs) > 0
+	toolsOffered := nativeToolsEnabled(settings, model) && len(toolDefs) > 0
 	replayReasoning := hasProvider && replaysReasoning(provider, toolsOffered)
 
 	measurement, hasMeasurement := e.Measurement(chat.ID)
 	if !hasMeasurement {
 		// The count did not survive the process (COMPACT.md §11.5).
-		measurement, hasMeasurement = measurementFromHistory(messages, compactions, backendID, modelID, replayReasoning)
+		measurement, hasMeasurement = measurementFromHistory(messages, compactions,
+			backendID, modelID, provider, toolsOffered)
 	}
 	measuredValid := hasMeasurement && measurement.Backend == backendID && measurement.Model == modelID
 	// The old prompt did not count the same history if reasoning replay changed.
@@ -809,6 +809,13 @@ func replaysReasoning(provider llm.Provider, toolsOffered bool) bool {
 	return ok && replayer.ReplaysReasoning(toolsOffered)
 }
 
+// nativeToolsEnabled reports whether a turn on this model offers tools at all. It is one function
+// because two places have to agree: the request generate builds, and the price put on the reasoning
+// that request may carry.
+func nativeToolsEnabled(settings config.Settings, model llm.ModelInfo) bool {
+	return settings.NativeTools && model.Has(llm.CapTools)
+}
+
 // measurementFromHistory recovers what the backend last reported for this chat's prompt, from
 // the reply rows the store already holds.
 //
@@ -822,13 +829,23 @@ func replaysReasoning(provider llm.Provider, toolsOffered bool) bool {
 //     that fold replaced — the same reason a compaction invalidates the count in memory;
 //   - a prompt_tokens above zero, which is a request that never measured itself.
 //
+// One row fact is not stored at all: whether the request behind a count carried a reply's
+// reasoning, so the shape is read from the provider (§11.5). Where the answer cannot vary —
+// Ollama always, every other local backend never — the count describes this request too. Where it
+// can (DeepSeek, beside tools) a count is adopted only for a request that carries no reasoning
+// either: the row may have carried some, which makes the count read too large, while reasoning the
+// row left out could not be recovered at all.
+//
 // Seq is the message before that reply, since a reply cannot be inside the prompt it answers.
 // One message too far back is the safe direction: the rows after it are priced as the delta,
 // where a seq above the one the request really ended at would leave them out of the accounting.
-// The reasoning-replay flag is reported as it is resolved for this request, because a stored row
-// does not record how its own request was shaped.
 func measurementFromHistory(messages []store.Message, compactions []store.Compaction,
-	backendID, modelID string, replayReasoning bool) (Measurement, bool) {
+	backendID, modelID string, provider llm.Provider, toolsOffered bool) (Measurement, bool) {
+
+	replayReasoning := replaysReasoning(provider, toolsOffered)
+	if replayReasoning && !replaysReasoning(provider, false) {
+		return Measurement{}, false
+	}
 
 	var foldedAt time.Time
 	for _, c := range compactions {
