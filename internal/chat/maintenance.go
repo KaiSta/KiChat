@@ -429,9 +429,12 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		// needs no allowance here — it carries the answer, not the transcript
 		// (summaryRestructure).
 		tail := summariseTail(SummarizeOptions{PreviousSummary: previous, Focus: opts.Focus, Lang: lang}, lang, true)
-		cost := llm.EstimateMessagesTokens(prefix) + llm.EstimateMessagesTokens([]llm.Message{
-			{Role: llm.RoleUser, Content: tail + "\n\n" + noThinkTag},
-		})
+		// The prefix is the chat's own request and carries no tools, so the chat's provider says
+		// whether its reasoning travels — and where it does, those tokens are sent again.
+		cost := llm.EstimateMessagesTokensAs(prefix, replaysReasoning(target.Provider, false)) +
+			llm.EstimateMessagesTokens([]llm.Message{
+				{Role: llm.RoleUser, Content: tail + "\n\n" + noThinkTag},
+			})
 		usePrefix = cost+outputTokens+margin <= limit
 	}
 	transcriptMessages := append([]store.Message(nil), toFold...)

@@ -107,8 +107,10 @@ type AssemblyInput struct {
 	// back; the engine always passes the full set.
 	KnownTools []string
 
-	// ReplayToolReasoning counts reasoning when the selected backend sends it with tools.
-	ReplayToolReasoning bool
+	// ReplayReasoning says this request carries an assistant reply's reasoning back to the
+	// model, which is the only case in which the budget may charge for that text. Two provider
+	// shapes do; Engine.buildAssembly resolves it from both (see replaysReasoning).
+	ReplayReasoning bool
 
 	Limit       int
 	LimitSource string
@@ -161,8 +163,8 @@ type Assembly struct {
 	// re-send this request's prefix unchanged instead of rendering a transcript of it
 	// (summarisationPrefix). It is nil when a helper rewrote the request's shape and the
 	// alignment no longer holds, so that caller falls back rather than guessing.
-	MessageSeqs         []int
-	ReplayToolReasoning bool
+	MessageSeqs     []int
+	ReplayReasoning bool
 
 	// AgedReads are the files whose `read_file` result was dropped from the request's tail
 	// to keep the reply from re-sending everything it has ever read (see ageToolResults).
@@ -428,7 +430,7 @@ func Assemble(in AssemblyInput) Assembly {
 		// Priced before the attachment text is appended: inlined document text
 		// belongs to Attachments below, and counting it here as well made the
 		// meter read half again as large as the request it describes.
-		historyTokens := historyMessageTokens(lm, in.ReplayToolReasoning)
+		historyTokens := historyMessageTokens(lm, in.ReplayReasoning)
 		if imgs := lm.Images; len(imgs) > 0 {
 			tokens := llm.EstimateImageTokens(len(imgs))
 			budget.Attachments += tokens
@@ -600,7 +602,7 @@ func Assemble(in AssemblyInput) Assembly {
 				len(inlineByMessage[m.ID]) == 0 {
 				continue
 			}
-			delta += historyMessageTokens(lm, in.ReplayToolReasoning)
+			delta += historyMessageTokens(lm, in.ReplayReasoning)
 			// Attachments of newer messages are part of the next request and no
 			// measurement can have counted them: they were added afterwards.
 			delta += llm.EstimateImageTokens(len(imagesByMessage[m.ID]))
@@ -636,16 +638,16 @@ func Assemble(in AssemblyInput) Assembly {
 	}
 
 	return Assembly{
-		Messages:            msgs,
-		MessageSeqs:         seqs,
-		Budget:              budget,
-		FirstVerbatimSeq:    firstVerbatim,
-		MemorySummary:       memorySummary,
-		MemoryCompactionID:  memoryID,
-		AttachmentNotice:    notice,
-		MaxIncludedSeq:      maxIncluded,
-		ReplayToolReasoning: in.ReplayToolReasoning,
-		AgedReads:           agedReads,
+		Messages:           msgs,
+		MessageSeqs:        seqs,
+		Budget:             budget,
+		FirstVerbatimSeq:   firstVerbatim,
+		MemorySummary:      memorySummary,
+		MemoryCompactionID: memoryID,
+		AttachmentNotice:   notice,
+		MaxIncludedSeq:     maxIncluded,
+		ReplayReasoning:    in.ReplayReasoning,
+		AgedReads:          agedReads,
 	}
 }
 
@@ -741,13 +743,17 @@ func buildAttachmentNotice(in AssemblyInput) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// historyMessageTokens prices tool calls and the reasoning the backend will replay.
+// historyMessageTokens prices a message as it travels: its content, the tool calls the backend
+// receives again, and — only when this request carries it — the reasoning.
+//
+// Stored reasoning is not context a backend sees. The OpenAI-compatible path drops it unless the
+// vendor requires it beside tool calls, so a thinking model's reply costs its answer and not its
+// thinking; charging half of it anyway made the meter read larger than the request it describes,
+// and on a project's history that alone can report an over-limit context for a request that fits.
 func historyMessageTokens(m llm.Message, replayReasoning bool) int {
 	tokens := llm.EstimateTokens(m.Content)
 	if replayReasoning && m.Role == llm.RoleAssistant {
 		tokens += llm.EstimateTokens(m.Reasoning)
-	} else {
-		tokens += llm.EstimateTokens(m.Reasoning) / 2
 	}
 	for _, call := range m.ToolCalls {
 		tokens += llm.EstimateTokens(call.Name) + llm.EstimateTokens(call.Arguments) + 8

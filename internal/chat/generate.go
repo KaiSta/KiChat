@@ -419,12 +419,12 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 
 		if usage != nil && usage.PromptTokens > 0 {
 			e.setMeasurement(in.Chat.ID, Measurement{
-				Backend:             in.BackendID,
-				Model:               in.ModelID,
-				PromptTokens:        usage.PromptTokens,
-				Seq:                 assembly.MaxIncludedSeq,
-				ReplayToolReasoning: assembly.ReplayToolReasoning,
-				At:                  time.Now(),
+				Backend:         in.BackendID,
+				Model:           in.ModelID,
+				PromptTokens:    usage.PromptTokens,
+				Seq:             assembly.MaxIncludedSeq,
+				ReplayReasoning: assembly.ReplayReasoning,
+				At:              time.Now(),
 			})
 		}
 

@@ -358,9 +358,11 @@ func newLMStudioProvider(baseURL, apiKey string) *openAICompatProvider {
 func (p *openAICompatProvider) ID() string   { return p.id }
 func (p *openAICompatProvider) Name() string { return p.name }
 
-// ReplaysToolReasoning reports whether tool requests include assistant reasoning.
-func (p *openAICompatProvider) ReplaysToolReasoning() bool {
-	return p.modelsFlavour == flavourDeepSeek
+// ReplaysReasoning reports that this wire carries an assistant reply's reasoning only for the one
+// vendor that requires it beside tool calls; every other OpenAI-compatible backend here receives
+// the reply without it.
+func (p *openAICompatProvider) ReplaysReasoning(withTools bool) bool {
+	return withTools && p.modelsFlavour == flavourDeepSeek
 }
 
 // CanToggleThinking reports whether this backend accepts `enable_thinking` in the
@@ -1188,7 +1190,7 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 	}
 	body := map[string]any{
 		"model":       req.Model,
-		"messages":    toWireMessages(req.Messages, p.ReplaysToolReasoning() && len(req.Tools) > 0),
+		"messages":    toWireMessages(req.Messages, p.ReplaysReasoning(len(req.Tools) > 0)),
 		"stream":      true,
 		"temperature": req.Temperature,
 		// OpenAI-compatible servers omit usage from a stream unless it is asked

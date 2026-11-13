@@ -213,10 +213,17 @@ type Provider interface {
 	Chat(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error)
 }
 
-// ToolReasoningReplayer marks a provider that includes assistant reasoning in
-// requests carrying tools, so prompt budgets can account for the replayed text.
-type ToolReasoningReplayer interface {
-	ReplaysToolReasoning() bool
+// ReasoningReplayer marks a provider whose requests carry an assistant reply's
+// reasoning back to the model, so prompt budgets can charge for text the backend
+// really tokenises. Two shapes do, and one method answers for both: Ollama's message
+// keeps a `thinking` field that toOllamaMessages fills on every request, while DeepSeek
+// requires the reasoning beside tool calls and nowhere else. Every other backend drops
+// it, which is why charging for it by default made the meter read larger than the
+// request it describes.
+type ReasoningReplayer interface {
+	// ReplaysReasoning reports whether a request with or without tools carries an
+	// assistant reply's reasoning.
+	ReplaysReasoning(withTools bool) bool
 }
 
 // CacheInvalidator is implemented by a provider that caches per-model metadata

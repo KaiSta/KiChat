@@ -474,18 +474,37 @@ nothing is folded** rather than guessed (`compact.go:297`). This also keeps the 
 prompt from beginning with an assistant message.
 Pinned by `TestPlanCompactionNeverFoldsAStreamingMessage`.
 
-### 5.6 How the fold is priced
+### 5.6 How the fold is priced, and what the meter charges for
 
 ```
 TokensBefore        = Σ over folded messages ( EstimateTokens(content) + EstimateTokens(reasoning)/2 )
 TokensAfterEstimate = min(MaxSummaryTokens, TokensBefore / 2)   → clamped to ≥ 1
 ```
 
-Reasoning is counted at **half weight** throughout the planner: it is context, but it is
-not the conversation. The `TokensBefore / 2` clamp exists so a fold can never be reported
-as saving nothing — *"a summary we instruct the model to keep terse should not be budgeted
-as larger than what it replaces, or compaction would appear to save nothing"*
+The planner's own sums count reasoning at **half weight**: a folded range's size is a rough
+figure either way, and both uses (`TokensBefore`, the kept-tail walk of §5.2) decide how much to
+fold rather than whether a request fits. The `TokensBefore / 2` clamp exists so a fold can never
+be reported as saving nothing — *"a summary we instruct the model to keep terse should not be
+budgeted as larger than what it replaces, or compaction would appear to save nothing"*
 (`compact.go:272`).
+
+**The budget the meter shows does not charge half.** `historyMessageTokens` (`context.go`) prices
+a reply's reasoning only when the request carries it, and then in full, because stored reasoning
+is context only where the backend receives it again. The flag is `AssemblyInput.ReplayReasoning`,
+resolved once in `buildAssembly` (`replaysReasoning`) from `llm.ReasoningReplayer`, which one
+method answers for both shapes that carry reasoning: Ollama's message keeps a `thinking` field
+filled on every request, and DeepSeek requires it beside tool calls and nowhere else. Every other
+backend drops it — LM Studio, llama.cpp, Groq, NVIDIA, Mistral, MLX and custom endpoints all
+receive a reply without its thinking. Charging half of it anyway made the
+meter read larger than the request it describes — the same error as counting an inlined document
+twice (§11.3) — and on a project run by a thinking model that share is large enough to decide
+whether the meter reads as over the window. The delta on top of a measurement goes through the
+same function, so `count + delta` follows one rule, and the flag is also what the stored
+measurement's shape check compares: a settings change that starts or stops replaying reasoning
+invalidates the count. The one other counter that prices a request which may carry reasoning is
+the summariser's prefix path (§7); it asks `llm.EstimateMessagesTokensAs` with the chat's own
+provider, because that request re-sends the chat's messages and pays for the same reasoning
+again.
 
 `TokensBefore`/`TokensAfter` are estimates. The context meter's `measured` figure is
 separate and authoritative (§11).
@@ -1014,12 +1033,12 @@ approximate. Two things happen with it:
 
 The count the meter treats as authoritative is the backend's own `prompt_tokens`, and it lives
 in `chat.TurnState` — which outlives an Engine but not the process. After a restart the chat was
-therefore priced by `llm.EstimateTokens`, and the estimator is deliberately priced in the safe
-direction and counts half of every reply's reasoning whether or not the request can carry it
-(§5.6). On a project's history that combination can cross the window the chat had been running
-inside: the meter reports an over-limit context for a request that fits, and the model picker
-will not start a local model on that reading (`ModelSwitcher.commit` refuses a start whose budget
-is over the limit), so the session cannot be resumed.
+therefore priced by `llm.EstimateTokens`, which is a heuristic rather than the backend's own
+tokenizer and is priced in the safe direction (§5.6). On a project's history that guess can cross
+the window the chat had been running inside: the meter reports an over-limit context for a request
+that fits, and the model picker will not start a local model on that reading
+(`ModelSwitcher.commit` refuses a start whose budget is over the limit), so the session cannot be
+resumed.
 
 Every measuring request wrote its `prompt_tokens` onto the reply row it produced
 (`generate.go`, `row.PromptTokens`), so the newest such row *is* the count the chat last had.
@@ -1029,7 +1048,20 @@ tokenizer), a reply written before the newest fold (its request still carried th
 fold replaced — the same rule as `InvalidateMeasurement` in §11.1), and a zero `prompt_tokens`
 (no measurement rather than a size). `Seq` is the message before that reply, since a reply cannot
 be inside the prompt it answers, so the ordinary delta accounting of `Assemble` applies
-unchanged: the reply itself and everything after it are priced as the delta.
+unchanged: the reply itself and everything after it are priced as the delta. A seq one message
+too far back only prices an extra message as the delta; a seq above where its request really
+ended would leave a message out of the accounting, so the row's predecessor is the right mark.
+
+Two shapes the recovery cannot see. Both are narrow, and neither can block a session the way the
+estimator did:
+
+- **Reasoning replay.** A stored row does not record whether its request replayed a reply's
+  reasoning, so the flag is taken from the request being assembled. Only a backend that replays
+  reasoning at all (`llm.ReasoningReplayer` — Ollama always, DeepSeek beside tools) can be off by
+  it, and only by how much of each reply was thinking rather than conversation.
+- **An undone compaction** (§11.4). Its messages are live again while the stored count still
+  describes the folded shape, so the meter reads low until the next turn measures. The error is
+  in the direction of missing a fold, and a request that does not fit is folded by `foldForSize`.
 
 ---
 

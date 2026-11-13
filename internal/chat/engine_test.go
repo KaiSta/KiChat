@@ -1069,7 +1069,7 @@ func TestMeasurementIncludesTheGeneratedAnswerInNextBudget(t *testing.T) {
 
 type reasoningReplayProvider struct{ *fakeProvider }
 
-func (*reasoningReplayProvider) ReplaysToolReasoning() bool { return true }
+func (*reasoningReplayProvider) ReplaysReasoning(withTools bool) bool { return withTools }
 
 func TestMeasurementIsDiscardedWhenToolReasoningReplayChanges(t *testing.T) {
 	st := newTestStore(t)
@@ -1090,13 +1090,13 @@ func TestMeasurementIsDiscardedWhenToolReasoningReplayChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(defs) == 0 || !assembly.ReplayToolReasoning {
+	if len(defs) == 0 || !assembly.ReplayReasoning {
 		t.Fatal("test needs a tool-enabled reasoning replay request")
 	}
 	if assembly.Budget.MeasuredValid {
 		t.Fatal("a tool-free measurement was reused for a tool-reasoning request")
 	}
-	engine.setMeasurement(chat.ID, Measurement{Backend: "fake", Model: "fake-model", PromptTokens: 100, Seq: 1, ReplayToolReasoning: true})
+	engine.setMeasurement(chat.ID, Measurement{Backend: "fake", Model: "fake-model", PromptTokens: 100, Seq: 1, ReplayReasoning: true})
 	settings.NativeTools = false
 	assembly, _, err = engine.buildAssembly(context.Background(), &chat, "fake", "fake-model", settings, model, "", "", "")
 	if err != nil {
@@ -1110,12 +1110,11 @@ func TestMeasurementIsDiscardedWhenToolReasoningReplayChanges(t *testing.T) {
 // TestARestartResumesFromTheCountTheBackendGave pins the meter across a restart.
 //
 // The count a backend reports lives in the turn state, which is per process. A chat that had
-// been measured all day was therefore priced by the estimator again after a restart — one that
-// is deliberately generous and counts half of a reply's reasoning whether or not the request can
-// carry it — and on a project's history that guess can read as over the window the conversation
-// had been running inside, which is what stops the picker from starting a local model for it.
-// Every measuring request stored its prompt_tokens on the reply row it produced, so the newest
-// row is used instead of the guess.
+// been measured all day was therefore priced by the estimator again after a restart — a heuristic
+// rather than the backend's tokenizer, and one priced in the safe direction — and on a project's
+// history that guess can read as over the window the conversation had been running inside, which
+// is what stops the picker from starting a local model for it. Every measuring request stored its
+// prompt_tokens on the reply row it produced, so the newest row is used instead of the guess.
 func TestARestartResumesFromTheCountTheBackendGave(t *testing.T) {
 	st := newTestStore(t)
 	c := makeChat(t, st)
@@ -1212,6 +1211,56 @@ func TestARestartIgnoresACountThatCannotDescribeThePrompt(t *testing.T) {
 				t.Fatalf("a count that cannot describe this prompt was adopted: %+v", budget)
 			}
 		})
+	}
+}
+
+// alwaysReasons is a backend whose message shape carries a reply's reasoning in every request,
+// the way Ollama's `thinking` field does (llm.ReasoningReplayer).
+type alwaysReasons struct{ *fakeProvider }
+
+func (*alwaysReasons) ReplaysReasoning(bool) bool { return true }
+
+// TestOnlyABackendThatCarriesReasoningPaysForIt pins the resolution the budget rests on: the same
+// stored reasoning is priced on a backend that replays it and costs nothing on one that does not,
+// which is every LM Studio, llama.cpp, Groq and NVIDIA request. The second half is the number the
+// user reads — a project's thinking model was charged for text no request carried.
+func TestOnlyABackendThatCarriesReasoningPaysForIt(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	reasoning := strings.Repeat("Ich prüfe die Datei. ", 300)
+	for i, m := range []store.Message{
+		{ID: "m1", Seq: 1, Role: "user", Content: "Frage", Status: store.StatusComplete},
+		{ID: "m2", Seq: 2, Role: "assistant", Content: "Antwort", Reasoning: reasoning,
+			Status: store.StatusComplete},
+	} {
+		m.ChatID = chat.ID
+		m.CreatedAt = time.Now().Add(time.Duration(i) * time.Second)
+		if err := st.CreateMessage(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 100000}
+	settings := config.Default()
+	settings.AutoTitle = false
+
+	preview := func(provider llm.Provider) ContextBudget {
+		t.Helper()
+		registry := llm.NewRegistry(nil)
+		registry.Register(provider)
+		engine := NewEngine(st, registry, &tools.Service{Store: st},
+			func() config.Settings { return settings }, nil)
+		budget, err := engine.PreviewBudget(context.Background(), chat.ID, "fake", "fake-model")
+		if err != nil {
+			t.Fatalf("PreviewBudget: %v", err)
+		}
+		return budget
+	}
+	plain := preview(&fakeProvider{model: model})
+	replayed := preview(&alwaysReasons{&fakeProvider{model: model}})
+
+	if got, want := replayed.History-plain.History, llm.EstimateTokens(reasoning); got != want {
+		t.Fatalf("reasoning priced at %d tokens, want %d on the backend that carries it and 0 "+
+			"on the one that does not (plain=%d, replayed=%d)", got, want, plain.History, replayed.History)
 	}
 }
 

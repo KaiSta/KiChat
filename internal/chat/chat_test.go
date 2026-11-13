@@ -1246,7 +1246,7 @@ func TestAssemblePricesNewToolCallAndReplayedReasoning(t *testing.T) {
 		{ID: "tool", Seq: 3, Role: "tool", ToolCallID: "call-1", Content: "Result"},
 	}
 	in := AssemblyInput{Chat: asmChat("System"), Messages: messages, Limit: 10000,
-		Measured: 100, MeasuredValid: true, MeasuredSeq: 1, ReplayToolReasoning: true}
+		Measured: 100, MeasuredValid: true, MeasuredSeq: 1, ReplayReasoning: true}
 	assembly := Assemble(in)
 	want := llm.EstimateTokens(reasoning) + llm.EstimateTokens("read_file") +
 		llm.EstimateTokens(arguments) + 8 + llm.EstimateTokens("Result")
@@ -1255,6 +1255,31 @@ func TestAssemblePricesNewToolCallAndReplayedReasoning(t *testing.T) {
 	}
 	if assembly.Budget.History < want {
 		t.Fatalf("history = %d, does not include tool call and full reasoning (%d)", assembly.Budget.History, want)
+	}
+}
+
+// TestAssembleLeavesOutReasoningTheRequestCannotCarry is the other half of the pricing rule: a
+// reply's stored reasoning is in the transcript but not in the request, because the
+// OpenAI-compatible path drops it for every backend that does not require it. Counting half of it
+// — which is what the budget used to do — made a project's history read larger than the request
+// it describes, and after a restart that reading is the one the picker refuses a model start on.
+func TestAssembleLeavesOutReasoningTheRequestCannotCarry(t *testing.T) {
+	reasoning := strings.Repeat("thinking ", 200)
+	messages := []store.Message{
+		msg(1, "user", "Question"),
+		{ID: "assistant", Seq: 2, Role: "assistant", Content: "Antwort", Reasoning: reasoning},
+	}
+	assembly := Assemble(AssemblyInput{Chat: asmChat("System"), Messages: messages, Limit: 10000})
+	if want := llm.EstimateTokens("Question") + llm.EstimateTokens("Antwort"); assembly.Budget.History != want {
+		t.Fatalf("history = %d, want %d: the reasoning is not in the request",
+			assembly.Budget.History, want)
+	}
+	// The same rule prices the delta, which is the figure a restart adds on top of the backend's
+	// own count.
+	delta := Assemble(AssemblyInput{Chat: asmChat("System"), Messages: messages, Limit: 10000,
+		Measured: 100, MeasuredValid: true, MeasuredSeq: 1})
+	if want := llm.EstimateTokens("Antwort"); delta.Budget.DeltaSince != want {
+		t.Fatalf("delta = %d, want %d: the reasoning is not in the request", delta.Budget.DeltaSince, want)
 	}
 }
 
@@ -1281,7 +1306,7 @@ func TestAssembleCountsInlinedDocumentTextOnce(t *testing.T) {
 	// replace, and what the model reads before any attachment is appended.
 	wantHistory := 0
 	for _, m := range messages {
-		wantHistory += llm.EstimateTokens(m.Content) + llm.EstimateTokens(m.Reasoning)/2
+		wantHistory += llm.EstimateTokens(m.Content)
 	}
 	budget := assembly.Budget
 	if budget.History != wantHistory {

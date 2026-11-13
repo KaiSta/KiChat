@@ -1055,7 +1055,9 @@ func estimateBodyTokens(raw string) int {
 				}
 			}
 		}
-		total += llm.EstimateTokens(m.Reasoning) / 2
+		// Priced in full when the body carries it: this decodes the request as sent, and
+		// reasoning_content is present only on the backend that replays it.
+		total += llm.EstimateTokens(m.Reasoning)
 		for _, tc := range m.ToolCalls {
 			total += llm.EstimateTokens(tc.Function.Name) + llm.EstimateTokens(tc.Function.Arguments) + 8
 		}

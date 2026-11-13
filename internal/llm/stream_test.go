@@ -450,6 +450,40 @@ func TestOllamaHonoursDisableThinking(t *testing.T) {
 	}
 }
 
+// TestOnlyTheShapesThatCarryReasoningSaySo pins the provider answer the context budget rests on:
+// a reply's reasoning is prompt again on Ollama (every request) and on DeepSeek (only beside
+// tools), and nowhere else, so nowhere else may the budget charge for it.
+func TestOnlyTheShapesThatCarryReasoningSaySo(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		provider  Provider
+		withTools bool
+		without   bool
+	}{
+		{name: "ollama", provider: newOllamaProvider("http://unused"), withTools: true, without: true},
+		{name: "deepseek", provider: newDeepSeekProvider("", "", "", ""), withTools: true},
+		{name: "lm studio", provider: newLMStudioProvider("http://unused", "")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replayer, ok := tc.provider.(ReasoningReplayer)
+			if !ok {
+				t.Fatalf("%s does not answer what its request carries", tc.name)
+			}
+			if got := replayer.ReplaysReasoning(true); got != tc.withTools {
+				t.Errorf("with tools = %v, want %v", got, tc.withTools)
+			}
+			if got := replayer.ReplaysReasoning(false); got != tc.without {
+				t.Errorf("without tools = %v, want %v", got, tc.without)
+			}
+		})
+	}
+	// Ollama's answer is not a claim about the interface: the request really carries the text.
+	msgs := toOllamaMessages([]Message{{Role: RoleAssistant, Content: "Antwort", Reasoning: "kurz überlegt"}})
+	if msgs[0].Thinking != "kurz überlegt" {
+		t.Fatalf("thinking = %q in the request, want the stored reasoning", msgs[0].Thinking)
+	}
+}
+
 // TestLMStudioSendsEnableThinkingFalse pins the LM Studio lever for the
 // summariser: LM Studio has no reasoning parameter, but its request accepts the
 // in-body `enable_thinking` toggle the Qwen-style chat template reads. Without it
