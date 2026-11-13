@@ -1010,6 +1010,27 @@ approximate. Two things happen with it:
   discarding the list it had loaded.
 - the measurement is invalidated again, for the same reason as in §11.1.
 
+### 11.5 The measured size after a restart
+
+The count the meter treats as authoritative is the backend's own `prompt_tokens`, and it lives
+in `chat.TurnState` — which outlives an Engine but not the process. After a restart the chat was
+therefore priced by `llm.EstimateTokens`, and the estimator is deliberately priced in the safe
+direction and counts half of every reply's reasoning whether or not the request can carry it
+(§5.6). On a project's history that combination can cross the window the chat had been running
+inside: the meter reports an over-limit context for a request that fits, and the model picker
+will not start a local model on that reading (`ModelSwitcher.commit` refuses a start whose budget
+is over the limit), so the session cannot be resumed.
+
+Every measuring request wrote its `prompt_tokens` onto the reply row it produced
+(`generate.go`, `row.PromptTokens`), so the newest such row *is* the count the chat last had.
+`measurementFromHistory` (`engine.go`) adopts it when the in-memory count is gone, and drops a
+row that cannot describe the prompt about to be sent: another backend/model's count (a different
+tokenizer), a reply written before the newest fold (its request still carried the messages that
+fold replaced — the same rule as `InvalidateMeasurement` in §11.1), and a zero `prompt_tokens`
+(no measurement rather than a size). `Seq` is the message before that reply, since a reply cannot
+be inside the prompt it answers, so the ordinary delta accounting of `Assemble` applies
+unchanged: the reply itself and everything after it are priced as the delta.
+
 ---
 
 ## 12. Settings reference

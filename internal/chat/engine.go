@@ -578,15 +578,21 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 		working.SystemPrompt = working.SystemPrompt + "\n\n" + extraSystem
 	}
 
-	measurement, hasMeasurement := e.Measurement(chat.ID)
-	measuredValid := hasMeasurement && measurement.Backend == backendID && measurement.Model == modelID
-
 	replayToolReasoning := false
 	if provider, ok := e.Registry.Provider(backendID); ok && settings.NativeTools && model.Has(llm.CapTools) && len(toolDefs) > 0 {
 		if replayer, ok := provider.(llm.ToolReasoningReplayer); ok {
 			replayToolReasoning = replayer.ReplaysToolReasoning()
 		}
 	}
+
+	measurement, hasMeasurement := e.Measurement(chat.ID)
+	if !hasMeasurement {
+		// The in-memory count did not survive the process, so the chat is priced from what
+		// the backend reported before the restart rather than from the estimator
+		// (measurementFromHistory says why that difference matters).
+		measurement, hasMeasurement = measurementFromHistory(messages, compactions, backendID, modelID, replayToolReasoning)
+	}
+	measuredValid := hasMeasurement && measurement.Backend == backendID && measurement.Model == modelID
 	// The old prompt did not count the same history if tool reasoning replay changed.
 	measuredValid = measuredValid && measurement.ReplayToolReasoning == replayToolReasoning
 
@@ -798,6 +804,70 @@ func anyProviderAvailable(chain interface{ ProviderAvailability() map[string]boo
 		}
 	}
 	return false
+}
+
+// measurementFromHistory recovers the size the backend last reported for this chat's prompt,
+// from the reply rows the store already holds.
+//
+// The measurement the meter treats as authoritative lives in TurnState, which outlives an
+// Engine but not the process (internal/llm/tokens.go: the estimator "is only used to predict
+// usage *before* a request has been sent"). So a restart used to price a running session with
+// the estimator — one that is deliberately generous, and that counts half of every reply's
+// reasoning whether or not the request can carry it. On a project's history those two together
+// can cross the window the chat had been running inside, and the meter then reports an
+// over-limit context for a request that fits; the model picker refuses to start a local model
+// on that reading (ModelSwitcher.commit), so the session cannot be resumed at all.
+//
+// Every measuring request wrote its own prompt_tokens onto the reply row it produced, so the
+// newest such row is the count this chat last had. Three conditions make a row usable, and each
+// drops one that cannot describe the prompt about to be sent:
+//
+//   - the same backend and model, because another tokenizer's count is not comparable;
+//   - a reply written after the newest fold, because the request behind it still carried the
+//     messages that fold replaced — which is the same reason a compaction invalidates the count
+//     in memory (maintenance.go);
+//   - a prompt_tokens above zero, which is a request that never measured itself rather than a
+//     prompt of no size.
+//
+// Seq is the message just before that reply: the assembly that produced it ended there, since a
+// reply cannot be inside the prompt it answers. The reasoning-replay flag is reported as it is
+// resolved for *this* request, because a stored row does not record how its request was shaped;
+// only a backend that replays reasoning (DeepSeek, see llm.ToolReasoningReplayer) can be off by
+// it, and by how much reasoning travels rather than by the conversation.
+func measurementFromHistory(messages []store.Message, compactions []store.Compaction,
+	backendID, modelID string, replayToolReasoning bool) (Measurement, bool) {
+
+	var foldedAt time.Time
+	for _, c := range compactions {
+		if c.CreatedAt.After(foldedAt) {
+			foldedAt = c.CreatedAt
+		}
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.Role != string(llm.RoleAssistant) || m.PromptTokens <= 0 {
+			continue
+		}
+		if m.Backend != backendID || m.Model != modelID {
+			continue
+		}
+		if !m.CreatedAt.After(foldedAt) {
+			continue
+		}
+		seq := 0
+		if i > 0 {
+			seq = messages[i-1].Seq
+		}
+		return Measurement{
+			Backend:             backendID,
+			Model:               modelID,
+			PromptTokens:        m.PromptTokens,
+			Seq:                 seq,
+			ReplayToolReasoning: replayToolReasoning,
+			At:                  m.CreatedAt,
+		}, true
+	}
+	return Measurement{}, false
 }
 
 // emitBudget publishes the current context budget so the meter can update.

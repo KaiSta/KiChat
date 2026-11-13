@@ -1107,6 +1107,114 @@ func TestMeasurementIsDiscardedWhenToolReasoningReplayChanges(t *testing.T) {
 	}
 }
 
+// TestARestartResumesFromTheCountTheBackendGave pins the meter across a restart.
+//
+// The count a backend reports lives in the turn state, which is per process. A chat that had
+// been measured all day was therefore priced by the estimator again after a restart — one that
+// is deliberately generous and counts half of a reply's reasoning whether or not the request can
+// carry it — and on a project's history that guess can read as over the window the conversation
+// had been running inside, which is what stops the picker from starting a local model for it.
+// Every measuring request stored its prompt_tokens on the reply row it produced, so the newest
+// row is used instead of the guess.
+func TestARestartResumesFromTheCountTheBackendGave(t *testing.T) {
+	st := newTestStore(t)
+	c := makeChat(t, st)
+	base := time.Now().Add(-time.Hour)
+	answer := strings.Repeat("Der Stand des Projekts in einem Absatz. ", 40)
+	reasoning := strings.Repeat("Ich prüfe die Datei. ", 200)
+	write := func(m store.Message) {
+		t.Helper()
+		m.ChatID = c.ID
+		if m.Status == "" {
+			m.Status = store.StatusComplete
+		}
+		if err := st.CreateMessage(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(store.Message{ID: "m1", Seq: 1, Role: "user", Content: "Wie ist der Stand?", CreatedAt: base})
+	write(store.Message{ID: "m2", Seq: 2, Role: "assistant", Content: answer, Reasoning: reasoning,
+		CreatedAt: base.Add(time.Second), Backend: "fake", Model: "fake-model", PromptTokens: 5000})
+	write(store.Message{ID: "m3", Seq: 3, Role: "user", Content: "Und weiter?", CreatedAt: base.Add(2 * time.Second)})
+
+	provider := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 64000}}
+	// A new engine has an empty turn state, which is what starting the app gives.
+	engine, _ := newTestEngine(t, st, provider)
+
+	budget, err := engine.PreviewBudget(context.Background(), c.ID, "fake", "fake-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !budget.MeasuredValid || budget.Measured != 5000 {
+		t.Fatalf("a restart priced the prompt by the estimator: %+v", budget)
+	}
+	if budget.DeltaSince <= 0 {
+		t.Fatalf("the reply and the question after the count were not priced: %+v", budget)
+	}
+	if budget.Used != 5000+budget.DeltaSince {
+		t.Errorf("used = %d, want %d (the count plus what was added after it)",
+			budget.Used, 5000+budget.DeltaSince)
+	}
+	if budget.OverLimit {
+		t.Errorf("a 5000-token prompt in a 64000-token window reads as over the limit: %+v", budget)
+	}
+}
+
+// TestARestartIgnoresACountThatCannotDescribeThePrompt covers the rows a restart must not adopt:
+// another model's count (a different tokenizer), a reply written before the newest fold (its
+// request still carried the messages the fold replaced — the fold here ends before the reply, so
+// only this rule can reject it), and a reply that never measured itself.
+func TestARestartIgnoresACountThatCannotDescribeThePrompt(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		replyModel string
+		prompt     int
+		foldAfter  bool
+	}{
+		{name: "another model's tokenizer", replyModel: "other-model", prompt: 5000},
+		{name: "a count from before the fold", replyModel: "fake-model", prompt: 5000, foldAfter: true},
+		{name: "a reply that never measured", replyModel: "fake-model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			c := makeChat(t, st)
+			base := time.Now().Add(-time.Hour)
+			write := func(m store.Message) {
+				t.Helper()
+				m.ChatID = c.ID
+				if m.Status == "" {
+					m.Status = store.StatusComplete
+				}
+				if err := st.CreateMessage(m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(store.Message{ID: "m1", Seq: 1, Role: "user", Content: "Die alte Frage", CreatedAt: base})
+			write(store.Message{ID: "m2", Seq: 2, Role: "assistant", Content: "Die alte Antwort",
+				CreatedAt: base.Add(time.Second), Backend: "fake", Model: tc.replyModel, PromptTokens: tc.prompt})
+			write(store.Message{ID: "m3", Seq: 3, Role: "user", Content: "Und weiter?", CreatedAt: base.Add(2 * time.Second)})
+			if tc.foldAfter {
+				if err := st.CreateCompaction(store.Compaction{
+					ID: "k1", ChatID: c.ID, Trigger: "manual", FromSeq: 1, ToSeq: 1,
+					Summary: "Erinnerung an die alte Frage", CreatedAt: base.Add(30 * time.Second),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			provider := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 64000}}
+			engine, _ := newTestEngine(t, st, provider)
+			budget, err := engine.PreviewBudget(context.Background(), c.ID, "fake", "fake-model")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if budget.MeasuredValid {
+				t.Fatalf("a count that cannot describe this prompt was adopted: %+v", budget)
+			}
+		})
+	}
+}
+
 // TestBudgetReflectsTheModelSwitchRisk proves the pre-switch warning has the
 // data it needs: the same conversation against two different context windows.
 func TestBudgetReflectsTheModelSwitchRisk(t *testing.T) {
