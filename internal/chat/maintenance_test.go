@@ -1319,11 +1319,92 @@ func TestCompactReportsAnUnconfiguredSummaryBackend(t *testing.T) {
 	}
 }
 
+// TestCompactShrinksTheTranscriptForACutOffSummary pins the last lever a fold has. The
+// transcript's allowance and the answer's are one budget, so a history that fills the window
+// leaves the answer only its cap — and a model whose memory runs past that cap used to fail
+// the compaction outright, although the room it still needed was sitting in the transcript.
+// The retry takes it from there, and the fold succeeds instead of failing.
+func TestCompactShrinksTheTranscriptForACutOffSummary(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	filler := strings.Repeat("wort ", 900)
+	seq := 0
+	add := func(role string) {
+		t.Helper()
+		seq++
+		if err := st.CreateMessage(store.Message{
+			ID: fmt.Sprintf("m%d", seq), ChatID: "chat-1", Seq: seq, Role: role,
+			Content: filler, CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 16; i++ {
+		add("user")
+		add("assistant")
+	}
+
+	// A window where the largest answer is more than twice the cap, so a ladder would have a
+	// rung between them to spend a generation on. The first two replies are cut off: one for
+	// the cap, one for the room the summariser itself can find, and the third is the memory
+	// the fold gets once it has taken the transcript's room for the answer.
+	const window = 32768
+	cutOff := []llm.StreamEvent{
+		{Type: llm.EventDelta, Text: "## Established facts\n- Das Projekt"},
+		{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "length"}},
+	}
+	p := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: window},
+		replies: [][]llm.StreamEvent{
+			cutOff,
+			cutOff,
+			{
+				{Type: llm.EventDelta, Text: "## Established facts\n- Alles gut."},
+				{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "stop"}},
+			},
+		},
+	}
+	e, _ := newTestEngine(t, st, p)
+	result, err := e.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !result.Created {
+		t.Fatal("a summary cut off at the cap was not retried with a smaller transcript")
+	}
+	if list := summariesOf(t, st); len(list) != 1 || !strings.Contains(list[0].Summary, "Alles gut") {
+		t.Fatalf("compactions = %+v, want one carrying the complete memory", list)
+	}
+	if n := p.requestCount(); n != 3 {
+		t.Fatalf("summariser called %d times, want 3 (the cap, the room the summariser can find, then the fold's retry)", n)
+	}
+	first := p.requestAt(0)
+	retry := p.requestAt(p.requestCount() - 1)
+	if retry.MaxTokens <= 2*first.MaxTokens {
+		t.Errorf("retry max_tokens = %d, want the largest answer the window allows rather than the next "+
+			"doubling of the %d-token cap", retry.MaxTokens, first.MaxTokens)
+	}
+	firstPrompt, retryPrompt := llm.EstimateMessagesTokens(first.Messages), llm.EstimateMessagesTokens(retry.Messages)
+	if retryPrompt >= firstPrompt {
+		t.Errorf("retry prompt = %d tokens, want fewer than the first %d — the room has to come from the transcript",
+			retryPrompt, firstPrompt)
+	}
+	for _, req := range []llm.ChatRequest{first, retry} {
+		if used := llm.EstimateMessagesTokens(req.Messages); used+req.MaxTokens > window {
+			t.Errorf("request = %d prompt + %d output = %d tokens, over the %d-token window",
+				used, req.MaxTokens, used+req.MaxTokens, window)
+		}
+	}
+}
+
 func TestCompactionRejectsIncompleteSummary(t *testing.T) {
 	st := newTestStore(t)
 	makeChat(t, st)
 	seedTurns(t, st)
-	p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 32768},
+	// An 8k window leaves the answer every token the transcript does not take, so this fold
+	// has no room left to hand over: the refusal that stays, and the one a smaller transcript
+	// cannot help.
+	p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192},
 		replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Partial memory"}, {Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "length"}}}}}
 	e, _ := newTestEngine(t, st, p)
 	result, err := e.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
@@ -1417,7 +1498,8 @@ func TestCompactionRejectsMaxTokensStop(t *testing.T) {
 	st := newTestStore(t)
 	makeChat(t, st)
 	seedTurns(t, st)
-	p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 32768},
+	// The same window-bound fold as above, with the other spelling of the same stop reason.
+	p := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192},
 		replies: [][]llm.StreamEvent{{{Type: llm.EventDelta, Text: "Partial memory"}, {Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "max_tokens"}}}}}
 	e, _ := newTestEngine(t, st, p)
 	result, err := e.Compact(context.Background(), "chat-1", CompactOptions{Force: true})

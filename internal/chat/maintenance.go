@@ -240,6 +240,47 @@ func (e *Engine) autoFold(ctx context.Context, chat *store.Chat, provider llm.Pr
 	return err
 }
 
+// inlineDocument is a document a fold has to carry with its message: the block as it is
+// rendered into a transcript, kept so the fold can prove the whole document made it in.
+type inlineDocument struct{ filename, text string }
+
+// loadInlineDocuments reads the inline text documents of the messages a fold is about to
+// summarise and appends each to its message, so the transcript renderer carries it.
+//
+// It is called for the transcript path only: the prefix path re-sends the request that
+// already carried the text, so reading the document again would be a store round trip per
+// attachment for nothing — and, when the document has gone, a failure the fold has no need
+// to hit (TestThePrefixPathDoesNotReadTheDocumentAgain). It runs once per fold because it
+// writes to the messages it is given; a retry with a smaller transcript renders from the
+// same content.
+func (e *Engine) loadInlineDocuments(messages []store.Message) ([]inlineDocument, error) {
+	var documents []inlineDocument
+	for i := range messages {
+		m := &messages[i]
+		for _, a := range m.Attachments {
+			if a.Placement != store.PlacementInline {
+				continue
+			}
+			// A text-only summary cannot see an image. Keep that turn verbatim rather than
+			// replace the picture with an invented description.
+			if isImageAttachment(a) {
+				return nil, uimsg.Errorf("chat.compactionImage")
+			}
+			if a.DocumentID == "" {
+				return nil, uimsg.Errorf("chat.compactionAttachmentMissing", a.Filename)
+			}
+			d, err := e.Store.GetDocument(a.DocumentID)
+			if err != nil {
+				return nil, uimsg.Errorf("chat.compactionAttachment", a.Filename, uimsg.Sentence(err))
+			}
+			block := "<attachment id=\"" + a.ID + "\">\n" + renderDocumentBlock(d, a) + "\n</attachment>"
+			documents = append(documents, inlineDocument{a.Filename, block})
+			m.Content += "\n\n" + block
+		}
+	}
+	return documents, nil
+}
+
 // compactWith performs one compaction. It returns the compaction it created, or
 // nil when there was nothing to fold — a planner that decided no compaction was
 // needed, or a range that turned out to hold no messages.
@@ -397,18 +438,21 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	// inside the window — never to a fraction of the window, which would shrink the
 	// cap on a small context for no reason. A slice is added on top as slack for the
 	// estimator undershooting the backend's real tokenizer.
-	outputTokens := summaryOutputTokens
-	if configured := settings.Compact.MaxSummaryTokens; configured > outputTokens {
-		outputTokens = configured
+	answer := summaryOutputTokens
+	if configured := settings.Compact.MaxSummaryTokens; configured > answer {
+		answer = configured
 	}
 	margin := limit / 16
-	if room := limit - overhead - margin - summaryMinTranscriptTokens; outputTokens > room {
-		outputTokens = room
+	// The most the answer may be given: everything the window has beyond the margin and a
+	// transcript that is still worth reading. A fold that has already been trimmed to this
+	// has nothing left to hand over, which is the case the retry below refuses in.
+	maxAnswer := limit - overhead - margin - summaryMinTranscriptTokens
+	if maxAnswer < 1 {
+		maxAnswer = 1
 	}
-	if outputTokens < 1 {
-		outputTokens = 1
+	if answer > maxAnswer {
+		answer = maxAnswer
 	}
-	budget := PlanTranscriptBudget(limit, outputTokens+margin, overhead)
 	// The summarisation can re-send the chat's own request up to the fold boundary instead
 	// of a transcript of it (summarisationPrefix), which is what turns a fold on a local
 	// server from a full re-evaluation of the history into a cache hit. It is taken only
@@ -422,83 +466,25 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	if target.Backend != backendID || target.Model != modelID {
 		prefix = nil
 	}
-	usePrefix := false
+	// Priced as it will be sent: the chat's messages, then the instruction alone, in the
+	// prefix path's wording, which no longer repeats the memory. The shape retry needs no
+	// allowance here — it carries the answer, not the transcript (summaryRestructure).
+	prefixCost := 0
 	if len(prefix) > 0 {
-		// Priced as it will be sent: the chat's messages, then the instruction alone, in
-		// the prefix path's wording, which no longer repeats the memory. The shape retry
-		// needs no allowance here — it carries the answer, not the transcript
-		// (summaryRestructure).
 		tail := summariseTail(SummarizeOptions{PreviousSummary: previous, Focus: opts.Focus, Lang: lang}, lang, true)
 		// The prefix is the chat's own request and carries no tools, so the chat's provider says
 		// whether its reasoning travels — and where it does, those tokens are sent again.
-		cost := llm.EstimateMessagesTokensAs(prefix, replaysReasoning(target.Provider, false)) +
+		prefixCost = llm.EstimateMessagesTokensAs(prefix, replaysReasoning(target.Provider, false)) +
 			llm.EstimateMessagesTokens([]llm.Message{
 				{Role: llm.RoleUser, Content: tail + "\n\n" + noThinkTag},
 			})
-		usePrefix = cost+outputTokens+margin <= limit
 	}
 	transcriptMessages := append([]store.Message(nil), toFold...)
-	type documentBlock struct{ filename, text string }
-	var documents []documentBlock
-	// Only the transcript path needs the attachment text in the blocks it renders. On the
-	// prefix path the assembled request already carries it as the text the turn sent, so
-	// reading the document again only adds a store round trip per attachment — and, when
-	// the document has gone, a failure the fold does not have any need to hit.
-	for i := range transcriptMessages {
-		if usePrefix {
-			break
-		}
-		m := &transcriptMessages[i]
-		for _, a := range m.Attachments {
-			if a.Placement != store.PlacementInline {
-				continue
-			}
-			// A text-only summary cannot see an image. Keep that turn verbatim
-			// rather than replace the picture with an invented description.
-			if isImageAttachment(a) {
-				return nil, uimsg.Errorf("chat.compactionImage")
-			}
-			if a.DocumentID == "" {
-				return nil, uimsg.Errorf("chat.compactionAttachmentMissing", a.Filename)
-			}
-			d, err := e.Store.GetDocument(a.DocumentID)
-			if err != nil {
-				return nil, uimsg.Errorf("chat.compactionAttachment", a.Filename, uimsg.Sentence(err))
-			}
-			block := "<attachment id=\"" + a.ID + "\">\n" + renderDocumentBlock(d, a) + "\n</attachment>"
-			documents = append(documents, documentBlock{a.Filename, block})
-			m.Content += "\n\n" + block
-		}
-	}
-	// Leave room for the actual transcript, not merely its role headings. This guard, the
-	// one below it and the document check are all about the transcript path, so a run that
-	// re-sends the request instead is not refused by them.
-	if !usePrefix && (budget.Total <= 0 || budget.Block <= llm.EstimateTokens(clipMarker)) {
-		return nil, uimsg.Errorf("chat.compactionNoTranscript")
-	}
-	transcript := RenderTranscript(transcriptMessages, budget)
-	usable := false
-	for _, line := range strings.Split(transcript, "\n") {
-		if !transcriptIsFiller(line) {
-			usable = true
-			break
-		}
-	}
-	if !usePrefix && !usable {
-		return nil, uimsg.Errorf("chat.compactionNoTranscript")
-	}
-	if !usePrefix {
-		for _, document := range documents {
-			if !strings.Contains(transcript, document.text) {
-				return nil, uimsg.Errorf("chat.compactionAttachmentTooLarge", document.filename)
-			}
-		}
-	}
-
-	// A cap, not a target: the model is told to be terse, so it stops far short of
-	// it. The cap only stops a runaway generation from filling the window — the
-	// failure that produced a 20k-token "memory" for a 13k-token fold.
-	maxTokens := outputTokens
+	// Only the transcript path carries the attachment text — the prefix path re-sends a request
+	// that already has it — and which path an attempt takes is decided in the loop, so the
+	// documents are read by the first attempt that renders a transcript.
+	var documents []inlineDocument
+	documentsLoaded := false
 
 	// Summarising is not a reasoning task, so the model is asked to skip thinking.
 	// A model that advertises thinking gets the backend's own control; a backend
@@ -507,21 +493,79 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	// in-prompt soft switch goes out, and Summarize's retry covers a model that
 	// thinks regardless.
 	disableThinking := target.withoutThinking()
-	summaryOptions := SummarizeOptions{
-		PreviousSummary: previous,
-		Transcript:      transcript,
-		Prefix:          prefixOrNil(prefix, usePrefix),
-		Focus:           opts.Focus,
-		Lang:            lang,
-		Temperature:     settings.Compact.SummaryTemperature,
-		MaxTokens:       maxTokens,
-		NumCtx:          target.NumCtx,
-		DisableThinking: disableThinking,
-		ContextLimit:    limit,
-	}
-	summary, err := Summarize(ctx, target.Provider, target.Model, summaryOptions)
-	if err != nil {
-		return nil, err
+
+	// The answer's allowance and the transcript's are one budget: what the answer does not
+	// take, the transcript may. A summary cut off at the cap — the one failure more room
+	// fixes — is therefore answered by shrinking the transcript and giving the answer that
+	// room, instead of failing a fold that had everything but the space for its own memory.
+	// The refusal stays for where that cannot help: a ceiling that is no real gain over the
+	// cap (maxAnswer), or a transcript that can no longer be sent at all — there the guard
+	// that failed is the error, because it names the one thing left to act on.
+	var summaryOptions SummarizeOptions
+	var summary string
+	for {
+		budget := PlanTranscriptBudget(limit, answer+margin, overhead)
+		// Recomputed per attempt: a larger answer can no longer afford the prefix, which is
+		// the right moment to fall back to the transcript it has to come from anyway.
+		usePrefix := len(prefix) > 0 && prefixCost+answer+margin <= limit
+		if !usePrefix && !documentsLoaded {
+			var err error
+			if documents, err = e.loadInlineDocuments(transcriptMessages); err != nil {
+				return nil, err
+			}
+			documentsLoaded = true
+		}
+		if !usePrefix {
+			// Leave room for the actual transcript, not merely its role headings. This
+			// guard, the one below it and the document check are all about the transcript
+			// path, so a run that re-sends the request instead is not refused by them.
+			if budget.Total <= 0 || budget.Block <= llm.EstimateTokens(clipMarker) {
+				return nil, uimsg.Errorf("chat.compactionNoTranscript")
+			}
+		}
+		transcript := RenderTranscript(transcriptMessages, budget)
+		if !usePrefix && !transcriptIsUsable(transcript) {
+			return nil, uimsg.Errorf("chat.compactionNoTranscript")
+		}
+		if !usePrefix {
+			for _, document := range documents {
+				if !strings.Contains(transcript, document.text) {
+					return nil, uimsg.Errorf("chat.compactionAttachmentTooLarge", document.filename)
+				}
+			}
+		}
+		// A cap, not a target: the model is told to be terse, so it stops far short of it.
+		// The cap only stops a runaway generation from filling the window — the failure that
+		// produced a 20k-token "memory" for a 13k-token fold. It is raised only by the retry
+		// below, which takes that room from the transcript.
+		summaryOptions = SummarizeOptions{
+			PreviousSummary: previous,
+			Transcript:      transcript,
+			Prefix:          prefixOrNil(prefix, usePrefix),
+			Focus:           opts.Focus,
+			Lang:            lang,
+			Temperature:     settings.Compact.SummaryTemperature,
+			MaxTokens:       answer,
+			NumCtx:          target.NumCtx,
+			DisableThinking: disableThinking,
+			ContextLimit:    limit,
+		}
+		written, err := Summarize(ctx, target.Provider, target.Model, summaryOptions)
+		if err == nil {
+			summary = written
+			break
+		}
+		if !isSummaryTruncated(err) {
+			return nil, err
+		}
+		// Straight to the largest answer the window allows, not a doubling ladder: the fold
+		// already knows that ceiling, while every rung is a full summary generation that a
+		// model running to the cap pays again and again. The quarter-more floor is what keeps
+		// the refusal for a fold whose transcript already sits at that ceiling.
+		if maxAnswer*retryGrowthDenominator < answer*retryGrowthNumerator {
+			return nil, err
+		}
+		answer = maxAnswer
 	}
 	// A memory that ignored the structure it was asked for is prose, and prose is what
 	// every later turn has to search instead of scan. One restructure is cheap against

@@ -606,12 +606,28 @@ outcome. What they differ in is whether a partial answer is usable, not how much
 needs: a cut-off memory is refused (`chat.summaryTruncated`), a condensation's cut-off page
 is kept (`TruncatedError` is nil, §17).
 
-A **window-bound** fold has its transcript in everything the answer allowance did not take,
-so the doubling clamps to the margin (`limit/16`) — a few percent more, which reaches the
-same wall at the price of a second full summary on a model that may take minutes. Below a
-quarter more there is no retry at all: the failure is reported at once, as it was before the
-retry existed, and that is the honest answer there, because the cap is already as large as
-the window allows. Pinned by `TestCompactionRetriesATruncatedSummary`, the room bound by
+A **window-bound** fold — the transcript already holding everything the answer allowance did
+not take — used to have nowhere to put that room, and failed. The transcript's allowance and
+the answer's are **one budget**, so the fold re-plans them instead: the transcript is
+re-budgeted at `answer + margin`, which shrinks it by exactly what the answer gains, and the
+request is made again with the bigger cap (`TestCompactShrinksTheTranscriptForACutOffSummary`).
+The fold goes straight to `maxAnswer = limit − overhead − margin − summaryMinTranscriptTokens`
+— the largest answer the window allows, the point at which the transcript is at its floor —
+rather than climbing there by doubling: the ceiling is known, and every rung in between costs
+a full summary generation that a model running to the cap would pay again and again. The
+retry still needs that ceiling to be worth **a quarter more** room than the cap it replaces,
+which is the same floor the summariser applies inside one attempt. A retry also falls back
+from the prefix path to the transcript path when the larger answer no longer fits beside the
+chat's own request, because the prefix's size is not the fold's to shrink.
+
+What is left of the refusal is what cannot be helped: a ceiling that is not a quarter more
+than the cap, a smaller transcript that can no longer be rendered at all
+(`chat.compactionNoTranscript`), or one that would drop an inline document
+(`chat.compactionAttachmentTooLarge`). Those guards report themselves rather than the
+cut-off that started the retry, because by then the cap is already at its ceiling: the
+cut-off message's advice — a bigger budget — is advice the fold has already taken, while the
+guard names the one thing left to act on.
+Pinned by `TestCompactionRetriesATruncatedSummary`, the room bound by
 `TestSummarizeDoesNotRetryATruncatedAnswerWithoutRoom`, the attempt cap by
 `TestSummarizeExplainsAReasoningOnlyAnswer`, and the refusal by
 `TestCompactionRejectsIncompleteSummary` and `TestCompactionRejectsMaxTokensStop`.
@@ -1133,7 +1149,8 @@ already read, a condensation decides what a tool result becomes on its way in.
 | summary model on a missing backend | error naming model *and* backend | `maintenance.go:310` |
 | summary model's window unknown | `events.Warning`, chat window used, memory still written | `maintenance.go:186` |
 | reasoning model eats the budget | up to 3 attempts, the room doubled each time, then the "spent its budget on reasoning" error naming `MaxSummaryTokens` | `compact.go:520` |
-| the memory stops at the output limit, half written | the same doubled-room retry (and the same quarter-more floor), then `chat.summaryTruncated`; a condensation still keeps its cut-off page | `extractWithBudget` |
+| the memory stops at the output limit, half written | the summariser doubles its room; the fold then shrinks the transcript and takes the answer straight to the largest the window allows; only then `chat.summaryTruncated`; a condensation still keeps its cut-off page | `extractWithBudget`, `compactWith` |
+| the fold has no room left to hand over | `maxAnswer` is not a quarter more than the cap: the refusal is reported at once, because the transcript cannot shrink enough to fund it | `compactWith` |
 | model returns only `<think>` blocks | blocks stripped, treated as reasoning, retried | `compact.go:415` |
 | model returns nothing and did not reason | one attempt, then "empty summary" | `compact.go:520` |
 | backend slower than 15 minutes | `context deadline exceeded` (the API backstop) | `api.go:344` |

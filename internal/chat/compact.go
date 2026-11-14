@@ -938,6 +938,17 @@ func Restructure(ctx context.Context, p llm.Provider, model, draft string, opts 
 		summaryRestructure(draft, opts.Lang)+"\n\n"+noThinkTag, summaryExtraction(opts))
 }
 
+// isSummaryTruncated reports whether a summarisation failed because the answer stopped at the
+// output limit. It is the one failure more room fixes, so it is also the only one a fold
+// retries with a smaller transcript — the two places ask the same question.
+func isSummaryTruncated(err error) bool {
+	if err == nil {
+		return false
+	}
+	message, ok := uimsg.Parse(err.Error())
+	return ok && message.Code == "chat.summaryTruncated"
+}
+
 // summaryExtraction is the half the two summary requests share: the same temperature, cap and
 // failure codes, so a restructure fails the way the call it repairs would have failed instead
 // of inventing a second set of outcomes for the same work.
@@ -1447,6 +1458,17 @@ func omissionNote(omitted int) string {
 	default:
 		return fmt.Sprintf("[%d ältere Nachrichten ausgelassen]", omitted)
 	}
+}
+
+// transcriptIsUsable reports whether a rendered transcript says anything the summariser
+// can work with, rather than only its own section headings and cut notes.
+func transcriptIsUsable(transcript string) bool {
+	for _, line := range strings.Split(transcript, "\n") {
+		if !transcriptIsFiller(line) {
+			return true
+		}
+	}
+	return false
 }
 
 // transcriptIsFiller reports whether a transcript line is one of the notes a fold adds
