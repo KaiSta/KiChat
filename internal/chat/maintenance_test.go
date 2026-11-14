@@ -531,13 +531,15 @@ func TestSummarizeAsksTheModelNotToThink(t *testing.T) {
 // to name the reasoning that ate the budget and the setting that grants more.
 func TestSummarizeExplainsAReasoningOnlyAnswer(t *testing.T) {
 	// Every attempt reasons and is cut off, so the final message has to name that
-	// cause. The retry asks again, so the same reply is scripted for each attempt.
+	// cause. Each retry is scripted, one per attempt: the budget doubles until the
+	// attempt cap stops it, so a fixture that ran out of replies would end on a silent
+	// answer and name the wrong cause.
 	onlyReasoning := []llm.StreamEvent{
 		{Type: llm.EventReasoning, Text: "Der Nutzer will eine Zusammenfassung."},
 		{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "length"}},
 	}
 	provider := &fakeProvider{
-		replies: [][]llm.StreamEvent{onlyReasoning, onlyReasoning},
+		replies: [][]llm.StreamEvent{onlyReasoning, onlyReasoning, onlyReasoning},
 	}
 	_, err := Summarize(context.Background(), provider, "fake-model", SummarizeOptions{
 		Transcript: "### Nutzer\nHallo", MaxTokens: 1200,
@@ -548,6 +550,9 @@ func TestSummarizeExplainsAReasoningOnlyAnswer(t *testing.T) {
 	if message, ok := uimsg.Parse(err.Error()); !ok || message.Code != "chat.summaryBudgetSpent" ||
 		len(message.Args) != 2 || message.Args[0] != "length" || message.Args[1] == "0" {
 		t.Errorf("error %q does not name the reasoning that ate the budget, with its stop reason and length", err)
+	}
+	if n := provider.requestCount(); n != summaryAttempts {
+		t.Errorf("summariser called %d times, want the %d-attempt cap", n, summaryAttempts)
 	}
 }
 
@@ -1325,6 +1330,86 @@ func TestCompactionRejectsIncompleteSummary(t *testing.T) {
 	message, ok := uimsg.Parse(fmt.Sprint(err))
 	if !ok || message.Code != "chat.summaryTruncated" || result.Created || len(summariesOf(t, st)) != 0 {
 		t.Fatalf("partial memory accepted: result=%+v error=%v", result, err)
+	}
+}
+
+// TestCompactionRetriesATruncatedSummary pins the other half of the output-budget
+// failure: a reasoning model that gets part of the memory written before the cap stops
+// it. A memory cut off mid-sentence is not a memory — the fold refuses it — but the first
+// answer is also the measurement of how much room the call needed, so reporting the
+// refusal before retrying left the chat uncompacted for a cause with a fix. The retry
+// grants the thinking it did, what it wrote, and the answer allowance on top.
+func TestCompactionRetriesATruncatedSummary(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	seedTurns(t, st)
+	p := &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 32768},
+		replies: [][]llm.StreamEvent{
+			{
+				{Type: llm.EventReasoning, Text: strings.Repeat("nachdenken ", 40)},
+				{Type: llm.EventDelta, Text: "## Festgestellte Fakten\n- Das Projekt"},
+				{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "length"}},
+			},
+			{
+				{Type: llm.EventReasoning, Text: "kurz"},
+				{Type: llm.EventDelta, Text: "## Festgestellte Fakten\n- Alles gut."},
+				{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "stop"}},
+			},
+		},
+	}
+	e, _ := newTestEngine(t, st, p)
+	result, err := e.Compact(context.Background(), "chat-1", CompactOptions{Force: true})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !result.Created {
+		t.Fatal("a summary that was cut off and then completed folded nothing")
+	}
+	list := summariesOf(t, st)
+	if len(list) != 1 || !strings.Contains(list[0].Summary, "Alles gut") {
+		t.Fatalf("compactions = %+v, want one carrying the complete memory", list)
+	}
+	if n := p.requestCount(); n != 2 {
+		t.Fatalf("summariser called %d times, want 2 (one cut off at the cap, then one with room)", n)
+	}
+	first, second := p.requestAt(0), p.requestAt(1)
+	if second.MaxTokens <= first.MaxTokens {
+		t.Errorf("retry max_tokens = %d, want more than the first %d", second.MaxTokens, first.MaxTokens)
+	}
+	if room := p.model.ContextLimit - llm.EstimateMessagesTokens(second.Messages); second.MaxTokens > room {
+		t.Errorf("retry max_tokens = %d exceeds the window room %d", second.MaxTokens, room)
+	}
+}
+
+// TestSummarizeDoesNotRetryATruncatedAnswerWithoutRoom pins the bound on that retry: a
+// second full summary is only worth paying for when the window has meaningfully more room
+// to offer. On a window-bound fold the transcript already took everything the answer
+// allowance did not, so retrying would grant a few percent more — reach the same wall, and
+// cost a whole generation on a model that may take minutes. There the cut-off is reported
+// at once, as it was before the retry existed.
+func TestSummarizeDoesNotRetryATruncatedAnswerWithoutRoom(t *testing.T) {
+	system := summarySystemPrompt(config.LangEnglish)
+	user := "Compact the log.\n\n" + noThinkTag
+	prompt := llm.EstimateMessagesTokens([]llm.Message{
+		{Role: llm.RoleSystem, Content: system},
+		{Role: llm.RoleUser, Content: user},
+	})
+	provider := &fakeProvider{replies: [][]llm.StreamEvent{{
+		{Type: llm.EventReasoning, Text: "kurz"},
+		{Type: llm.EventDelta, Text: "## Established facts\n- Partial"},
+		{Type: llm.EventDone, Stats: &llm.GenerationStats{StopReason: "length"}},
+	}}}
+	// The window leaves the cap plus 5 %: the margin a transcript-bound fold leaves, and
+	// not enough to finish an answer that was cut at the cap.
+	opts := summaryExtraction(SummarizeOptions{MaxTokens: 1200, ContextLimit: prompt + 1260})
+
+	_, err := extractWithBudget(context.Background(), provider, "fake-model", nil, system, user, opts)
+	if message, ok := uimsg.Parse(fmt.Sprint(err)); !ok || message.Code != "chat.summaryTruncated" {
+		t.Fatalf("err = %v, want the truncated-summary refusal", err)
+	}
+	if n := provider.requestCount(); n != 1 {
+		t.Errorf("summariser called %d times, want 1 — a few percent more room is not worth a second summary", n)
 	}
 }
 

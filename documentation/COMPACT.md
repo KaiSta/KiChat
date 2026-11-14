@@ -595,6 +595,27 @@ the failure that produced a 20k-token 'memory' for a 13k-token fold."* *
 lower it, and on a window so small that even the minimum transcript does not fit, the cap
 collapses towards 1 token: the request fitting is non-negotiable.
 
+Being cut off at the cap is not accepted as a memory — a sentence that breaks off is a
+fact nothing can recover — but it is **retried with more room** before the fold gives up,
+by the same rule as the reasoning-budget retry: the room is **doubled**, held to what the
+window leaves beside the prompt, and taken only when that is at least a quarter more than
+the attempt had. Twice and not "the reasoning that came back", because a memory can be cut
+off with no reasoning at all, and a model that did reason has to fit that thinking plus an
+answer either way — so the two failures are one rule in the retry and two sentences in the
+outcome. What they differ in is whether a partial answer is usable, not how much room it
+needs: a cut-off memory is refused (`chat.summaryTruncated`), a condensation's cut-off page
+is kept (`TruncatedError` is nil, §17).
+
+A **window-bound** fold has its transcript in everything the answer allowance did not take,
+so the doubling clamps to the margin (`limit/16`) — a few percent more, which reaches the
+same wall at the price of a second full summary on a model that may take minutes. Below a
+quarter more there is no retry at all: the failure is reported at once, as it was before the
+retry existed, and that is the honest answer there, because the cap is already as large as
+the window allows. Pinned by `TestCompactionRetriesATruncatedSummary`, the room bound by
+`TestSummarizeDoesNotRetryATruncatedAnswerWithoutRoom`, the attempt cap by
+`TestSummarizeExplainsAReasoningOnlyAnswer`, and the refusal by
+`TestCompactionRejectsIncompleteSummary` and `TestCompactionRejectsMaxTokensStop`.
+
 ### Why the transcript is not a fraction of the window
 
 `PlanTranscriptBudget` (`compact.go:616`) says explicitly what it replaced: a fixed 4000
@@ -1111,7 +1132,8 @@ already read, a condensation decides what a tool result becomes on its way in.
 | unknown window, **automatic** | silent, the turn proceeds; the meter already says the limit is unknown | `autoFold` |
 | summary model on a missing backend | error naming model *and* backend | `maintenance.go:310` |
 | summary model's window unknown | `events.Warning`, chat window used, memory still written | `maintenance.go:186` |
-| reasoning model eats the budget | up to 3 attempts with a growing budget, then the "spent its budget on reasoning" error naming `MaxSummaryTokens` | `compact.go:520` |
+| reasoning model eats the budget | up to 3 attempts, the room doubled each time, then the "spent its budget on reasoning" error naming `MaxSummaryTokens` | `compact.go:520` |
+| the memory stops at the output limit, half written | the same doubled-room retry (and the same quarter-more floor), then `chat.summaryTruncated`; a condensation still keeps its cut-off page | `extractWithBudget` |
 | model returns only `<think>` blocks | blocks stripped, treated as reasoning, retried | `compact.go:415` |
 | model returns nothing and did not reason | one attempt, then "empty summary" | `compact.go:520` |
 | backend slower than 15 minutes | `context deadline exceeded` (the API backstop) | `api.go:344` |

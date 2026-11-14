@@ -809,11 +809,20 @@ const noThinkTag = "/no_think"
 // read — the cap is never held to a fraction of the window.
 const summaryMinTranscriptTokens = 1024
 
-// summaryAttempts bounds how often a summarisation is retried when a thinking
-// model keeps spending its output budget before it writes a word of the answer.
-// Each retry grows the budget by the reasoning observed, so one or two is normally
-// enough; the cap keeps a model whose thinking keeps getting longer from looping.
+// summaryAttempts bounds how often a summarisation is retried when the room it was
+// given was not enough — a thinking model that spent it before writing a word, or an
+// answer that ran to the cap. Each retry doubles the budget, so one or two is normally
+// enough; the cap keeps a model that always hits its limit from looping.
 const summaryAttempts = 3
+
+// retryGrowthNumerator and retryGrowthDenominator are how much more room a retry must
+// offer to be worth a second generation: five quarters, a quarter more than the cap the
+// failed attempt had. It is the floor under a doubling that the window has clamped, so
+// it bites exactly on the window-bound fold (see extractWithBudget).
+const (
+	retryGrowthNumerator   = 5
+	retryGrowthDenominator = 4
+)
 
 // thinkingBlock matches an inline chain-of-thought block, which is how a backend
 // with no separate reasoning channel delivers one. It is case-insensitive and
@@ -894,10 +903,10 @@ func summarisationPrefix(assembly Assembly, plan CompactPlan) []llm.Message {
 // A summary is not a reasoning task, so thinking is switched off where the
 // backend allows it. Where it does not, a thinking model can still spend the
 // whole output budget thinking and return nothing — `max_tokens` bounds thinking
-// and answer together — so the call is retried with enough room to finish that
-// thinking AND write the summary, measured from the reasoning that actually came
-// back. The content itself stays bounded: the extra budget goes to the thinking,
-// not to a larger memory.
+// and answer together — so the call is retried with twice the room, which is what
+// that thinking AND a summary need. The retry is bounded by the model's window, so
+// the content stays bounded: the extra budget goes to the thinking, not to a memory
+// larger than the window can hold.
 func Summarize(ctx context.Context, p llm.Provider, model string, opts SummarizeOptions) (string, error) {
 	lang := promptLanguage(opts.Lang)
 	var userPrompt string
@@ -966,19 +975,26 @@ type extractionOptions struct {
 	BudgetCode string
 	// TruncatedError rejects an answer that stopped at the output limit. Only a fold
 	// sets it: the memory it writes replaces history, so a sentence cut short is a
-	// fact nothing can recover. A condensation's cap-cut summary is used as it is —
+	// fact nothing can recover. It is reported only once a retry with more room has
+	// been cut off too — a condensation's cap-cut summary is used as it is, because
 	// the page it stands in for is still on the tool card and comes back on a second
 	// read (digest.go, DigestToolOutput).
 	TruncatedError error
 }
 
-// extractWithBudget runs one prompted extraction and retries it when a reasoning
-// model spent the whole output budget thinking and returned nothing. It is shared by
-// the two callers in this package — the memory a fold writes and the condensation a
-// tool result becomes — because `max_tokens` bounds thinking and answer together, so
-// both have exactly the same failure to survive and neither should reinvent the
-// arithmetic for it: the retry grows the budget by the reasoning that actually came
-// back, measured rather than guessed.
+// extractWithBudget runs one prompted extraction and retries it while the answer it got
+// was a shortage of room rather than an answer: a model that spent the budget thinking
+// (`max_tokens` bounds thinking and answer together), or one that ran into the cap. It is
+// shared by the two callers in this package — the memory a fold writes and the
+// condensation a tool result becomes — because both have exactly the same shortage to
+// survive, and neither should reinvent the arithmetic for it: double the room, held to the
+// window, and only when that is meaningfully more than the attempt had.
+//
+// The two failures are one rule in the retry and two sentences in the outcome. What they
+// differ in is not how much room is needed but whether a partial answer is usable: a
+// condensation's page cut at its ceiling stands in for text that can be read again, so it
+// is kept (opts.TruncatedError is nil); a memory cut mid-sentence is a fact nothing can
+// recover, so a fold refuses it.
 func extractWithBudget(ctx context.Context, p llm.Provider, model string, prefix []llm.Message,
 	systemPrompt, userPrompt string, opts extractionOptions) (string, error) {
 	if p == nil {
@@ -1027,7 +1043,15 @@ func extractWithBudget(ctx context.Context, p llm.Provider, model string, prefix
 		}
 	}
 	budget := answer
-	var last completion
+	// cutShort records that an attempt wrote part of a memory and the cap stopped it. It
+	// decides one thing only: which sentence the failure is reported with. The room it
+	// needs is the same shortage as an empty answer's (below), but a memory cut off
+	// mid-sentence is not something to keep, so it is refused rather than called empty.
+	cutShort := false
+	// cause is the attempt a failure is explained by: the last one that reasoned or ran
+	// out of budget. An attempt that wrote nothing and thought nothing explains nothing,
+	// so it does not overwrite this one.
+	var cause completion
 	for attempt := 0; attempt < summaryAttempts; attempt++ {
 		req := llm.ChatRequest{
 			Model:       model,
@@ -1051,33 +1075,47 @@ func extractWithBudget(ctx context.Context, p llm.Provider, model string, prefix
 		// answer is judged, and what they contained is counted as reasoning, because
 		// that is what it is.
 		summary, thought := stripThinking(out.text)
-		if summary != "" {
-			if opts.TruncatedError != nil && llm.Truncated(out.stopReason) {
-				return "", opts.TruncatedError
-			}
-			return summary, nil
-		}
 		if thought != "" {
 			out.reasoning += thought
 		}
-		last = out
-		// Only a model that reasoned and ran out of budget is worth another look;
-		// one that simply said nothing will say nothing again.
+		if summary != "" && (opts.TruncatedError == nil || !llm.Truncated(out.stopReason)) {
+			return summary, nil
+		}
+		cutShort = cutShort || summary != ""
 		if out.reasoning == "" && !llm.Truncated(out.stopReason) {
+			// Nothing written and nothing thought: more room changes nothing, because the
+			// budget is not what this answer ran out of.
 			break
 		}
-		grown := llm.EstimateTokens(out.reasoning) + answer
+		cause = out
+		// Every failure that is left is a shortage of room: thinking that ate the cap, an
+		// answer that ran into it, a memory that stopped half written. One rule covers
+		// all three, because how much more a cut-off answer still needs cannot be
+		// measured — so the retry offers twice the room, held to what the window leaves
+		// beside the prompt. Twice, and not the reasoning that came back: a memory can be
+		// cut off with no reasoning at all, and a model that reasoned has to fit that
+		// thinking plus an answer either way.
+		grown := 2 * budget
 		if opts.ContextLimit > 0 {
-			if room := opts.ContextLimit - promptTokens; room > 0 && grown > room {
-				grown = room
-			}
+			// The window has the last word on how much of that doubling is available: the
+			// prompt and its transcript are already spoken for.
+			grown = min(grown, opts.ContextLimit-promptTokens)
 		}
-		if grown <= budget {
+		// A window-bound fold has its transcript in everything the answer allowance did not
+		// take, so the doubling clamps to the margin (limit/16): a few percent more room,
+		// which reaches the same wall at the price of a second full summary on a model that
+		// may take minutes. Less than a quarter more is therefore not a retry — the refusal
+		// is reported at once, as it was before the retry existed, and it is the honest
+		// answer there: the cap is already as large as that window allows.
+		if grown*retryGrowthDenominator < budget*retryGrowthNumerator {
 			break
 		}
 		budget = grown
 	}
-	return "", emptyExtractionError(last, opts.EmptyCode, opts.BudgetCode)
+	if cutShort {
+		return "", opts.TruncatedError
+	}
+	return "", emptyExtractionError(cause, opts.EmptyCode, opts.BudgetCode)
 }
 
 // emptyExtractionError explains an answer that came back empty. The usual cause is a
