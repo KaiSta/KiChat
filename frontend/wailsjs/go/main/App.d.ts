@@ -36,6 +36,8 @@ export function DeleteCompaction(arg1:string,arg2:string):Promise<void>;
 
 export function DetectTerminal():Promise<main.TerminalStatus>;
 
+export function DropQueuedMessage(arg1:string,arg2:string):Promise<boolean>;
+
 export function ExportBackup(arg1:main.BackupExportRequest):Promise<main.BackupExportResult>;
 
 export function GetAppInfo():Promise<main.AppInfo>;

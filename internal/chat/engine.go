@@ -114,9 +114,16 @@ func (e *Engine) ActiveChats() []string {
 	return e.turns.chats()
 }
 
-// Stop cancels a running turn. The partial reply is kept and marked
-// interrupted, and any tool call left in flight is closed off so the next
-// request is still valid.
+// Stop cancels a running turn and nothing else.
+//
+// The messages queued behind it stay where they are: deleting what the user typed is their
+// decision, and the queue has a delete button for exactly that. What Stop stops is the answer,
+// so the message at the head of the queue starts as soon as the chat is free — which the window
+// says out loud ("the next queued message goes out now") rather than letting a new answer
+// appear out of a click that read as "stop everything".
+//
+// The partial reply is kept and marked interrupted, and any tool call left in flight is closed
+// off so the next request is still valid.
 func (e *Engine) Stop(chatID string) bool {
 	handle, ok := e.turns.handle(chatID)
 	if !ok {
@@ -129,6 +136,7 @@ func (e *Engine) Stop(chatID string) bool {
 
 // StopAll cancels every running turn.
 func (e *Engine) StopAll() {
+	e.turns.clearAllQueued()
 	for _, h := range e.turns.handles() {
 		h.cancel()
 	}
@@ -170,16 +178,21 @@ func (e *Engine) InvalidateMeasurement(chatID string) {
 	e.turns.invalidateMeasurement(chatID)
 }
 
-// Send starts a turn. It returns immediately; progress arrives as events.
+// Send starts a turn, or queues the message when the chat is already answering.
+//
+// A second message used to be refused with "this chat is already generating", which threw away
+// what the user had typed at the moment they were most likely to type it: reading a running
+// answer and thinking of the next question. It waits its turn instead — the window draws the
+// queue above the composer, and DropQueued takes one back out.
 func (e *Engine) Send(req TurnRequest) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	handle := &turnHandle{cancel: cancel, chatID: req.ChatID}
-	// The claim is the only decision about whether the chat is free: checking and
-	// reserving are one step, so a rebuild that replaced this engine cannot leave a
-	// second turn able to start beside the first.
-	if !e.turns.claim(req.ChatID, handle) {
+	// One step decides which of the two answers this send gets: the chat is free, so the turn
+	// starts now, or a turn holds it, so the message joins the queue behind it.
+	if !e.turns.accept(req, handle) {
 		cancel()
-		return uimsg.Errorf("chat.turnRunning")
+		e.emitQueue(req.ChatID)
+		return nil
 	}
 
 	// What the user just wrote is stored here, before the turn's goroutine starts — not
@@ -196,16 +209,87 @@ func (e *Engine) Send(req TurnRequest) error {
 		e.turns.release(req.ChatID, handle)
 		return err
 	}
+	e.launch(ctx, cancel, req, handle)
+	return nil
+}
 
+// Queued lists the messages waiting behind a chat's running turn, in the order they will be
+// sent.
+func (e *Engine) Queued(chatID string) []QueuedTurn {
+	return e.turns.queuedTurns(chatID)
+}
+
+// DropQueued removes one waiting message and reports whether it was still there. A false answer
+// is the ordinary case of a click that arrives after that entry's turn started.
+func (e *Engine) DropQueued(chatID, id string) bool {
+	if !e.turns.dropQueued(chatID, id) {
+		return false
+	}
+	e.emitQueue(chatID)
+	return true
+}
+
+// DropAllQueued empties a chat's queue.
+//
+// Stop leaves a queue alone, so this is the one case that still drops one: a chat being deleted.
+// Left there, the queue would start a turn in a conversation that no longer exists.
+func (e *Engine) DropAllQueued(chatID string) {
+	if e.turns.clearQueued(chatID) {
+		e.emitQueue(chatID)
+	}
+}
+
+// emitQueue publishes a chat's queue, which is what the window draws above the composer.
+func (e *Engine) emitQueue(chatID string) {
+	e.emit(events.Queue, map[string]any{"chatId": chatID, "queue": e.Queued(chatID)})
+}
+
+// launch runs a claimed turn in its own goroutine. The claim is given back when the turn ends,
+// and a message the user queued meanwhile takes the chat over from there — without the chat ever
+// being reported idle, because the window would otherwise watch its Send button come back
+// between two answers that simply followed each other.
+func (e *Engine) launch(ctx context.Context, cancel context.CancelFunc, req TurnRequest, handle *turnHandle) {
 	go func() {
 		defer func() {
 			cancel()
 			e.turns.release(req.ChatID, handle)
+			if e.startQueued(req.ChatID) {
+				return
+			}
 			e.emitStatus(req.ChatID, "idle")
 		}()
 		e.runTurn(ctx, req)
 	}()
-	return nil
+}
+
+// startQueued starts the message at the head of a chat's queue, and reports whether there was
+// one. The turn that is giving the chat back calls it, after releasing the claim.
+func (e *Engine) startQueued(chatID string) bool {
+	ctx, cancel := context.WithCancel(context.Background())
+	handle := &turnHandle{cancel: cancel, chatID: chatID}
+	if !e.turns.claim(chatID, handle) {
+		cancel()
+		return false
+	}
+	next, ok := e.turns.head(chatID)
+	if !ok {
+		e.turns.release(chatID, handle)
+		cancel()
+		return false
+	}
+	// Stored first and taken off the queue afterwards, so a message that cannot be written stays
+	// where the user can see it and delete it; the failure is what the window reports.
+	if err := e.beginUserTurn(next.req); err != nil {
+		e.turns.release(chatID, handle)
+		cancel()
+		e.emit(events.Error, map[string]any{"chatId": chatID, "error": err.Error()})
+		return false
+	}
+	if e.turns.dropQueued(chatID, next.id) {
+		e.emitQueue(chatID)
+	}
+	e.launch(ctx, cancel, next.req, handle)
+	return true
 }
 
 // maxToolRounds is how many model/tool rounds this chat's reply may take, and it is

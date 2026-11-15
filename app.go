@@ -1621,6 +1621,16 @@ func (a *App) Regenerate(chatID, backend, model string) error {
 	})
 }
 
+// DropQueuedMessage removes one message waiting behind a running turn. A false answer means it
+// was already gone — that entry's turn had started — which is not an error, in the same way
+// StopToolCommand's false is not.
+func (a *App) DropQueuedMessage(chatID, id string) (bool, error) {
+	if err := a.ensure(); err != nil {
+		return false, err
+	}
+	return a.currentEngine().DropQueued(chatID, id), nil
+}
+
 // StopGeneration cancels a running generation, keeping the partial reply.
 func (a *App) StopGeneration(chatID string) bool {
 	if err := a.ensure(); err != nil {
@@ -2105,6 +2115,9 @@ func (a *App) DeleteChat(chatID string) error {
 	if err := a.ensure(); err != nil {
 		return err
 	}
+	// The queue goes first: a message waiting for this conversation belongs to it, and Stop no
+	// longer empties a queue — left there, it would start a turn for a chat that is gone.
+	a.currentEngine().DropAllQueued(chatID)
 	a.currentEngine().Stop(chatID)
 	if err := a.store.DeleteChat(chatID); err != nil {
 		return err
@@ -2133,7 +2146,8 @@ func (a *App) ClearChat(chatID string) error {
 		return err
 	}
 	if a.currentEngine().IsRunning(chatID) {
-		// The same sentence a second send gets, because it is the same condition.
+		// Not a queued command: a second *send* waits in the queue, but there is no "cleared"
+		// to defer — the clear is either done now or not at all.
 		return uimsg.Errorf("chat.turnRunning")
 	}
 	// An id nothing in the database knows is a refusal, not a no-op: a stale window would
@@ -2163,6 +2177,11 @@ type ChatState struct {
 	Documents   []store.Document   `json:"documents"`
 	Budget      chat.ContextBudget `json:"budget"`
 	Running     bool               `json:"running"`
+	// Queue is the messages waiting behind the running turn, oldest first. It travels with
+	// the state rather than being asked for separately because a chat opened while another
+	// message waits has to show that message: a queue nobody can see is a message the user
+	// would send again.
+	Queue []chat.QueuedTurn `json:"queue"`
 	// Consent is what this chat answers without a card, from the "always" clicked on one of
 	// its own. It travels with the state rather than being asked for separately because the
 	// window has to show it: a grant that only shows up as a card *not* appearing is one the
@@ -2207,6 +2226,7 @@ func (a *App) GetChatState(chatID string) (ChatState, error) {
 		Documents:   documents,
 		Budget:      budget,
 		Running:     a.currentEngine().IsRunning(chatID),
+		Queue:       a.currentEngine().Queued(chatID),
 		Consent:     a.chatConsent(chatID),
 	}, nil
 }

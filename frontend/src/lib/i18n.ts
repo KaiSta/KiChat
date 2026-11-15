@@ -144,6 +144,14 @@ const de = {
   'chat.composerLabel': 'Nachricht',
   'chat.send': 'Senden',
   'chat.stop': 'Stoppen',
+  // The composer's third send state: while an answer streams, a message is not refused, it
+  // waits, and these three lines are the whole of what that queue says.
+  'chat.queue': 'Einreihen',
+  'chat.queue.title': 'Wartet auf die laufende Antwort',
+  'chat.queue.remove': 'Aus der Warteschlange entfernen',
+  // Stop ends the answer, not the queue: the next waiting message goes out at once, and saying
+  // so is the difference between a controlled stop and a surprising one.
+  'chat.queue.afterStop': 'Antwort gestoppt — die nächste Nachricht aus der Warteschlange geht jetzt raus.',
   'chat.stopping': 'Wird gestoppt …',
   'chat.missingModel':
     'Das Modell dieses Chats — {{model}} ({{backend}}) — ist derzeit nicht verfügbar. Sein Backend ist vielleicht aus, oder das Modell wurde entfernt.',
@@ -1705,6 +1713,14 @@ const en: Record<keyof typeof de, string> = {
   'chat.composerLabel': 'Message',
   'chat.send': 'Send',
   'chat.stop': 'Stop',
+  // The composer's third send state: while an answer streams, a message is not refused, it
+  // waits, and these three lines are the whole of what that queue says.
+  'chat.queue': 'Queue',
+  'chat.queue.title': 'Waiting to send',
+  'chat.queue.remove': 'Remove from queue',
+  // Stop ends the answer, not the queue: the next waiting message goes out at once, and saying
+  // so is the difference between a controlled stop and a surprising one.
+  'chat.queue.afterStop': 'Answer stopped — the next queued message goes out now.',
   'chat.stopping': 'Stopping …',
   'chat.missingModel':
     'The model this chat uses — {{model}} ({{backend}}) — is not available right now. Its backend may be off, or the model was removed.',
@@ -3207,6 +3223,10 @@ const zh: Record<keyof typeof de, string> = {
   'chat.composerLabel': '消息',
   'chat.send': '发送',
   'chat.stop': '停止',
+  'chat.queue': '排队',
+  'chat.queue.title': '等待发送',
+  'chat.queue.remove': '从队列移除',
+  'chat.queue.afterStop': '已停止回答——队列中的下一条消息现在发送。',
   'chat.stopping': '正在停止……',
   'chat.missingModel': '此对话使用的模型——{{model}}（{{backend}}）——当前不可用。其后端可能已关闭，或该模型已被移除。',
   'chat.missingModelSwitch': '切换到 {{model}}',

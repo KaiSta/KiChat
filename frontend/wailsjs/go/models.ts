@@ -122,6 +122,23 @@ export namespace chat {
 		    return a;
 		}
 	}
+	
+	export class QueuedTurn {
+	    id: string;
+	    text: string;
+	    attachmentIds: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new QueuedTurn(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.text = source["text"];
+	        this.attachmentIds = source["attachmentIds"];
+	    }
+	}
 
 }
 
@@ -1041,6 +1058,7 @@ export namespace main {
 	    documents: store.Document[];
 	    budget: chat.ContextBudget;
 	    running: boolean;
+	    queue: chat.QueuedTurn[];
 	    consent: ChatConsent;
 	
 	    static createFrom(source: any = {}) {
@@ -1056,6 +1074,7 @@ export namespace main {
 	        this.documents = this.convertValues(source["documents"], store.Document);
 	        this.budget = this.convertValues(source["budget"], chat.ContextBudget);
 	        this.running = source["running"];
+	        this.queue = this.convertValues(source["queue"], chat.QueuedTurn);
 	        this.consent = this.convertValues(source["consent"], ChatConsent);
 	    }
 	

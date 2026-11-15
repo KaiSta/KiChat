@@ -2,7 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { OnFileDrop, OnFileDropOff } from '../../wailsjs/runtime/runtime'
-import { App, folderName, formatNumber, modelLabel, type config, type store as storeTypes } from '../lib/api'
+import {
+  App,
+  folderName,
+  formatNumber,
+  modelLabel,
+  type chat,
+  type config,
+  type store as storeTypes,
+} from '../lib/api'
 import { type MessageKey } from '../lib/i18n'
 import { messageText, pendingAttachments, useStore } from '../store'
 import {
@@ -112,12 +120,25 @@ function searchTranscript(items: Item[], query: string): ChatMatch[] {
 /** The one slash command the composer answers itself: empty this conversation, keep the chat. */
 const CLEAR_COMMAND = '/clear'
 
+/**
+ * The queue of a chat with nothing waiting in it.
+ *
+ * One shared array rather than a fresh `[]` per selector call: the selector below builds the
+ * value zustand compares, and a new array on every read is a new snapshot every read (see
+ * the note on `pending`).
+ */
+const NO_QUEUE: chat.QueuedTurn[] = []
+
 export function ChatView() {
   const t = useStore((s) => s.t)
   const chatState = useStore((s) => s.chatState)
   const activeChatId = useStore((s) => s.activeChatId)
   const chatLoading = useStore((s) => s.chatLoading)
   const running = useStore((s) => (s.activeChatId ? !!s.running[s.activeChatId] : false))
+  // Messages waiting behind the running turn, in the order the backend will send them.
+  const queued = useStore(
+    useShallow((s) => (s.activeChatId ? s.queued[s.activeChatId] : undefined) ?? NO_QUEUE),
+  )
   const phase = useStore((s) => (s.activeChatId ? s.phase[s.activeChatId] : undefined))
   const phaseWaitMs = useStore((s) => (s.activeChatId ? (s.phaseWaitMs[s.activeChatId] ?? 0) : 0))
   const send = useStore((s) => s.send)
@@ -403,7 +424,8 @@ export function ChatView() {
       await useStore.getState().clearChat(activeChatId)
       return
     }
-    if (running) return
+    // No `running` guard: a message typed while the answer streams is queued behind it
+    // rather than refused, and the queue above the field is where it shows up.
     setInput('')
     // Sending is a deliberate move to the newest content, so the list follows again even
     // if the user had scrolled up to read: their own message and the reply to it belong
@@ -636,6 +658,38 @@ export function ChatView() {
           </div>
         )}
 
+        {/* The messages waiting behind this turn, oldest first. Above the field because that is
+            what the next Enter adds to, and every row is deletable: a queue the user cannot
+            shrink is a queue that makes them wait before they can correct themselves. */}
+        {queued.length > 0 && (
+          <div className="mb-2">
+            <div className="faint mb-1 text-[11px]">{t('chat.queue.title')}</div>
+            <ul className="flex flex-col gap-1">
+              {queued.map((entry, index) => (
+                <li
+                  key={entry.id}
+                  className="flex items-center gap-2 rounded-md px-2 py-1 text-[12px]"
+                  style={{ background: 'var(--surface-2)' }}
+                >
+                  <span className="faint shrink-0">{index + 1}</span>
+                  <span className="min-w-0 flex-1 truncate" title={entry.text}>
+                    {entry.text.replace(/\s+/g, ' ')}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    title={t('chat.queue.remove')}
+                    aria-label={`${t('chat.queue.remove')}: ${entry.text}`}
+                    onClick={() => void useStore.getState().dropQueued(activeChatId, entry.id)}
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <div className="flex items-end gap-2">
           <textarea
             ref={textareaRef}
@@ -650,20 +704,22 @@ export function ChatView() {
             onKeyDown={onKeyDown}
             disabled={running && phase === 'compacting'}
           />
-          {running ? (
+          {running && (
             <button type="button" className="btn btn-danger h-[42px]" onClick={() => void stop()}>
               ⏹ {t('chat.stop')}
             </button>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-primary h-[42px]"
-              disabled={!input.trim()}
-              onClick={() => void submit()}
-            >
-              {t('chat.send')}
-            </button>
           )}
+          {/* While a turn runs this queues the message instead of sending it now, and says so:
+              a button reading “Send” that would not send for another minute is the one lie
+              left in this row. */}
+          <button
+            type="button"
+            className="btn btn-primary h-[42px]"
+            disabled={!input.trim()}
+            onClick={() => void submit()}
+          >
+            {running ? t('chat.queue') : t('chat.send')}
+          </button>
         </div>
 
         <div className="mt-2 flex flex-wrap items-center gap-2">

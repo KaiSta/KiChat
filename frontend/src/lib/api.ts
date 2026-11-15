@@ -26,6 +26,11 @@ type Plain<T> = 0 extends 1 & T
 export namespace chat {
   export type ContextSegment = Plain<Gen.chat.ContextSegment>
   export type ContextBudget = Plain<Gen.chat.ContextBudget>
+  /**
+   * One message waiting behind a chat's running turn. The app owns the order — oldest first —
+   * and `id` is what deleting it names.
+   */
+  export type QueuedTurn = Plain<Gen.chat.QueuedTurn>
 }
 
 export namespace config {
@@ -277,6 +282,9 @@ export const EV = {
   toolOutput: 'chat:tool-output',
   status: 'chat:status',
   done: 'chat:done',
+  // A chat's queue of messages waiting behind its running turn. The whole list travels in
+  // the event, so the window can set it rather than apply a delta.
+  queue: 'chat:queue',
   error: 'chat:error',
   warning: 'chat:warning',
   budget: 'chat:budget',
@@ -325,6 +333,11 @@ export interface ToolOutputPayload {
 export interface StatusPayload {
   chatId: string
   phase: string
+}
+/** A chat's whole queue, oldest first, each time it gains, sends or loses a message. */
+export interface QueuePayload {
+  chatId: string
+  queue: chat.QueuedTurn[]
 }
 export interface DonePayload {
   chatId: string

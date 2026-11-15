@@ -10,6 +10,7 @@ import {
   type ImageProgressPayload,
   type llm,
   type main,
+  type QueuePayload,
   type research,
   type store as storeTypes,
   type ToolOutputPayload,
@@ -180,6 +181,12 @@ interface State {
    */
   fileChanges: Record<string, main.FileChange[]>
   running: Record<string, boolean>
+  /**
+   * chatId -> the messages waiting behind that chat's running turn, oldest first. The backend
+   * owns the order, so this is replaced wholesale from `chat:queue` and from the chat's own
+   * state; nothing here sorts or edits the list.
+   */
+  queued: Record<string, chat.QueuedTurn[]>
   /** chatId -> phase such as "tool" or "compacting". */
   phase: Record<string, string>
   /**
@@ -299,6 +306,12 @@ interface State {
 
   send: (text: string) => Promise<void>
   stop: () => Promise<void>
+  /**
+   * Take one waiting message back out of the queue, by the id the backend gave it. The row is
+   * dropped from the list before the call for the reason an answered question is: the entry
+   * may already be starting, and a row that stays on screen invites a second click.
+   */
+  dropQueued: (chatId: string, id: string) => Promise<void>
   regenerate: (backend?: string, model?: string) => Promise<void>
 
   updateChat: (patch: Partial<storeTypes.Chat>) => Promise<void>
@@ -363,6 +376,7 @@ export const useStore = create<State>((set, get) => {
     approvals: {},
     fileChanges: {},
     running: {},
+    queued: {},
     phase: {},
     phaseWaitMs: {},
     toasts: [],
@@ -524,7 +538,7 @@ export const useStore = create<State>((set, get) => {
         const state = await App.GetChatState(id)
         // Ignore a response for a chat the user has already navigated away from.
         if (get().activeChatId !== id) return
-        set({ chatState: state })
+        set({ chatState: state, queued: { ...get().queued, [id]: state.queue ?? [] } })
         const running = { ...get().running, [id]: state.running }
         set({ running })
         // A project's changed files come with it: the header's count is part of what the
@@ -577,7 +591,7 @@ export const useStore = create<State>((set, get) => {
       try {
         const state = await App.GetChatState(id)
         if (get().activeChatId !== id) return
-        set({ chatState: state })
+        set({ chatState: state, queued: { ...get().queued, [id]: state.queue ?? [] } })
       } catch {
         /* transient read failure; the next event will refresh */
       }
@@ -613,7 +627,11 @@ export const useStore = create<State>((set, get) => {
       try {
         await App.DeleteChat(id)
         const chats = get().chats.filter((c) => c.id !== id)
-        set({ chats })
+        // The queue went with the chat: a message waiting for a conversation that no longer
+        // exists would never be sent, and nothing would say so.
+        const queued = { ...get().queued }
+        delete queued[id]
+        set({ chats, queued })
         if (get().activeChatId === id) {
           set({ activeChatId: null, chatState: null })
           if (chats.length > 0) await get().selectChat(chats[0].id)
@@ -651,7 +669,7 @@ export const useStore = create<State>((set, get) => {
         // A command whose output was on screen belongs to the conversation that was just
         // dropped, so its text goes with it — and so does a hand-off, which is about a turn
         // that no longer exists.
-        set({ toolOutput: {}, handoffs: {} })
+        set({ toolOutput: {}, handoffs: {}, queued: { ...get().queued, [id]: [] } })
         // The undo records go with the conversation too (`Store.ClearChat`), so the changes
         // panel's list is re-read rather than left as it was: a stale row would keep the
         // header's count and offer a revert that silently does nothing.
@@ -662,16 +680,22 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
+    /*
+     * Sending while a turn runs queues the message rather than refusing it, so there is no
+     * guard on `running` here: the backend decides, and answers by putting it in the queue.
+     */
     send: async (text) => {
       const state = get()
       const chatId = state.activeChatId
       if (!chatId || !state.chatState) return
-      if (state.running[chatId]) return
+      const wasRunning = !!state.running[chatId]
 
-      // Attachments that have not been assigned to a message yet travel with
-      // this turn.
+      // Attachments that have not been assigned to a message yet travel with this turn — but
+      // not one a queued message already claimed: two waiting turns would otherwise both
+      // carry the same file, and the second would attach it to the wrong message.
+      const claimed = new Set((state.queued[chatId] ?? []).flatMap((q) => q.attachmentIds ?? []))
       const attachmentIds = state.chatState.attachments
-        .filter((a) => !a.messageId)
+        .filter((a) => !a.messageId && !claimed.has(a.id))
         .map((a) => a.id)
 
       const override = state.nextModel?.chatId === chatId ? state.nextModel : null
@@ -687,7 +711,20 @@ export const useStore = create<State>((set, get) => {
           regenerate: false,
         })
       } catch (err) {
-        set({ running: { ...get().running, [chatId]: false } })
+        // Only the flag this call set. A send queued behind a running turn must not clear the
+        // indicator of the turn that is still streaming.
+        if (!wasRunning) set({ running: { ...get().running, [chatId]: false } })
+        get().toast('error', errText(err))
+      }
+    },
+
+    dropQueued: async (chatId, id) => {
+      set((s) => ({
+        queued: { ...s.queued, [chatId]: (s.queued[chatId] ?? []).filter((q) => q.id !== id) },
+      }))
+      try {
+        await App.DropQueuedMessage(chatId, id)
+      } catch (err) {
         get().toast('error', errText(err))
       }
     },
@@ -695,8 +732,14 @@ export const useStore = create<State>((set, get) => {
     stop: async () => {
       const chatId = get().activeChatId
       if (!chatId) return
+      // Read before the call, because the answer to it is what frees the chat for the queue.
+      const waiting = (get().queued[chatId] ?? []).length
       try {
-        await App.StopGeneration(chatId)
+        const stopped = await App.StopGeneration(chatId)
+        // Stop ends the answer and leaves what the user typed in the queue, so the next message
+        // starts straight away. Said out loud: an answer appearing right after a click that
+        // read as "stop everything" is otherwise unexplained.
+        if (stopped && waiting > 0) get().toast('info', get().t('chat.queue.afterStop'))
       } catch (err) {
         get().toast('error', errText(err))
       }
@@ -978,6 +1021,15 @@ function wireEvents(
     const state = get()
     if (!state.chatState || state.chatState.chat.id !== p.chatId) return
     set({ chatState: { ...state.chatState, budget: p.budget } })
+  })
+
+  /*
+   * The queue changed: a message was added, a turn took the next one, or one was taken back
+   * out. Not filtered by the open chat, for the reason the approval below is not — the list is
+   * keyed by chat, and a chat that is opened later reads its own from `GetChatState` anyway.
+   */
+  on<QueuePayload>(EV.queue, (p) => {
+    set((s) => ({ queued: { ...s.queued, [p.chatId]: p.queue } }))
   })
 
   on<{ chatId: string; status: string }>(EV.done, (p) => {

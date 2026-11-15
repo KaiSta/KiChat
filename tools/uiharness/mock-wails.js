@@ -2556,6 +2556,17 @@ Available tools: {{tool_list}}`,
   const timers = new Map()
 
   /*
+   * chatId -> the messages waiting behind that chat's running turn, oldest first, exactly as
+   * the engine keeps them. The harness queues and drains them so the panel above the composer
+   * can be rendered, and its delete button pressed.
+   */
+  const queuedTurns = new Map()
+
+  const emitQueue = (chatId) => {
+    emit('chat:queue', { chatId, queue: copy(queuedTurns.get(chatId) || []) })
+  }
+
+  /*
    * The change waiting for an answer, or null. One at a time: the real app keeps a map
    * keyed by tool call id, but a fixture that could hold two questions at once would
    * only make the flag harder to read.
@@ -2892,6 +2903,7 @@ Available tools: {{tool_list}}`,
           chat.title = text.split(/\s+/).slice(0, 5).join(' ')
           emit('chat:title', { chatId, title: chat.title })
         }
+        drainQueue(chatId)
         return
       }
       const chunk = words.slice(i, (i += 4)).join('')
@@ -2986,6 +2998,20 @@ Available tools: {{tool_list}}`,
     emit('chat:done', { chatId, messageId, lastMessageId: messageId, status: 'complete' })
   }
 
+  /*
+   * The next queued message takes the chat the moment a turn ends, as the engine does it: the
+   * chat is never reported idle between two answers that follow each other.
+   */
+  function drainQueue(chatId) {
+    const list = queuedTurns.get(chatId) || []
+    if (list.length === 0) return
+    const [next, ...rest] = list
+    if (rest.length) queuedTurns.set(chatId, rest)
+    else queuedTurns.delete(chatId)
+    emitQueue(chatId)
+    startTurn(chatId, next.text, false)
+  }
+
   function chatState(chatId) {
     const chat = chats.find((c) => c.id === chatId)
     if (!chat) return Promise.reject(new Error('chat not found: ' + chatId))
@@ -3025,6 +3051,8 @@ Available tools: {{tool_list}}`,
       // finished it, and reporting `false` here would drop the Stop button the moment the
       // question appeared — the one control a user needs while a change is on screen.
       running: timers.has(chatId) || pendingApproval?.chatId === chatId,
+      // The messages queued behind that turn, in the order they will be sent.
+      queue: copy(queuedTurns.get(chatId) || []),
       // What this chat answers without a card, from an "always" clicked on one of its own.
       // Seeded for the coding fixture so the header's consent chip renders without having to
       // answer a card first — `?always=commands` is the state the report was about.
@@ -3876,8 +3904,29 @@ Available tools: {{tool_list}}`,
       return Promise.resolve(null)
     },
     SendMessage: (req) => {
+      // A message sent while a turn runs waits behind it instead of being refused, as the
+      // engine does now: nothing goes wrong, and the queue above the composer shows it.
+      if (timers.has(req.chatId)) {
+        const list = queuedTurns.get(req.chatId) || []
+        // The three fields the engine's QueuedTurn carries, and no others: a fixture with more
+        // than the bridge sends would let a reader depend on something that is not there.
+        list.push({ id: nextId('queued'), text: req.text, attachmentIds: req.attachmentIds || [] })
+        queuedTurns.set(req.chatId, list)
+        emitQueue(req.chatId)
+        return Promise.resolve(null)
+      }
       startTurn(req.chatId, req.text, req.regenerate)
       return Promise.resolve(null)
+    },
+    // Taking one waiting message back out, by the id the engine gave it.
+    DropQueuedMessage: (chatId, id) => {
+      const list = queuedTurns.get(chatId) || []
+      const kept = list.filter((q) => q.id !== id)
+      if (kept.length === list.length) return Promise.resolve(false)
+      if (kept.length) queuedTurns.set(chatId, kept)
+      else queuedTurns.delete(chatId)
+      emitQueue(chatId)
+      return Promise.resolve(true)
     },
     /*
      * The answer to a waiting change. The real one sends on a channel the blocked turn is
@@ -3935,6 +3984,9 @@ Available tools: {{tool_list}}`,
       return Promise.resolve(null)
     },
     StopGeneration: (chatId) => {
+      // Stop ends the answer and nothing else: the queue stays as it is, and the next message
+      // starts the moment the chat is free — exactly as the engine does it, which is why the
+      // window has a sentence for it.
       const timer = timers.get(chatId)
       if (timer) clearTimeout(timer)
       timers.delete(chatId)
@@ -3942,7 +3994,10 @@ Available tools: {{tool_list}}`,
       const last = list[list.length - 1]
       if (last && last.role === 'assistant') last.status = 'stopped'
       emit('chat:done', { chatId, messageId: last ? last.id : '', lastMessageId: last ? last.id : '', status: 'stopped' })
-      return Promise.resolve(null)
+      drainQueue(chatId)
+      // The real binding reports whether it found a turn to stop, which is what decides whether
+      // the window says anything about the queue behind it.
+      return Promise.resolve(!!timer)
     },
 
     GetSearchStatus: () => Promise.resolve(searchStatus),

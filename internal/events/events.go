@@ -37,6 +37,10 @@ const (
 	// keyed to one call, and a Tool event carries a *record* — a status and a result —
 	// which is the opposite of "this is not finished yet".
 	ToolOutput = "chat:tool-output"
+	// Queue carries a chat's queue of messages waiting behind its running turn, each time one
+	// is added, started or taken back out. It is the whole list rather than a delta, so the
+	// window can set it and cannot drift from the order the turns will really be sent in.
+	Queue = "chat:queue"
 	// Approval carries a change to a project folder that is waiting for the user's
 	// answer. The turn that asked is blocked until ResolveToolApproval answers it, which
 	// is why it cannot ride on Status: a phase string tells the window what is happening,
@@ -61,6 +65,6 @@ func All() []string {
 	return []string{
 		Delta, Reasoning, Start, Done, Message, Tool, Status,
 		Error, Warning, Budget, Compaction, Title, Attachments, ChatsChanged,
-		ImageProgress, Approval, ToolOutput, AppUpdate,
+		ImageProgress, Approval, ToolOutput, AppUpdate, Queue,
 	}
 }

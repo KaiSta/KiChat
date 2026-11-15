@@ -880,7 +880,9 @@ func TestCancelledToolCallsLeaveNoOrphan(t *testing.T) {
 }
 
 // TestGenerationsAreSerialisedPerChat guards against two turns interleaving and
-// corrupting each other's message sequence.
+// corrupting each other's message sequence. A message sent while a turn runs waits in the
+// queue, and the serialisation is what makes that waiting safe: it is sent after the first
+// turn has released the chat, never beside it.
 func TestGenerationsAreSerialisedPerChat(t *testing.T) {
 	st := newTestStore(t)
 	makeChat(t, st)
@@ -896,11 +898,34 @@ func TestGenerationsAreSerialisedPerChat(t *testing.T) {
 	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "erst"}); err != nil {
 		t.Fatalf("first Send: %v", err)
 	}
-	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "zweite"}); err == nil {
-		t.Fatal("expected the second Send to be rejected while a turn is running")
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "zweite"}); err != nil {
+		t.Fatalf("the second Send was refused instead of queued: %v", err)
+	}
+	if got := engine.Queued("chat-1"); len(got) != 1 || got[0].Text != "zweite" {
+		t.Fatalf("Queued = %+v, want the second message waiting", got)
+	}
+	// Taken back out by hand: Stop leaves the queue alone now, and this test is about one chat
+	// never running two turns at once.
+	if waiting := engine.Queued("chat-1"); !engine.DropQueued("chat-1", waiting[0].ID) {
+		t.Fatal("DropQueued did not find the message it had just listed")
 	}
 	engine.Stop("chat-1")
 	waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning("chat-1") })
+	// Nothing started behind the stopped turn: the transcript holds the question that was asked
+	// and nothing else.
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var users int
+	for _, m := range messages {
+		if m.Role == string(llm.RoleUser) {
+			users++
+		}
+	}
+	if users != 1 {
+		t.Errorf("the transcript holds %d user message(s), want 1", users)
+	}
 }
 
 // TestRegenerateDropsTrailingAssistant keeps a regenerate from appending a second

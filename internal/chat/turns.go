@@ -3,6 +3,8 @@ package chat
 import (
 	"sync"
 	"time"
+
+	"uuid"
 )
 
 // TurnState is the part of an engine that has to outlive the Engine value itself.
@@ -23,6 +25,36 @@ type TurnState struct {
 	mu           sync.Mutex
 	active       map[string]*turnHandle
 	measurements map[string]Measurement
+	// queued holds the messages waiting behind each chat's running turn, oldest first.
+	queued map[string][]queuedRequest
+}
+
+// QueuedTurn is one message waiting for a chat's running turn to finish, in the form the
+// window draws it: the text to show, the id it is deleted by, and the attachments it travels
+// with — which the window needs off screen, to keep two waiting messages off one file.
+type QueuedTurn struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+	// AttachmentIDs is never null: the window maps over it, and a nil slice marshals to null.
+	AttachmentIDs []string `json:"attachmentIds"`
+}
+
+// queuedRequest is one waiting turn with the identity the window deletes it by. The whole
+// request is kept, not a rendering of it: what starts when its turn comes is the turn the user
+// asked for, model override and attachments included.
+type queuedRequest struct {
+	id  string
+	req TurnRequest
+}
+
+// turn converts the entry to the shape the window reads. The attachment slice is a copy, so a
+// caller cannot reach into the queue through it.
+func (q queuedRequest) turn() QueuedTurn {
+	return QueuedTurn{
+		ID:            q.id,
+		Text:          q.req.Text,
+		AttachmentIDs: append([]string{}, q.req.AttachmentIDs...),
+	}
 }
 
 // NewTurnState builds the shared turn registry.
@@ -30,6 +62,7 @@ func NewTurnState() *TurnState {
 	return &TurnState{
 		active:       map[string]*turnHandle{},
 		measurements: map[string]Measurement{},
+		queued:       map[string][]queuedRequest{},
 	}
 }
 
@@ -69,6 +102,93 @@ func (t *TurnState) handle(chatID string) (*turnHandle, bool) {
 func (t *TurnState) running(chatID string) bool {
 	_, ok := t.handle(chatID)
 	return ok
+}
+
+// accept puts a request where it belongs in one step: it claims the chat for a turn that starts
+// now, or — when a turn already holds the chat — appends the request to its queue. It reports
+// which of the two happened.
+//
+// One lock for both answers is the point. Deciding in two steps would let a message be refused
+// for a chat that had just gone quiet, or start ahead of a queue, in the gap between them.
+func (t *TurnState) accept(req TurnRequest, h *turnHandle) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, busy := t.active[req.ChatID]; busy {
+		t.queued[req.ChatID] = append(t.queued[req.ChatID], queuedRequest{
+			id:  uuid.New().String(),
+			req: req,
+		})
+		return false
+	}
+	t.active[req.ChatID] = h
+	return true
+}
+
+// queuedTurns lists a chat's queue in the order it will be sent. The answer is never null:
+// a chat with nothing queued gets an empty list rather than the null a nil slice marshals to.
+func (t *TurnState) queuedTurns(chatID string) []QueuedTurn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]QueuedTurn, 0, len(t.queued[chatID]))
+	for _, q := range t.queued[chatID] {
+		out = append(out, q.turn())
+	}
+	return out
+}
+
+// dropQueued removes one entry and reports whether it was still there. A click that arrives
+// after the entry's turn started is the ordinary false, not an error.
+func (t *TurnState) dropQueued(chatID, id string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	list := t.queued[chatID]
+	for i, q := range list {
+		if q.id != id {
+			continue
+		}
+		// Three-index slicing so the entries after this one are copied rather than shifted
+		// into a backing array the popped head still points at.
+		rest := append(list[:i:i], list[i+1:]...)
+		if len(rest) == 0 {
+			delete(t.queued, chatID)
+		} else {
+			t.queued[chatID] = rest
+		}
+		return true
+	}
+	return false
+}
+
+// head is the oldest queued request, still in the queue. The engine stores its message first and
+// takes the entry out afterwards, so a message that could not be stored stays where the user can
+// see it and delete it instead of disappearing.
+func (t *TurnState) head(chatID string) (queuedRequest, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	list := t.queued[chatID]
+	if len(list) == 0 {
+		return queuedRequest{}, false
+	}
+	return list[0], true
+}
+
+// clearQueued empties one chat's queue and reports whether anything was in it.
+func (t *TurnState) clearQueued(chatID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.queued[chatID]) == 0 {
+		return false
+	}
+	delete(t.queued, chatID)
+	return true
+}
+
+// clearAllQueued drops every chat's queue. A cancelled turn drains its chat's queue on the
+// way out, and a process that is closing must not start the next message.
+func (t *TurnState) clearAllQueued() {
+	t.mu.Lock()
+	t.queued = map[string][]queuedRequest{}
+	t.mu.Unlock()
 }
 
 // handles snapshots every claimed turn, so a caller can cancel them all without

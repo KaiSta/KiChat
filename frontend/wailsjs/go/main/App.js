@@ -54,6 +54,10 @@ export function DetectTerminal() {
   return window['go']['main']['App']['DetectTerminal']();
 }
 
+export function DropQueuedMessage(arg1, arg2) {
+  return window['go']['main']['App']['DropQueuedMessage'](arg1, arg2);
+}
+
 export function ExportBackup(arg1) {
   return window['go']['main']['App']['ExportBackup'](arg1);
 }
