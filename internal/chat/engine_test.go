@@ -928,6 +928,51 @@ func TestGenerationsAreSerialisedPerChat(t *testing.T) {
 	}
 }
 
+// TestAnAttachmentIsNotTakenOverByALaterMessage is the two-sends-one-file case: the second was
+// typed while the first was still being answered, so the window had not yet heard that the file
+// was queued. It goes with the message that stored it first; taking it over would leave that
+// message without the file the user gave it.
+func TestAnAttachmentIsNotTakenOverByALaterMessage(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	engine, _ := newTestEngine(t, st, &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192},
+	})
+
+	if err := st.CreateAttachment(store.Attachment{
+		ID: "att-1", ChatID: "chat-1", Filename: "notes.txt", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create attachment: %v", err)
+	}
+
+	if err := engine.appendUserMessage(TurnRequest{
+		ChatID: "chat-1", Text: "erste Frage", AttachmentIDs: []string{"att-1"},
+	}, "fake", "fake-model"); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	if err := engine.appendUserMessage(TurnRequest{
+		ChatID: "chat-1", Text: "zweite Frage", AttachmentIDs: []string{"att-1"},
+	}, "fake", "fake-model"); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("the transcript holds %d message(s), want 2", len(messages))
+	}
+	attachment, err := st.GetAttachment("att-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attachment.MessageID != messages[0].ID {
+		t.Errorf("the file sits on message %q, want the first one %q",
+			attachment.MessageID, messages[0].ID)
+	}
+}
+
 // TestRegenerateDropsTrailingAssistant keeps a regenerate from appending a second
 // answer on top of the first.
 func TestRegenerateDropsTrailingAssistant(t *testing.T) {

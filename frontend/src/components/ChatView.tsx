@@ -172,6 +172,10 @@ export function ChatView() {
   //    React spins in an infinite update loop (#185), which blanks the window
   //    the same way.
   const pending = useStore(useShallow(pendingAttachments))
+  // The files a waiting message carries, by the names its chips showed before it was queued.
+  // One that is no longer in the chat is left out: the row must not name a file that is gone.
+  const queuedFiles = (ids: string[]) =>
+    ids.map((id) => chatState?.attachments.find((a) => a.id === id)?.filename ?? '').filter(Boolean)
   // What the composer's permission note has to say. Read from the stored settings rather
   // than from the chat, because the answer is the same for every chat in the window.
   const autoApprove = useStore((s) => s.settings?.autoApprove)
@@ -675,6 +679,17 @@ export function ChatView() {
                   <span className="min-w-0 flex-1 truncate" title={entry.text}>
                     {entry.text.replace(/\s+/g, ' ')}
                   </span>
+                  {/* The files this message carries. Their chips left the composer when it was
+                      queued — they are not pending any more — so the row is where they are
+                      shown, and it is the only place that names them. */}
+                  {entry.attachmentIds.length > 0 && (
+                    <span
+                      className="faint max-w-[10rem] shrink-0 truncate"
+                      title={queuedFiles(entry.attachmentIds).join(', ')}
+                    >
+                      📎 {queuedFiles(entry.attachmentIds).join(', ') || entry.attachmentIds.length}
+                    </span>
+                  )}
                   <button
                     type="button"
                     className="btn btn-sm btn-ghost"

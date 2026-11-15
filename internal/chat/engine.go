@@ -1051,6 +1051,13 @@ func (e *Engine) appendUserMessage(req TurnRequest, backendID, modelID string) e
 		if attachment.ChatID != req.ChatID {
 			continue
 		}
+		// A file another message already holds is not taken over by this one. Two sends can name
+		// the same attachment when the second was typed before the window had heard that the
+		// first was queued; the file belongs to the message that stored it first, and moving it
+		// would leave that message without the file the user gave it.
+		if attachment.MessageID != "" {
+			continue
+		}
 		attachment.MessageID = msg.ID
 		if err := e.Store.UpdateAttachment(attachment); err != nil {
 			return err

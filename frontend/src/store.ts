@@ -690,10 +690,10 @@ export const useStore = create<State>((set, get) => {
       if (!chatId || !state.chatState) return
       const wasRunning = !!state.running[chatId]
 
-      // Attachments that have not been assigned to a message yet travel with this turn — but
-      // not one a queued message already claimed: two waiting turns would otherwise both
-      // carry the same file, and the second would attach it to the wrong message.
-      const claimed = new Set((state.queued[chatId] ?? []).flatMap((q) => q.attachmentIds ?? []))
+      // Attachments no message holds yet travel with this turn, by the same rule the chips are
+      // drawn by: a file a queued message carries has already gone somewhere, and handing it to
+      // this message too would move it off the turn the user gave it to.
+      const claimed = claimedAttachmentIds(state)
       const attachmentIds = state.chatState.attachments
         .filter((a) => !a.messageId && !claimed.has(a.id))
         .map((a) => a.id)
@@ -1180,9 +1180,33 @@ function handoffCommand(argsJSON: string): string {
   }
 }
 
-/** Convenience selector for the active chat's pending (unsent) attachments. */
+/**
+ * The attachments of the open chat that are already spoken for: written onto a message, or
+ * carried by a message that is still waiting in its queue.
+ *
+ * One definition, because the composer's chips and the ids a send hands over have to agree about
+ * what is free. A file a queued turn carries is not waiting to be sent: attaching it to the next
+ * message would move it off the turn the user gave it to.
+ */
+function claimedAttachmentIds(state: State): Set<string> {
+  const claimed = new Set<string>()
+  const waiting = (state.activeChatId ? state.queued[state.activeChatId] : undefined) ?? []
+  for (const entry of waiting) {
+    for (const id of entry.attachmentIds ?? []) claimed.add(id)
+  }
+  return claimed
+}
+
+/**
+ * Convenience selector for the active chat's pending (unsent) attachments — the chips the
+ * composer offers to send or remove.
+ *
+ * A file a queued message carries is not one of them: its turn already has it, and the queue
+ * row above the field is where it is shown.
+ */
 export function pendingAttachments(state: State): storeTypes.Attachment[] {
-  return (state.chatState?.attachments ?? []).filter((a) => !a.messageId)
+  const claimed = claimedAttachmentIds(state)
+  return (state.chatState?.attachments ?? []).filter((a) => !a.messageId && !claimed.has(a.id))
 }
 
 /** The text a message should render: the live buffer while streaming, else the
