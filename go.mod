@@ -14,7 +14,7 @@ require (
 	github.com/wailsapp/wails/v2 v2.17.1
 	github.com/xuri/excelize/v2 v2.11.1
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/crypto v0.58.0
+	golang.org/x/crypto v0.59.0
 	golang.org/x/image v0.48.0
 	golang.org/x/text v0.44.0
 )
