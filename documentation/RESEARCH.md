@@ -447,6 +447,26 @@ The measurements behind that are pinned from both sides: `TestIsDDGChallengeOnRe
 (a real result page is *not* flagged as a block), `TestDuckDuckGoEmptyResultIsNotABlock`,
 `TestDuckDuckGoReportsBotChallenge` and `TestDuckDuckGoLiteBlockSurfaces`.
 
+**The check is answerable in the window.** A refusal keeps its body's check: the parse goes into a
+package-level pending store and out to the window as an event, while the error stays a plain
+`ErrBlocked`, so pacing and fallback are unchanged. The window names a tile and ticks tiles; it
+never holds the form's action, its hidden token or a tile's address — the answer is posted and
+the pictures are fetched from the pending copy, through the same `browserClient`, jar included,
+because a clearance earned by another client proves nothing about this one. A name the check does
+not have, or a check that is gone, answers `ErrNoChallenge`, which the bridge words as "this check
+is gone — run the search again". Only `https` is
+required of an address taken out of the page's own markup; there is no host allowlist, because
+the page that supplied the address already knows the query it was asked, and a tile that moves
+to a CDN would otherwise stop loading. The parse leans on the one self-identifying pair in the
+markup: a tile's checkbox is `image-check_<hash>` and its picture is `/challenge/<hash>.jpg`, so
+tiles are paired by hash and **not** by position. **Unmeasured (2026-11-22)**: the live
+interstitial was not fetched while this was built — the fixture in `duckduckgo_test.go` is a
+capture of the shape, and a layout change that breaks the hash pairing leaves the refusal without
+a check, which is the old behaviour rather than an error. `TestParseDDGChallengeGrid`,
+`TestDuckDuckGoOffersTheCheckToTheWindow`,
+`TestSolveChallengePostsTheTickedTilesAndReturnsTheResults` (which also fetches a tile by name)
+and `TestBrowserClientCarriesTheSitesCookies` pin the parse, the offer, the answer and the jar.
+
 ---
 
 ## 6. Scraping a page
@@ -682,7 +702,7 @@ Every parser has a fixture test beside it, and the guards have theirs:
 | --- | --- |
 | `research_test.go` | Brave's five sections and the infobox order (`TestParseBraveResponse`), the count clamp, both DDG layouts, a **layout change returning nothing rather than a wrong answer**, URL normalisation, dedupe/rerank, the SSRF block, non-http schemes, the limiter's cancellation, `robots.txt` parsing |
 | `brave_context_test.go` | the context envelope, empty snippets dropped, query clamping, the failure classification, the **request shape** (parameters as sent), the token floor, the missing-key case, and the three chain-level fallback cases — quota, no key, empty query — plus `TestGroundedContextFallbackCountsBraveOnce` |
-| `duckduckgo_test.go` | that the interstitial is reported as a block, that an empty result is **not** one, that a lite block surfaces, that real result markup is not misread as a challenge, that a refusal and a 503 are each **retried** into results, that a second parallel search outlasts the refusal it drew, that a parallel burst reaches the host one pacing gap apart, and the pacer's growth (the first refusal included), ceiling, untouched queue when a wait is declined, and bounded wait |
+| `duckduckgo_test.go` | that the interstitial is reported as a block, that an empty result is **not** one, that a lite block surfaces, that real result markup is not misread as a challenge, that a refusal and a 503 are each **retried** into results, that a second parallel search outlasts the refusal it drew, that a parallel burst reaches the host one pacing gap apart, and the pacer's growth (the first refusal included), ceiling, untouched queue when a wait is declined, and bounded wait; and that a refusal's check reaches the pending store and the window, that its tiles are fetched by name, and that an unknown name answers `ErrNoChallenge` |
 | `scrape_cache_test.go` | that a page cached under a small budget still serves a larger one, and that the cached path applies the caller's bound |
 | `scrape_guard_test.go` | that a redirect hop is re-guarded, that the chain stops at the limit, and the dial-time check |
 

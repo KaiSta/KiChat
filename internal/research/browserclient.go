@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"sync"
@@ -176,6 +177,16 @@ func chromeSecChUa(major int) string {
 	return strings.Join(out, ", ")
 }
 
+// searchCookies is the cookie state that belongs to the scraped identity, shared by every
+// browserClient in this process.
+//
+// It is package-level because the jar belongs to the identity rather than to one client: the
+// chain rebuilds its providers whenever a setting is saved, and a bot check the reader has just
+// answered has to survive that. A browser keeps one jar for a site the same way, whoever is
+// asking. Without it every request was a client that had never been to the site before, which is
+// both a fingerprint of its own and the reason a solved check could not be remembered.
+var searchCookies, _ = cookiejar.New(nil)
+
 // browserClient sends one request per call as the profile's browser would: a form POST for
 // DuckDuckGo, or a GET navigation for the scraper's retry after a refusal.
 //
@@ -187,6 +198,9 @@ type browserClient struct {
 	profile browserProfile
 	dialer  *net.Dialer
 	timeout time.Duration
+	// jar holds the identity's cookies. Nil means this client carries none, which is what a
+	// fixture needs and what the identity must never be in production.
+	jar http.CookieJar
 	// insecure skips certificate verification. Tests only: the fixture server uses a
 	// certificate no CA signed, and a test that needed a trusted certificate would have to
 	// install one in the system store.
@@ -198,6 +212,7 @@ func newBrowserClient(profile browserProfile) *browserClient {
 		profile: profile,
 		dialer:  &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second},
 		timeout: 25 * time.Second,
+		jar:     searchCookies,
 	}
 }
 
@@ -221,6 +236,33 @@ func (c *browserClient) postForm(ctx context.Context, endpoint string, form url.
 	resp.Request = &http.Request{Method: http.MethodPost, URL: target}
 	resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
 	return resp, nil
+}
+
+// postFormFollow posts a form and, when the host answers with a redirect rather than a page,
+// follows it once as the browser would. The bot check's answer is a 303 back to the results, so
+// without this the reply would be an empty redirect to the caller.
+func (c *browserClient) postFormFollow(ctx context.Context, endpoint string, form url.Values, lang string) (*http.Response, error) {
+	target, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.postForm(ctx, endpoint, form, lang)
+	if err != nil {
+		return nil, err
+	}
+	location := resp.Header.Get("Location")
+	if !isRedirect(resp.StatusCode) || location == "" {
+		return resp, nil
+	}
+	next, err := target.Parse(location)
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("research: bad redirect target: %w", err)
+	}
+	if next.Scheme != "https" && next.Scheme != "http" {
+		return nil, fmt.Errorf("research: unsupported redirect scheme %q", next.Scheme)
+	}
+	return c.get(ctx, next, lang, nil)
 }
 
 // get performs one browser navigation and follows redirects. guard is called for the URL named
@@ -342,6 +384,13 @@ func (c *browserClient) do(ctx context.Context, target *url.URL, request string)
 		cleanup()
 		return nil, err
 	}
+	// The cookies a response sets are part of the identity: the bot check's answer is validated
+	// against them, and a browser that forgets them has to prove itself again.
+	if c.jar != nil {
+		if cookies := resp.Cookies(); len(cookies) > 0 {
+			c.jar.SetCookies(target, cookies)
+		}
+	}
 	body, err := decodeResponseBody(resp)
 	if err != nil {
 		resp.Body.Close()
@@ -431,9 +480,28 @@ func (c *browserClient) requestText(target *url.URL, form url.Values, lang strin
 	fmt.Fprintf(&b, "Referer: %s/\r\n", origin)
 	b.WriteString("Accept-Encoding: gzip, deflate, br, zstd\r\n")
 	fmt.Fprintf(&b, "Accept-Language: %s\r\n", acceptLanguage(lang))
+	c.writeCookies(&b, target)
 	b.WriteString("\r\n")
 	b.WriteString(body)
 	return b.String()
+}
+
+// writeCookies appends the identity's cookies for target where Chrome sends them: last, after
+// Accept-Language. A request with none carries no Cookie header at all, as a fresh profile's
+// would not.
+func (c *browserClient) writeCookies(b *strings.Builder, target *url.URL) {
+	if c.jar == nil {
+		return
+	}
+	cookies := c.jar.Cookies(target)
+	if len(cookies) == 0 {
+		return
+	}
+	pairs := make([]string, 0, len(cookies))
+	for _, cookie := range cookies {
+		pairs = append(pairs, cookie.Name+"="+cookie.Value)
+	}
+	fmt.Fprintf(b, "Cookie: %s\r\n", strings.Join(pairs, "; "))
 }
 
 // navigationText renders a top-level GET navigation in Chrome's order. It differs from a form
@@ -459,6 +527,7 @@ func (c *browserClient) navigationText(target, previous *url.URL, lang string) s
 	}
 	b.WriteString("Accept-Encoding: gzip, deflate, br, zstd\r\n")
 	fmt.Fprintf(&b, "Accept-Language: %s\r\n", acceptLanguage(lang))
+	c.writeCookies(&b, target)
 	b.WriteString("\r\n")
 	return b.String()
 }

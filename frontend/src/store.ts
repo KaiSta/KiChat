@@ -130,6 +130,12 @@ interface State {
    * panel's own Check. Null means none has been made in this session.
    */
   appUpdate: main.AppUpdate | null
+  /**
+   * A DuckDuckGo bot check waiting to be answered. The backend keeps its own copy — it is the
+   * one the answer is posted with — and this is what the dialog draws; both are dropped when
+   * the answer is sent or the dialog closed.
+   */
+  searchChallenge: research.Challenge | null
 
   settings: config.Settings | null
   models: llm.ModelInfo[]
@@ -273,6 +279,8 @@ interface State {
   setLang: (lang: Lang) => void
   setTheme: (theme: 'dark' | 'light') => void
   setView: (view: 'chat' | 'settings') => void
+  /** Show a bot check, or clear it (null) once it was answered or dismissed. */
+  setSearchChallenge: (challenge: research.Challenge | null) => void
 
   /**
    * Re-read the settings blob. An install writes the recorded build — its tag, the
@@ -358,6 +366,7 @@ export const useStore = create<State>((set, get) => {
     theme: 'dark',
     view: 'chat',
     appUpdate: null,
+    searchChallenge: null,
 
     settings: null,
     models: [],
@@ -394,7 +403,8 @@ export const useStore = create<State>((set, get) => {
         setTimeout(() => get().dismissToast(id), 6000)
       }
     },
-    dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+          dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+      setSearchChallenge: (challenge) => set({ searchChallenge: challenge }),
 
     bootstrap: async () => {
       try {
@@ -897,6 +907,10 @@ function wireEvents(
   // A newer release, found in the background. Nothing here is filtered by chat: the
   // badge is about the installation, and it stays until a later check says otherwise.
   on<main.AppUpdate>(EV.appUpdate, (p) => set({ appUpdate: p }))
+  // A refused search that carried a solvable check opens the dialog. There is one check at a
+  // time: a second refusal replaces the first rather than queueing behind it, because the
+  // newer one is the one the host will still accept an answer to.
+  on<research.Challenge>(EV.searchChallenge, (check) => set({ searchChallenge: check }))
 
   on<{ chatId: string; messageId: string; text: string }>(EV.start, (p) => {
     if (p.chatId !== active()) return

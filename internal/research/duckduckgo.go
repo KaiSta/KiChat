@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -73,6 +74,127 @@ func isDDGChallenge(body string) bool {
 	}
 	return false
 }
+
+// Challenge is DuckDuckGo's bot check: the form the answer is posted to and the tiles to tick.
+//
+// Only the part the window draws is tagged for the bridge. The action and the form's own hidden
+// fields stay on this side: the answer is posted from the pending copy, so the window never holds
+// the address the token goes to and cannot be talked into sending it elsewhere.
+type Challenge struct {
+	Query       string            `json:"query"`
+	Instruction string            `json:"instruction"`
+	Tiles       []Tile            `json:"tiles"`
+	Action      string            `json:"-"`
+	Fields      map[string]string `json:"-"`
+	// Lang words this package's failure of the answer. Untagged: the window knows its own.
+	Lang string `json:"-"`
+}
+
+// Tile is one square of the check: the checkbox the answer posts and the picture it names. The
+// address stays on this side too — the window asks for a tile by name.
+type Tile struct {
+	Name string `json:"name"`
+	URL  string `json:"-"`
+}
+
+// ErrNoChallenge means there is no check left to act on: it was answered, the window dismissed it,
+// or the app was restarted.
+var ErrNoChallenge = errors.New("research: no pending DuckDuckGo check")
+
+// parseDDGChallenge reads the check out of the interstitial.
+//
+// The markup is the endpoint's own and undocumented, so the parse leans on the one thing that is
+// self-identifying: a tile's checkbox is named `image-check_<hash>` and its picture's path carries
+// the same hash. Tiles are paired by that hash, never by position.
+func parseDDGChallenge(body, query, lang string) (Challenge, bool) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
+	if err != nil {
+		return Challenge{}, false
+	}
+	form := doc.Find("form.challenge-form").First()
+	action, ok := form.Attr("action")
+	if !ok || strings.TrimSpace(action) == "" {
+		return Challenge{}, false
+	}
+	challenge := Challenge{
+		Query:       query,
+		Action:      absoluteDDGURL(action),
+		Instruction: cleanText(doc.Find(".anomaly-modal__instructions").First().Text()),
+		Fields:      map[string]string{},
+		Lang:        lang,
+	}
+	// Hidden inputs are carried back untouched: the form's own token is what makes the answer
+	// valid, and inventing it here would be guessing at an undocumented field.
+	form.Find("input[type=hidden]").Each(func(_ int, input *goquery.Selection) {
+		name, _ := input.Attr("name")
+		value, _ := input.Attr("value")
+		if name != "" {
+			challenge.Fields[name] = value
+		}
+	})
+	images := make([]string, 0, len(challenge.Tiles))
+	form.Find("img.anomaly-modal__image").Each(func(_ int, image *goquery.Selection) {
+		if src, ok := image.Attr("src"); ok && src != "" {
+			images = append(images, absoluteDDGURL(src))
+		}
+	})
+	form.Find("input.anomaly-modal__check").Each(func(_ int, input *goquery.Selection) {
+		name, _ := input.Attr("name")
+		if name == "" {
+			return
+		}
+		hash := strings.TrimPrefix(name, "image-check_")
+		tile := Tile{Name: name}
+		for _, src := range images {
+			if strings.Contains(src, hash) {
+				tile.URL = src
+				break
+			}
+		}
+		challenge.Tiles = append(challenge.Tiles, tile)
+	})
+	if len(challenge.Tiles) == 0 {
+		return Challenge{}, false
+	}
+	return challenge, true
+}
+
+// absoluteDDGURL resolves the protocol-relative and root-relative URLs the interstitial uses.
+func absoluteDDGURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	switch {
+	case strings.HasPrefix(raw, "//"):
+		return "https:" + raw
+	case strings.HasPrefix(raw, "/"):
+		return "https://duckduckgo.com" + raw
+	default:
+		return raw
+	}
+}
+
+// pendingChallenge is the check the last refused search was answered with, kept so the window can
+// show it. It is package-level for the same reason the cookie jar is: the chain rebuilds its
+// providers whenever a setting is saved, and a check the reader is looking at must not vanish
+// because they moved a slider.
+//
+// Every store puts a fresh Challenge in and nothing mutates one in place, so a reader's copy is a
+// snapshot and the pointer swap is the whole of the synchronisation.
+var pendingChallenge atomic.Pointer[Challenge]
+
+// rememberChallenge stores a check for the window.
+func rememberChallenge(challenge Challenge) { pendingChallenge.Store(&challenge) }
+
+// PendingChallenge reports the check a search was last refused with, and whether there is one.
+func PendingChallenge() (Challenge, bool) {
+	stored := pendingChallenge.Load()
+	if stored == nil {
+		return Challenge{}, false
+	}
+	return *stored, true
+}
+
+// ClearPendingChallenge forgets the check: it was answered, or the window dismissed it.
+func ClearPendingChallenge() { pendingChallenge.Store(nil) }
 
 // Pacing and retry policy for the scraped provider.
 //
@@ -287,6 +409,9 @@ type DuckDuckGoProvider struct {
 	cooldown     time.Duration
 	cooldownMu   sync.Mutex
 	blockedUntil time.Time
+	// onChallenge is called when a refusal carries a check the reader can answer, so the window
+	// can open on it. Nil means nobody is listening, which is the case in tests.
+	onChallenge func(Challenge)
 	// client is the browser identity the requests go out as. It matters more than the
 	// request does: measured on 2026-11-03, the same query from the same machine was answered
 	// with the anti-bot interstitial over net/http and with ten results over this client.
@@ -488,6 +613,147 @@ func (d *DuckDuckGoProvider) Search(ctx context.Context, req SearchRequest) ([]S
 	return nil, lastErr
 }
 
+// offer keeps a solvable check for the window and tells whoever is listening. Both are needed:
+// the store is what the bridge reads, the hook is what opens the dialog without the window having
+// to poll for one.
+func (d *DuckDuckGoProvider) offer(challenge Challenge) {
+	rememberChallenge(challenge)
+	if d.onChallenge != nil {
+		d.onChallenge(challenge)
+	}
+}
+
+// clearCooldown ends the post-refusal pause: the host accepted an answer, so the reason for the
+// silence is gone.
+func (d *DuckDuckGoProvider) clearCooldown() {
+	d.cooldownMu.Lock()
+	defer d.cooldownMu.Unlock()
+	d.blockedUntil = time.Time{}
+}
+
+// SolveChallenge answers the pending bot check with the tiles the reader ticked and returns the
+// results the answer redirects to.
+//
+// The answer has to leave over the identity the check was issued to — same ClientHello, same
+// address, and the cookies the interstitial set — which is why it is posted here rather than
+// opened in a browser: a browser's clearance belongs to that browser, and a second client proving
+// itself says nothing about this one.
+func (d *DuckDuckGoProvider) SolveChallenge(ctx context.Context, selections []string) ([]SearchResult, error) {
+	challenge, ok := PendingChallenge()
+	if !ok {
+		return nil, ErrNoChallenge
+	}
+	lang := challenge.Lang
+	if lang == "" {
+		lang = defaultLang("")
+	}
+	if _, ok := parseHTTPS(challenge.Action); !ok {
+		return nil, errors.New(text(lang,
+			"keine gültige DuckDuckGo-Prüfung – bitte die Suche wiederholen",
+			"not a valid DuckDuckGo check — please run the search again"))
+	}
+	form := url.Values{}
+	for name, value := range challenge.Fields {
+		form.Set(name, value)
+	}
+	for _, name := range selections {
+		if name != "" {
+			form.Set(name, "on")
+		}
+	}
+
+	answerCtx := ctx
+	if d.budget > 0 {
+		var cancel context.CancelFunc
+		answerCtx, cancel = context.WithTimeout(ctx, d.budget)
+		defer cancel()
+	}
+	resp, err := d.client.postFormFollow(answerCtx, challenge.Action, form, lang)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if isDDGChallenge(string(body)) {
+		// A wrong answer draws another check; it replaces the one on screen rather than
+		// leaving the reader ticking tiles over a verdict that has already been given.
+		if next, ok := parseDDGChallenge(string(body), challenge.Query, lang); ok {
+			d.offer(next)
+		}
+		return nil, ddgBlockedErr(lang)
+	}
+	results, parseErr := parseDDGHtml(string(body), 0)
+	if parseErr != nil || len(results) == 0 {
+		if lite, liteErr := parseDDGLite(string(body), 0); liteErr == nil && len(lite) > 0 {
+			results = lite
+		} else {
+			results = nil
+		}
+	}
+	if len(results) == 0 {
+		if resp.StatusCode != http.StatusOK {
+			return nil, &httpError{StatusCode: resp.StatusCode, Status: resp.Status, Provider: "duckduckgo"}
+		}
+		return nil, errors.New(text(lang,
+			"DuckDuckGo hat die Antwort angenommen, aber keine Ergebnisse geliefert – bitte die Suche wiederholen",
+			"DuckDuckGo accepted the answer but returned no results — please run the search again"))
+	}
+	d.clearCooldown()
+	d.pacer.Succeeded()
+	ClearPendingChallenge()
+	return results, nil
+}
+
+// parseHTTPS reads an address out of a check and answers whether this client may use it. The
+// client carries the identity's cookies, so anything but https would hand them to the network in
+// clear. The host is deliberately not checked: the address comes from the host's own page, which
+// already knows the query it was asked, and an allowlist over markup this app does not control
+// only breaks the day a tile moves to a CDN.
+func parseHTTPS(raw string) (*url.URL, bool) {
+	target, err := url.Parse(raw)
+	if err != nil || target.Scheme != "https" {
+		return nil, false
+	}
+	return target, true
+}
+
+// fetchTile downloads one tile of the pending check, by the name the window shows. A name the
+// check does not have answers ErrNoChallenge, so the dialog and the check stay in step without
+// the window ever holding an address.
+func (d *DuckDuckGoProvider) fetchTile(ctx context.Context, name string) ([]byte, string, error) {
+	challenge, ok := PendingChallenge()
+	if !ok {
+		return nil, "", ErrNoChallenge
+	}
+	var tileURL string
+	for _, tile := range challenge.Tiles {
+		if tile.Name == name {
+			tileURL = tile.URL
+			break
+		}
+	}
+	target, ok := parseHTTPS(tileURL)
+	if !ok {
+		return nil, "", ErrNoChallenge
+	}
+	resp, err := d.client.get(ctx, target, "en", nil)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", &httpError{StatusCode: resp.StatusCode, Status: resp.Status, Provider: "duckduckgo"}
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, "", err
+	}
+	return body, resp.Header.Get("Content-Type"), nil
+}
+
 // searchOnce asks both layouts once, one paced request each. The first refusal ends it: the
 // check is handed out per client rather than per layout, so the second shape cannot succeed
 // where the first was refused, and the pacing it would wait out is time the turn does not
@@ -561,7 +827,7 @@ func (d *DuckDuckGoProvider) searchHTML(ctx context.Context, req SearchRequest) 
 		return nil, err
 	}
 	if isDDGChallenge(string(body)) {
-		return nil, ddgBlockedErr(req.Lang)
+		return nil, d.refusal(string(body), req)
 	}
 	return parseDDGHtml(string(body), req.Count)
 }
@@ -626,9 +892,20 @@ func (d *DuckDuckGoProvider) searchLite(ctx context.Context, req SearchRequest) 
 		return nil, err
 	}
 	if isDDGChallenge(string(body)) {
-		return nil, ddgBlockedErr(req.Lang)
+		return nil, d.refusal(string(body), req)
 	}
 	return parseDDGLite(string(body), req.Count)
+}
+
+// refusal answers an interstitial: the check goes to the window and to the pending store when it
+// parses, and the error is the refusal either way. It is not carried inside the error because
+// nothing downstream reads it from there — the refusal only has to stay ErrBlocked so pacing and
+// fall-through are unchanged.
+func (d *DuckDuckGoProvider) refusal(body string, req SearchRequest) error {
+	if challenge, ok := parseDDGChallenge(body, req.Query, req.Lang); ok {
+		d.offer(challenge)
+	}
+	return ddgBlockedErr(req.Lang)
 }
 
 // parseDDGLite extracts results from the lite endpoint's table markup.

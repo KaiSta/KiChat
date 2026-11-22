@@ -36,6 +36,8 @@ export function DeleteCompaction(arg1:string,arg2:string):Promise<void>;
 
 export function DetectTerminal():Promise<main.TerminalStatus>;
 
+export function DismissSearchChallenge():Promise<void>;
+
 export function DropQueuedMessage(arg1:string,arg2:string):Promise<boolean>;
 
 export function ExportBackup(arg1:main.BackupExportRequest):Promise<main.BackupExportResult>;
@@ -176,6 +178,8 @@ export function ScrapeIntoChat(arg1:string,arg2:string,arg3:number):Promise<stor
 
 export function Search(arg1:string):Promise<research.SearchOutcome>;
 
+export function SearchChallengeTile(arg1:string):Promise<string>;
+
 export function SendMessage(arg1:main.SendMessageRequest):Promise<void>;
 
 export function SetAttachmentPlacement(arg1:string,arg2:string):Promise<store.Attachment>;
@@ -191,6 +195,8 @@ export function SetManagedModel(arg1:string,arg2:config.ManagedModel):Promise<vo
 export function SetModelOverride(arg1:string,arg2:string,arg3:llm.ModelOverride):Promise<void>;
 
 export function Settings():Promise<config.Settings>;
+
+export function SolveSearchChallenge(arg1:Array<string>):Promise<research.SearchOutcome>;
 
 export function StartFreshDatabase():Promise<void>;
 

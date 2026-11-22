@@ -410,6 +410,13 @@ const de = {
     'Ist das an, sucht KiChat vor jeder Antwort mit deiner Frage im Web und legt die Treffer in den Prompt — so antworten auch Modelle mit Quellen, die von sich aus keine Tools aufrufen. Mit LLM-Kontext kommen echte Seitenausschnitte dazu, sonst nur Überschriften und Kurztexte. Kostet pro Antwort eine Suchanfrage und gilt nur für diesen Chat.',
   'search.providers': 'Anbieter',
   'search.quota': 'Brave-Anfragen diesen Monat',
+  'search.challengeTitle': 'DuckDuckGo: Bot-Prüfung',
+  'search.challengeIntro':
+    'DuckDuckGo hat statt Ergebnissen eine Prüfung geschickt. Wähle die passenden Kacheln aus – die Antwort geht über dieselbe Verbindung wie die Suche, damit sie für diesen Rechner zählt.',
+  'search.challengeInstruction': 'Wähle alle Kacheln aus, auf denen eine Ente zu sehen ist:',
+  'search.challengeSolve': 'Antwort senden',
+  'search.challengeSolved':
+    'Antwort angenommen: {{count}} Ergebnisse. Die Suche lässt sich jetzt wiederholen.',
 
   'files.add': 'Dateien hinzufügen',
   'files.dropHint': 'Dateien hierher ziehen',
@@ -1296,6 +1303,8 @@ const de = {
   'err.runtime.notManaged': '{{1}} wird nicht von KiChat gestartet',
   'err.model.notFound': 'Modell nicht gefunden: {{1}}',
   'err.search.noBraveKey': 'kein Brave API-Key angegeben',
+  'err.search.challengeGone':
+    'Diese Prüfung ist nicht mehr aktuell – bitte die Suche wiederholen.',
   'err.research.pdfTooLarge':
     'Das PDF ist größer als das Download-Limit von {{1}} MB und kann nicht vollständig gelesen werden',
   'err.model.backendOff': 'Backend {{1}} ist nicht konfiguriert oder ausgeschaltet',
@@ -1973,6 +1982,13 @@ const en: Record<keyof typeof de, string> = {
     'When on, KiChat searches the web with your question before every answer and puts the hits into the prompt — so models that never call tools themselves still answer from sources. With LLM context enabled it injects real page excerpts, otherwise only headlines and snippets. Costs one search request per answer and applies to this chat only.',
   'search.providers': 'Providers',
   'search.quota': 'Brave requests this month',
+  'search.challengeTitle': 'DuckDuckGo: bot check',
+  'search.challengeIntro':
+    'DuckDuckGo sent a check instead of results. Select the matching squares — the answer goes out over the same connection as the search, so it counts for this machine.',
+  'search.challengeInstruction': 'Select all squares containing a duck:',
+  'search.challengeSolve': 'Send answer',
+  'search.challengeSolved':
+    'Answer accepted: {{count}} results. The search can be repeated now.',
 
   'files.add': 'Add files',
   'files.dropHint': 'Drop files here',
@@ -2835,6 +2851,7 @@ const en: Record<keyof typeof de, string> = {
   'err.runtime.notManaged': '{{1}} is not started by KiChat',
   'err.model.notFound': 'model not found: {{1}}',
   'err.search.noBraveKey': 'no Brave API key set',
+  'err.search.challengeGone': 'This check is no longer current — please run the search again.',
   'err.research.pdfTooLarge':
     'the PDF is larger than the {{1}} MB download limit and cannot be read in full',
   'err.model.backendOff': 'backend {{1}} is not configured or switched off',
@@ -3465,6 +3482,12 @@ const zh: Record<keyof typeof de, string> = {
     '开启后，KiChat 会在每次回答前用你的问题搜索网络，并把命中结果放进提示词——即便模型本身不会调用工具，也能依据来源作答。启用 LLM 上下文时会注入真实网页摘录，否则仅有标题与摘要。每次回答消耗一次搜索请求，且仅对当前对话生效。',
   'search.providers': '提供商',
   'search.quota': '本月 Brave 请求数',
+  'search.challengeTitle': 'DuckDuckGo：机器人验证',
+  'search.challengeIntro':
+    'DuckDuckGo 返回的是验证而非结果。请选择相应的方格——答案会通过与搜索相同的连接发送，因此对这台机器有效。',
+  'search.challengeInstruction': '请选择所有包含鸭子的方格：',
+  'search.challengeSolve': '提交答案',
+  'search.challengeSolved': '答案已接受：{{count}} 条结果。现在可以重新搜索。',
 
   'files.add': '添加文件',
   'files.dropHint': '将文件拖到此处',
@@ -4251,6 +4274,7 @@ const zh: Record<keyof typeof de, string> = {
   'err.runtime.notManaged': '{{1}} 不是由 KiChat 启动的',
   'err.model.notFound': '未找到模型：{{1}}',
   'err.search.noBraveKey': '未设置 Brave API 密钥',
+  'err.search.challengeGone': '此验证已失效——请重新搜索。',
   'err.research.pdfTooLarge': 'PDF 超过 {{1}} MB 的下载上限，无法完整读取',
   'err.model.backendOff': '后端 {{1}} 未配置或已关闭',
   'err.model.backendUnreachable': '无法访问后端 {{1}}：{{2}}',

@@ -54,6 +54,10 @@ export function DetectTerminal() {
   return window['go']['main']['App']['DetectTerminal']();
 }
 
+export function DismissSearchChallenge() {
+  return window['go']['main']['App']['DismissSearchChallenge']();
+}
+
 export function DropQueuedMessage(arg1, arg2) {
   return window['go']['main']['App']['DropQueuedMessage'](arg1, arg2);
 }
@@ -334,6 +338,10 @@ export function Search(arg1) {
   return window['go']['main']['App']['Search'](arg1);
 }
 
+export function SearchChallengeTile(arg1) {
+  return window['go']['main']['App']['SearchChallengeTile'](arg1);
+}
+
 export function SendMessage(arg1) {
   return window['go']['main']['App']['SendMessage'](arg1);
 }
@@ -364,6 +372,10 @@ export function SetModelOverride(arg1, arg2, arg3) {
 
 export function Settings() {
   return window['go']['main']['App']['Settings']();
+}
+
+export function SolveSearchChallenge(arg1) {
+  return window['go']['main']['App']['SolveSearchChallenge'](arg1);
 }
 
 export function StartFreshDatabase() {

@@ -57,6 +57,10 @@ const (
 	// the sidebar can show that a newer version exists without the user opening
 	// Settings. It is not a `chat:` name because it is about the installation.
 	AppUpdate = "app:update"
+	// SearchChallenge carries DuckDuckGo's bot check when a search was refused with one the
+	// reader can answer. The refusal still travels as an error to whoever asked — the model
+	// sees a failed search — and this is what opens the dialog that answers it.
+	SearchChallenge = "search:challenge"
 )
 
 // All lists every event name, so a test can check the set as a whole rather
@@ -65,6 +69,6 @@ func All() []string {
 	return []string{
 		Delta, Reasoning, Start, Done, Message, Tool, Status,
 		Error, Warning, Budget, Compaction, Title, Attachments, ChatsChanged,
-		ImageProgress, Approval, ToolOutput, AppUpdate, Queue,
+		ImageProgress, Approval, ToolOutput, AppUpdate, Queue, SearchChallenge,
 	}
 }

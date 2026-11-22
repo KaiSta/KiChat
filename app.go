@@ -1059,6 +1059,12 @@ func (a *App) rebuildServices(settings config.Settings) {
 	// language (config.ModelLanguage), and the supplier is read per call so a save reaches
 	// the next search rather than the next restart.
 	chain.Lang = func() string { return a.Settings().Language }
+	// A DuckDuckGo refusal that carries a solvable check is shown rather than only reported: the
+	// error keeps its classification, and this is how the window hears about it without the
+	// research package knowing what a window is.
+	chain.SetChallengeHandler(func(challenge research.Challenge) {
+		a.emit(events.SearchChallenge, challenge)
+	})
 
 	scraper := research.NewScraper(a.store, research.ScrapeOptions{
 		MaxBytes:          settings.Search.ScrapeMaxBytes,

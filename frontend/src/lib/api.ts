@@ -153,6 +153,20 @@ export namespace main {
 
 export namespace research {
   export type SearchResult = Plain<Gen.research.SearchResult>
+  /**
+   * DuckDuckGo's bot check, as the `search:challenge` event carries it.
+   *
+   * Hand-written rather than generated: no bound method returns it — the answer is posted from
+   * the backend's own copy — so there is no method signature for Wails to derive it from. It is
+   * also deliberately less than the backend holds: the form's action and hidden token stay there.
+   */
+  export type Challenge = {
+    query: string
+    instruction: string
+    tiles: Tile[]
+  }
+  /** One square of the check, named — its picture is asked for by that name. */
+  export type Tile = { name: string }
   export type SearchOutcome = Plain<Gen.research.SearchOutcome>
   export type ScrapeResult = Plain<Gen.research.ScrapeResult>
 }
@@ -300,6 +314,10 @@ export const EV = {
   // picture backend talking about work it is doing right now, and the row it lands on can
   // be a picture that does not exist yet.
   imageProgress: 'image:progress',
+  // DuckDuckGo refused a search with a bot check the reader can answer. The search itself
+  // still failed — the model was told so — and this is the dialog that clears the way for
+  // the next one.
+  searchChallenge: 'search:challenge',
 } as const
 
 export interface DeltaPayload {

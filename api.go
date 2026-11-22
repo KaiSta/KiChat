@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"net/url"
 	goruntime "runtime"
 	"strings"
@@ -349,6 +351,54 @@ func (a *App) TestBraveKey(key string) (research.SearchOutcome, error) {
 		return research.SearchOutcome{}, err
 	}
 	return research.SearchOutcome{Results: results, Provider: "brave"}, nil
+}
+
+// --- DuckDuckGo bot checks -------------------------------------------------
+
+// SearchChallengeTile returns one tile of the pending check as a data URL.
+//
+// A data URL rather than the http address because the image has to come over the identity the
+// check was issued to: an <img> pointed at duckduckgo.com is fetched by the webview, which is a
+// different ClientHello and a different cookie jar, and it would be a request the host answered
+// for somebody else.
+func (a *App) SearchChallengeTile(name string) (string, error) {
+	if err := a.ensure(); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	body, contentType, err := a.currentChain().FetchChallengeTile(ctx, name)
+	if errors.Is(err, research.ErrNoChallenge) {
+		return "", uimsg.Errorf("search.challengeGone")
+	}
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(contentType, "image/") {
+		contentType = "image/jpeg"
+	}
+	return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(body), nil
+}
+
+// SolveSearchChallenge posts the tiles the reader ticked and returns the results the answer
+// redirects to, so the search that was refused is answered after all.
+func (a *App) SolveSearchChallenge(names []string) (research.SearchOutcome, error) {
+	if err := a.ensure(); err != nil {
+		return research.SearchOutcome{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	outcome, err := a.currentChain().SolveDuckDuckGoChallenge(ctx, names)
+	if errors.Is(err, research.ErrNoChallenge) {
+		return research.SearchOutcome{}, uimsg.Errorf("search.challengeGone")
+	}
+	return outcome, err
+}
+
+// DismissSearchChallenge forgets the pending check: the reader closed the dialog.
+func (a *App) DismissSearchChallenge() error {
+	research.ClearPendingChallenge()
+	return nil
 }
 
 // --- backends and models ---------------------------------------------------

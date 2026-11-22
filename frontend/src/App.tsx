@@ -6,6 +6,7 @@ import { LANGS } from './lib/i18n'
 import { errText, useStore } from './store'
 import { ChatView, permissionBadge } from './components/ChatView'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { SearchChallenge } from './components/SearchChallenge'
 import { Settings } from './components/settings/Settings'
 import { UnlockScreen } from './components/UnlockScreen'
 
@@ -66,6 +67,10 @@ export default function App() {
           <ViewSwitch view={view} />
         </ErrorBoundary>
       </main>
+      {/* Outside the view switch, like the toasts: a bot check belongs to the search that
+          triggered it, not to the screen that happens to be open, and a refusal during a
+          background search must still reach the reader. */}
+      <SearchChallenge />
       <Toasts />
     </div>
   )

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"slices"
@@ -803,4 +804,46 @@ func TestALPNAndALPSSendOneProtocolList(t *testing.T) {
 				alps, want)
 		}
 	})
+}
+
+// TestBrowserClientCarriesTheSitesCookies pins the jar: the first request goes out as a profile
+// that has never been to the site, the second one carries what the site set. Without it every
+// search was a stranger and a solved bot check had nothing to be remembered in.
+func TestBrowserClientCarriesTheSitesCookies(t *testing.T) {
+	var (
+		mu                       sync.Mutex
+		requests                 int
+		firstCookie, nextCookies string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		if requests == 1 {
+			firstCookie = r.Header.Get("Cookie")
+		} else {
+			nextCookies = r.Header.Get("Cookie")
+		}
+		mu.Unlock()
+		http.SetCookie(w, &http.Cookie{Name: "dc", Value: "de-de", Path: "/"})
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	client := newBrowserClient(chromeWindows)
+	// A jar of its own: the process-wide one belongs to the identity and the other tests share
+	// it, so asserting on it here would be asserting on their traffic.
+	client.jar, _ = cookiejar.New(nil)
+	for range 2 {
+		resp, err := client.postForm(context.Background(), srv.URL+"/html/", url.Values{"q": {"x"}}, "de")
+		if err != nil {
+			t.Fatalf("postForm: %v", err)
+		}
+		_ = resp.Body.Close()
+	}
+	if firstCookie != "" {
+		t.Errorf("the first request carried cookies: %q", firstCookie)
+	}
+	if !strings.Contains(nextCookies, "dc=de-de") {
+		t.Errorf("the second request carried %q, want the cookie the first answer set", nextCookies)
+	}
 }

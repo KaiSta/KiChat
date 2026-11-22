@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"kichat/internal/config"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -534,5 +536,244 @@ func TestDuckDuckGoPostsTheEndpointsOwnFields(t *testing.T) {
 	}
 	if posted.Has("kl") {
 		t.Errorf("kl is not a field of this form, but was sent: %v", posted)
+	}
+}
+
+// ddgGridFixture is the check as a reader meets it: a 3×3 grid where every square is a checkbox
+// named after its image's hash. The images are deliberately listed in a different order than the
+// checkboxes, because a pairing by position would pass a fixture that happened to list them in
+// step and then pair the wrong picture with the wrong box on the real page.
+const ddgGridFixture = `<!DOCTYPE html><html lang="en"><head>
+  <title>DuckDuckGo</title>
+  <script src="/assets/anomaly.js?sv=html&cc=botnet"></script>
+</head><body>
+  <div class="anomaly-modal__mask">
+    <div class="anomaly-modal__modal">
+      <p class="anomaly-modal__description">Unfortunately, bots use DuckDuckGo too.
+        Please complete the following challenge to confirm this search was made by a human.</p>
+      <form class="challenge-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=botnet" method="post">
+        <input type="hidden" name="token" value="t-9f2">
+        <span class="anomaly-modal__instructions">Select all squares containing a duck:</span>
+        <input type="checkbox" class="anomaly-modal__check" name="image-check_1a">
+        <input type="checkbox" class="anomaly-modal__check" name="image-check_2b">
+        <input type="checkbox" class="anomaly-modal__check" name="image-check_3c">
+        <input type="checkbox" class="anomaly-modal__check" name="image-check_4d">
+        <input type="checkbox" class="anomaly-modal__check" name="image-check_5e">
+        <input type="checkbox" class="anomaly-modal__check" name="image-check_6f">
+        <input type="checkbox" class="anomaly-modal__check" name="image-check_7g">
+        <input type="checkbox" class="anomaly-modal__check" name="image-check_8h">
+        <input type="checkbox" class="anomaly-modal__check" name="image-check_9i">
+        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/9i.jpg">
+        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/1a.jpg">
+        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/8h.jpg">
+        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/7g.jpg">
+        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/6f.jpg">
+        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/5e.jpg">
+        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/4d.jpg">
+        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/3c.jpg">
+        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/2b.jpg">
+        <input type="submit" class="anomaly-modal__submit" value="Submit">
+      </form>
+    </div>
+  </div>
+</body></html>`
+
+// ddgResultsAfterCheck is the page the answer redirects to: one ordinary result.
+const ddgResultsAfterCheck = `<html><body>
+<div class="result results_links"><div class="result__body"><h2 class="result__title">
+<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fsolved">Gelöst</a></h2>
+<a class="result__snippet">Nach der Prüfung.</a></div></div>
+</body></html>`
+
+// TestParseDDGChallengeGrid pins the parse: the tiles, each one paired with its own image by the
+// hash the checkbox and the image share, the form's action made absolute, the hidden field kept
+// (it is the form's own token and inventing it would be guessing), and the instruction.
+func TestParseDDGChallengeGrid(t *testing.T) {
+	challenge, ok := parseDDGChallenge(ddgGridFixture, "Mietrecht", config.LangGerman)
+	if !ok {
+		t.Fatal("the grid did not parse as a check")
+	}
+	if len(challenge.Tiles) != 9 {
+		t.Fatalf("tiles = %d, want 9: %+v", len(challenge.Tiles), challenge.Tiles)
+	}
+	for _, tile := range challenge.Tiles {
+		hash := strings.TrimPrefix(tile.Name, "image-check_")
+		want := "https://duckduckgo.com/challenge/" + hash + ".jpg"
+		if tile.URL != want {
+			t.Errorf("tile %s names %q, want %q — the pairing is by hash, not by position", tile.Name, tile.URL, want)
+		}
+	}
+	if want := "https://duckduckgo.com/anomaly.js?sv=html&cc=botnet"; challenge.Action != want {
+		t.Errorf("action = %q, want %q", challenge.Action, want)
+	}
+	if challenge.Fields["token"] != "t-9f2" {
+		t.Errorf("fields = %v, want the form's hidden token", challenge.Fields)
+	}
+	if !strings.Contains(challenge.Instruction, "duck") {
+		t.Errorf("instruction = %q", challenge.Instruction)
+	}
+	if challenge.Query != "Mietrecht" {
+		t.Errorf("query = %q, want the one that was refused", challenge.Query)
+	}
+}
+
+// TestDuckDuckGoOffersTheCheckToTheWindow is the shape the window depends on: the refusal stays a
+// refusal (the chain must still fall through) and the check the page carried reaches the pending
+// store and the handler, which is what opens the dialog on it.
+func TestDuckDuckGoOffersTheCheckToTheWindow(t *testing.T) {
+	ClearPendingChallenge()
+	t.Cleanup(ClearPendingChallenge)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, ddgGridFixture)
+	}))
+	defer srv.Close()
+
+	p := newTestDDGProvider(srv.URL, srv.URL)
+	var offered Challenge
+	p.onChallenge = func(challenge Challenge) { offered = challenge }
+
+	_, err := p.Search(context.Background(), SearchRequest{
+		Query: "Mietrecht", Count: 5, Lang: config.LangGerman})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err = %v, want it to still classify as ErrBlocked", err)
+	}
+	if len(offered.Tiles) != 9 {
+		t.Errorf("the handler was told about %d tiles, want 9", len(offered.Tiles))
+	}
+	pending, ok := PendingChallenge()
+	if !ok || len(pending.Tiles) != 9 {
+		t.Errorf("pending = %+v (%v), want the check kept for the window", pending, ok)
+	}
+	if !strings.Contains(err.Error(), "Captcha") {
+		t.Errorf("err = %v, the sentence the model reads must still name the check", err)
+	}
+}
+
+// TestSolveChallengePostsTheTickedTilesAndReturnsTheResults covers the whole answer: the ticks and
+// the form's own fields are posted to the form's action over the same client, the redirect is
+// followed, the cookies the check and the answer set come along, the results are returned, and the
+// pause the refusal started is lifted so the next search asks the host again.
+func TestSolveChallengePostsTheTickedTilesAndReturnsTheResults(t *testing.T) {
+	ClearPendingChallenge()
+	t.Cleanup(ClearPendingChallenge)
+
+	var (
+		mu          sync.Mutex
+		answers     url.Values
+		cookieAtEnd string
+		searches    int
+	)
+	// TLS, because the answer is only allowed to leave over https: the guard that keeps the
+	// form's action from pointing anywhere is not loosened for a fixture.
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/challenge/") {
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = io.WriteString(w, "\xff\xd8tile")
+			return
+		}
+		switch r.URL.Path {
+		case "/anomaly.js":
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			answers = r.PostForm
+			mu.Unlock()
+			http.SetCookie(w, &http.Cookie{Name: "solved", Value: "1", Path: "/"})
+			http.Redirect(w, r, "/results?q=Mietrecht", http.StatusSeeOther)
+		case "/results":
+			mu.Lock()
+			cookieAtEnd = r.Header.Get("Cookie")
+			mu.Unlock()
+			_, _ = io.WriteString(w, ddgResultsAfterCheck)
+		default:
+			mu.Lock()
+			searches++
+			attempt := searches
+			mu.Unlock()
+			if attempt == 1 {
+				// The first search is refused with the check; the host trusts the identity
+				// again once it has been answered.
+				http.SetCookie(w, &http.Cookie{Name: "issued", Value: "1", Path: "/"})
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, strings.ReplaceAll(ddgGridFixture, "//duckduckgo.com", srv.URL))
+				return
+			}
+			_, _ = io.WriteString(w, ddgResultsAfterCheck)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestDDGProvider(srv.URL, srv.URL+"/lite")
+	// A jar of this test's own: the process-wide one belongs to the identity and other tests
+	// would then be reading this one's cookies.
+	p.client.jar, _ = cookiejar.New(nil)
+	p.client.insecure = true
+
+	if _, err := p.Search(context.Background(), SearchRequest{
+		Query: "Mietrecht", Count: 5, Lang: config.LangGerman}); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("search err = %v, want ErrBlocked", err)
+	}
+	challenge, ok := PendingChallenge()
+	if !ok {
+		t.Fatal("no check was kept for the window")
+	}
+
+	// A tile is asked for by the name the window shows, over the same identity, and a name the
+	// check does not have is answered without a request.
+	body, kind, err := p.fetchTile(context.Background(), challenge.Tiles[2].Name)
+	if err != nil {
+		t.Fatalf("fetchTile: %v", err)
+	}
+	if string(body) != "\xff\xd8tile" || kind != "image/jpeg" {
+		t.Errorf("tile = %q (%s), want the picture the host served", body, kind)
+	}
+	if _, _, err := p.fetchTile(context.Background(), "image-check_none"); !errors.Is(err, ErrNoChallenge) {
+		t.Errorf("a tile the check does not have: err = %v, want ErrNoChallenge", err)
+	}
+
+	ticked := []string{challenge.Tiles[0].Name, challenge.Tiles[4].Name}
+	results, err := p.SolveChallenge(context.Background(), ticked)
+	if err != nil {
+		t.Fatalf("SolveChallenge: %v", err)
+	}
+	if len(results) != 1 || results[0].URL != "https://example.org/solved" {
+		t.Fatalf("results = %+v, want the page the answer redirected to", results)
+	}
+
+	mu.Lock()
+	posted, cookie := answers, cookieAtEnd
+	mu.Unlock()
+	for _, name := range ticked {
+		if posted.Get(name) != "on" {
+			t.Errorf("posted %v, want %s=on", posted, name)
+		}
+	}
+	if unticked := challenge.Tiles[1].Name; posted.Get(unticked) != "" {
+		t.Errorf("an unticked tile was sent: %s", unticked)
+	}
+	if posted.Get("token") != "t-9f2" {
+		t.Errorf("the form's own hidden field was dropped: %v", posted)
+	}
+	if !strings.Contains(cookie, "issued=1") || !strings.Contains(cookie, "solved=1") {
+		t.Errorf("cookies on the results request = %q, want the ones the check and the answer set", cookie)
+	}
+	if _, pending := PendingChallenge(); pending {
+		t.Error("the answered check was left pending")
+	}
+
+	// The pause the refusal started is over: without that, this search would be refused by our
+	// own cooldown before the host was asked at all.
+	again, err := p.Search(context.Background(), SearchRequest{
+		Query: "Mietrecht zwei", Count: 5, Lang: config.LangGerman})
+	if err != nil {
+		t.Fatalf("search after the answer: %v", err)
+	}
+	if len(again) != 1 {
+		t.Errorf("results after the answer = %+v, want the host's answer", again)
 	}
 }
