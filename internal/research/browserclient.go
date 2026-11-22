@@ -445,6 +445,42 @@ func (c *browserClient) handshake(ctx context.Context, conn net.Conn, host strin
 	return uconn, nil
 }
 
+// requestURI renders a target for the request line, with the query's unencoded bytes escaped.
+//
+// The escape is applied here rather than trusted to the URL because the host's own markup is not
+// always a valid URI: measured on 2026-11-22, the anomaly form's action carries
+// `&q=Bürostuhl hohe Rückenlehne…` verbatim, and a space on the request line is not a request at
+// all — DuckDuckGo answers 400 Bad Request. A browser percent-encodes the action when it posts the
+// form, and so does this.
+func requestURI(target *url.URL) string {
+	path := target.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if target.RawQuery == "" {
+		return path
+	}
+	return path + "?" + escapeQuery(target.RawQuery)
+}
+
+// escapeQuery percent-encodes the bytes a request line cannot carry — a space, and anything
+// outside ASCII — and leaves existing escapes and reserved characters as they are.
+func escapeQuery(query string) string {
+	var out strings.Builder
+	out.Grow(len(query))
+	for index := 0; index < len(query); index++ {
+		switch b := query[index]; {
+		case b == ' ':
+			out.WriteString("%20")
+		case b >= 0x80:
+			fmt.Fprintf(&out, "%%%02X", b)
+		default:
+			out.WriteByte(b)
+		}
+	}
+	return out.String()
+}
+
 // requestText renders the request in the order Chrome sends a form navigation: the fields the
 // browser computes itself (Host, length, fetch metadata) around the ones this call supplies.
 //
@@ -461,7 +497,7 @@ func (c *browserClient) requestText(target *url.URL, form url.Values, lang strin
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "POST %s HTTP/1.1\r\n", target.RequestURI())
+	fmt.Fprintf(&b, "POST %s HTTP/1.1\r\n", requestURI(target))
 	fmt.Fprintf(&b, "Host: %s\r\n", target.Host)
 	fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
 	b.WriteString("Cache-Control: max-age=0\r\n")
@@ -509,7 +545,7 @@ func (c *browserClient) writeCookies(b *strings.Builder, target *url.URL) {
 // fetch metadata describes a navigation rather than a same-site form post.
 func (c *browserClient) navigationText(target, previous *url.URL, lang string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "GET %s HTTP/1.1\r\n", target.RequestURI())
+	fmt.Fprintf(&b, "GET %s HTTP/1.1\r\n", requestURI(target))
 	fmt.Fprintf(&b, "Host: %s\r\n", target.Host)
 	b.WriteString("Cache-Control: max-age=0\r\n")
 	fmt.Fprintf(&b, "sec-ch-ua: %s\r\n", c.profile.secChUa)

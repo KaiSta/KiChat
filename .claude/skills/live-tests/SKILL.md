@@ -116,7 +116,7 @@ KICHAT_LIVE=1 go test ./internal/research/ -run TestLiveDDGInterstitialMarkup -v
 | `TestLiveFlux3KleinProfile` | the profile is identified from the checkpoint's own tensors, `Health` names a missing VAE before a multi-gigabyte load, 16 steps at CFG 1.0 really draw, and the negative prompt the profile drops really is inert |
 | `TestLiveESRGAN` | the released Vulkan build starts on this machine, its weights load, and a real 4× comes back — the three things a stand-in program cannot say, and the one archive trap (a build with no `models/` that exits 0 writing a black picture) reported as `ErrUpscalerNoModels` |
 | `TestLiveAppUpdate` | the release endpoint, the headers and the field names still agree with the real API, the tag is one `Newer` can order, and the reading the panel receives is coherent — one request out of GitHub's anonymous hourly budget |
-| `TestLiveDDGInterstitialMarkup` | the interstitial's real markup: the answer form is an id rather than a class, the tiles are paths relative to the page, the parse finds nine of them plus the form's hidden field, and a tile comes back as image bytes over the same client |
+| `TestLiveDDGInterstitialMarkup` | the interstitial's real markup: the answer form is an id rather than a class, the tiles are paths relative to the page, the parse finds nine of them plus the form's hidden field, a tile comes back as image bytes over the same client, and the answer itself is accepted for judging (a guessed set of squares draws another check, never a 400) |
 
 ## Rules
 

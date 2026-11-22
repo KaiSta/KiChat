@@ -470,7 +470,15 @@ the address of the page it was served from and resolves against it, so protocol-
 root-relative and relative URLs all work, and tiles are paired by the hash and **not** by
 position, because the pictures are not laid out in the boxes' order. The same live request
 answered one tile with 52 KB of `image/jpeg` over this client, so the grid is the page's own
-pictures rather than a placeholder. `TestParseDDGChallengeGrid`,
+pictures rather than a placeholder.
+
+That measurement caught a second, silent failure behind the first: the action carries its query
+**unencoded** (`&q=Bürostuhl hohe Rückenlehne…`, spaces and UTF-8 as they are), and a space on the
+request line is not a request at all — posting the form's own action verbatim was answered
+`400 Bad Request`, so a ticked check could never be sent. The client now percent-encodes what a
+request line cannot carry, exactly where a browser does it when it posts a form, and the live
+check confirms the rest of the path: the answer is read and judged by the host — a guessed set of
+squares draws another check rather than a 400. `TestParseDDGChallengeGrid`,
 `TestDuckDuckGoOffersTheCheckToTheWindow`,
 `TestSolveChallengePostsTheTickedTilesAndReturnsTheResults` (which also fetches a tile by name)
 and `TestBrowserClientCarriesTheSitesCookies` pin the parse, the offer, the answer and the jar;

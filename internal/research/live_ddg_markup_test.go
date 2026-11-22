@@ -2,7 +2,9 @@ package research
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"testing"
@@ -59,4 +61,22 @@ func TestLiveDDGInterstitialMarkup(t *testing.T) {
 		t.Fatalf("tile %s (%s): %v", challenge.Tiles[0].Name, challenge.Tiles[0].URL, err)
 	}
 	t.Logf("tile %s: %d bytes of %s", challenge.Tiles[0].Name, len(picture), contentType)
+
+	// The answer itself. Which squares hold a duck is not knowable here, so this measures whether
+	// the request is readable at all: every ticked square goes back to the action, and a 400 means
+	// the host could not read the answer rather than that it was wrong.
+	selections := make([]string, 0, len(challenge.Tiles))
+	for _, tile := range challenge.Tiles {
+		selections = append(selections, tile.Name)
+	}
+	results, err := provider.SolveChallenge(context.Background(), selections)
+	var httpErr *httpError
+	switch {
+	case err == nil:
+		t.Logf("the answer was accepted and returned %d results", len(results))
+	case errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusBadRequest:
+		t.Fatalf("the host could not read the answer: %v", err)
+	default:
+		t.Logf("the answer was read and judged (these squares were guessed): %v", err)
+	}
 }

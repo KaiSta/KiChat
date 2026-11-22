@@ -847,3 +847,31 @@ func TestBrowserClientCarriesTheSitesCookies(t *testing.T) {
 		t.Errorf("the second request carried %q, want the cookie the first answer set", nextCookies)
 	}
 }
+
+// TestBrowserClientEscapesTheQueryOnTheRequestLine pins the measured failure behind a 400: the
+// anomaly form's action carries its query verbatim — `&q=Bürostuhl hohe Rückenlehne…` — and a space
+// on the request line is not a request at all, so the host answered 400 Bad Request and an answer
+// to the check could never be posted.
+func TestBrowserClientEscapesTheQueryOnTheRequestLine(t *testing.T) {
+	target, err := url.Parse("https://duckduckgo.com/anomaly.js?sv=html&q=Bürostuhl hohe Rückenlehne&r=euw")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := requestURI(target)
+	want := "/anomaly.js?sv=html&q=B%C3%BCrostuhl%20hohe%20R%C3%BCckenlehne&r=euw"
+	if got != want {
+		t.Errorf("request line target = %q, want %q", got, want)
+	}
+	if strings.ContainsAny(got, " \t") {
+		t.Errorf("%q still carries whitespace on the request line", got)
+	}
+
+	// An escape the host already made is not escaped a second time.
+	escaped, err := url.Parse("https://duckduckgo.com/anomaly.js?q=B%C3%BCrostuhl%20hohe")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := requestURI(escaped); got != "/anomaly.js?q=B%C3%BCrostuhl%20hohe" {
+		t.Errorf("an already escaped query was rewritten: %q", got)
+	}
+}
