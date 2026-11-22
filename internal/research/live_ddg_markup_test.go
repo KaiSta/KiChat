@@ -105,17 +105,26 @@ func TestLiveDDGInterstitialMarkup(t *testing.T) {
 
 	next, isCheck := parseDDGChallenge(string(reply), query, "de", challenge.Action)
 	modal := modalText(string(reply))
-	summary := strings.Join([]string{
-		"request: POST " + challenge.Action,
-		"  Origin:      " + from.String(),
-		"  Referer:     " + from.String(),
-		"  Sec-Fetch-Site: " + formFetchSite(parseURLOrFail(t, challenge.Action), from),
-		"status: " + answer.Status,
-		"location: " + answer.Header.Get("Location"),
-		"cookies: " + strings.Join(answer.Header.Values("Set-Cookie"), " | "),
-		"modal: " + modal,
-	}, "\n") + "\n"
-	if err := os.WriteFile("../../scratch/ddg-answer.txt", []byte(summary), 0o644); err != nil {
+	summary := []string{"request: POST " + challenge.Action}
+	// What the request carries, read out of the request text the client itself builds: a summary
+	// that spells these out by hand drifts from the wire — the first version printed the page's
+	// whole address on the Origin line, which no browser ever sends.
+	head := provider.client.requestText(parseURLOrFail(t, challenge.Action), answerForm, "de", from)
+	for _, name := range []string{"Origin", "Referer", "Sec-Fetch-Site", "Sec-Fetch-Mode",
+		"Sec-Fetch-Dest"} {
+		value, ok := requestHeader(head, name)
+		if !ok {
+			t.Fatalf("the answer's request has no %s header:\n%s", name, head)
+		}
+		summary = append(summary, "  "+name+": "+value)
+	}
+	summary = append(summary,
+		"status: "+answer.Status,
+		"location: "+answer.Header.Get("Location"),
+		"cookies: "+strings.Join(answer.Header.Values("Set-Cookie"), " | "),
+		"modal: "+modal,
+	)
+	if err := os.WriteFile("../../scratch/ddg-answer.txt", []byte(strings.Join(summary, "\n")+"\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	t.Logf("answer status=%s bytes=%d location=%q check-again=%v",
@@ -133,6 +142,47 @@ func TestLiveDDGInterstitialMarkup(t *testing.T) {
 		t.Logf("a different set of %d squares came back: the host read and judged the answer",
 			len(next.Tiles))
 	}
+}
+
+// TestRequestHeaderReadsTheRequestText pins the capture's reader. The summary takes Origin, Referer
+// and the fetch metadata out of the request the client builds, so the Origin line is scheme and
+// host while the Referer is the page's whole address — never one string standing in for both, which
+// is how the first version of the summary read.
+func TestRequestHeaderReadsTheRequestText(t *testing.T) {
+	client := newBrowserClient(chromeWindows)
+	target, err := url.Parse("https://duckduckgo.com/anomaly.js?cc=sre")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	from, err := url.Parse("https://html.duckduckgo.com/html/")
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	head := client.requestText(target, url.Values{"ct": {"x"}}, "de", from)
+	for name, want := range map[string]string{
+		"Origin":         "https://html.duckduckgo.com",
+		"Referer":        "https://html.duckduckgo.com/html/",
+		"Sec-Fetch-Site": "same-site",
+	} {
+		got, ok := requestHeader(head, name)
+		if !ok || got != want {
+			t.Errorf("%s = %q (%v), want %q", name, got, ok, want)
+		}
+	}
+	if value, ok := requestHeader(head, "Not-A-Header"); ok {
+		t.Errorf("a header the request does not send was read as %q", value)
+	}
+}
+
+// requestHeader reads one header out of a rendered request head, so a capture can state what the
+// request carries rather than what the test believed it carried.
+func requestHeader(head, name string) (string, bool) {
+	for _, line := range strings.Split(head, "\r\n") {
+		if value, ok := strings.CutPrefix(line, name+": "); ok {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 // modalText is every word the check's modal says, in reading order. The capture needs it because

@@ -493,7 +493,10 @@ the answer's request is built from it (`postFormFromPage`, `formFetchSite`).
 
 A verdict and an automation refusal both arrive as the check's own markup, so the live check
 does not infer which one it got: it captures the reply whole — `scratch/ddg-answer.html`, with a
-one-screen summary in `scratch/ddg-answer.txt` — and records what separates them. A different set
+one-screen summary in `scratch/ddg-answer.txt` — and records what separates them. The summary's
+header lines are read out of the request text the client builds, not written by hand: `Origin` is
+the page's scheme and host, `Referer` its whole address, and `Sec-Fetch-Site` the hop between them,
+so the capture cannot state a header the request does not send. A different set
 of squares means the host read the ticks and drew a new puzzle; the same squares coming back means
 the answer was not taken at all; a reply that is not a check means neither. When the identity is
 trusted and the search returns results, there is no check to answer and the test says so instead of
