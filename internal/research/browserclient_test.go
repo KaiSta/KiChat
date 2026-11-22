@@ -875,3 +875,69 @@ func TestBrowserClientEscapesTheQueryOnTheRequestLine(t *testing.T) {
 		t.Errorf("an already escaped query was rewritten: %q", got)
 	}
 }
+
+// TestBrowserClientPostsTheAnswerAsTheSearchPage pins the hop the bot check's answer makes. The
+// form lives on html.duckduckgo.com and posts to duckduckgo.com; a browser carries the search page's
+// own origin and address across that hop and calls it same-site. An answer that names the site
+// itself as its origin is a hop no browser makes, and the host judges it as automation rather than
+// as an answer.
+func TestBrowserClientPostsTheAnswerAsTheSearchPage(t *testing.T) {
+	client := newBrowserClient(chromeWindows)
+	target, err := url.Parse("https://duckduckgo.com/anomaly.js?cc=sre&sv=html")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	from, err := url.Parse("https://html.duckduckgo.com/html/")
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	request := client.requestText(target, url.Values{"ct": {"x"}}, "de", from)
+	for _, want := range []string{
+		"Origin: https://html.duckduckgo.com\r\n",
+		"Referer: https://html.duckduckgo.com/html/\r\n",
+		"Sec-Fetch-Site: same-site\r\n",
+		"Sec-Fetch-Mode: navigate\r\n",
+		"Sec-Fetch-User: ?1\r\n",
+		"Sec-Fetch-Dest: document\r\n",
+	} {
+		if !strings.Contains(request, want) {
+			t.Errorf("the answer's request has no %q:\n%s", want, request)
+		}
+	}
+	if strings.Contains(request, "Origin: https://duckduckgo.com\r\n") {
+		t.Errorf("the answer claims to come from the site it posts to:\n%s", request)
+	}
+
+	// A page posting to itself — the search form on the page that carries it — is same-origin, and
+	// the address is the page's own rather than the site's root.
+	own, err := url.Parse("https://html.duckduckgo.com/html/")
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	request = client.requestText(own, url.Values{"q": {"Mietrecht"}}, "de", own)
+	for _, want := range []string{
+		"Origin: https://html.duckduckgo.com\r\n",
+		"Referer: https://html.duckduckgo.com/html/\r\n",
+		"Sec-Fetch-Site: same-origin\r\n",
+	} {
+		if !strings.Contains(request, want) {
+			t.Errorf("a page posting to itself has no %q:\n%s", want, request)
+		}
+	}
+
+	// A page that is not known at all — a check kept without one — falls back to the search form's
+	// shape rather than naming an origin no host has.
+	request = client.requestText(target, url.Values{"ct": {"x"}}, "de", &url.URL{})
+	for _, want := range []string{
+		"Origin: https://duckduckgo.com\r\n",
+		"Referer: https://duckduckgo.com/\r\n",
+		"Sec-Fetch-Site: same-site\r\n",
+	} {
+		if !strings.Contains(request, want) {
+			t.Errorf("a check with no page has no %q:\n%s", want, request)
+		}
+	}
+	if site := formFetchSite(target, &url.URL{}); site != "same-site" {
+		t.Errorf("fetch site with no page = %q, want same-site", site)
+	}
+}

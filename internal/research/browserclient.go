@@ -223,12 +223,25 @@ func newBrowserClient(profile browserProfile) *browserClient {
 // stranger thing to see than a fresh one. Closing also means the body must be closed, which
 // closes the connection.
 func (c *browserClient) postForm(ctx context.Context, endpoint string, form url.Values, lang string) (*http.Response, error) {
+	return c.postFormFromPage(ctx, endpoint, form, lang, nil)
+}
+
+// postFormFromPage posts a form as the page at from would: that page's Origin, its address as the
+// Referer, and fetch metadata describing the hop from it to the endpoint. Nil keeps the shape the
+// search form has always had, where the post names the site as its own origin.
+//
+// It matters for the bot check. Its answer is posted from the search page to duckduckgo.com, which
+// a browser sends as `Origin: https://html.duckduckgo.com`, `Referer:
+// https://html.duckduckgo.com/html/` and `Sec-Fetch-Site: same-site`; claiming to come from
+// duckduckgo.com itself is a hop no browser makes, and an answer that looks automated is judged as
+// automation rather than as an answer.
+func (c *browserClient) postFormFromPage(ctx context.Context, endpoint string, form url.Values, lang string, from *url.URL) (*http.Response, error) {
 	target, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := c.withTimeout(ctx)
-	resp, err := c.do(ctx, target, c.requestText(target, form, lang))
+	resp, err := c.do(ctx, target, c.requestText(target, form, lang, from))
 	if err != nil {
 		cancel()
 		return nil, err
@@ -241,12 +254,12 @@ func (c *browserClient) postForm(ctx context.Context, endpoint string, form url.
 // postFormFollow posts a form and, when the host answers with a redirect rather than a page,
 // follows it once as the browser would. The bot check's answer is a 303 back to the results, so
 // without this the reply would be an empty redirect to the caller.
-func (c *browserClient) postFormFollow(ctx context.Context, endpoint string, form url.Values, lang string) (*http.Response, error) {
+func (c *browserClient) postFormFollow(ctx context.Context, endpoint string, form url.Values, lang string, from *url.URL) (*http.Response, error) {
 	target, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.postForm(ctx, endpoint, form, lang)
+	resp, err := c.postFormFromPage(ctx, endpoint, form, lang, from)
 	if err != nil {
 		return nil, err
 	}
@@ -481,15 +494,41 @@ func escapeQuery(query string) string {
 	return out.String()
 }
 
+// formFetchSite describes the hop a form submission makes. Nil from is the search form's own
+// shape, where the post names the site as its origin and the endpoint is one of its subdomains.
+func formFetchSite(target, from *url.URL) string {
+	if from == nil || from.Host == "" {
+		return "same-site"
+	}
+	if target.Scheme == from.Scheme && target.Host == from.Host {
+		return "same-origin"
+	}
+	if isDuckDuckGoHost(target.Hostname()) && isDuckDuckGoHost(from.Hostname()) {
+		return "same-site"
+	}
+	return "cross-site"
+}
+
 // requestText renders the request in the order Chrome sends a form navigation: the fields the
 // browser computes itself (Host, length, fetch metadata) around the ones this call supplies.
 //
 // The order is written out rather than looped over so that reading it next to a browser's
 // network panel is a comparison, not a deduction.
-func (c *browserClient) requestText(target *url.URL, form url.Values, lang string) string {
+func (c *browserClient) requestText(target *url.URL, form url.Values, lang string, from *url.URL) string {
 	body := form.Encode()
 	origin := target.Scheme + "://" + target.Host
-	if host := target.Hostname(); target.Scheme == "https" && isDuckDuckGoHost(host) {
+	referer := origin + "/"
+	// A page with no host is no page: a check kept without one keeps the search form's shape
+	// rather than naming an origin no host has.
+	if from != nil && from.Host == "" {
+		from = nil
+	}
+	if from != nil {
+		// The page that carried the form: its origin is the one the post claims, and its own
+		// address is what the request says it came from.
+		origin = from.Scheme + "://" + from.Host
+		referer = from.String()
+	} else if host := target.Hostname(); target.Scheme == "https" && isDuckDuckGoHost(host) {
 		// Searches are submitted from the site itself: html.duckduckgo.com and
 		// lite.duckduckgo.com are different hosts than duckduckgo.com but the same site, and a
 		// form posted from a search page names the site in Origin.
@@ -509,11 +548,11 @@ func (c *browserClient) requestText(target *url.URL, form url.Values, lang strin
 	b.WriteString("Content-Type: application/x-www-form-urlencoded\r\n")
 	fmt.Fprintf(&b, "User-Agent: %s\r\n", c.profile.userAgent)
 	b.WriteString("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\r\n")
-	b.WriteString("Sec-Fetch-Site: same-site\r\n")
+	fmt.Fprintf(&b, "Sec-Fetch-Site: %s\r\n", formFetchSite(target, from))
 	b.WriteString("Sec-Fetch-Mode: navigate\r\n")
 	b.WriteString("Sec-Fetch-User: ?1\r\n")
 	b.WriteString("Sec-Fetch-Dest: document\r\n")
-	fmt.Fprintf(&b, "Referer: %s/\r\n", origin)
+	fmt.Fprintf(&b, "Referer: %s\r\n", referer)
 	b.WriteString("Accept-Encoding: gzip, deflate, br, zstd\r\n")
 	fmt.Fprintf(&b, "Accept-Language: %s\r\n", acceptLanguage(lang))
 	c.writeCookies(&b, target)

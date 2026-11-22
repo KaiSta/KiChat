@@ -98,6 +98,10 @@ type Challenge struct {
 	Tiles       []Tile            `json:"tiles"`
 	Action      string            `json:"-"`
 	Fields      map[string]string `json:"-"`
+	// Page is the search page the check was served on. The answer is posted as that page would
+	// post it — Origin, Referer and fetch metadata — so the post is the hop a browser makes and
+	// not a claim to come from the site itself.
+	Page string `json:"-"`
 	// Lang words this package's failure of the answer. Untagged: the window knows its own.
 	Lang string `json:"-"`
 }
@@ -137,6 +141,7 @@ func parseDDGChallenge(body, query, lang, base string) (Challenge, bool) {
 	challenge := Challenge{
 		Query:       query,
 		Action:      absoluteDDGURL(action, base),
+		Page:        base,
 		Instruction: cleanText(doc.Find(".anomaly-modal__instructions").First().Text()),
 		Fields:      map[string]string{},
 		Lang:        lang,
@@ -660,6 +665,10 @@ func (d *DuckDuckGoProvider) clearCooldown() {
 // address, and the cookies the interstitial set — which is why it is posted here rather than
 // opened in a browser: a browser's clearance belongs to that browser, and a second client proving
 // itself says nothing about this one.
+//
+// It is posted as the search page would post it, Origin, Referer and fetch metadata included. Those
+// headers are part of what the host judges: an answer that claims to come from duckduckgo.com when
+// no browser makes that hop is an answer that looks automated.
 func (d *DuckDuckGoProvider) SolveChallenge(ctx context.Context, selections []string) ([]SearchResult, error) {
 	challenge, ok := PendingChallenge()
 	if !ok {
@@ -690,7 +699,13 @@ func (d *DuckDuckGoProvider) SolveChallenge(ctx context.Context, selections []st
 		answerCtx, cancel = context.WithTimeout(ctx, d.budget)
 		defer cancel()
 	}
-	resp, err := d.client.postFormFollow(answerCtx, challenge.Action, form, lang)
+	var from *url.URL
+	if challenge.Page != "" {
+		if page, err := url.Parse(challenge.Page); err == nil {
+			from = page
+		}
+	}
+	resp, err := d.client.postFormFollow(answerCtx, challenge.Action, form, lang, from)
 	if err != nil {
 		return nil, err
 	}

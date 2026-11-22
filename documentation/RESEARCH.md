@@ -482,12 +482,31 @@ squares draws another check rather than a 400. An answer the host does not accep
 reported as exactly that — "tick the squares of the new check and send it again" — while the new
 check replaces the old grid in the dialog. It is deliberately not the first refusal's sentence:
 that one sends the reader to a browser and promises a pause, and neither is true after they have
-just answered in the window. `TestParseDDGChallengeGrid`,
-`TestDuckDuckGoOffersTheCheckToTheWindow`,
-`TestSolveChallengePostsTheTickedTilesAndReturnsTheResults` (which also fetches a tile by name)
-and `TestBrowserClientCarriesTheSitesCookies` pin the parse, the offer, the answer and the jar;
-`TestLiveDDGInterstitialMarkup` is the one that reaches the real page, and it leaves the body in
-`scratch/` when the parse stops matching the markup.
+just answered in the window.
+
+The answer is also posted as the search page posts it. The form lives on `html.duckduckgo.com` and
+posts to `duckduckgo.com`, a hop a browser makes as `Origin: https://html.duckduckgo.com`,
+`Referer: https://html.duckduckgo.com/html/` and `Sec-Fetch-Site: same-site`; naming the site
+itself as the origin is a hop no browser makes, and an answer shaped like that is judged as
+automation rather than as an answer. The check therefore remembers the page it was served on, and
+the answer's request is built from it (`postFormFromPage`, `formFetchSite`).
+
+A verdict and an automation refusal both arrive as the check's own markup, so the live check
+does not infer which one it got: it captures the reply whole — `scratch/ddg-answer.html`, with a
+one-screen summary in `scratch/ddg-answer.txt` — and records what separates them. A different set
+of squares means the host read the ticks and drew a new puzzle; the same squares coming back means
+the answer was not taken at all; a reply that is not a check means neither. When the identity is
+trusted and the search returns results, there is no check to answer and the test says so instead of
+failing.
+
+`TestParseDDGChallengeGrid`, `TestDuckDuckGoOffersTheCheckToTheWindow`,
+`TestSolveChallengePostsTheTickedTilesAndReturnsTheResults` (which also fetches a tile by name and
+asserts the answer's Origin, Referer and `Sec-Fetch-Site`),
+`TestSolveChallengeSaysWhenTheAnswerWasNotAccepted`,
+`TestBrowserClientPostsTheAnswerAsTheSearchPage` and `TestBrowserClientCarriesTheSitesCookies` pin
+the parse, the offer, the answer, its wording and the jar; `TestLiveDDGInterstitialMarkup` is the
+one that reaches the real page, and it leaves the bodies in `scratch/` when the parse stops matching
+the markup.
 
 ---
 

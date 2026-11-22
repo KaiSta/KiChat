@@ -715,10 +715,13 @@ func TestSolveChallengePostsTheTickedTilesAndReturnsTheResults(t *testing.T) {
 	t.Cleanup(ClearPendingChallenge)
 
 	var (
-		mu          sync.Mutex
-		answers     url.Values
-		cookieAtEnd string
-		searches    int
+		mu            sync.Mutex
+		answers       url.Values
+		cookieAtEnd   string
+		searches      int
+		answerOrigin  string
+		answerReferer string
+		answerSite    string
 	)
 	// TLS, because the answer is only allowed to leave over https: the guard that keeps the
 	// form's action from pointing anywhere is not loosened for a fixture.
@@ -737,6 +740,9 @@ func TestSolveChallengePostsTheTickedTilesAndReturnsTheResults(t *testing.T) {
 			}
 			mu.Lock()
 			answers = r.PostForm
+			answerOrigin = r.Header.Get("Origin")
+			answerReferer = r.Header.Get("Referer")
+			answerSite = r.Header.Get("Sec-Fetch-Site")
 			mu.Unlock()
 			http.SetCookie(w, &http.Cookie{Name: "solved", Value: "1", Path: "/"})
 			http.Redirect(w, r, "/results?q=Mietrecht", http.StatusSeeOther)
@@ -802,7 +808,20 @@ func TestSolveChallengePostsTheTickedTilesAndReturnsTheResults(t *testing.T) {
 
 	mu.Lock()
 	posted, cookie := answers, cookieAtEnd
+	origin, referer, site := answerOrigin, answerReferer, answerSite
 	mu.Unlock()
+	// The answer left as the search page would have posted it: that page's origin and address,
+	// and the hop's fetch metadata. The page is this fixture, so same-origin here — the site's own
+	// subdomain hops are covered by the browserclient test.
+	if origin != srv.URL {
+		t.Errorf("answer Origin = %q, want the search page's %q", origin, srv.URL)
+	}
+	if !strings.HasPrefix(referer, srv.URL) {
+		t.Errorf("answer Referer = %q, want the search page's address", referer)
+	}
+	if site != "same-origin" {
+		t.Errorf("answer Sec-Fetch-Site = %q, want same-origin for the page it was served on", site)
+	}
 	for _, name := range ticked {
 		if posted.Get(name) != "on" {
 			t.Errorf("posted %v, want %s=on", posted, name)
