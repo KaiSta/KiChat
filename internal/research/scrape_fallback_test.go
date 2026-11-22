@@ -22,7 +22,9 @@ func TestScrapeRetriesARefusalAsABrowser(t *testing.T) {
 	var browserSeen atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		if !strings.Contains(r.UserAgent(), "Chrome/133") {
+		// The profile's own user agent rather than a version baked into the test: the retry has
+		// to be the profile, whatever version it currently presents.
+		if r.UserAgent() != chromeWindows.userAgent {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}

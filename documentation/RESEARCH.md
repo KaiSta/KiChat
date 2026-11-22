@@ -221,7 +221,7 @@ tried as a second, differently-shaped layout.
 - **POST, not GET.** The comment records the measurement: POST is the more reliable form,
   because some networks block the GET variant.
 - **It presents a browser's identity, not a browser's user agent.** The connection is a
-  Chrome 133 ClientHello — cipher list, extension order, ALPN — from
+  Chrome 155 ClientHello — cipher list, extension order, ALPN — from
   `github.com/refraction-networking/utls`, and `net/http` only parses the response
   ([internal/research/browserclient.go](../internal/research/browserclient.go)). This is the
   single measure that works. Measured on **2026-11-03**, from one machine inside one minute:
@@ -232,6 +232,24 @@ tried as a second, differently-shaped layout.
   `impersonate="random"`, a `curl-impersonate` fork — and forced onto DuckDuckGo alone it
   managed one answer and then drew the challenge, which is why the identity is paired with
   the pacing below rather than used instead of it.
+- **The version is authored once, and the hello is named rather than auto.** `chromeMajor` in
+  `browserclient.go` is the only place the number lives: the user agent and the `sec-ch-ua`
+  hints are generated from it by Chromium's own rules — the fake brand's two separators from a
+  fixed character list, its version from `["8","99","24"][major%3]`, and one of six brand
+  orders by `major%6` — so the three cannot drift apart. The hand-copied literal this replaced
+  *had* drifted: it claimed `"Chromium";v="133", "Not(A:Brand";v="24", "Google Chrome";v="133"`
+  where Chrome 133 sent `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"`.
+  The hello is `utls.HelloChrome_155` by name, not `HelloChrome_Auto`, which follows the
+  dependency: Auto would move this client's wire identity on a `go get -u` while its user agent
+  stayed where it was. **158** is the stable channel as of 2026-11-17 and **152–158 measured
+  identical on every JA4 hash**, which is what makes a 158 user agent honest over a hello captured
+  from Chrome 155.0.8059.40 on 2026-10-06 — and that capture is why the dependency is pinned to
+  the untagged commit `v1.8.3-0.20261118233537-360383f893fb`, because v1.8.2, the newest tag,
+  stops at Chrome 133. Pinned by `TestSecChUAMatchesChromiumsRules` (eight measured versions),
+  `TestIdentityMajorsAgree` (user agent, hints and hello describe one browser) and
+  `TestBrowserClientPresentsChromesJa4`, which computes FoxIO's JA4 from the bytes on the wire:
+  `t13d1517h2_8daaf6152771_cb7bf5808d99` for the profile and the same with `h1` for what this
+  client sends, since it speaks HTTP/1.1 and nothing else.
 - **The request is written by hand, in Chrome's order.** `net/http` sorts header names, so the
   request is rendered — `Host`, `Content-Length`, `Cache-Control`, `sec-ch-ua`,
   `sec-ch-ua-mobile`, `sec-ch-ua-platform`, `Upgrade-Insecure-Requests`, `Origin`,
@@ -246,6 +264,10 @@ tried as a second, differently-shaped layout.
   which is the fingerprint this exists to avoid. One protocol step behind a browser is a smaller
   tell than a ClientHello that offers h2 and cannot speak it. Pinned by
   `TestBrowserClientHandshakesAsTheProfile`, which asserts the negotiated protocol server-side.
+  Chrome's ALPS extension is cut to the same list, because a browser derives its ALPS protocols
+  from the ones it offers in ALPN: an `h2` ALPS beside an `http/1.1`-only ALPN is a pair no
+  browser produces, and it is what this client sent while the two lists were set separately
+  (`TestBrowserClientPresentsChromesJa4` asserts the ALPS list too).
 - **One request per connection**, closed with the body: a search is one navigation, and a
   connection that sat idle through an 8 s pacing gap is stranger than a fresh one. The client
   advertises `gzip, deflate, br, zstd` — what Chrome advertises — and decodes all four, because

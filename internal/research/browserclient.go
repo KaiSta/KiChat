@@ -33,29 +33,147 @@ import (
 // and the request below have to describe the same browser, or the mismatch is a fingerprint of
 // its own (a Firefox ClientHello sending sec-ch-ua is not something any browser does).
 
-// browserProfile is one browser identity: the handshake, and the headers that have to agree
-// with it. name is only for error messages and tests.
+// browserProfile is one browser identity: the handshake, the headers that have to agree with it,
+// and the version both are derived from. name is only for error messages and tests.
 type browserProfile struct {
-	name            string
+	name string
+	// major is the Chrome version this identity claims. Everything version-shaped is derived
+	// from it — see chromeMajor.
+	major           int
 	userAgent       string
 	hello           utls.ClientHelloID
 	secChUa         string
 	secChUaPlatform string
 }
 
-// chromeWindows is the identity this package presents. Every field describes Chrome 133 on
-// Windows, the newest profile the uTLS version in go.mod carries; the sec-ch-ua hints repeat
-// the version in the user agent because a browser that lies about one of them lies about both.
+// chromeMajor is the one place the version is authored. The user agent, the sec-ch-ua hints and
+// the choice of captured ClientHello are all derived from it, because the three only work as a
+// set: a browser naming one version in its user agent and another in its hints is a fingerprint
+// of its own, and so is an older release's hello wearing the newer name.
 //
-// The version ages and the day will come when it is old enough to look wrong on its own. When
-// that happens the fix is to move to the newest profile uTLS has and to change these strings
-// with it — as one edit, because half of it is worse than none.
-var chromeWindows = browserProfile{
-	name:            "chrome133-windows",
-	userAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-	hello:           utls.HelloChrome_133,
-	secChUa:         `"Chromium";v="133", "Not(A:Brand";v="24", "Google Chrome";v="133"`,
-	secChUaPlatform: `"Windows"`,
+// 158 is the stable channel as of 2026-11-17. The hints are generated rather than copied because
+// Chromium derives them from the major version and nothing else
+// (components/embedder_support/user_agent_utils.cc, read at the 158.0.8127.37 tag). The previous
+// hand-copied literal here was already wrong: it claimed
+// `"Chromium";v="133", "Not(A:Brand";v="24", "Google Chrome";v="133"`, and Chrome 133 sent
+// `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"` — all three of brand
+// order, GREASE version and the pair itself were off, and nothing checked them.
+const chromeMajor = 158
+
+// chromeALPN is the only protocol this client speaks. It is offered in ALPN and in Chrome's ALPS
+// extension, because a browser derives the second from the first: an `h2` ALPS list beside an
+// `http/1.1`-only ALPN is a pair no browser produces, and it is what this package sent while the
+// two were set separately.
+const chromeALPN = "http/1.1"
+
+// chromeHello is one ClientHello uTLS carries: the version it was captured from, and the range of
+// Chrome versions it is measured to serve.
+type chromeHello struct {
+	version int
+	hello   utls.ClientHelloID
+	first   int
+	last    int
+}
+
+// chromeHellos names the presets this package may present, as a table rather than
+// utls.HelloChrome_Auto: Auto follows the dependency, so a `go get -u` would move this app's
+// wire identity while its user agent stayed where it was. TestIdentityMajorsAgree pins the
+// version this client actually sends.
+//
+// The 155 entry is uTLS' capture of branded Chrome 155.0.8059.40 on 2026-10-06
+// (testdata/chrome155_clienthello.md): Chrome 133's hello plus GREASE, ML-DSA signature schemes
+// and a 28-entry trust_anchors extension, JA4 `t13d1517h2_8daaf6152771_cb7bf5808d99` against
+// 133's `t13d1516h2_8daaf6152771_d8a2da3f94cd`. Chrome 152 through 158 measured identical on
+// every JA4 hash (checked 2026-11), which is what makes a 158 user agent honest over the 155
+// hello rather than a lie about which release was captured. 150 and 151 changed the
+// signature-algorithm tail without the extension count moving, so neither preset is exact there;
+// they are left out rather than mislabelled.
+var chromeHellos = []chromeHello{
+	{version: 155, hello: utls.HelloChrome_155, first: 152, last: 158},
+	{version: 133, hello: utls.HelloChrome_133, first: 133, last: 149},
+}
+
+// chromeHelloFor answers the hello measured to serve major, and whether the table has one.
+func chromeHelloFor(major int) (chromeHello, bool) {
+	for _, capture := range chromeHellos {
+		if major >= capture.first && major <= capture.last {
+			return capture, true
+		}
+	}
+	return chromeHello{}, false
+}
+
+// newestChromeHello is the hello a profile presents: the capture covering major, or the newest
+// the table has once the constant has been moved past it. Falling back rather than panicking
+// keeps a shipped build working; TestIdentityMajorsAgree is what fails, so the gap is found
+// before a release instead of by a reader who draws a captcha.
+func newestChromeHello(major int) chromeHello {
+	if capture, ok := chromeHelloFor(major); ok {
+		return capture
+	}
+	newest := chromeHellos[0]
+	for _, capture := range chromeHellos {
+		if capture.last > newest.last {
+			newest = capture
+		}
+	}
+	return newest
+}
+
+// chromeWindows is the identity this package presents: Chrome chromeMajor on Windows.
+var chromeWindows = newChromeProfile(chromeMajor)
+
+// newChromeProfile builds the identity for one Chrome version.
+func newChromeProfile(major int) browserProfile {
+	hello := newestChromeHello(major)
+	return browserProfile{
+		name:            fmt.Sprintf("chrome%d-windows", major),
+		major:           major,
+		userAgent:       chromeUserAgent(major),
+		hello:           hello.hello,
+		secChUa:         chromeSecChUa(major),
+		secChUaPlatform: `"Windows"`,
+	}
+}
+
+// chromeUserAgent is the frozen user agent Chrome sends: only the major version changes from one
+// release to the next.
+func chromeUserAgent(major int) string {
+	return fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%d.0.0.0 Safari/537.36", major)
+}
+
+// Chromium builds Sec-CH-UA from the major version and nothing else. The three rules below are
+// its own (components/embedder_support/user_agent_utils.cc at 158.0.8127.37), and
+// TestSecChUAMatchesChromiumsRules checks the result against eight versions measured in real
+// builds, so a mistake here fails a test instead of shipping as a fingerprint.
+var (
+	// chromeHintSeparators is the character list the fake brand's two separators come from.
+	chromeHintSeparators = [...]string{" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"}
+	// chromeGreaseVersions is the version the fake brand is given, by major % 3.
+	chromeGreaseVersions = [...]string{"8", "99", "24"}
+	// chromeBrandOrder says where the fake brand, Chromium and Google Chrome go, by major % 6.
+	// All six orders come round every six releases on purpose: no server may rely on one.
+	chromeBrandOrder = [6][3]int{
+		{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {2, 0, 1}, {1, 2, 0}, {2, 1, 0},
+	}
+)
+
+// chromeSecChUa renders the Sec-CH-UA header value Chrome sends for major.
+func chromeSecChUa(major int) string {
+	grease := "Not" + chromeHintSeparators[major%len(chromeHintSeparators)] +
+		"A" + chromeHintSeparators[(major+1)%len(chromeHintSeparators)] + "Brand"
+	version := fmt.Sprintf("%d", major)
+	brands := [...]string{
+		fmt.Sprintf("%q;v=%q", grease, chromeGreaseVersions[major%len(chromeGreaseVersions)]),
+		fmt.Sprintf("%q;v=%q", "Chromium", version),
+		fmt.Sprintf("%q;v=%q", "Google Chrome", version),
+	}
+	order := chromeBrandOrder[major%len(chromeBrandOrder)]
+	out := make([]string, 0, len(brands))
+	for _, index := range order {
+		out = append(out, brands[index])
+	}
+	return strings.Join(out, ", ")
 }
 
 // browserClient sends one request per call as the profile's browser would: a form POST for
@@ -255,8 +373,16 @@ func (c *browserClient) handshake(ctx context.Context, conn net.Conn, host strin
 		return nil, err
 	}
 	for _, ext := range uconn.Extensions {
-		if alpn, ok := ext.(*utls.ALPNExtension); ok {
-			alpn.AlpnProtocols = []string{"http/1.1"}
+		switch typed := ext.(type) {
+		case *utls.ALPNExtension:
+			typed.AlpnProtocols = []string{chromeALPN}
+		// Chrome derives its ALPS list from the protocols it offers in ALPN, so both are cut
+		// to what this client can actually speak. The presets advertise h2 in both, because
+		// the browser they were captured from does.
+		case *utls.ApplicationSettingsExtension:
+			typed.SupportedProtocols = []string{chromeALPN}
+		case *utls.ApplicationSettingsExtensionNew:
+			typed.SupportedProtocols = []string{chromeALPN}
 		}
 	}
 	if err := uconn.MarshalClientHello(); err != nil {
