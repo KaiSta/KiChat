@@ -101,24 +101,30 @@ type Tile struct {
 // or the app was restarted.
 var ErrNoChallenge = errors.New("research: no pending DuckDuckGo check")
 
-// parseDDGChallenge reads the check out of the interstitial.
+// parseDDGChallenge reads the check out of the interstitial. base is the page it was served from:
+// the tiles are named by paths relative to it, so an address is only resolvable with the page in
+// hand.
 //
-// The markup is the endpoint's own and undocumented, so the parse leans on the one thing that is
-// self-identifying: a tile's checkbox is named `image-check_<hash>` and its picture's path carries
-// the same hash. Tiles are paired by that hash, never by position.
-func parseDDGChallenge(body, query, lang string) (Challenge, bool) {
+// The markup is the endpoint's own and undocumented, so the parse leans on what identifies itself.
+// Measured on 2026-11-22: the answer form is `#challenge-form` — the page also carries `#img-form`,
+// the frame target the answer is posted from, which must not be mistaken for it — and each square
+// is a checkbox named `image-check_<hash>` whose picture is
+// `../assets/anomaly/images/challenge/<hash>.jpg`, the same hash in both. Tiles are therefore
+// paired by hash and never by position. The `form.challenge-form` class is kept as a second
+// selector because the lite endpoint's interstitial has not been captured yet.
+func parseDDGChallenge(body, query, lang, base string) (Challenge, bool) {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
 	if err != nil {
 		return Challenge{}, false
 	}
-	form := doc.Find("form.challenge-form").First()
+	form := doc.Find("form#challenge-form, form.challenge-form").First()
 	action, ok := form.Attr("action")
 	if !ok || strings.TrimSpace(action) == "" {
 		return Challenge{}, false
 	}
 	challenge := Challenge{
 		Query:       query,
-		Action:      absoluteDDGURL(action),
+		Action:      absoluteDDGURL(action, base),
 		Instruction: cleanText(doc.Find(".anomaly-modal__instructions").First().Text()),
 		Fields:      map[string]string{},
 		Lang:        lang,
@@ -135,7 +141,7 @@ func parseDDGChallenge(body, query, lang string) (Challenge, bool) {
 	images := make([]string, 0, len(challenge.Tiles))
 	form.Find("img.anomaly-modal__image").Each(func(_ int, image *goquery.Selection) {
 		if src, ok := image.Attr("src"); ok && src != "" {
-			images = append(images, absoluteDDGURL(src))
+			images = append(images, absoluteDDGURL(src, base))
 		}
 	})
 	form.Find("input.anomaly-modal__check").Each(func(_ int, input *goquery.Selection) {
@@ -159,17 +165,21 @@ func parseDDGChallenge(body, query, lang string) (Challenge, bool) {
 	return challenge, true
 }
 
-// absoluteDDGURL resolves the protocol-relative and root-relative URLs the interstitial uses.
-func absoluteDDGURL(raw string) string {
+// absoluteDDGURL resolves a URL the interstitial carries against the page it was served from:
+// protocol-relative (`//duckduckgo.com/anomaly.js…`), root-relative and relative to the page
+// (`../assets/anomaly/images/challenge/<hash>.jpg`). An already absolute URL is returned as it is,
+// and so is everything when the page itself is not known.
+func absoluteDDGURL(raw, base string) string {
 	raw = strings.TrimSpace(raw)
-	switch {
-	case strings.HasPrefix(raw, "//"):
-		return "https:" + raw
-	case strings.HasPrefix(raw, "/"):
-		return "https://duckduckgo.com" + raw
-	default:
+	page, err := url.Parse(base)
+	if raw == "" || err != nil || !page.IsAbs() {
 		return raw
 	}
+	ref, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return page.ResolveReference(ref).String()
 }
 
 // pendingChallenge is the check the last refused search was answered with, kept so the window can
@@ -680,7 +690,7 @@ func (d *DuckDuckGoProvider) SolveChallenge(ctx context.Context, selections []st
 	if isDDGChallenge(string(body)) {
 		// A wrong answer draws another check; it replaces the one on screen rather than
 		// leaving the reader ticking tiles over a verdict that has already been given.
-		if next, ok := parseDDGChallenge(string(body), challenge.Query, lang); ok {
+		if next, ok := parseDDGChallenge(string(body), challenge.Query, lang, challenge.Action); ok {
 			d.offer(next)
 		}
 		return nil, ddgBlockedErr(lang)
@@ -827,7 +837,7 @@ func (d *DuckDuckGoProvider) searchHTML(ctx context.Context, req SearchRequest) 
 		return nil, err
 	}
 	if isDDGChallenge(string(body)) {
-		return nil, d.refusal(string(body), req)
+		return nil, d.refusal(string(body), req, d.Endpoint)
 	}
 	return parseDDGHtml(string(body), req.Count)
 }
@@ -892,7 +902,7 @@ func (d *DuckDuckGoProvider) searchLite(ctx context.Context, req SearchRequest) 
 		return nil, err
 	}
 	if isDDGChallenge(string(body)) {
-		return nil, d.refusal(string(body), req)
+		return nil, d.refusal(string(body), req, d.LiteURL)
 	}
 	return parseDDGLite(string(body), req.Count)
 }
@@ -901,8 +911,8 @@ func (d *DuckDuckGoProvider) searchLite(ctx context.Context, req SearchRequest) 
 // parses, and the error is the refusal either way. It is not carried inside the error because
 // nothing downstream reads it from there — the refusal only has to stay ErrBlocked so pacing and
 // fall-through are unchanged.
-func (d *DuckDuckGoProvider) refusal(body string, req SearchRequest) error {
-	if challenge, ok := parseDDGChallenge(body, req.Query, req.Lang); ok {
+func (d *DuckDuckGoProvider) refusal(body string, req SearchRequest, base string) error {
+	if challenge, ok := parseDDGChallenge(body, req.Query, req.Lang, base); ok {
 		d.offer(challenge)
 	}
 	return ddgBlockedErr(req.Lang)

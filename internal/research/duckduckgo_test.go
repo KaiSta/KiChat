@@ -539,43 +539,49 @@ func TestDuckDuckGoPostsTheEndpointsOwnFields(t *testing.T) {
 	}
 }
 
-// ddgGridFixture is the check as a reader meets it: a 3×3 grid where every square is a checkbox
-// named after its image's hash. The images are deliberately listed in a different order than the
-// checkboxes, because a pairing by position would pass a fixture that happened to list them in
-// step and then pair the wrong picture with the wrong box on the real page.
-const ddgGridFixture = `<!DOCTYPE html><html lang="en"><head>
+// ddgGridFixture is the check as a reader met it on 2026-11-22, trimmed from the live interstitial
+// that the test does not ship: the answer form is `#challenge-form`, the page carries `#img-form`
+// (the frame target the answer is posted from) before it, the form's own hidden field is `ct`, and
+// every square is a checkbox named `image-check_<hash>` whose picture is
+// `../assets/anomaly/images/challenge/<hash>.jpg` — relative to the page, which is why the parse
+// needs the page's address. The pictures are listed after the boxes and in reverse on purpose: a
+// pairing by position would pass a fixture that listed them in step and then pair the wrong
+// picture with the wrong box on the real page.
+const ddgGridFixture = `<!DOCTYPE html><html lang="de"><head>
   <title>DuckDuckGo</title>
-  <script src="/assets/anomaly.js?sv=html&cc=botnet"></script>
 </head><body>
-  <div class="anomaly-modal__mask">
-    <div class="anomaly-modal__modal">
-      <p class="anomaly-modal__description">Unfortunately, bots use DuckDuckGo too.
-        Please complete the following challenge to confirm this search was made by a human.</p>
-      <form class="challenge-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=botnet" method="post">
-        <input type="hidden" name="token" value="t-9f2">
-        <span class="anomaly-modal__instructions">Select all squares containing a duck:</span>
-        <input type="checkbox" class="anomaly-modal__check" name="image-check_1a">
-        <input type="checkbox" class="anomaly-modal__check" name="image-check_2b">
-        <input type="checkbox" class="anomaly-modal__check" name="image-check_3c">
-        <input type="checkbox" class="anomaly-modal__check" name="image-check_4d">
-        <input type="checkbox" class="anomaly-modal__check" name="image-check_5e">
-        <input type="checkbox" class="anomaly-modal__check" name="image-check_6f">
-        <input type="checkbox" class="anomaly-modal__check" name="image-check_7g">
-        <input type="checkbox" class="anomaly-modal__check" name="image-check_8h">
-        <input type="checkbox" class="anomaly-modal__check" name="image-check_9i">
-        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/9i.jpg">
-        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/1a.jpg">
-        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/8h.jpg">
-        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/7g.jpg">
-        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/6f.jpg">
-        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/5e.jpg">
-        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/4d.jpg">
-        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/3c.jpg">
-        <img class="anomaly-modal__image" src="//duckduckgo.com/challenge/2b.jpg">
+  <form id="img-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=sre&gk=d4cd0dabcf4caa22ad92fab40844c786" target="ifr" method="POST"></form>
+  <form id="challenge-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=sre&gk=d4cd0dabcf4caa22ad92fab40844c786" method="POST">
+    <div class="anomaly-modal__mask">
+      <div class="anomaly-modal__modal is-ie" data-testid="anomaly-modal">
+        <div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+        <div class="anomaly-modal__description">Please complete the following challenge to confirm this search was made by a human.</div>
+        <input type="hidden" name="ct" value="AgEAB5wdSrjEZZ2e">
+        <div class="anomaly-modal__instructions">Select all squares containing a duck:</div>
+        <div class="anomaly-modal__puzzle">
+          <div class="anomaly-modal__box" data-index="0"><input type="checkbox" class="anomaly-modal__check" name="image-check_036ef386126084b6275ff34fabda050d" id="image-check_036ef386126084b6275ff34fabda050d"></div>
+          <div class="anomaly-modal__box" data-index="1"><input type="checkbox" class="anomaly-modal__check" name="image-check_4f03c9125f97677d3fa603568fc1e2a8" id="image-check_4f03c9125f97677d3fa603568fc1e2a8"></div>
+          <div class="anomaly-modal__box" data-index="2"><input type="checkbox" class="anomaly-modal__check" name="image-check_978d9b368b0c4230ea350737bfac6838" id="image-check_978d9b368b0c4230ea350737bfac6838"></div>
+          <div class="anomaly-modal__box" data-index="3"><input type="checkbox" class="anomaly-modal__check" name="image-check_2715fb5fbd4f8b0e5f866ddcaafe1a6c" id="image-check_2715fb5fbd4f8b0e5f866ddcaafe1a6c"></div>
+          <div class="anomaly-modal__box" data-index="4"><input type="checkbox" class="anomaly-modal__check" name="image-check_9d5e5407b2f04d4f295d2fc1814c6ddd" id="image-check_9d5e5407b2f04d4f295d2fc1814c6ddd"></div>
+          <div class="anomaly-modal__box" data-index="5"><input type="checkbox" class="anomaly-modal__check" name="image-check_cb61254942740da72a6dae65642b577d" id="image-check_cb61254942740da72a6dae65642b577d"></div>
+          <div class="anomaly-modal__box" data-index="6"><input type="checkbox" class="anomaly-modal__check" name="image-check_386bbfda8ebf70ab247457acc6aaf1ff" id="image-check_386bbfda8ebf70ab247457acc6aaf1ff"></div>
+          <div class="anomaly-modal__box" data-index="7"><input type="checkbox" class="anomaly-modal__check" name="image-check_19a35de270e182a720528e91465f7484" id="image-check_19a35de270e182a720528e91465f7484"></div>
+          <div class="anomaly-modal__box" data-index="8"><input type="checkbox" class="anomaly-modal__check" name="image-check_b81a45b3407b44b7318acc768eb01c88" id="image-check_b81a45b3407b44b7318acc768eb01c88"></div>
+        </div>
+        <img class="anomaly-modal__image" alt=" " id="image-b81a45b3407b44b7318acc768eb01c88" src="../assets/anomaly/images/challenge/b81a45b3407b44b7318acc768eb01c88.jpg" data-id="b81a45b3407b44b7318acc768eb01c88.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-19a35de270e182a720528e91465f7484" src="../assets/anomaly/images/challenge/19a35de270e182a720528e91465f7484.jpg" data-id="19a35de270e182a720528e91465f7484.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-386bbfda8ebf70ab247457acc6aaf1ff" src="../assets/anomaly/images/challenge/386bbfda8ebf70ab247457acc6aaf1ff.jpg" data-id="386bbfda8ebf70ab247457acc6aaf1ff.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-cb61254942740da72a6dae65642b577d" src="../assets/anomaly/images/challenge/cb61254942740da72a6dae65642b577d.jpg" data-id="cb61254942740da72a6dae65642b577d.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-9d5e5407b2f04d4f295d2fc1814c6ddd" src="../assets/anomaly/images/challenge/9d5e5407b2f04d4f295d2fc1814c6ddd.jpg" data-id="9d5e5407b2f04d4f295d2fc1814c6ddd.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-2715fb5fbd4f8b0e5f866ddcaafe1a6c" src="../assets/anomaly/images/challenge/2715fb5fbd4f8b0e5f866ddcaafe1a6c.jpg" data-id="2715fb5fbd4f8b0e5f866ddcaafe1a6c.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-978d9b368b0c4230ea350737bfac6838" src="../assets/anomaly/images/challenge/978d9b368b0c4230ea350737bfac6838.jpg" data-id="978d9b368b0c4230ea350737bfac6838.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-4f03c9125f97677d3fa603568fc1e2a8" src="../assets/anomaly/images/challenge/4f03c9125f97677d3fa603568fc1e2a8.jpg" data-id="4f03c9125f97677d3fa603568fc1e2a8.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-036ef386126084b6275ff34fabda050d" src="../assets/anomaly/images/challenge/036ef386126084b6275ff34fabda050d.jpg" data-id="036ef386126084b6275ff34fabda050d.jpg">
         <input type="submit" class="anomaly-modal__submit" value="Submit">
-      </form>
+      </div>
     </div>
-  </div>
+  </form>
 </body></html>`
 
 // ddgResultsAfterCheck is the page the answer redirects to: one ordinary result.
@@ -589,7 +595,7 @@ const ddgResultsAfterCheck = `<html><body>
 // hash the checkbox and the image share, the form's action made absolute, the hidden field kept
 // (it is the form's own token and inventing it would be guessing), and the instruction.
 func TestParseDDGChallengeGrid(t *testing.T) {
-	challenge, ok := parseDDGChallenge(ddgGridFixture, "Mietrecht", config.LangGerman)
+	challenge, ok := parseDDGChallenge(ddgGridFixture, "Mietrecht", config.LangGerman, ddgHTMLEndpoint)
 	if !ok {
 		t.Fatal("the grid did not parse as a check")
 	}
@@ -598,15 +604,15 @@ func TestParseDDGChallengeGrid(t *testing.T) {
 	}
 	for _, tile := range challenge.Tiles {
 		hash := strings.TrimPrefix(tile.Name, "image-check_")
-		want := "https://duckduckgo.com/challenge/" + hash + ".jpg"
+		want := "https://html.duckduckgo.com/assets/anomaly/images/challenge/" + hash + ".jpg"
 		if tile.URL != want {
 			t.Errorf("tile %s names %q, want %q — the pairing is by hash, not by position", tile.Name, tile.URL, want)
 		}
 	}
-	if want := "https://duckduckgo.com/anomaly.js?sv=html&cc=botnet"; challenge.Action != want {
+	if want := "https://duckduckgo.com/anomaly.js?sv=html&cc=sre&gk=d4cd0dabcf4caa22ad92fab40844c786"; challenge.Action != want {
 		t.Errorf("action = %q, want %q", challenge.Action, want)
 	}
-	if challenge.Fields["token"] != "t-9f2" {
+	if challenge.Fields["ct"] != "AgEAB5wdSrjEZZ2e" {
 		t.Errorf("fields = %v, want the form's hidden token", challenge.Fields)
 	}
 	if !strings.Contains(challenge.Instruction, "duck") {
@@ -669,7 +675,7 @@ func TestSolveChallengePostsTheTickedTilesAndReturnsTheResults(t *testing.T) {
 	// form's action from pointing anywhere is not loosened for a fixture.
 	var srv *httptest.Server
 	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/challenge/") {
+		if strings.HasPrefix(r.URL.Path, "/assets/anomaly/images/challenge/") {
 			w.Header().Set("Content-Type", "image/jpeg")
 			_, _ = io.WriteString(w, "\xff\xd8tile")
 			return
@@ -756,7 +762,7 @@ func TestSolveChallengePostsTheTickedTilesAndReturnsTheResults(t *testing.T) {
 	if unticked := challenge.Tiles[1].Name; posted.Get(unticked) != "" {
 		t.Errorf("an unticked tile was sent: %s", unticked)
 	}
-	if posted.Get("token") != "t-9f2" {
+	if posted.Get("ct") != "AgEAB5wdSrjEZZ2e" {
 		t.Errorf("the form's own hidden field was dropped: %v", posted)
 	}
 	if !strings.Contains(cookie, "issued=1") || !strings.Contains(cookie, "solved=1") {

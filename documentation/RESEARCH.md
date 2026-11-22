@@ -457,15 +457,25 @@ not have, or a check that is gone, answers `ErrNoChallenge`, which the bridge wo
 is gone — run the search again". Only `https` is
 required of an address taken out of the page's own markup; there is no host allowlist, because
 the page that supplied the address already knows the query it was asked, and a tile that moves
-to a CDN would otherwise stop loading. The parse leans on the one self-identifying pair in the
-markup: a tile's checkbox is `image-check_<hash>` and its picture is `/challenge/<hash>.jpg`, so
-tiles are paired by hash and **not** by position. **Unmeasured (2026-11-22)**: the live
-interstitial was not fetched while this was built — the fixture in `duckduckgo_test.go` is a
-capture of the shape, and a layout change that breaks the hash pairing leaves the refusal without
-a check, which is the old behaviour rather than an error. `TestParseDDGChallengeGrid`,
+to a CDN would otherwise stop loading.
+
+The parse was measured against the live interstitial on **2026-11-22**, and that measurement
+found two things a fixture had guessed wrong: the answer form identifies itself by **id**
+(`#challenge-form`, with a second form `#img-form` — the frame target the answer is posted from —
+that must not be picked instead), and each square's picture is a path **relative to the page**,
+`../assets/anomaly/images/challenge/<hash>.jpg`, next to a checkbox named `image-check_<hash>`.
+Looking for a class and resolving only absolute paths therefore found no form and no tiles, which
+is why a refused search could report the check without ever showing the grid. The parse now takes
+the address of the page it was served from and resolves against it, so protocol-relative,
+root-relative and relative URLs all work, and tiles are paired by the hash and **not** by
+position, because the pictures are not laid out in the boxes' order. The same live request
+answered one tile with 52 KB of `image/jpeg` over this client, so the grid is the page's own
+pictures rather than a placeholder. `TestParseDDGChallengeGrid`,
 `TestDuckDuckGoOffersTheCheckToTheWindow`,
 `TestSolveChallengePostsTheTickedTilesAndReturnsTheResults` (which also fetches a tile by name)
-and `TestBrowserClientCarriesTheSitesCookies` pin the parse, the offer, the answer and the jar.
+and `TestBrowserClientCarriesTheSitesCookies` pin the parse, the offer, the answer and the jar;
+`TestLiveDDGInterstitialMarkup` is the one that reaches the real page, and it leaves the body in
+`scratch/` when the parse stops matching the markup.
 
 ---
 
