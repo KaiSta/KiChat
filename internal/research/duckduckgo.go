@@ -53,6 +53,18 @@ func ddgBlockedErr(lang string) error {
 			"or configure another search provider; further requests are skipped for a few minutes"))
 }
 
+// ddgAnswerRefusedErr is the refusal of an answer the host did not accept: it drew another check
+// instead of results. It deliberately does not repeat ddgBlockedErr's advice — the reader has just
+// answered inside the window — and nothing is paused behind it, because the next thing they do is
+// tick the new squares.
+func ddgAnswerRefusedErr(lang string) error {
+	return fmt.Errorf("%w: %s", ErrBlocked, text(lang,
+		"DuckDuckGo hat die Antwort nicht angenommen – bitte die Kästchen der neuen Prüfung "+
+			"markieren und wieder senden",
+		"DuckDuckGo did not accept that answer — tick the squares of the new check and send it "+
+			"again"))
+}
+
 // ddgCoolingErr is the refusal of a search that was not sent: the provider is in its cooldown,
 // so nothing is asked of the host. ErrRateLimited, because it is a throttle rather than a
 // verdict — the chain's next provider is the thing to try, and DuckDuckGo will be asked again
@@ -688,12 +700,12 @@ func (d *DuckDuckGoProvider) SolveChallenge(ctx context.Context, selections []st
 		return nil, err
 	}
 	if isDDGChallenge(string(body)) {
-		// A wrong answer draws another check; it replaces the one on screen rather than
+		// A refused answer draws another check; it replaces the one on screen rather than
 		// leaving the reader ticking tiles over a verdict that has already been given.
 		if next, ok := parseDDGChallenge(string(body), challenge.Query, lang, challenge.Action); ok {
 			d.offer(next)
 		}
-		return nil, ddgBlockedErr(lang)
+		return nil, ddgAnswerRefusedErr(lang)
 	}
 	results, parseErr := parseDDGHtml(string(body), 0)
 	if parseErr != nil || len(results) == 0 {

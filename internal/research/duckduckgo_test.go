@@ -657,6 +657,55 @@ func TestDuckDuckGoOffersTheCheckToTheWindow(t *testing.T) {
 	}
 }
 
+// TestSolveChallengeSaysWhenTheAnswerWasNotAccepted pins the sentence a reader gets when the host
+// judges the ticks wrong: the check is replaced with the new one rather than the old grid
+// remaining under a verdict, and the failure is worded as an answer that was not accepted — not as
+// the first refusal, which would send them to a browser and promise a pause that never started.
+func TestSolveChallengeSaysWhenTheAnswerWasNotAccepted(t *testing.T) {
+	ClearPendingChallenge()
+	t.Cleanup(ClearPendingChallenge)
+
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, strings.ReplaceAll(ddgGridFixture, "//duckduckgo.com", srv.URL))
+	}))
+	defer srv.Close()
+
+	p := newTestDDGProvider(srv.URL, srv.URL+"/lite")
+	p.client.jar, _ = cookiejar.New(nil)
+	p.client.insecure = true
+	var offered Challenge
+	p.onChallenge = func(challenge Challenge) { offered = challenge }
+
+	rememberChallenge(Challenge{
+		Query:  "Mietrecht",
+		Action: srv.URL + "/anomaly.js",
+		Fields: map[string]string{"ct": "x"},
+		Tiles:  []Tile{{Name: "image-check_1a", URL: srv.URL + "/assets/anomaly/images/challenge/1a.jpg"}},
+		Lang:   config.LangGerman,
+	})
+	_, err := p.SolveChallenge(context.Background(), []string{"image-check_1a"})
+	if err == nil {
+		t.Fatal("a refused answer was reported as the search succeeding")
+	}
+	if !errors.Is(err, ErrBlocked) {
+		t.Errorf("err = %v, want it to stay an ErrBlocked", err)
+	}
+	if !strings.Contains(err.Error(), "nicht angenommen") {
+		t.Errorf("err = %v, want the sentence that says the answer was not accepted", err)
+	}
+	if strings.Contains(err.Error(), "Browser lösen") {
+		t.Errorf("err = %v, want no advice to solve it in a browser after the reader just did", err)
+	}
+	if next, ok := PendingChallenge(); !ok || len(next.Tiles) != 9 {
+		t.Errorf("pending = %+v (%v), want the check the host drew instead", next, ok)
+	}
+	if len(offered.Tiles) != 9 {
+		t.Errorf("the handler was told about %d tiles, want the new check's 9", len(offered.Tiles))
+	}
+}
+
 // TestSolveChallengePostsTheTickedTilesAndReturnsTheResults covers the whole answer: the ticks and
 // the form's own fields are posted to the form's action over the same client, the redirect is
 // followed, the cookies the check and the answer set come along, the results are returned, and the

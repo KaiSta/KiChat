@@ -2,7 +2,6 @@ package research
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -62,21 +61,34 @@ func TestLiveDDGInterstitialMarkup(t *testing.T) {
 	}
 	t.Logf("tile %s: %d bytes of %s", challenge.Tiles[0].Name, len(picture), contentType)
 
-	// The answer itself. Which squares hold a duck is not knowable here, so this measures whether
-	// the request is readable at all: every ticked square goes back to the action, and a 400 means
-	// the host could not read the answer rather than that it was wrong.
-	selections := make([]string, 0, len(challenge.Tiles))
-	for _, tile := range challenge.Tiles {
-		selections = append(selections, tile.Name)
+	// The answer itself. Which squares hold a duck is not knowable here, so this measures what the
+	// host does with a readable answer: every square is ticked and the reply is captured whole, so a
+	// 400 (unreadable request) is distinguishable from a fresh check (a verdict) in the dump.
+	answerForm := url.Values{}
+	for name, value := range challenge.Fields {
+		answerForm.Set(name, value)
 	}
-	results, err := provider.SolveChallenge(context.Background(), selections)
-	var httpErr *httpError
-	switch {
-	case err == nil:
-		t.Logf("the answer was accepted and returned %d results", len(results))
-	case errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusBadRequest:
-		t.Fatalf("the host could not read the answer: %v", err)
-	default:
-		t.Logf("the answer was read and judged (these squares were guessed): %v", err)
+	for _, tile := range challenge.Tiles {
+		answerForm.Set(tile.Name, "on")
+	}
+	answer, postErr := provider.client.postForm(context.Background(), challenge.Action, answerForm, "de")
+	if postErr != nil {
+		t.Fatalf("posting the answer: %v", postErr)
+	}
+	defer answer.Body.Close()
+	reply, readErr := io.ReadAll(io.LimitReader(answer.Body, 4<<20))
+	if readErr != nil {
+		t.Fatalf("reading the answer's reply: %v", readErr)
+	}
+	if err := os.WriteFile("../../scratch/ddg-answer.html", reply, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Logf("answer status=%s bytes=%d location=%q challenge-again=%v",
+		answer.Status, len(reply), answer.Header.Get("Location"), isDDGChallenge(string(reply)))
+	if next, ok := parseDDGChallenge(string(reply), query, "de", challenge.Action); ok {
+		t.Logf("the reply is another check: %d tiles, instruction=%q", len(next.Tiles), next.Instruction)
+	}
+	if answer.StatusCode == http.StatusBadRequest {
+		t.Fatalf("the host could not read the answer at all: %s", answer.Status)
 	}
 }

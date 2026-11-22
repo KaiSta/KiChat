@@ -478,7 +478,11 @@ request line is not a request at all — posting the form's own action verbatim 
 `400 Bad Request`, so a ticked check could never be sent. The client now percent-encodes what a
 request line cannot carry, exactly where a browser does it when it posts a form, and the live
 check confirms the rest of the path: the answer is read and judged by the host — a guessed set of
-squares draws another check rather than a 400. `TestParseDDGChallengeGrid`,
+squares draws another check rather than a 400. An answer the host does not accept is therefore
+reported as exactly that — "tick the squares of the new check and send it again" — while the new
+check replaces the old grid in the dialog. It is deliberately not the first refusal's sentence:
+that one sends the reader to a browser and promises a pause, and neither is true after they have
+just answered in the window. `TestParseDDGChallengeGrid`,
 `TestDuckDuckGoOffersTheCheckToTheWindow`,
 `TestSolveChallengePostsTheTickedTilesAndReturnsTheResults` (which also fetches a tile by name)
 and `TestBrowserClientCarriesTheSitesCookies` pin the parse, the offer, the answer and the jar;
