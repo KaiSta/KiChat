@@ -7,7 +7,7 @@ require (
 	github.com/PuerkitoBio/goquery v1.14.0
 	github.com/andybalholm/brotli v1.3.0
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
-	github.com/klauspost/compress v1.20.4
+	github.com/klauspost/compress v1.20.5
 	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
 	github.com/ncruces/go-sqlite3 v0.37.0
 	github.com/refraction-networking/utls v1.8.3-0.20261118233537-360383f893fb
