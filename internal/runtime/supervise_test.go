@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -300,6 +301,176 @@ func TestStopIgnoresTheOldReadinessProbe(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if st := srv.Status(); st.State != StateStopped || st.PID != 0 || st.URL != "" {
 		t.Fatalf("stopped server became ready: %+v", st)
+	}
+}
+
+// A crash is explained by the line before the backtrace, not by the frames after it.
+// llama.cpp forks gdb on SIGABRT, so the process's last lines are `#16 0x… in
+// __libc_start_call_main` and gdb's notes about sources it could not find — and the
+// assert that says what went wrong is above all of them. The output below is the tail of
+// a real aborted load, which the panel used to report in full and with no reason in it.
+func TestACrashIsReportedByItsReasonAndNotItsBacktrace(t *testing.T) {
+	lines := []string{
+		"llama-server gestartet (PID 8315) auf http://127.0.0.1:9931",
+		"ggml_cuda_host_malloc: failed to allocate 4096.00 MiB on the host",
+		"/src/ggml-cuda/ggml-cuda.cu:96: GGML_ASSERT(ptr != nullptr) failed",
+		"#0  0x00007f2641c4f1ca in ggml_abort (file=…) at ggml.c:1234",
+		"#1  0x00007f2641c4f2c5 in ggml_cuda_host_malloc (size=4294967296) at ggml-cuda.cu:96",
+		"#16 0x00007f2641a2a1ca in __libc_start_call_main (main=…, argc=21, argv=…) at ../sysdeps/nptl/libc_start_call_main.h:58",
+		"warning: 58\t../sysdeps/nptl/libc_start_call_main.h: No such file or directory",
+		"warning: 360\t../csu/libc-start.c: No such file or directory",
+		"#18 0x000055ad805d12a5 in _start ()",
+		"[Inferior 1 (process 8315) detached]",
+		"0x00007f8bba110913 in __GI___wait4 (pid=69280, stat_loc=0x0, options=0, usage=0x0) at ../sysdeps/unix/sysv/linux/wait4.c:30",
+		"30\tin ../sysdeps/unix/sysv/linux/wait4.c",
+		"Thread 1 (process 69280):",
+	}
+	got := formatTail(failureTail(lines, ""))
+	if strings.Contains(got, "#0  0x") || strings.Contains(got, "[Inferior") || strings.Contains(got, "wait4") {
+		t.Errorf("the report still carries the backtrace: %q", got)
+	}
+	if !strings.Contains(got, "GGML_ASSERT(ptr != nullptr) failed") {
+		t.Errorf("the report has no reason in it: %q", got)
+	}
+
+	// A log with nothing to strip is reported as before: the last six lines.
+	plain := []string{"one", "two", "three", "four", "five", "six", "seven"}
+	if tail := failureTail(plain, ""); strings.Join(tail, ",") != "two,three,four,five,six,seven" {
+		t.Errorf("plain tail = %v, want the last six lines", tail)
+	}
+
+	// A message that merely starts with a hash, or a warning in prose, is the program's
+	// own and has to survive: only gdb's numbered frame and numbered-source shapes are
+	// dropped.
+	own := []string{"# configuration loaded", "warning: no usable GPU found, using the CPU"}
+	if kept := failureTail(own, ""); len(kept) != 2 {
+		t.Errorf("the program's own lines were dropped: %v", kept)
+	}
+
+	// The report this was written for: forty lines of gdb outran the ring, so the assert
+	// is not in the lines at all. The reason recorded as it arrived is what the message
+	// quotes, on its own, because nothing left in the window explains anything.
+	assert := "/src/ggml-cuda/ggml-cuda.cu:96: GGML_ASSERT(ptr != nullptr) failed"
+	gdbOnly := []string{
+		"0x00007f8bba110913 in __GI___wait4 (pid=69280, stat_loc=0x0, options=0, usage=0x0) at ../sysdeps/unix/sysv/linux/wait4.c:30",
+		"30\tin ../sysdeps/unix/sysv/linux/wait4.c",
+		"#0  0x00007f8bba1f0c1a in ggml_abort (file=…, line=96, fmt=…) at ggml.c:1234",
+	}
+	if quoted := failureTail(gdbOnly, assert); len(quoted) != 1 || quoted[0] != assert {
+		t.Errorf("quoted = %v, want the recorded assert alone", quoted)
+	}
+}
+
+// The whole path with a window too small to hold the crash: sixty frames means 120 lines
+// of gdb after the assert, which is more than the ring keeps. The row still has to name
+// the assert, which is what the second report showed it did not.
+func TestACrashKeepsItsReasonWhenTheBacktraceOutrunsTheWindow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a shell")
+	}
+	binary, _ := fakeServer(t, "echo 'ggml-cuda.cu:96: GGML_ASSERT(ptr != nullptr) failed'\n"+
+		"i=0\nwhile [ $i -lt 60 ]; do echo \"#$i  0x00007f0000 frame\"; "+
+		"echo 'warning: 58\t../sysdeps/x.h: No such file or directory'; i=$((i+1)); done\n"+
+		"exit 134\n")
+
+	srv := NewServer("test")
+	srv.readyTimeout = 10 * time.Second
+	srv.probe = func(context.Context, string) error { return context.DeadlineExceeded }
+
+	if err := srv.Start(Options{Binary: binary, Model: writeModel(t)}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return srv.Status().State == StateFailed }) {
+		t.Fatalf("state = %q, want failed: %+v", srv.Status().State, srv.Status())
+	}
+	if st := srv.Status(); !strings.Contains(st.Error, "GGML_ASSERT(ptr != nullptr) failed") {
+		t.Errorf("error = %q, want the assert in it although the backtrace outran the ring", st.Error)
+	}
+}
+
+// The whole path, through a real process and the ring: twelve frames after the assert
+// must not push it out of the report.
+func TestAFailedServerQuotesTheAssertAndNotTheFrames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a shell")
+	}
+	binary, _ := fakeServer(t, "echo 'ggml.c:1234: GGML_ASSERT(n_ctx > 0) failed'\n"+
+		"i=0\nwhile [ $i -lt 12 ]; do echo \"#$i  0x00007f0000 frame\"; i=$((i+1)); done\n"+
+		"echo '[Inferior 1 (process 8315) detached]'\nexit 134\n")
+
+	srv := NewServer("test")
+	srv.readyTimeout = 10 * time.Second
+	srv.probe = func(context.Context, string) error { return context.DeadlineExceeded }
+
+	if err := srv.Start(Options{Binary: binary, Model: writeModel(t)}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return srv.Status().State == StateFailed }) {
+		t.Fatalf("state = %q, want failed: %+v", srv.Status().State, srv.Status())
+	}
+	st := srv.Status()
+	if !strings.Contains(st.Error, "GGML_ASSERT(n_ctx > 0) failed") {
+		t.Errorf("error = %q, want the assert in it", st.Error)
+	}
+	if strings.Contains(st.Error, "#11  0x") || strings.Contains(st.Error, "[Inferior") {
+		t.Errorf("error = %q, want no backtrace in it", st.Error)
+	}
+}
+
+// The row cannot hold a crash, the file can. Every line of the program's output — the
+// frames the message drops included — is on disk, and the failed row names the file, so
+// the thing a user has to attach to a report survives the row that produced it.
+func TestAFailedServerNamesTheFileHoldingItsWholeOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a shell")
+	}
+	binary, _ := fakeServer(t, "echo 'ggml.c:1234: GGML_ASSERT(n_ctx > 0) failed'\n"+
+		"i=0\nwhile [ $i -lt 8 ]; do echo \"#$i  0x00007f0000 frame\"; i=$((i+1)); done\n"+
+		"exit 134\n")
+	path := filepath.Join(t.TempDir(), "llama-test.log")
+
+	srv := NewServer("test")
+	srv.readyTimeout = 10 * time.Second
+	srv.probe = func(context.Context, string) error { return context.DeadlineExceeded }
+	if err := srv.SetServerLog(path); err != nil {
+		t.Fatalf("SetServerLog: %v", err)
+	}
+	if err := srv.Start(Options{Binary: binary, Model: writeModel(t)}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !waitFor(t, 10*time.Second, func() bool { return srv.Status().State == StateFailed }) {
+		t.Fatalf("state = %q, want failed: %+v", srv.Status().State, srv.Status())
+	}
+	st := srv.Status()
+	if !strings.Contains(st.Error, path) {
+		t.Errorf("error = %q, want it to name %s", st.Error, path)
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the server log: %v", err)
+	}
+	for _, want := range []string{"GGML_ASSERT(n_ctx > 0) failed", "#7  0x00007f0000 frame", "Aufruf:"} {
+		if !strings.Contains(string(written), want) {
+			t.Errorf("the log has no %q:\n%s", want, written)
+		}
+	}
+}
+
+// A line the program was still writing when it died has no newline, so it is only in
+// the writer's buffer — and on a crash that line is the assert itself.
+func TestALastLineWithoutItsNewlineIsKept(t *testing.T) {
+	r := newRing(10)
+	w := r.writer()
+	if _, err := w.Write([]byte("GGML_ASSERT(n_ctx > 0) failed")); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.tail(10); len(got) != 0 {
+		t.Fatalf("the ring already holds %v, want nothing until the line ends", got)
+	}
+	w.flush()
+	if got := r.tail(10); len(got) != 1 || got[0] != "GGML_ASSERT(n_ctx > 0) failed" {
+		t.Errorf("after flush the ring holds %v, want the unfinished line", got)
 	}
 }
 

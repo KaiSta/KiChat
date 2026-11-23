@@ -213,23 +213,72 @@ func (e *Engine) autoFold(ctx context.Context, chat *store.Chat, provider llm.Pr
 	// created compaction is irrelevant here — an automatic run has nobody to report back
 	// to, and "nothing to fold" is already the silent outcome.
 	opts := CompactOptions{Threshold: threshold, Ceiling: ceiling}
-	if midTurn && threshold > 0 {
-		// Between the rounds of one answer the threshold is also the aim, and that is what
-		// lets the planner fold a history shorter than KeepRecentTurns. Without an aim it
-		// refuses any automatic fold whose cut would keep every turn — so the between-rounds
-		// switch did nothing in the chats it exists for, because a turn that grows through
-		// tool calls is usually one of a few long turns and not one of many short ones. The
-		// growth then became a fold only after the backend refused the request for its size,
-		// which costs that round the whole answer it had already produced.
-		//
-		// The fold still stops before the newest user turn, so the question being answered
-		// and the tool results it is working from stay verbatim; only settled history becomes
-		// memory. The check before a turn keeps its own behaviour: there the user has a fold
-		// point between two messages, so a short chat is left alone rather than folded early.
+	// When the threshold is also the aim, and why two callers ask for it.
+	//
+	// Between the rounds of one answer the aim is what lets the planner fold a history
+	// shorter than KeepRecentTurns. Without one it refuses any automatic fold whose cut
+	// would keep every turn — so the between-rounds switch did nothing in the chats it
+	// exists for, because a turn that grows through tool calls is usually one of a few long
+	// turns and not one of many short ones. The growth then became a fold only after the
+	// backend refused the request for its size, which costs that round the whole answer it
+	// had already produced.
+	//
+	// A **project** asks for the aim before its turn as well, and for the same reason: it is
+	// the shape whose history is a few long work sessions, so the targetless cut either finds
+	// nothing older than its keep-turns boundary to fold or keeps turns that are over the
+	// threshold. It cannot wait for a between-rounds check either, because a reply that never
+	// calls a tool has no next round — and a project has no moment between answers to fold at.
+	// A chat keeps the old rule before a turn: there the user has a fold point between two
+	// messages, so a short chat is left alone rather than folded early.
+	//
+	// The fold still stops before the newest user turn, so the question being answered and
+	// the tool results it is working from stay verbatim; only settled history becomes memory.
+	if threshold > 0 && (midTurn || chat.IsProject()) {
 		opts.Target = threshold
 	}
 	_, err := e.compactWith(ctx, chat, provider, backendID, modelID, modelInfo, settings, opts)
 	return err
+}
+
+// inlineDocument is a document a fold has to carry with its message: the block as it is
+// rendered into a transcript, kept so the fold can prove the whole document made it in.
+type inlineDocument struct{ filename, text string }
+
+// loadInlineDocuments reads the inline text documents of the messages a fold is about to
+// summarise and appends each to its message, so the transcript renderer carries it.
+//
+// It is called for the transcript path only: the prefix path re-sends the request that
+// already carried the text, so reading the document again would be a store round trip per
+// attachment for nothing — and, when the document has gone, a failure the fold has no need
+// to hit (TestThePrefixPathDoesNotReadTheDocumentAgain). It runs once per fold because it
+// writes to the messages it is given; a retry with a smaller transcript renders from the
+// same content.
+func (e *Engine) loadInlineDocuments(messages []store.Message) ([]inlineDocument, error) {
+	var documents []inlineDocument
+	for i := range messages {
+		m := &messages[i]
+		for _, a := range m.Attachments {
+			if a.Placement != store.PlacementInline {
+				continue
+			}
+			// A text-only summary cannot see an image. Keep that turn verbatim rather than
+			// replace the picture with an invented description.
+			if isImageAttachment(a) {
+				return nil, uimsg.Errorf("chat.compactionImage")
+			}
+			if a.DocumentID == "" {
+				return nil, uimsg.Errorf("chat.compactionAttachmentMissing", a.Filename)
+			}
+			d, err := e.Store.GetDocument(a.DocumentID)
+			if err != nil {
+				return nil, uimsg.Errorf("chat.compactionAttachment", a.Filename, uimsg.Sentence(err))
+			}
+			block := "<attachment id=\"" + a.ID + "\">\n" + renderDocumentBlock(d, a) + "\n</attachment>"
+			documents = append(documents, inlineDocument{a.Filename, block})
+			m.Content += "\n\n" + block
+		}
+	}
+	return documents, nil
 }
 
 // compactWith performs one compaction. It returns the compaction it created, or
@@ -263,6 +312,7 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 		Threshold:         opts.Threshold,
 		Ceiling:           opts.Ceiling,
 		KeepRecentTurns:   effectiveKeepTurns(*chat, settings),
+		KeepRecentTokens:  effectiveKeepTokens(settings, assembly.Budget.EffectiveLimit),
 		Reserve:           settings.Compact.ReserveForResponse,
 		MaxSummaryTokens:  settings.Compact.MaxSummaryTokens,
 		Force:             opts.Force,
@@ -366,11 +416,16 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	// read it, less the prompt that carries it and a reserve for the answer.
 	// Measuring the prompt here, with the transcript left out, is what makes that
 	// subtraction exact instead of a guess.
+	// The memory is written in the app's language, not a guess at the conversation's:
+	// the user chose this language for the interface, and a German memory in an
+	// English chat is what made later answers German.
+	lang := promptLanguage(settings.Language)
 	overhead := llm.EstimateMessagesTokens([]llm.Message{
-		{Role: llm.RoleSystem, Content: summarySystemPrompt},
+		{Role: llm.RoleSystem, Content: summarySystemPrompt(lang)},
 		{Role: llm.RoleUser, Content: summarisePrompt(SummarizeOptions{
 			PreviousSummary: previous,
 			Focus:           opts.Focus,
+			Lang:            lang,
 		})},
 	})
 
@@ -383,70 +438,53 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	// inside the window — never to a fraction of the window, which would shrink the
 	// cap on a small context for no reason. A slice is added on top as slack for the
 	// estimator undershooting the backend's real tokenizer.
-	outputTokens := summaryOutputTokens
-	if configured := settings.Compact.MaxSummaryTokens; configured > outputTokens {
-		outputTokens = configured
+	answer := summaryOutputTokens
+	if configured := settings.Compact.MaxSummaryTokens; configured > answer {
+		answer = configured
 	}
 	margin := limit / 16
-	if room := limit - overhead - margin - summaryMinTranscriptTokens; outputTokens > room {
-		outputTokens = room
+	// The most the answer may be given: everything the window has beyond the margin and a
+	// transcript that is still worth reading. A fold that has already been trimmed to this
+	// has nothing left to hand over, which is the case the retry below refuses in.
+	maxAnswer := limit - overhead - margin - summaryMinTranscriptTokens
+	if maxAnswer < 1 {
+		maxAnswer = 1
 	}
-	if outputTokens < 1 {
-		outputTokens = 1
+	if answer > maxAnswer {
+		answer = maxAnswer
 	}
-	budget := PlanTranscriptBudget(limit, outputTokens+margin, overhead)
+	// The summarisation can re-send the chat's own request up to the fold boundary instead
+	// of a transcript of it (summarisationPrefix), which is what turns a fold on a local
+	// server from a full re-evaluation of the history into a cache hit. It is taken only
+	// when the request it makes still fits beside the answer the call may write: fitting is
+	// the one thing the transcript path guarantees unconditionally, so it stays the default
+	// and the prefix is the improvement, never the requirement.
+	// Only for the chat's own model. Another model never processed those bytes, so the
+	// prefix would be a full evaluation of a request larger than the transcript — the
+	// cache argument that justifies this path is exactly the argument against it there.
+	prefix := summarisationPrefix(assembly, plan)
+	if target.Backend != backendID || target.Model != modelID {
+		prefix = nil
+	}
+	// Priced as it will be sent: the chat's messages, then the instruction alone, in the
+	// prefix path's wording, which no longer repeats the memory. The shape retry needs no
+	// allowance here — it carries the answer, not the transcript (summaryRestructure).
+	prefixCost := 0
+	if len(prefix) > 0 {
+		tail := summariseTail(SummarizeOptions{PreviousSummary: previous, Focus: opts.Focus, Lang: lang}, lang, true)
+		// The prefix is the chat's own request and carries no tools, so the chat's provider says
+		// whether its reasoning travels — and where it does, those tokens are sent again.
+		prefixCost = llm.EstimateMessagesTokensAs(prefix, replaysReasoning(target.Provider, false)) +
+			llm.EstimateMessagesTokens([]llm.Message{
+				{Role: llm.RoleUser, Content: tail + "\n\n" + noThinkTag},
+			})
+	}
 	transcriptMessages := append([]store.Message(nil), toFold...)
-	type documentBlock struct{ filename, text string }
-	var documents []documentBlock
-	for i := range transcriptMessages {
-		m := &transcriptMessages[i]
-		for _, a := range m.Attachments {
-			if a.Placement != store.PlacementInline {
-				continue
-			}
-			// A text-only summary cannot see an image. Keep that turn verbatim
-			// rather than replace the picture with an invented description.
-			if isImageAttachment(a) {
-				return nil, uimsg.Errorf("chat.compactionImage")
-			}
-			if a.DocumentID == "" {
-				return nil, uimsg.Errorf("chat.compactionAttachmentMissing", a.Filename)
-			}
-			d, err := e.Store.GetDocument(a.DocumentID)
-			if err != nil {
-				return nil, uimsg.Errorf("chat.compactionAttachment", a.Filename, uimsg.Sentence(err))
-			}
-			block := "<attachment id=\"" + a.ID + "\">\n" + renderDocumentBlock(d, a) + "\n</attachment>"
-			documents = append(documents, documentBlock{a.Filename, block})
-			m.Content += "\n\n" + block
-		}
-	}
-	// Leave room for the actual transcript, not merely its role headings.
-	if budget.Total <= 0 || budget.Block <= llm.EstimateTokens(truncationMarker) {
-		return nil, uimsg.Errorf("chat.compactionNoTranscript")
-	}
-	transcript := RenderTranscript(transcriptMessages, budget)
-	usable := false
-	for _, line := range strings.Split(transcript, "\n") {
-		switch strings.TrimSpace(line) {
-		case "", "…[gekürzt]", "### Nutzer", "### Assistent", "### Tool-Ergebnis", "### Websuche":
-		default:
-			usable = true
-		}
-	}
-	if !usable {
-		return nil, uimsg.Errorf("chat.compactionNoTranscript")
-	}
-	for _, document := range documents {
-		if !strings.Contains(transcript, document.text) {
-			return nil, uimsg.Errorf("chat.compactionAttachmentTooLarge", document.filename)
-		}
-	}
-
-	// A cap, not a target: the model is told to be terse, so it stops far short of
-	// it. The cap only stops a runaway generation from filling the window — the
-	// failure that produced a 20k-token "memory" for a 13k-token fold.
-	maxTokens := outputTokens
+	// Only the transcript path carries the attachment text — the prefix path re-sends a request
+	// that already has it — and which path an attempt takes is decided in the loop, so the
+	// documents are read by the first attempt that renders a transcript.
+	var documents []inlineDocument
+	documentsLoaded := false
 
 	// Summarising is not a reasoning task, so the model is asked to skip thinking.
 	// A model that advertises thinking gets the backend's own control; a backend
@@ -454,22 +492,100 @@ func (e *Engine) compactWith(ctx context.Context, chat *store.Chat, provider llm
 	// toggle (LM Studio's `enable_thinking`) is asked the same way. Either way the
 	// in-prompt soft switch goes out, and Summarize's retry covers a model that
 	// thinks regardless.
-	disableThinking := target.Info.Has(llm.CapThink)
-	if t, ok := target.Provider.(llm.ThinkingToggle); ok && t.CanToggleThinking() {
-		disableThinking = true
+	disableThinking := target.withoutThinking()
+
+	// The answer's allowance and the transcript's are one budget: what the answer does not
+	// take, the transcript may. A summary cut off at the cap — the one failure more room
+	// fixes — is therefore answered by shrinking the transcript and giving the answer that
+	// room, instead of failing a fold that had everything but the space for its own memory.
+	// The refusal stays for where that cannot help: a ceiling that is no real gain over the
+	// cap (maxAnswer), or a transcript that can no longer be sent at all — there the guard
+	// that failed is the error, because it names the one thing left to act on.
+	var summaryOptions SummarizeOptions
+	var summary string
+	for {
+		budget := PlanTranscriptBudget(limit, answer+margin, overhead)
+		// Recomputed per attempt: a larger answer can no longer afford the prefix, which is
+		// the right moment to fall back to the transcript it has to come from anyway.
+		usePrefix := len(prefix) > 0 && prefixCost+answer+margin <= limit
+		if !usePrefix && !documentsLoaded {
+			var err error
+			if documents, err = e.loadInlineDocuments(transcriptMessages); err != nil {
+				return nil, err
+			}
+			documentsLoaded = true
+		}
+		if !usePrefix {
+			// Leave room for the actual transcript, not merely its role headings. This
+			// guard, the one below it and the document check are all about the transcript
+			// path, so a run that re-sends the request instead is not refused by them.
+			if budget.Total <= 0 || budget.Block <= llm.EstimateTokens(clipMarker) {
+				return nil, uimsg.Errorf("chat.compactionNoTranscript")
+			}
+		}
+		transcript := RenderTranscript(transcriptMessages, budget)
+		if !usePrefix && !transcriptIsUsable(transcript) {
+			return nil, uimsg.Errorf("chat.compactionNoTranscript")
+		}
+		if !usePrefix {
+			for _, document := range documents {
+				if !strings.Contains(transcript, document.text) {
+					return nil, uimsg.Errorf("chat.compactionAttachmentTooLarge", document.filename)
+				}
+			}
+		}
+		// A cap, not a target: the model is told to be terse, so it stops far short of it.
+		// The cap only stops a runaway generation from filling the window — the failure that
+		// produced a 20k-token "memory" for a 13k-token fold. It is raised only by the retry
+		// below, which takes that room from the transcript.
+		summaryOptions = SummarizeOptions{
+			PreviousSummary: previous,
+			Transcript:      transcript,
+			Prefix:          prefixOrNil(prefix, usePrefix),
+			Focus:           opts.Focus,
+			Lang:            lang,
+			Temperature:     settings.Compact.SummaryTemperature,
+			MaxTokens:       answer,
+			NumCtx:          target.NumCtx,
+			DisableThinking: disableThinking,
+			ContextLimit:    limit,
+		}
+		written, err := Summarize(ctx, target.Provider, target.Model, summaryOptions)
+		if err == nil {
+			summary = written
+			break
+		}
+		if !isSummaryTruncated(err) {
+			return nil, err
+		}
+		// Straight to the largest answer the window allows, not a doubling ladder: the fold
+		// already knows that ceiling, while every rung is a full summary generation that a
+		// model running to the cap pays again and again. The quarter-more floor is what keeps
+		// the refusal for a fold whose transcript already sits at that ceiling.
+		if maxAnswer*retryGrowthDenominator < answer*retryGrowthNumerator {
+			return nil, err
+		}
+		answer = maxAnswer
 	}
-	summary, err := Summarize(ctx, target.Provider, target.Model, SummarizeOptions{
-		PreviousSummary: previous,
-		Transcript:      transcript,
-		Focus:           opts.Focus,
-		Temperature:     settings.Compact.SummaryTemperature,
-		MaxTokens:       maxTokens,
-		NumCtx:          target.NumCtx,
-		DisableThinking: disableThinking,
-		ContextLimit:    limit,
-	})
-	if err != nil {
-		return nil, err
+	// A memory that ignored the structure it was asked for is prose, and prose is what
+	// every later turn has to search instead of scan. One restructure is cheap against
+	// that, and it is only half a validation: nothing here rejects or shortens a summary,
+	// because a memory with the wrong shape still knows more than none. A retry that
+	// also comes back shapeless leaves the first answer in place.
+	//
+	// The size gate is what stops this from doubling the cost of every fold: a second
+	// request is minutes on a CPU-hosted model, and it buys nothing for an answer short
+	// enough that its shape does not matter (summaryStructureMinTokens).
+	//
+	// The retry sends the first answer back, not the history (summaryRestructure): it asks
+	// for headings the model can add to what it already wrote, so the request that asks a
+	// second time carries a draft bounded by the output cap instead of a transcript bounded
+	// by the window — the reason a fold on a long history no longer pays twice.
+	if llm.EstimateTokens(summary) >= summaryStructureMinTokens && !summaryHasStructure(summary) {
+		if second, retryErr := Restructure(ctx, target.Provider, target.Model, summary, summaryOptions); retryErr == nil &&
+			summaryHasStructure(second) {
+			summary = second
+		}
 	}
 
 	trigger := triggerName(opts.Force)
@@ -528,6 +644,21 @@ type summaryTarget struct {
 // the choice was not applied, or the fix for an empty summary stays hidden.
 // (Measured on a local reasoning model: 48 of 48 output tokens went to reasoning
 // and not a single message was produced.)
+// withoutThinking is how a background request asks a model not to reason. One rule rather
+// than two because a fold and a title have the same failure: `max_tokens` bounds reasoning
+// and answer together, so a model that thinks first produces nothing either job can use.
+// The model's own claim decides; a backend whose request accepts the toggle is asked even
+// when its listing says nothing (LM Studio's `enable_thinking`).
+func (t summaryTarget) withoutThinking() bool {
+	if t.Info.Has(llm.CapThink) {
+		return true
+	}
+	if toggle, ok := t.Provider.(llm.ThinkingToggle); ok && toggle.CanToggleThinking() {
+		return true
+	}
+	return false
+}
+
 func (e *Engine) summariser(ctx context.Context, provider llm.Provider, backendID, modelID string,
 	modelInfo llm.ModelInfo, chatLimit, numCtx int, settings config.Settings) (summaryTarget, error) {
 
@@ -621,6 +752,38 @@ func effectiveThreshold(chat store.Chat, settings config.Settings) float64 {
 	return 0.80
 }
 
+// prefixOrNil is the prefix a run actually sends: nil when the transcript path was chosen,
+// so Summarize has one condition to test rather than two.
+func prefixOrNil(prefix []llm.Message, use bool) []llm.Message {
+	if !use {
+		return nil
+	}
+	return prefix
+}
+
+// effectiveKeepTokens is how much of the newest history a fold leaves verbatim, in
+// tokens. A configured value wins; 0 derives it from the limit the plan is priced
+// against, because the right figure is a share of what the model can hold rather than
+// one number for every backend — 15 000 tokens is most of an 8k window and a tenth of a
+// 131k one. Deriving it from EffectiveLimit rather than the window is what keeps the
+// value and the plan from disagreeing on a backend whose request ceiling binds.
+func effectiveKeepTokens(settings config.Settings, limit int) int {
+	if configured := settings.Compact.KeepRecentTokens; configured > 0 {
+		return configured
+	}
+	if limit <= 0 {
+		return 0
+	}
+	quarter := limit / 4
+	if quarter < keepTokensMin {
+		return keepTokensMin
+	}
+	if quarter > keepTokensMax {
+		return keepTokensMax
+	}
+	return quarter
+}
+
 func effectiveKeepTurns(chat store.Chat, settings config.Settings) int {
 	if chat.KeepRecentTurns > 0 {
 		return chat.KeepRecentTurns
@@ -631,9 +794,34 @@ func effectiveKeepTurns(chat store.Chat, settings config.Settings) int {
 	return 6
 }
 
-// autoTitle names a chat from its first message using the same model, cheaply.
+// titleMaxTokens is the output cap for a title, and it is not a title's size. `max_tokens`
+// bounds a reasoning model's private thinking and its answer together, so a cap sized to the
+// words is a cap that thinking can spend before the first word: 32 was that mistake, and on
+// a reasoning backend every title came back as `finish_reason: length` with an empty body.
+// 256 fits any title this prompt can produce once thinking is off, and leaves it a
+// background call.
+const titleMaxTokens = 256
+
+// titleMaxRunes is the longest title kept as it stands. A longer answer is cut rather than
+// thrown away: the cut still names the chat, and discarding it would leave the title empty
+// and the next turn asking again.
+const titleMaxRunes = 80
+
+// autoTitle names a chat from its first message. Best effort throughout: nothing here
+// reports to the user, so every way it can fail has to end somewhere other than the next
+// turn's copy of the same request.
+//
+// The model is the configured summariser's when one is set, because naming a chat is
+// background work of the same kind as folding one — a user who pointed summaries at a cheap
+// model meant this job too. A configured model that cannot be reached is not an error the
+// way it is for a fold: a title is optional and has nobody to report to, so the chat's own
+// model answers instead.
+//
+// Thinking is switched off wherever the backend allows it, for the same reason a summary
+// switches it off. Both the backend's control and the in-prompt soft switch go out, since a
+// local template with no reasoning parameter is only reachable by the tag.
 func (e *Engine) autoTitle(ctx context.Context, chat *store.Chat, provider llm.Provider,
-	modelID, firstMessage string) {
+	backendID, modelID string, modelInfo llm.ModelInfo, settings config.Settings, firstMessage string) {
 
 	source := strings.TrimSpace(firstMessage)
 	if source == "" {
@@ -642,27 +830,50 @@ func (e *Engine) autoTitle(ctx context.Context, chat *store.Chat, provider llm.P
 	if len(source) > 600 {
 		source = source[:600]
 	}
+	target := e.titleTarget(provider, backendID, modelID, modelInfo, chat.NumCtx, settings)
 	titleCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	text, _, err := Complete(titleCtx, provider, llm.ChatRequest{
-		Model: modelID,
+	req := llm.ChatRequest{
+		Model: target.Model,
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: "Du erzeugst einen kurzen Titel für einen Chat. " +
 				"Antworte mit 3 bis 6 Wörtern, ohne Anführungszeichen, ohne Satzzeichen am Ende, " +
-				"in der Sprache der Nachricht."},
+				"in der Sprache der Nachricht." + "\n\n" + noThinkTag},
 			{Role: llm.RoleUser, Content: source},
 		},
 		Temperature: 0.2,
-		MaxTokens:   32,
-	})
+		MaxTokens:   titleMaxTokens,
+		NumCtx:      target.NumCtx,
+	}
+	if target.withoutThinking() {
+		off := false
+		req.Think = &off
+	}
+	out, err := runToCompletion(titleCtx, target.Provider, req)
 	if err != nil {
 		return
 	}
+	// A backend with no reasoning channel inlines the deliberation in the content, so a
+	// ` thinking` block has to go before the answer is read as a title.
+	text, _ := stripThinking(out.text)
 	title := strings.TrimSpace(text)
 	title = strings.Trim(title, "\"'`*# ")
 	title = strings.SplitN(title, "\n", 2)[0]
-	if title == "" || len(title) > 80 {
+	if strings.TrimSpace(title) == "" {
+		if !llm.Truncated(out.stopReason) {
+			return
+		}
+		// Structural, and the shape a reasoning model produces when thinking it was not
+		// asked about ate the whole budget: asking again produces the same nothing, on
+		// every turn, for as long as the chat has no title. The opening of the message
+		// names it instead, which ends that loop at the cost of a name nobody has to keep.
+		title = titleFromMessage(source)
+	}
+	if runes := []rune(title); len(runes) > titleMaxRunes {
+		title = titleFromMessage(title)
+	}
+	if title == "" {
 		return
 	}
 	if err := e.Store.SetChatTitle(chat.ID, title); err != nil {
@@ -670,4 +881,44 @@ func (e *Engine) autoTitle(ctx context.Context, chat *store.Chat, provider llm.P
 	}
 	chat.Title = title
 	e.emit(events.Title, map[string]any{"chatId": chat.ID, "title": title})
+}
+
+// titleTarget is the model that names a chat: the configured summariser when one is set and
+// its backend is reachable, the chat's own model otherwise.
+func (e *Engine) titleTarget(provider llm.Provider, backendID, modelID string, modelInfo llm.ModelInfo,
+	numCtx int, settings config.Settings) summaryTarget {
+
+	own := summaryTarget{Provider: provider, Backend: backendID, Model: modelID, Info: modelInfo, NumCtx: numCtx}
+	ref := settings.Compact.SummaryModel
+	if ref.Backend == "" || ref.Model == "" || (ref.Backend == backendID && ref.Model == modelID) {
+		return own
+	}
+	other, ok := e.Registry.Provider(ref.Backend)
+	if !ok {
+		return own
+	}
+	// No NumCtx, as for a fold: the per-chat override was chosen for the chat's model.
+	return summaryTarget{
+		Provider:   other,
+		Backend:    ref.Backend,
+		Model:      ref.Model,
+		Info:       e.resolveModelCached(ref.Backend, ref.Model, settings),
+		Configured: true,
+	}
+}
+
+// titleFromMessage names a chat after the message it is about: whitespace collapsed, then
+// either whole or cut to titleMaxRunes at a word boundary. It is the title a chat gets when
+// the model could not give one, and it exists to end the retry rather than to be good.
+func titleFromMessage(source string) string {
+	line := strings.Join(strings.Fields(source), " ")
+	runes := []rune(line)
+	if len(runes) <= titleMaxRunes {
+		return line
+	}
+	cut := string(runes[:titleMaxRunes-1])
+	if i := strings.LastIndex(cut, " "); i > len(cut)/2 {
+		cut = cut[:i]
+	}
+	return strings.TrimSpace(cut) + "…"
 }

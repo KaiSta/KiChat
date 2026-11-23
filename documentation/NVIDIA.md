@@ -85,7 +85,7 @@ exactly four fields, and `created` is the same placeholder value on all 80:
 | `id` | `ModelInfo.ID` | the fully-qualified name, `publisher/model` |
 | `owned_by` | `Publisher` | also the id's first half |
 | — | `State: loaded` | hosted: it answers as soon as the request is authenticated |
-| — | `ContextLimit: 0` | no route of this API publishes a window |
+| `max_model_len` | `ContextLimit` | a self-hosted NIM (vLLM) states the window it serves; the hosted route sends no such field, so a hosted model stays at 0 |
 | — | `CapTools` | see below |
 | `object`, `created` | *not decoded* | `created` is a constant, so neither carries information |
 
@@ -303,7 +303,9 @@ shape Mistral's branch uses, so the "whole list, or one entry" split has one hom
 
 | test | what it pins |
 | --- | --- |
-| `TestNvidiaListingCarriesWhatThePlanningNeeds` | `Publisher` from `owned_by`, `State: loaded`, `CapTools`, no vision/thinking claim, and a window of **0** — the listing reports none, so nothing may be invented |
+| `TestNvidiaListingCarriesWhatThePlanningNeeds` | `Publisher` from `owned_by`, `State: loaded`, `CapTools`, no vision/thinking claim, and a window of **0** — the hosted listing reports none, so nothing may be invented |
+| `TestNvidiaListingUsesTheWindowASelfHostedNIMPublishes` | a local NIM's `max_model_len` becomes `ContextLimit`; the hosted listing, which omits the field, is unaffected |
+| `TestNvidiaLearnsTheWindowItsRefusalNames` | a refused request's window is remembered on the provider and appears in the next listing; a model that was never refused stays at 0 |
 | `TestNvidiaListingKeepsModelsTheAccountMayNotReach` | the no-filter decision, pinned so it cannot be quietly reversed |
 | `TestNvidiaListingSkipsEntriesItCannotRead` | one malformed entry does not hide the rest; an entry with no id is dropped |
 | `TestNvidiaStreamsReasoningWithoutDoublingIt` | `reasoning` + `reasoning_content` produce the words **once**, plus content, usage and stop reason |
@@ -349,9 +351,16 @@ discovering refusals, and the subset a given key can reach is not a fact about t
 
 ## 8. Known gaps
 
-1. **No context window, by design.** No route of this API reports one, so every NVIDIA model
-   arrives with `ContextLimit: 0` and has to be given a number through the per-model override
-   in Settings — the same state a plain OpenAI-compatible server is in. Seeding a table of known
+1. **No context window from the hosted route, by design.** No route of the hosted API reports
+   one, so every hosted model arrives with `ContextLimit: 0` and the per-model override in
+   Settings is the first source — the same state a plain OpenAI-compatible server is in. The
+   second is the deployment itself: when a request is too large, vLLM's refusal names the window
+   it enforces (`This model's maximum context length is 131072 tokens`),
+   `classifyRequestTooLarge` reads it into `RequestTooLargeError.Window`, and the provider keeps
+   it so the rest of the session plans against it. That is what makes the recovery fold possible
+   on a model that reported no window, and it costs only the request that was already refused.
+   A self-hosted NIM needs neither: vLLM's listing states the window it is serving as
+   `max_model_len`, which `fromNvidiaEntry` maps straight through. Seeding a table of known
    windows was rejected: it would be unmaintainable and would silently rot into wrong numbers
    presented as measured ones.
 

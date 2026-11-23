@@ -26,6 +26,11 @@ type Plain<T> = 0 extends 1 & T
 export namespace chat {
   export type ContextSegment = Plain<Gen.chat.ContextSegment>
   export type ContextBudget = Plain<Gen.chat.ContextBudget>
+  /**
+   * One message waiting behind a chat's running turn. The app owns the order — oldest first —
+   * and `id` is what deleting it names.
+   */
+  export type QueuedTurn = Plain<Gen.chat.QueuedTurn>
 }
 
 export namespace config {
@@ -89,6 +94,8 @@ export namespace runtime {
 
 export namespace main {
   export type AppInfo = Plain<Gen.main.AppInfo>
+  /** Whether a newer release exists, and the release page its download is on. */
+  export type AppUpdate = Plain<Gen.main.AppUpdate>
   /** The terminal the coding hand-off would open, or empty when there is none. */
   export type TerminalStatus = Plain<Gen.main.TerminalStatus>
   /**
@@ -108,6 +115,8 @@ export namespace main {
   export type AttachmentInput = Plain<Gen.main.AttachmentInput>
   export type RuntimeStatus = Plain<Gen.main.RuntimeStatus>
   export type ManagedStatus = Plain<Gen.main.ManagedStatus>
+  /** What one GGUF's header says about itself: architecture, layers, expert layout. */
+  export type ManagedModelTraits = Plain<Gen.main.ManagedModelTraits>
   /** The last look at llama.cpp's releases, carried inside RuntimeStatus. */
   export type RuntimeUpdate = Plain<Gen.main.RuntimeUpdate>
   /** One llama.cpp build on disk, as the cleanup list reads it. */
@@ -144,6 +153,20 @@ export namespace main {
 
 export namespace research {
   export type SearchResult = Plain<Gen.research.SearchResult>
+  /**
+   * DuckDuckGo's bot check, as the `search:challenge` event carries it.
+   *
+   * Hand-written rather than generated: no bound method returns it — the answer is posted from
+   * the backend's own copy — so there is no method signature for Wails to derive it from. It is
+   * also deliberately less than the backend holds: the form's action and hidden token stay there.
+   */
+  export type Challenge = {
+    query: string
+    instruction: string
+    tiles: Tile[]
+  }
+  /** One square of the check, named — its picture is asked for by that name. */
+  export type Tile = { name: string }
   export type SearchOutcome = Plain<Gen.research.SearchOutcome>
   export type ScrapeResult = Plain<Gen.research.ScrapeResult>
 }
@@ -189,6 +212,13 @@ export const App = {
     WailsApp.SetManagedModel(backendID, Gen.config.ManagedModel.createFrom(mm)),
   StartManagedModelWith: (backendID: string, mm: config.ManagedModel) =>
     WailsApp.StartManagedModelWith(backendID, Gen.config.ManagedModel.createFrom(mm)),
+  // The header facts of a GGUF, plus the expert-offload layer count this app would
+  // suggest for it from the file's size and the free device memory.
+  InspectManagedModel: (path: string, modelBytes: number, freeBytes: number) =>
+    WailsApp.InspectManagedModel(path, modelBytes, freeBytes),
+  // The same facts for a whole folder listing, keyed by path, so the model list can
+  // mark the files that have experts without a round trip per row.
+  InspectManagedModels: (paths: string[]) => WailsApp.InspectManagedModels(paths),
 }
 
 /**
@@ -213,7 +243,18 @@ export function defaultManagedModel(): config.ManagedModel {
     cacheTypeK: 'f16',
     cacheTypeV: 'f16',
     offload: 'auto',
+    // The pre-Experts pair, kept at its defaults: a placement is stored per file in
+    // `experts` (keyed by path) because a layer count tuned for one mixture is the wrong
+    // answer for the next file started on the same backend.
+    expertOffload: 'auto',
+    expertLayers: 0,
+    experts: {},
     extraArgs: '',
+    // llama.cpp's several slots, off: a managed start asks for one (`--parallel 1`),
+    // which is what a single-session machine wants and the combination MTP is
+    // documented for. Turning it on leaves the server's own count, so a second
+    // simultaneous request runs beside the first.
+    parallel: false,
     // The MLX-only section. Its zeros mean "the server's own default", and the
     // field is present for every entry because the bridge's JSON carries it; only
     // a kind that reads it acts on it.
@@ -255,18 +296,28 @@ export const EV = {
   toolOutput: 'chat:tool-output',
   status: 'chat:status',
   done: 'chat:done',
+  // A chat's queue of messages waiting behind its running turn. The whole list travels in
+  // the event, so the window can set it rather than apply a delta.
+  queue: 'chat:queue',
   error: 'chat:error',
   warning: 'chat:warning',
   budget: 'chat:budget',
   compaction: 'chat:compaction',
   title: 'chat:title',
   chatsChanged: 'chats:changed',
+  // The result of a background look at the app's own releases; not a `chat:` name
+  // because it is about the installation rather than a conversation.
+  appUpdate: 'app:update',
   attachments: 'chat:attachments',
   approval: 'chat:approval',
   // Not a `chat:` name, because a draw is not something a chat engine does: it is the
   // picture backend talking about work it is doing right now, and the row it lands on can
   // be a picture that does not exist yet.
   imageProgress: 'image:progress',
+  // DuckDuckGo refused a search with a bot check the reader can answer. The search itself
+  // still failed — the model was told so — and this is the dialog that clears the way for
+  // the next one.
+  searchChallenge: 'search:challenge',
 } as const
 
 export interface DeltaPayload {
@@ -300,6 +351,11 @@ export interface ToolOutputPayload {
 export interface StatusPayload {
   chatId: string
   phase: string
+}
+/** A chat's whole queue, oldest first, each time it gains, sends or loses a message. */
+export interface QueuePayload {
+  chatId: string
+  queue: chat.QueuedTurn[]
 }
 export interface DonePayload {
   chatId: string

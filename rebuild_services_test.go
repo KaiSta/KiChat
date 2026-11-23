@@ -94,8 +94,18 @@ func TestRebuildingServicesKeepsTheRunningTurn(t *testing.T) {
 	if !second.IsRunning("c1") {
 		t.Fatal("the rebuilt engine does not see the running turn")
 	}
-	if err := second.Send(chat.TurnRequest{ChatID: "c1", Text: "zweite Frage"}); err == nil {
-		t.Error("a second turn started beside the one the rebuild inherited")
+	// A second message waits behind the inherited turn — the queue, like the running turn
+	// itself, is state the rebuild must not lose.
+	if err := second.Send(chat.TurnRequest{ChatID: "c1", Text: "zweite Frage"}); err != nil {
+		t.Errorf("Send after the rebuild: %v", err)
+	}
+	if got := second.Queued("c1"); len(got) != 1 || got[0].Text != "zweite Frage" {
+		t.Errorf("Queued = %+v, want the message waiting behind the inherited turn", got)
+	}
+	// Dropped by hand: Stop leaves the queue alone, and this provider blocks for ever, so the
+	// message would otherwise start a turn that nothing here is waiting for.
+	if waiting := second.Queued("c1"); !second.DropQueued("c1", waiting[0].ID) {
+		t.Fatal("DropQueued did not find the message it had just listed")
 	}
 	if !second.Stop("c1") {
 		t.Fatal("Stop did not reach the turn the rebuild inherited")

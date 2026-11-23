@@ -453,7 +453,7 @@ CREATE INDEX IF NOT EXISTS idx_digest_cache_expiry ON digest_cache(expires_at);
 	// only other copy of the page is the result itself — and a client-side estimate of
 	// it would be a second tokenizer disagreeing with the one the budget charged.
 	// `condensed` is the cause, because the same two numbers also arise from the
-	// answer's tool budget, and a reader cannot tell those apart from the sizes alone.
+	// room left in the request, and a reader cannot tell those apart from the sizes alone.
 	// Appended here for the reason 4–7 are: the runner resumes at the version a
 	// database is already at, so an existing installation runs this entry and nothing
 	// earlier.
@@ -462,7 +462,7 @@ ALTER TABLE tool_calls ADD COLUMN source_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tool_calls ADD COLUMN context_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tool_calls ADD COLUMN condensed INTEGER NOT NULL DEFAULT 0;
 `,
-	// 9: the result the budget refused entirely.
+	// 9: the result the request had no room for at all.
 	//
 	// Its own migration rather than a fourth column in 8: 8 has already run on the
 	// installations that built between the two, so folding this in would leave them
@@ -556,6 +556,16 @@ CREATE INDEX IF NOT EXISTS idx_file_snapshots_chat ON file_snapshots(chat_id, up
 	// before this column existed and every backend that reports nothing, which is why
 	// the window shows the row only when it is positive.
 	`ALTER TABLE messages ADD COLUMN cache_hit_tokens INTEGER NOT NULL DEFAULT 0`,
+	// 16: the copy of a drawn picture that sits in a project's folder.
+	//
+	// A relative path, and a column of its own rather than a second use of `saved_path`: that
+	// one records where the *user* exported a picture, which may be anywhere and is replaced
+	// by the next Save as, while this one is a fact about the project the picture was drawn
+	// in. It is what lets a picture's card name the file without the reader opening the tool
+	// result above it. Empty is every picture drawn outside a project, and every row written
+	// before this column existed. Appended here for the reason migrations 4–15 are: the
+	// runner resumes at the version a database is already at.
+	`ALTER TABLE attachments ADD COLUMN project_path TEXT NOT NULL DEFAULT ''`,
 }
 
 // ftsMigration creates the search index. It is attempted separately because a

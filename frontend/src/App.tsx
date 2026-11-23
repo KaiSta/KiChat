@@ -6,6 +6,7 @@ import { LANGS } from './lib/i18n'
 import { errText, useStore } from './store'
 import { ChatView, permissionBadge } from './components/ChatView'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { SearchChallenge } from './components/SearchChallenge'
 import { Settings } from './components/settings/Settings'
 import { UnlockScreen } from './components/UnlockScreen'
 
@@ -19,6 +20,9 @@ export default function App() {
   // that runs on some renders but not others changes the hook count and React
   // unmounts the whole tree.
   const t = useStore((s) => s.t)
+  // The badge the daily check exists for: visible without opening the screen that
+  // would already show the answer. The reading arrives from the backend's background
+  // look (app:update) or from the one bootstrap asks for.
 
   useEffect(() => {
     void bootstrap()
@@ -63,6 +67,10 @@ export default function App() {
           <ViewSwitch view={view} />
         </ErrorBoundary>
       </main>
+      {/* Outside the view switch, like the toasts: a bot check belongs to the search that
+          triggered it, not to the screen that happens to be open, and a refusal during a
+          background search must still reach the reader. */}
+      <SearchChallenge />
       <Toasts />
     </div>
   )
@@ -83,6 +91,10 @@ function Sidebar() {
   const theme = useStore((s) => s.theme)
   const setTheme = useStore((s) => s.setTheme)
   const running = useStore((s) => s.running)
+  // The badge the daily check exists for: visible without opening the screen that would
+  // already show the answer. The reading arrives from the backend's background look
+  // (app:update) or from the one bootstrap asks for.
+  const updateAvailable = useStore((s) => Boolean(s.appUpdate?.available))
   // What a project row's permission note says. Read from the stored settings rather than from
   // the chat, for the reason the composer's note is: the answer is the same for every project
   // in the window, and only the sentence about *this* folder belongs in the row.
@@ -391,6 +403,18 @@ function Sidebar() {
           onClick={() => setView(view === 'settings' ? 'chat' : 'settings')}
         >
           ⚙ {t('nav.settings')}
+          {/* A dot, not a word pill: this sits on screen for as long as an update is
+              outstanding, and a coloured badge there turns every glance at the sidebar
+              into a reminder. The tooltip and the label carry the meaning. */}
+          {updateAvailable && (
+            <span
+              className="ml-2 inline-block h-1.5 w-1.5 rounded-full align-middle"
+              style={{ background: 'var(--warn)' }}
+              role="img"
+              aria-label={t('settings.updateAvailable')}
+              title={t('settings.updateAvailable')}
+            />
+          )}
         </button>
       </div>
 

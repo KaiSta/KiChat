@@ -184,6 +184,20 @@ func TestOversizedCurrentTurnFailsWithoutSummarisingIt(t *testing.T) {
 	}
 }
 
+func TestCurrentReasoningMustFitBeforeCallingTheProvider(t *testing.T) {
+	p := &fakeProvider{}
+	s, opt := setup(p)
+	opt.Compact = false
+	request := `{"model":"kichat","messages":[{"role":"user","content":"continue"},{"role":"assistant","content":"answer","reasoning_content":"` + strings.Repeat("reasoning ", 4000) + `"}]}`
+	w := send(s, request)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "context") {
+		t.Fatalf("oversized reasoning was not rejected: %d %s", w.Code, w.Body)
+	}
+	if len(p.requests) != 0 {
+		t.Fatal("oversized reasoning reached the provider")
+	}
+}
+
 func TestSummaryBatchesConsumeAllUnicodeSource(t *testing.T) {
 	var observed strings.Builder
 	p := &fakeProvider{reply: func(_ context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {

@@ -236,6 +236,17 @@ Every one of them was resolved against the live listing (linux/amd64): **CPU 17.
 Vulkan 31.8, ROCm 244.9, CUDA 152.8, SYCL 55.5, OpenVINO 110.7**, with the arm64 and macOS
 rows correctly offering fewer.
 
+**A CUDA suite has a card floor as well as a driver floor.** CUDA 13.0 removed offline
+compilation and library support for Maxwell, Pascal and Volta — everything below Turing,
+compute capability 7.5 — so a 13.x build carries no kernel for such a card. Measured on
+this machine (GTX 860M, compute capability 5.0, driver 580.178.04): `b12224-cuda-13.5`
+aborts inside `common_init_from_params` with `CUDA error: no kernel image is available for
+execution on the device` at `ggml-cuda.cu:111`, called from `ggml_cuda_kernel_can_use_pdl`,
+while the 12.8 suite of the same release runs. `SuiteUsable` therefore weighs the card's
+capability as well as the driver (`cudaMinCapability`, `nvidiaComputeCapabilities`) and
+refuses the suite with a sentence naming both numbers, instead of downloading 153 MB of a
+backend whose first kernel aborts.
+
 **Adding a family or a source means touching lists in step, and a test holds them
 together.** For a family: `config.Accelerators()`, `runtime.Accelerators()` and the
 `settings.managed.accel*` labels in all three dictionaries. For a source:
@@ -405,6 +416,18 @@ lines wiped by the reset, and a start whose exec fails puts the row back to stop
 than leaving a "loading" row the panel would poll forever
 (`TestLateOutputFromAStoppedServerIsIgnored`, `TestAFailedExecLeavesNoLoadingRow`).
 
+**The ring is a window, not a record.** On an abort llama.cpp forks gdb, so the line that
+explains the crash is followed by twenty-odd frames and gdb's notes about sources it could
+not find; the ring holds 40, the panel shows 12, and the failure message quotes six. Every
+line is therefore also appended to `<dataDir>/llama-<backendID>.log` (the managed picture
+server's to `sd-images.log`) — owner-only, rolled at 4 MiB with one previous file — and a
+failed row names that path after its own quote of the reason
+(`internal/runtime/serverlog.go`, `TestAFailedServerNamesTheFileHoldingItsWholeOutput`).
+The message quotes the last line that looked like a failure, recorded as it arrived
+because gdb's output outruns the ring, and drops gdb's shapes, so the assert is what a red
+row shows instead of `__libc_start_call_main` or the `wait4` frame gdb stops on
+(`failureTail`, `isReasonLine`, `Ring.failureReason`).
+
 ### 3.7 GPU offload
 
 `-ngl, --gpu-layers, --n-gpu-layers` documents "either an exact number, 'auto', or 'all'
@@ -418,6 +441,133 @@ A managed model carries a mode (`ManagedModel.Offload`):
 | `auto` | nothing at all — the server's own default is the right answer |
 | `all` | `-ngl all` |
 | `off` | `-ngl 0`, because llama.cpp has no word for CPU only |
+
+**Mixture-of-experts models have a second placement knob.** `-cmoe, --cpu-moe` keeps every
+routed-expert tensor in system RAM and `-ncmoe, --n-cpu-moe N` keeps the first N layers' worth,
+while attention, the shared weights and the KV cache stay on the device. That is what makes a
+model whose weights outgrow the card usable at all: Qwen3.6-35B-A3B is 20.4 GB at `Q4_K_M` but
+fires 3B parameters per token, and reported runs put it at 28–35 tok/s on a 12–16 GB card with
+32 GB of RAM. A managed entry keeps that placement per file — `Experts`, keyed by the GGUF's path,
+each an `ExpertChoice` (`auto`, `cpu`, `layers`) with its layer count — because a count that
+fits one mixture is the wrong answer for another, and the chat's picker moves only the path. A file
+with no stored choice starts on `auto`: neither flag, because `--fit` already places the experts as
+far into the device as they go. A stored `auto` is a decision and survives, so a file set back to
+automatic is not suggested at again. A dense model ignores the setting — it has no expert tensors
+to move.
+
+The panel does not make you guess whether a file is an MoE: it reads `general.architecture`,
+`block_count`, `expert_count` and `expert_used_count` out of the selected GGUF's header (a bounded
+read of the metadata block, cached by size and mtime), keeps the row only when the file has experts,
+and shows the counts it found. It also suggests a `--n-cpu-moe` count from the share of the file
+that does not fit in device memory, scaled by the block count, and fills the row with it as soon as
+an undecided file is selected — the control then states what a start would do before anything is
+edited. A header it cannot read leaves the row in place: silence is not evidence of a dense model.
+
+The chat's model picker reads the same header when it starts a file that has no stored choice, so a
+first start from the picker lands on the suggested count instead of waiting for Settings. A choice
+already stored for that path is sent as it is — the picker fills a gap, it does not overrule one —
+and a file it cannot parse starts on `--fit` like any other untuned model.
+
+In the panel, *Use the suggestion (N)* returns that file to the recommended count — or to automatic
+placement when it fits — because a count typed once survives a switch to another file and back. The
+recommendation also needs no click: an undecided file is filled with it as soon as it is selected.
+The chat's picker list does not repeat the number — it is a reading of the file and the free memory,
+and a copy there would be one more thing to keep in step.
+
+**Multi-token prediction (MTP)** is the other per-file capability, and the one that changes speed
+rather than memory. A GGUF converted with the model's own MTP heads declares them as
+`{arch}.nextn_predict_layers`, and llama.cpp 22673 turns them on with `--spec-type draft-mtp`
+plus `--spec-draft-n-max N`: the model drafts N tokens itself and verifies them in one batch, so
+every draft it rejects costs a verification pass. The suggestion is **3**, and the number has a
+reason rather than a guess: 3 is llama.cpp's own default (`docs/speculative.md`) and the count the
+published Qwen3.6 27B/35B runs use, and the one direct 2-against-3 comparison on a single machine
+put 3 ahead — about 18–21 tok/s against 16, at 72% draft acceptance against 82%, because a draft
+that is mostly accepted earns more per verification pass than a short one that always is. Unsloth's
+2 is a starting point for smaller and older models, and its guide says to try 1–6; the measured
+guides that run 4–6 all pair them with `--spec-draft-p-min`, which stops the head once it is
+unsure. That floor is a per-file setting of its own, suggested at 0.75 — the value both measured
+guides use — and sent as `--spec-draft-p-min P` only alongside a draft count, since a floor with
+nothing to truncate describes nothing. Setting it is what makes the 1–6 range worth measuring:
+without it, past four the drafts are mostly rejected, and with it the head simply stops talking.
+The row appears only for a file whose header declares the heads, and the count is stored per
+file like the expert placement. That map has three states, and the start treats them
+differently: an absent entry means nobody has decided, so the file starts with the
+recommendation — which is what makes a pick in the chat get the same numbers the panel shows;
+a stored 0 is a deliberate off; a stored count is used as it is. The start checks the same
+header again, because the flag on a file without the heads stops the server rather than being
+ignored, so a count left on a replaced file sends nothing.
+
+MTP also depends on where the count is written, not only on whether it is. ISTA-DASLab's
+`Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` puts `tokenizer.ggml.tokens` at byte 1868 and
+`qwen35.nextn_predict_layers` at 10 944 502, behind ten megabytes of tokenizer arrays, so a
+read that stopped at the first tokenizer key never saw the heads — which is why the panel used
+to say "no MTP" about a file that declares it, while llama.cpp, which reads the whole metadata
+table, loaded it with them. The probe walks every key now, and then the tensor table as a
+second answer: a conversion that keeps the `blk.N.nextn.*` tensors and drops the key is read
+from the block index — one head, in the block after the trunk, is the layout llama.cpp
+expects — and the start supplies the count as `--override-kv {arch}.nextn_predict_layers=int:N`,
+since llama.cpp takes `n_layer_nextn` from that key alone and asserts it is positive before it
+builds the draft graph. A file whose nextn tensors sit anywhere else is left alone: there the
+override would make llama.cpp reinterpret trunk layers.
+
+One caveat belongs with the flags: MTP is documented for a single slot, so a `--parallel` above 1
+typed into the further arguments is outside what llama.cpp measures for it.
+
+**Slots cost memory, but as buffers rather than as cache, and the price is large enough to matter.**
+Measured in use on 2026-11-10, same 27B IQ3_S MTP file: the four slots of the auto default held
+18.45 GiB after two or three messages, and `-np 1` held **17.10 GiB** through the same kind of
+conversation and stayed there — **1.35 GiB, about 7 %**. Read straight after start-up the single slot
+shows 15.80 GiB, but that is before any decode: the missing 1.3 GiB arrives with the first request,
+so a load-time reading overstates the saving by exactly that much, which is worth knowing because it
+is the reading everybody takes first. The gap is compute and scheduler buffers sized for a
+multi-sequence graph, not KV — `-c` sizes the pool once, whatever the slot count, and with the
+unified cache (the default when slots are auto) one slot may reach all of it, so `-np 1` gives back
+memory without giving back usable context. It is the same allocation llama.cpp issue #23903 ran out
+of, where a *second* slot wanted ~983 MiB of PP buffer on a 35B-A3B with MTP. What a single user pays
+instead is concurrency: a second simultaneous request is deferred, not refused. The panel
+sets it with *Single session (--parallel 1)* beside the context field and ships it **ticked** —
+a managed start asks for one slot, so unticking it is the opt-in for concurrency — while a
+`-np` typed into the further arguments still wins over either.
+
+**`--ctx-checkpoints` buys time with host RAM, not VRAM.** `-ctxcp, --ctx-checkpoints` (alias
+`--swa-checkpoints`, default 32, with `-cms` spacing it at 8 192 tokens) caps how many copies of the
+state a prefix would otherwise lose one slot keeps: originally the sliding-window part of the cache
+(PR #15293), extended to hybrid and recurrent models (PR #16382). One is taken when a prompt finishes
+processing and restored when a later request shares that prefix, which is what keeps a SWA or hybrid
+model from reprocessing thousands of tokens before every turn; they are made only when `--swa-full`
+is unset, and `0` disables them. The copies live in system RAM — so this is the lever for the RAM
+bloat and OOM that unchecked checkpointing caused (issue #21690, where 1 or 0 was the workaround),
+not for a VRAM ceiling, which only the context size, the cache dtype and MTP move. A file with no
+sliding-window or recurrent layers never creates one, and a small `-c` never reaches the 8 192-token
+spacing, so on those the setting changes nothing either way.
+
+**The prefill graph is the other allocation a flag moves, and it is the one `--ubatch-size` owns.**
+`-ub, --ubatch-size` (default 512, against `-b, --batch-size` at 2048) is the physical batch,
+and llama.cpp sizes the prompt-processing compute buffer from it — the same class of buffer each
+slot was reserving, which is why the draft's twin is documented as "use a smaller value to spare
+VRAM" (`--spec-draft-n-ubatch`). Halving `-ub` lowers the peak reached while a prompt is processed
+and slows that processing, because the prompt is then fed in more passes; the weights, the KV cache
+and the decode path are untouched, so it is a lever for a card that runs out of memory on a long
+*first* turn rather than one short of cache. Not measured here — the honest read is the `compute
+buffer size` line llama.cpp prints at load, before and after the change.
+
+**MTP costs memory of its own, and a quantized V cache needs flash attention.** Measured on that 27B
+IQ3_S file, CPU, 4096 tokens of context: 13 061 MiB without MTP and 15 213 with it — about 2.1 GiB
+for the draft context — and the same gap at 16 384 tokens (13 803 against 16 029), so it is the
+draft's own weights, buffers and KV rather than a share of the main cache. Flash attention `on`
+with a q8_0 cache *saves* about 120 MiB (12 941), and MTP adds its 2.1 GiB on top of that (15 093).
+The draft cache stays f16 whatever the main one is: `--spec-draft-type-k`/`-v` change it, and a
+measured q8_0 pair came out no better here (15 110 MiB), so the app does not pass them. What it does
+refuse is the one pair llama.cpp cannot load at all — a quantized V cache with flash attention
+*off*, where the server answers `quantized V cache requires flash_attn to be enabled` and exits —
+which is why that combination is a sentence in the panel rather than a failed load.
+
+Those two readings also price one token of context on this file: 742 MiB across the 12 288 tokens
+between 4 096 and 16 384 is **~62 KiB a token** (0.060 MiB) without MTP, and 816 MiB across the same
+span with it (0.066 MiB, the draft's own cache included) — so the 1.35 GiB a one-slot start frees is
+worth roughly **23 000 more tokens** of window, or about 21 000 with MTP on. A q8_0 cache with flash
+attention on cuts that price to 8.5 bits a value, which is why the same memory buys about 43 000
+tokens with K and V both quantized.
 
 An exact count stays a *further argument* (`-ngl 24`), which is where a number only one
 model needs belongs, and it wins over the mode because the user's arguments go last on the
@@ -682,6 +832,95 @@ words instead of a sentence from the app.
 binds to `127.0.0.1` only, so this is a local-origin exposure rather than a network one; it is
 recorded as a limitation in `PLAN.md` §8.
 
+### 3.14 The libraries the archive does not carry
+
+The GPU archives ship the GPU code and not the vendor runtime, so which build runs is decided
+by what the machine already has on disk. The README keeps the picker and the measured offload;
+the prerequisites live here.
+
+**CUDA: the runtime bundle, the driver floor, and why the build is not self-contained.**
+The published CUDA build does **not** carry its runtime. Its `libggml-cuda.so` links
+`libcudart.so.13`, `libcublas.so.13` and the driver's own `libcuda.so.1`; unpacked on its own,
+`ldd libggml-cuda.so` answers `libcudart.so.13 => not found` on all of them (measured on b11538
+and b11541: 152.8 MB, 62 entries, exactly one of them CUDA-named).
+
+llama.cpp *does* publish the runtime separately, and KiChat fetches it in the same step under
+one progress bar: 440.2 MB for CUDA 13.4, 594.4 MB for 12.8, against 152.8 MB and 172.0 MB for
+the builds themselves. It is unpacked **beside** the launcher, because that `$ORIGIN` runpath is
+the only place the build looks. A CUDA install is therefore **593 MB fetched by the app itself**,
+and it is skipped when the machine already has a CUDA toolkit (`libcudart.so.<major>` and
+`libcublas.so.<major>` in the loader's index).
+
+The driver is the part no archive carries, and its version picks the build:
+
+| CUDA | oldest driver |
+| --- | --- |
+| 13.x | 580 |
+| 12.x | 525 |
+| 11.x | 450 |
+
+A release publishes several suites at once, and KiChat takes the newest one this machine can
+run, reading the driver version from `/proc/driver/nvidia/version`. A 570 driver therefore gets
+12.8 rather than a 13.4 build that would find no device and run the model on the CPU. A machine
+with no driver at all is refused before the download starts, and told that the driver is what is
+missing.
+
+**ROCm: the version has to line up, and AMD's repo has to outrank Ubuntu's.**
+The ROCm build has the same hole and no runtime bundle to fill it. Its `libggml-hip.so` links
+`libamdhip64`, `libhipblas` and `librocblas`, and those come from the system.
+
+**The versions have to line up.** Ubuntu 24.04 (noble, and Mint 22 on top of it) ships ROCm 5.7
+— `libamdhip64.so.5` — while the published assets ask for `libamdhip64.so.7`,
+`libhipblas.so.3` and `librocblas.so.5`. Those come from ROCm 7.x, so any 7.x or newer
+user-space runs the `rocm-10.0` build. KiChat checks before it downloads anything: with no
+matching HIP runtime it refuses the 245 MB build and names both versions instead of handing you
+a model that silently runs on the CPU.
+
+```sh
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://repo.radeon.com/rocm/rocm.gpg.key \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/rocm.gpg
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2.4 noble main" \
+  | sudo tee /etc/apt/sources.list.d/rocm.list
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends rocm-hip-runtime hipblas rocblas
+```
+
+That is 17 packages — measured at **3.1 GB to download and 7.5 GB unpacked**, most of it
+`rocm-llvm`, `comgr` and `rocblas`, and user-space only. The `amdgpu` module, `/dev/kfd` and
+`/dev/dri/renderD128` are the kernel's and are already there; your user still has to be in the
+`render` group (usually `video` too) to open them.
+
+**AMD's repository has to outrank Ubuntu's.** Ubuntu also packages `rocminfo` at `5.7.1`, a
+version that sorts *above* AMD's `1.0.0.70204`, so without a pin apt keeps Ubuntu's copy and the
+two stacks mix. AMD's own installer writes the same pin:
+
+```sh
+printf 'Package: *\nPin: origin repo.radeon.com\nPin-Priority: 600\n' \
+  | sudo tee /etc/apt/preferences.d/rocm-pin-600
+```
+
+Then check it, on the machine and in the app:
+
+```sh
+rocminfo | grep -E "Marketing Name|gfx11"   # -> AMD Radeon RX 7900 XT / gfx1100
+```
+
+The GPU has to be one that ROCm version supports (`gfx1100` is the 7900 XT). Restart KiChat or
+press Save / the refresh arrow in Settings → Backends — a running instance caches its device
+probe per binary path — then start the model.
+
+AMD's packages unpack into `/opt/rocm-<version>/lib` and register nothing with the loader, so
+KiChat resolves the directory itself (`ROCM_PATH`, then `/opt/rocm`, then the versioned trees,
+newest first) and starts `llama-server` with it on `LD_LIBRARY_PATH`. The device, library and
+version probes get the same environment, so the panel describes the build's situation rather than
+the app's.
+
+**If the panel still says it found no device**, it also names what the build cannot resolve
+(`libamdhip64.so.7, libhipblas.so.3, …`): those sonames did not arrive, so the install above did
+not land or the pin was skipped. Otherwise use **Vulkan** instead — it needs no ROCm and runs on
+every card RADV supports.
+
 ---
 
 ## 4. Ternary models on the GPU (measured)
@@ -875,6 +1114,20 @@ a third path (`/media/usb/models`) that holds models — a pick that landed on a
 in the row would neither add a chip nor scan anything. `ModelFolders` in the mock is computed
 from `settings.runtime.modelDirs` the way the backend computes it from the blob, so picking,
 forgetting and saving all move the chips rather than only the draft.
+
+The file whose header will not parse is in the folder every time: `…/Gemma-3-4B-Q4_K_M.gguf`
+answers `InspectManagedModel` with an error and is absent from `InspectManagedModels`, the two
+shapes `ProbeGGUF`'s callers produce. It is the expert controls' state without a reading —
+selecting it keeps the row (silence is not evidence of a dense model) at `automatic` and 0, with
+neither the suggested count nor the button that applies it, and the listing shows it without a
+MoE badge. A probe failure is caught rather than reported, so nothing about the file appears in
+the UI.
+
+Beside the two plain quantisations of Qwen3.6-35B-A3B sits one converted with its MTP heads,
+`…/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf`, and the mock answers its header with one `nextn_predict_layers`
+and a suggested 2 draft tokens. That is what makes both halves visible at once: the list's `MTP`
+badge and the panel's row appear on that file alone, and the two files without the heads show
+neither — the row and the badge are readings of the header, not of the name they happen to share.
 
 The loaded mark needs one flag and one click: `?fit=fits` installs a build and selects the
 Ministral file, and pressing **Start** then loads it — so the listing carries the mark while

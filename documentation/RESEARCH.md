@@ -221,7 +221,7 @@ tried as a second, differently-shaped layout.
 - **POST, not GET.** The comment records the measurement: POST is the more reliable form,
   because some networks block the GET variant.
 - **It presents a browser's identity, not a browser's user agent.** The connection is a
-  Chrome 133 ClientHello — cipher list, extension order, ALPN — from
+  Chrome 155 ClientHello — cipher list, extension order, ALPN — from
   `github.com/refraction-networking/utls`, and `net/http` only parses the response
   ([internal/research/browserclient.go](../internal/research/browserclient.go)). This is the
   single measure that works. Measured on **2026-11-03**, from one machine inside one minute:
@@ -232,6 +232,24 @@ tried as a second, differently-shaped layout.
   `impersonate="random"`, a `curl-impersonate` fork — and forced onto DuckDuckGo alone it
   managed one answer and then drew the challenge, which is why the identity is paired with
   the pacing below rather than used instead of it.
+- **The version is authored once, and the hello is named rather than auto.** `chromeMajor` in
+  `browserclient.go` is the only place the number lives: the user agent and the `sec-ch-ua`
+  hints are generated from it by Chromium's own rules — the fake brand's two separators from a
+  fixed character list, its version from `["8","99","24"][major%3]`, and one of six brand
+  orders by `major%6` — so the three cannot drift apart. The hand-copied literal this replaced
+  *had* drifted: it claimed `"Chromium";v="133", "Not(A:Brand";v="24", "Google Chrome";v="133"`
+  where Chrome 133 sent `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"`.
+  The hello is `utls.HelloChrome_155` by name, not `HelloChrome_Auto`, which follows the
+  dependency: Auto would move this client's wire identity on a `go get -u` while its user agent
+  stayed where it was. **158** is the stable channel as of 2026-11-17 and **152–158 measured
+  identical on every JA4 hash**, which is what makes a 158 user agent honest over a hello captured
+  from Chrome 155.0.8059.40 on 2026-10-06 — and that capture is why the dependency is pinned to
+  the untagged commit `v1.8.3-0.20261118233537-360383f893fb`, because v1.8.2, the newest tag,
+  stops at Chrome 133. Pinned by `TestSecChUAMatchesChromiumsRules` (eight measured versions),
+  `TestIdentityMajorsAgree` (user agent, hints and hello describe one browser) and
+  `TestBrowserClientPresentsChromesJa4`, which computes FoxIO's JA4 from the bytes on the wire:
+  `t13d1517h2_8daaf6152771_cb7bf5808d99` for the profile and the same with `h1` for what this
+  client sends, since it speaks HTTP/1.1 and nothing else.
 - **The request is written by hand, in Chrome's order.** `net/http` sorts header names, so the
   request is rendered — `Host`, `Content-Length`, `Cache-Control`, `sec-ch-ua`,
   `sec-ch-ua-mobile`, `sec-ch-ua-platform`, `Upgrade-Insecure-Requests`, `Origin`,
@@ -246,6 +264,10 @@ tried as a second, differently-shaped layout.
   which is the fingerprint this exists to avoid. One protocol step behind a browser is a smaller
   tell than a ClientHello that offers h2 and cannot speak it. Pinned by
   `TestBrowserClientHandshakesAsTheProfile`, which asserts the negotiated protocol server-side.
+  Chrome's ALPS extension is cut to the same list, because a browser derives its ALPS protocols
+  from the ones it offers in ALPN: an `h2` ALPS beside an `http/1.1`-only ALPN is a pair no
+  browser produces, and it is what this client sent while the two lists were set separately
+  (`TestBrowserClientPresentsChromesJa4` asserts the ALPS list too).
 - **One request per connection**, closed with the body: a search is one navigation, and a
   connection that sat idle through an 8 s pacing gap is stranger than a fresh one. The client
   advertises `gzip, deflate, br, zstd` — what Chrome advertises — and decodes all four, because
@@ -425,6 +447,70 @@ The measurements behind that are pinned from both sides: `TestIsDDGChallengeOnRe
 (a real result page is *not* flagged as a block), `TestDuckDuckGoEmptyResultIsNotABlock`,
 `TestDuckDuckGoReportsBotChallenge` and `TestDuckDuckGoLiteBlockSurfaces`.
 
+**The check is answerable in the window.** A refusal keeps its body's check: the parse goes into a
+package-level pending store and out to the window as an event, while the error stays a plain
+`ErrBlocked`, so pacing and fallback are unchanged. The window names a tile and ticks tiles; it
+never holds the form's action, its hidden token or a tile's address — the answer is posted and
+the pictures are fetched from the pending copy, through the same `browserClient`, jar included,
+because a clearance earned by another client proves nothing about this one. A name the check does
+not have, or a check that is gone, answers `ErrNoChallenge`, which the bridge words as "this check
+is gone — run the search again". Only `https` is
+required of an address taken out of the page's own markup; there is no host allowlist, because
+the page that supplied the address already knows the query it was asked, and a tile that moves
+to a CDN would otherwise stop loading.
+
+The parse was measured against the live interstitial on **2026-11-22**, and that measurement
+found two things a fixture had guessed wrong: the answer form identifies itself by **id**
+(`#challenge-form`, with a second form `#img-form` — the frame target the answer is posted from —
+that must not be picked instead), and each square's picture is a path **relative to the page**,
+`../assets/anomaly/images/challenge/<hash>.jpg`, next to a checkbox named `image-check_<hash>`.
+Looking for a class and resolving only absolute paths therefore found no form and no tiles, which
+is why a refused search could report the check without ever showing the grid. The parse now takes
+the address of the page it was served from and resolves against it, so protocol-relative,
+root-relative and relative URLs all work, and tiles are paired by the hash and **not** by
+position, because the pictures are not laid out in the boxes' order. The same live request
+answered one tile with 52 KB of `image/jpeg` over this client, so the grid is the page's own
+pictures rather than a placeholder.
+
+That measurement caught a second, silent failure behind the first: the action carries its query
+**unencoded** (`&q=Bürostuhl hohe Rückenlehne…`, spaces and UTF-8 as they are), and a space on the
+request line is not a request at all — posting the form's own action verbatim was answered
+`400 Bad Request`, so a ticked check could never be sent. The client now percent-encodes what a
+request line cannot carry, exactly where a browser does it when it posts a form, and the live
+check confirms the rest of the path: the answer is read and judged by the host — a guessed set of
+squares draws another check rather than a 400. An answer the host does not accept is therefore
+reported as exactly that — "tick the squares of the new check and send it again" — while the new
+check replaces the old grid in the dialog. It is deliberately not the first refusal's sentence:
+that one sends the reader to a browser and promises a pause, and neither is true after they have
+just answered in the window.
+
+The answer is also posted as the search page posts it. The form lives on `html.duckduckgo.com` and
+posts to `duckduckgo.com`, a hop a browser makes as `Origin: https://html.duckduckgo.com`,
+`Referer: https://html.duckduckgo.com/html/` and `Sec-Fetch-Site: same-site`; naming the site
+itself as the origin is a hop no browser makes, and an answer shaped like that is judged as
+automation rather than as an answer. The check therefore remembers the page it was served on, and
+the answer's request is built from it (`postFormFromPage`, `formFetchSite`).
+
+A verdict and an automation refusal both arrive as the check's own markup, so the live check
+does not infer which one it got: it captures the reply whole — `scratch/ddg-answer.html`, with a
+one-screen summary in `scratch/ddg-answer.txt` — and records what separates them. The summary's
+header lines are read out of the request text the client builds, not written by hand: `Origin` is
+the page's scheme and host, `Referer` its whole address, and `Sec-Fetch-Site` the hop between them,
+so the capture cannot state a header the request does not send. A different set
+of squares means the host read the ticks and drew a new puzzle; the same squares coming back means
+the answer was not taken at all; a reply that is not a check means neither. When the identity is
+trusted and the search returns results, there is no check to answer and the test says so instead of
+failing.
+
+`TestParseDDGChallengeGrid`, `TestDuckDuckGoOffersTheCheckToTheWindow`,
+`TestSolveChallengePostsTheTickedTilesAndReturnsTheResults` (which also fetches a tile by name and
+asserts the answer's Origin, Referer and `Sec-Fetch-Site`),
+`TestSolveChallengeSaysWhenTheAnswerWasNotAccepted`,
+`TestBrowserClientPostsTheAnswerAsTheSearchPage` and `TestBrowserClientCarriesTheSitesCookies` pin
+the parse, the offer, the answer, its wording and the jar; `TestLiveDDGInterstitialMarkup` is the
+one that reaches the real page, and it leaves the bodies in `scratch/` when the parse stops matching
+the markup.
+
 ---
 
 ## 6. Scraping a page
@@ -432,6 +518,24 @@ The measurements behind that are pinned from both sides: `TestIsDDGChallengeOnRe
 `scrape_url` and `ScrapeIntoChat` share one `Scraper`
 ([internal/research/scrape.go:168](../internal/research/scrape.go#L168)). It is guarded, and
 each guard exists because of a specific way this can be abused.
+
+**The request asks for the app's language.** `Accept-Language` is built from the window's
+setting — `de-DE,de;q=0.9,en;q=0.8`, `en-US,en;q=0.9` or `zh-CN,zh;q=0.9,en;q=0.8` — rather
+than the fixed German header it used to send, so a server that negotiates by language answers
+the reader's language where it can. The value comes from the raw setting, not
+`config.ModelLanguage`, because a Chinese window has a Chinese header even though the
+model-facing sentences fall back to English.
+
+**A refusal is retried once as the browser.** A **403** or **503** from the ordinary fetch is
+retried once over the Chrome profile in `browserclient.go`: the same ClientHello and header
+conventions as the DuckDuckGo request. The retry follows redirects with `guardHost`
+and the robots rules applied to every hop, and the connection keeps the dial-time
+private-address check, so it is not a way around either guard. It is one attempt, and the
+original status is reported if it fails. A **429** is not retried: it is a rate limit, not a
+verdict on the client identity, and a second handshake does not make it true. A challenge
+page served with HTTP 200 still reaches the extractor as page text; only the two statuses
+trigger the retry. A configured HTTP proxy disables it, because this client speaks to the
+origin directly and would bypass the proxy the ordinary client honours.
 
 **SSRF is refused at two layers.** `guardHost` rejects `localhost`, anything ending in
 `.local` or `.internal`, and any loopback, private, link-local or unspecified address; for
@@ -642,7 +746,7 @@ Every parser has a fixture test beside it, and the guards have theirs:
 | --- | --- |
 | `research_test.go` | Brave's five sections and the infobox order (`TestParseBraveResponse`), the count clamp, both DDG layouts, a **layout change returning nothing rather than a wrong answer**, URL normalisation, dedupe/rerank, the SSRF block, non-http schemes, the limiter's cancellation, `robots.txt` parsing |
 | `brave_context_test.go` | the context envelope, empty snippets dropped, query clamping, the failure classification, the **request shape** (parameters as sent), the token floor, the missing-key case, and the three chain-level fallback cases — quota, no key, empty query — plus `TestGroundedContextFallbackCountsBraveOnce` |
-| `duckduckgo_test.go` | that the interstitial is reported as a block, that an empty result is **not** one, that a lite block surfaces, that real result markup is not misread as a challenge, that a refusal and a 503 are each **retried** into results, that a second parallel search outlasts the refusal it drew, that a parallel burst reaches the host one pacing gap apart, and the pacer's growth (the first refusal included), ceiling, untouched queue when a wait is declined, and bounded wait |
+| `duckduckgo_test.go` | that the interstitial is reported as a block, that an empty result is **not** one, that a lite block surfaces, that real result markup is not misread as a challenge, that a refusal and a 503 are each **retried** into results, that a second parallel search outlasts the refusal it drew, that a parallel burst reaches the host one pacing gap apart, and the pacer's growth (the first refusal included), ceiling, untouched queue when a wait is declined, and bounded wait; and that a refusal's check reaches the pending store and the window, that its tiles are fetched by name, and that an unknown name answers `ErrNoChallenge` |
 | `scrape_cache_test.go` | that a page cached under a small budget still serves a larger one, and that the cached path applies the caller's bound |
 | `scrape_guard_test.go` | that a redirect hop is re-guarded, that the chain stops at the limit, and the dial-time check |
 

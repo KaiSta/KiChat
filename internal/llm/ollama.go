@@ -46,6 +46,10 @@ func newOllamaProvider(baseURL string) *ollamaProvider {
 func (p *ollamaProvider) ID() string   { return "ollama" }
 func (p *ollamaProvider) Name() string { return "Ollama" }
 
+// ReplaysReasoning reports that every Ollama request carries an assistant reply's reasoning:
+// toOllamaMessages fills the message's `thinking` field from the stored row, tools or not.
+func (p *ollamaProvider) ReplaysReasoning(bool) bool { return true }
+
 func (p *ollamaProvider) Health(ctx context.Context) error {
 	var v struct {
 		Version string `json:"version"`

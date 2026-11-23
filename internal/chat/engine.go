@@ -22,12 +22,11 @@ import (
 // Measurements remember what a backend said the prompt cost, so the context
 // meter can report a real number instead of an estimate.
 type Measurement struct {
-	Backend             string
-	Model               string
-	PromptTokens        int
-	Seq                 int
-	ReplayToolReasoning bool
-	At                  time.Time
+	Backend         string
+	Model           string
+	PromptTokens    int
+	Seq             int
+	ReplayReasoning bool
 }
 
 // TurnRequest asks the engine to produce one assistant reply.
@@ -115,9 +114,16 @@ func (e *Engine) ActiveChats() []string {
 	return e.turns.chats()
 }
 
-// Stop cancels a running turn. The partial reply is kept and marked
-// interrupted, and any tool call left in flight is closed off so the next
-// request is still valid.
+// Stop cancels a running turn and nothing else.
+//
+// The messages queued behind it stay where they are: deleting what the user typed is their
+// decision, and the queue has a delete button for exactly that. What Stop stops is the answer,
+// so the message at the head of the queue starts as soon as the chat is free — which the window
+// says out loud ("the next queued message goes out now") rather than letting a new answer
+// appear out of a click that read as "stop everything".
+//
+// The partial reply is kept and marked interrupted, and any tool call left in flight is closed
+// off so the next request is still valid.
 func (e *Engine) Stop(chatID string) bool {
 	handle, ok := e.turns.handle(chatID)
 	if !ok {
@@ -130,6 +136,7 @@ func (e *Engine) Stop(chatID string) bool {
 
 // StopAll cancels every running turn.
 func (e *Engine) StopAll() {
+	e.turns.clearAllQueued()
 	for _, h := range e.turns.handles() {
 		h.cancel()
 	}
@@ -171,16 +178,21 @@ func (e *Engine) InvalidateMeasurement(chatID string) {
 	e.turns.invalidateMeasurement(chatID)
 }
 
-// Send starts a turn. It returns immediately; progress arrives as events.
+// Send starts a turn, or queues the message when the chat is already answering.
+//
+// A second message used to be refused with "this chat is already generating", which threw away
+// what the user had typed at the moment they were most likely to type it: reading a running
+// answer and thinking of the next question. It waits its turn instead — the window draws the
+// queue above the composer, and DropQueued takes one back out.
 func (e *Engine) Send(req TurnRequest) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	handle := &turnHandle{cancel: cancel, chatID: req.ChatID}
-	// The claim is the only decision about whether the chat is free: checking and
-	// reserving are one step, so a rebuild that replaced this engine cannot leave a
-	// second turn able to start beside the first.
-	if !e.turns.claim(req.ChatID, handle) {
+	// One step decides which of the two answers this send gets: the chat is free, so the turn
+	// starts now, or a turn holds it, so the message joins the queue behind it.
+	if !e.turns.accept(req, handle) {
 		cancel()
-		return uimsg.Errorf("chat.turnRunning")
+		e.emitQueue(req.ChatID)
+		return nil
 	}
 
 	// What the user just wrote is stored here, before the turn's goroutine starts — not
@@ -197,16 +209,87 @@ func (e *Engine) Send(req TurnRequest) error {
 		e.turns.release(req.ChatID, handle)
 		return err
 	}
+	e.launch(ctx, cancel, req, handle)
+	return nil
+}
 
+// Queued lists the messages waiting behind a chat's running turn, in the order they will be
+// sent.
+func (e *Engine) Queued(chatID string) []QueuedTurn {
+	return e.turns.queuedTurns(chatID)
+}
+
+// DropQueued removes one waiting message and reports whether it was still there. A false answer
+// is the ordinary case of a click that arrives after that entry's turn started.
+func (e *Engine) DropQueued(chatID, id string) bool {
+	if !e.turns.dropQueued(chatID, id) {
+		return false
+	}
+	e.emitQueue(chatID)
+	return true
+}
+
+// DropAllQueued empties a chat's queue.
+//
+// Stop leaves a queue alone, so this is the one case that still drops one: a chat being deleted.
+// Left there, the queue would start a turn in a conversation that no longer exists.
+func (e *Engine) DropAllQueued(chatID string) {
+	if e.turns.clearQueued(chatID) {
+		e.emitQueue(chatID)
+	}
+}
+
+// emitQueue publishes a chat's queue, which is what the window draws above the composer.
+func (e *Engine) emitQueue(chatID string) {
+	e.emit(events.Queue, map[string]any{"chatId": chatID, "queue": e.Queued(chatID)})
+}
+
+// launch runs a claimed turn in its own goroutine. The claim is given back when the turn ends,
+// and a message the user queued meanwhile takes the chat over from there — without the chat ever
+// being reported idle, because the window would otherwise watch its Send button come back
+// between two answers that simply followed each other.
+func (e *Engine) launch(ctx context.Context, cancel context.CancelFunc, req TurnRequest, handle *turnHandle) {
 	go func() {
 		defer func() {
 			cancel()
 			e.turns.release(req.ChatID, handle)
+			if e.startQueued(req.ChatID) {
+				return
+			}
 			e.emitStatus(req.ChatID, "idle")
 		}()
 		e.runTurn(ctx, req)
 	}()
-	return nil
+}
+
+// startQueued starts the message at the head of a chat's queue, and reports whether there was
+// one. The turn that is giving the chat back calls it, after releasing the claim.
+func (e *Engine) startQueued(chatID string) bool {
+	ctx, cancel := context.WithCancel(context.Background())
+	handle := &turnHandle{cancel: cancel, chatID: chatID}
+	if !e.turns.claim(chatID, handle) {
+		cancel()
+		return false
+	}
+	next, ok := e.turns.head(chatID)
+	if !ok {
+		e.turns.release(chatID, handle)
+		cancel()
+		return false
+	}
+	// Stored first and taken off the queue afterwards, so a message that cannot be written stays
+	// where the user can see it and delete it; the failure is what the window reports.
+	if err := e.beginUserTurn(next.req); err != nil {
+		e.turns.release(chatID, handle)
+		cancel()
+		e.emit(events.Error, map[string]any{"chatId": chatID, "error": err.Error()})
+		return false
+	}
+	if e.turns.dropQueued(chatID, next.id) {
+		e.emitQueue(chatID)
+	}
+	e.launch(ctx, cancel, next.req, handle)
+	return true
 }
 
 // maxToolRounds is how many model/tool rounds this chat's reply may take, and it is
@@ -227,22 +310,6 @@ func maxToolRounds(chat store.Chat, settings config.Settings) int {
 		return settings.CodingToolIterations
 	}
 	return settings.ToolIterations
-}
-
-// maxToolResultTokens is how much tool-result text one reply may carry into its next
-// request, and it is chosen by mode for the same reason the rounds are.
-//
-// The material differs more than the size of the reply does: a chat's budget is spent on
-// scraped pages and search results, a project's on source files and the output of a build.
-// A whole read of `app.go` measures 24 429 tokens, so two of them spent most of the chat's
-// 60 000 — and the budget is per answer, so a project still working through its rounds then
-// read notices instead of file contents. A project therefore has its own figure, which is
-// still bounded and still cut to the room the next request has (`chat.roomForToolResults`).
-func maxToolResultTokens(chat store.Chat, settings config.Settings) int {
-	if chat.IsProject() && settings.CodingToolTokenBudget > 0 {
-		return settings.CodingToolTokenBudget
-	}
-	return settings.ToolTokenBudget
 }
 
 // runTurn performs one full exchange, including any tool iterations.
@@ -357,7 +424,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	// or a custom endpoint) falls back to the text protocol, which works
 	// everywhere: sending `tools` a backend cannot honour degrades the reply
 	// rather than enabling tools, and the fallback is what makes that safe.
-	useNativeTools := settings.NativeTools && modelInfo.Has(llm.CapTools)
+	useNativeTools := nativeToolsEnabled(settings, modelInfo)
 
 	in := generateInput{
 		Chat:        chat,
@@ -399,6 +466,21 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 	outcome := foldNothing
 	if genErr != nil && ctx.Err() == nil {
 		if too, ok := llm.RequestTooLarge(genErr); ok {
+			// A refusal that names the model's window is a measurement of this
+			// deployment, and for a backend that publishes none it is the only one
+			// that ever arrives. It is used for this turn at once — the recovery
+			// fold cannot run without a window — and the provider keeps it for the
+			// listings that follow, so the next turn plans against it before it is
+			// refused instead of after.
+			if too.Window > 0 && too.Window != modelInfo.ContextLimit {
+				modelInfo.ContextLimit = too.Window
+				in.Model = modelInfo
+				if e.Registry != nil {
+					// The catalogue is cached; without this the next turn would keep
+					// resolving the old number until the listing expired.
+					e.Registry.Invalidate()
+				}
+			}
 			outcome = e.foldForSize(ctx, &chat, provider, backendID, modelID, modelInfo, settings, too)
 			if outcome == foldFolded {
 				result, genErr = e.generate(ctx, in)
@@ -448,7 +530,7 @@ func (e *Engine) runTurn(ctx context.Context, req TurnRequest) {
 
 	e.emitBudget(req.ChatID, &chat, backendID, modelID, settings, modelInfo)
 	if chat.Title == "" && settings.AutoTitle {
-		e.autoTitle(ctx, &chat, provider, modelID, req.Text)
+		e.autoTitle(ctx, &chat, provider, backendID, modelID, modelInfo, settings, req.Text)
 	}
 }
 
@@ -579,17 +661,19 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 		working.SystemPrompt = working.SystemPrompt + "\n\n" + extraSystem
 	}
 
-	measurement, hasMeasurement := e.Measurement(chat.ID)
-	measuredValid := hasMeasurement && measurement.Backend == backendID && measurement.Model == modelID
+	provider, hasProvider := e.Registry.Provider(backendID)
+	toolsOffered := nativeToolsEnabled(settings, model) && len(toolDefs) > 0
+	replayReasoning := hasProvider && replaysReasoning(provider, toolsOffered)
 
-	replayToolReasoning := false
-	if provider, ok := e.Registry.Provider(backendID); ok && settings.NativeTools && model.Has(llm.CapTools) && len(toolDefs) > 0 {
-		if replayer, ok := provider.(llm.ToolReasoningReplayer); ok {
-			replayToolReasoning = replayer.ReplaysToolReasoning()
-		}
+	measurement, hasMeasurement := e.Measurement(chat.ID)
+	if !hasMeasurement {
+		// The count did not survive the process (COMPACT.md §11.5).
+		measurement, hasMeasurement = measurementFromHistory(messages, compactions,
+			backendID, modelID, provider, toolsOffered)
 	}
-	// The old prompt did not count the same history if tool reasoning replay changed.
-	measuredValid = measuredValid && measurement.ReplayToolReasoning == replayToolReasoning
+	measuredValid := hasMeasurement && measurement.Backend == backendID && measurement.Model == modelID
+	// The old prompt did not count the same history if reasoning replay changed.
+	measuredValid = measuredValid && measurement.ReplayReasoning == replayReasoning
 
 	in := AssemblyInput{
 		Chat:        working,
@@ -603,8 +687,8 @@ func (e *Engine) buildAssembly(ctx context.Context, chat *store.Chat,
 		// offered list: a tool that is momentarily unavailable — search with both
 		// providers down, the index disabled — is still a tool the app can answer.
 		// The project tools are the exception: engineKnownTools explains why.
-		KnownTools:          engineKnownTools(e, chat),
-		ReplayToolReasoning: replayToolReasoning,
+		KnownTools:      engineKnownTools(e, chat),
+		ReplayReasoning: replayReasoning,
 
 		Limit:         limit,
 		LimitSource:   limitSource,
@@ -801,6 +885,84 @@ func anyProviderAvailable(chain interface{ ProviderAvailability() map[string]boo
 	return false
 }
 
+// replaysReasoning reports whether a request from this provider carries an assistant reply's
+// reasoning back to the model, which is the only case in which the budget may charge for it
+// (llm.ReasoningReplayer says which providers do).
+func replaysReasoning(provider llm.Provider, toolsOffered bool) bool {
+	replayer, ok := provider.(llm.ReasoningReplayer)
+	return ok && replayer.ReplaysReasoning(toolsOffered)
+}
+
+// nativeToolsEnabled reports whether a turn on this model offers tools at all. It is one function
+// because two places have to agree: the request generate builds, and the price put on the reasoning
+// that request may carry.
+func nativeToolsEnabled(settings config.Settings, model llm.ModelInfo) bool {
+	return settings.NativeTools && model.Has(llm.CapTools)
+}
+
+// measurementFromHistory recovers what the backend last reported for this chat's prompt, from
+// the reply rows the store already holds.
+//
+// The authoritative count lives in TurnState, which outlives an Engine but not the process, so
+// without this a restart prices a running session with the estimator — COMPACT.md §11.5 has the
+// failure that made that visible. Every measuring request wrote its prompt_tokens onto the reply
+// row it produced, so the newest usable row is the count this chat last had. Usable means:
+//
+//   - the same backend and model, because another tokenizer's count is not comparable;
+//   - written after the newest fold, because the request behind it still carried the messages
+//     that fold replaced — the same reason a compaction invalidates the count in memory;
+//   - a prompt_tokens above zero, which is a request that never measured itself.
+//
+// One row fact is not stored at all: whether the request behind a count carried a reply's
+// reasoning, so the shape is read from the provider (§11.5). Where the answer cannot vary —
+// Ollama always, every other local backend never — the count describes this request too. Where it
+// can (DeepSeek, beside tools) a count is adopted only for a request that carries no reasoning
+// either: the row may have carried some, which makes the count read too large, while reasoning the
+// row left out could not be recovered at all.
+//
+// Seq is the message before that reply, since a reply cannot be inside the prompt it answers.
+// One message too far back is the safe direction: the rows after it are priced as the delta,
+// where a seq above the one the request really ended at would leave them out of the accounting.
+func measurementFromHistory(messages []store.Message, compactions []store.Compaction,
+	backendID, modelID string, provider llm.Provider, toolsOffered bool) (Measurement, bool) {
+
+	replayReasoning := replaysReasoning(provider, toolsOffered)
+	if replayReasoning && !replaysReasoning(provider, false) {
+		return Measurement{}, false
+	}
+
+	var foldedAt time.Time
+	for _, c := range compactions {
+		if c.CreatedAt.After(foldedAt) {
+			foldedAt = c.CreatedAt
+		}
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.Role != string(llm.RoleAssistant) || m.PromptTokens <= 0 {
+			continue
+		}
+		if m.Backend != backendID || m.Model != modelID {
+			continue
+		}
+		if !m.CreatedAt.After(foldedAt) {
+			continue
+		}
+		seq := 0
+		if i > 0 {
+			seq = messages[i-1].Seq
+		}
+		return Measurement{
+			Backend:         backendID,
+			Model:           modelID,
+			PromptTokens:    m.PromptTokens,
+			Seq:             seq,
+			ReplayReasoning: replayReasoning,
+		}, true
+	}
+	return Measurement{}, false
+}
+
 // emitBudget publishes the current context budget so the meter can update.
 func (e *Engine) emitBudget(chatID string, chat *store.Chat,
 	backendID, modelID string, settings config.Settings, model llm.ModelInfo) {
@@ -887,6 +1049,13 @@ func (e *Engine) appendUserMessage(req TurnRequest, backendID, modelID string) e
 			continue
 		}
 		if attachment.ChatID != req.ChatID {
+			continue
+		}
+		// A file another message already holds is not taken over by this one. Two sends can name
+		// the same attachment when the second was typed before the window had heard that the
+		// first was queued; the file belongs to the message that stored it first, and moving it
+		// would leave that message without the file the user gave it.
+		if attachment.MessageID != "" {
 			continue
 		}
 		attachment.MessageID = msg.ID

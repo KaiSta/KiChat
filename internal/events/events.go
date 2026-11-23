@@ -37,6 +37,10 @@ const (
 	// keyed to one call, and a Tool event carries a *record* — a status and a result —
 	// which is the opposite of "this is not finished yet".
 	ToolOutput = "chat:tool-output"
+	// Queue carries a chat's queue of messages waiting behind its running turn, each time one
+	// is added, started or taken back out. It is the whole list rather than a delta, so the
+	// window can set it and cannot drift from the order the turns will really be sent in.
+	Queue = "chat:queue"
 	// Approval carries a change to a project folder that is waiting for the user's
 	// answer. The turn that asked is blocked until ResolveToolApproval answers it, which
 	// is why it cannot ride on Status: a phase string tells the window what is happening,
@@ -49,6 +53,14 @@ const (
 	ImageProgress = "image:progress"
 	// ChatsChanged reports that the chat list itself changed.
 	ChatsChanged = "chats:changed"
+	// AppUpdate carries the result of a background look at KiChat's own releases, so
+	// the sidebar can show that a newer version exists without the user opening
+	// Settings. It is not a `chat:` name because it is about the installation.
+	AppUpdate = "app:update"
+	// SearchChallenge carries DuckDuckGo's bot check when a search was refused with one the
+	// reader can answer. The refusal still travels as an error to whoever asked — the model
+	// sees a failed search — and this is what opens the dialog that answers it.
+	SearchChallenge = "search:challenge"
 )
 
 // All lists every event name, so a test can check the set as a whole rather
@@ -57,6 +69,6 @@ func All() []string {
 	return []string{
 		Delta, Reasoning, Start, Done, Message, Tool, Status,
 		Error, Warning, Budget, Compaction, Title, Attachments, ChatsChanged,
-		ImageProgress, Approval, ToolOutput,
+		ImageProgress, Approval, ToolOutput, AppUpdate, Queue, SearchChallenge,
 	}
 }

@@ -86,6 +86,13 @@ func TestDestructiveGitLinesAreRecognised(t *testing.T) {
 		{"git clean -fd", nil},
 		{"git clean -fdx build/", []string{"build/"}},
 		{"git clean -fX", nil},
+		// The exclusion is a filter, not the pathspec: the scope is still the whole folder.
+		{"git clean -f -e node_modules", nil},
+		{"git clean -f --exclude node_modules", nil},
+		{"git clean -f --exclude=node_modules", nil},
+		{"git clean -f -enode_modules", nil},
+		// An assignment after the `env` names the same program one word later.
+		{"env GIT_DIR=. git reset --hard", nil},
 		// One segment of a compound line is enough, and global options are skipped.
 		{"git add . && git checkout -- .", []string{"."}},
 		{"git --no-pager reset --hard", nil},
@@ -125,6 +132,9 @@ func TestHarmlessGitLinesAreNotGuarded(t *testing.T) {
 		"git -C ../other reset --hard",
 		// The pathspecs would be relative to another directory.
 		"cd internal && git reset --hard",
+		// The attached spelling moves git just as the separated one does, so the scope cannot
+		// be measured against this folder.
+		"git -C../other reset --hard",
 		// The words are not the command.
 		`bash -c "git reset --hard"`,
 	} {
@@ -232,6 +242,37 @@ func TestCleanAndResetCountDifferentWork(t *testing.T) {
 		t.Fatalf("refusal code = %q, want tools.destructiveGit", code)
 	}
 	if _, statErr := os.Stat(filepath.Join(folder, "untracked.go")); statErr != nil {
+		t.Errorf("the untracked file was removed although the command was refused: %v", statErr)
+	}
+}
+
+// TestAnExcludedPathIsStillInsideTheScope is the guard's promise in the spelling that used to
+// defeat it: `git clean -f -e keep.go` deletes everything *except* keep.go, so the pattern is
+// not the scope. Measuring the scope with the pattern as the pathspec counted nothing and let
+// a clean that removes every other untracked file through.
+func TestAnExcludedPathIsStillInsideTheScope(t *testing.T) {
+	service, conf, folder := gitProject(t)
+	// An ignored folder is what `-e` is usually named after, and it is exactly what the status
+	// probe does not list: with the pattern taken as the pathspec the count was zero, so the
+	// line ran and the untracked file beside it was deleted.
+	writeProjectFile(t, folder, ".gitignore", "node_modules/\n")
+	if err := os.MkdirAll(filepath.Join(folder, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeProjectFile(t, folder, "node_modules/pkg.js", "x\n")
+	writeProjectFile(t, folder, "drop.go", "package main\n")
+	gitRun(t, folder, "add", ".gitignore")
+	gitRun(t, folder, "commit", "-q", "-m", "ignore")
+
+	_, err := service.Execute(context.Background(), "project-1", ToolRunCommand,
+		`{"command":`+jsonString("git clean -f -e keep.go")+`}`)
+	if code := refusalCode(t, err); code != "tools.destructiveGit" {
+		t.Fatalf("refusal code = %q, want tools.destructiveGit", code)
+	}
+	if conf.calls != 0 {
+		t.Errorf("the command was confirmed %d times, want the refusal first", conf.calls)
+	}
+	if _, statErr := os.Stat(filepath.Join(folder, "drop.go")); statErr != nil {
 		t.Errorf("the untracked file was removed although the command was refused: %v", statErr)
 	}
 }

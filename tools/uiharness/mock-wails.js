@@ -1265,8 +1265,6 @@ Available tools: {{tool_list}}`,
     autoTitle: true,
     toolIterations: 24,
     codingToolIterations: 60,
-    toolTokenBudget: 60000,
-    codingToolTokenBudget: 120000,
     nativeTools: true,
     // Both off, like the shipped default: a fixture that granted a permission would hide
     // the very state the coding tab's switches are about.
@@ -2349,7 +2347,7 @@ Available tools: {{tool_list}}`,
     createdAt: now(),
   }
   // The third cause of a smaller context size, and the reason the tooltip exists: this
-  // result was cut by the answer's tool budget, not by the summary model, so the card
+  // result was cut by the room left in the request, not by the summary model, so the card
   // shows the same arrow with a different explanation.
   const budgetToolCall = {
     id: 'call-search-3',
@@ -2511,6 +2509,34 @@ Available tools: {{tool_list}}`,
   }
 
   let braveKeySet = false
+  // The app-update reading Settings -> About starts from: checked and current, so a
+  // harness build never claims a newer release exists. The URL is the release list,
+  // which is where a download is either way.
+  //
+  // `?appupdate=1` is the other state — the one the sidebar badge and the notes exist
+  // for — and it is a flag because an update offered in every screenshot would be a
+  // fixture pretending to be news. Its notes are the shape a real release body has: a
+  // short bullet list.
+  const mockAppUpdate = new URLSearchParams(location.search).get('appupdate')
+    ? {
+        checked: true,
+        available: true,
+        current: '0.1.0-harness',
+        latest: '0.7.17',
+        url: 'https://github.com/KaiSta/KiChat/releases/tag/0.7.17',
+        publishedAt: '2026-11-09T20:08:57Z',
+        notes:
+          '- A badge in the sidebar when a newer release exists\n' +
+          '- A daily check for releases, once a day, that can be switched off\n' +
+          '- The release notes shown before the download link\n' +
+          '- Fixes for the picture server and the model picker',
+      }
+    : {
+        checked: true,
+        available: false,
+        current: '0.1.0-harness',
+        url: 'https://github.com/KaiSta/KiChat/releases',
+      }
 
   /*
    * Which backends have a key in the secret store, mirroring
@@ -2529,6 +2555,17 @@ Available tools: {{tool_list}}`,
   /* --------------------------------------------------------------- streaming */
 
   const timers = new Map()
+
+  /*
+   * chatId -> the messages waiting behind that chat's running turn, oldest first, exactly as
+   * the engine keeps them. The harness queues and drains them so the panel above the composer
+   * can be rendered, and its delete button pressed.
+   */
+  const queuedTurns = new Map()
+
+  const emitQueue = (chatId) => {
+    emit('chat:queue', { chatId, queue: copy(queuedTurns.get(chatId) || []) })
+  }
 
   /*
    * The change waiting for an answer, or null. One at a time: the real app keeps a map
@@ -2867,6 +2904,7 @@ Available tools: {{tool_list}}`,
           chat.title = text.split(/\s+/).slice(0, 5).join(' ')
           emit('chat:title', { chatId, title: chat.title })
         }
+        drainQueue(chatId)
         return
       }
       const chunk = words.slice(i, (i += 4)).join('')
@@ -2961,6 +2999,20 @@ Available tools: {{tool_list}}`,
     emit('chat:done', { chatId, messageId, lastMessageId: messageId, status: 'complete' })
   }
 
+  /*
+   * The next queued message takes the chat the moment a turn ends, as the engine does it: the
+   * chat is never reported idle between two answers that follow each other.
+   */
+  function drainQueue(chatId) {
+    const list = queuedTurns.get(chatId) || []
+    if (list.length === 0) return
+    const [next, ...rest] = list
+    if (rest.length) queuedTurns.set(chatId, rest)
+    else queuedTurns.delete(chatId)
+    emitQueue(chatId)
+    startTurn(chatId, next.text, false)
+  }
+
   function chatState(chatId) {
     const chat = chats.find((c) => c.id === chatId)
     if (!chat) return Promise.reject(new Error('chat not found: ' + chatId))
@@ -3000,6 +3052,8 @@ Available tools: {{tool_list}}`,
       // finished it, and reporting `false` here would drop the Stop button the moment the
       // question appeared — the one control a user needs while a change is on screen.
       running: timers.has(chatId) || pendingApproval?.chatId === chatId,
+      // The messages queued behind that turn, in the order they will be sent.
+      queue: copy(queuedTurns.get(chatId) || []),
       // What this chat answers without a card, from an "always" clicked on one of its own.
       // Seeded for the coding fixture so the header's consent chip renders without having to
       // answer a card first — `?always=commands` is the state the report was about.
@@ -3427,6 +3481,13 @@ Available tools: {{tool_list}}`,
     return 0
   }
 
+  // The one file whose header will not parse — a corrupt byte, or a download that stopped
+  // early while keeping the .gguf name. The harness never reads bytes, so the state is
+  // declared by name: what matters is the shape the panel has when `ProbeGGUF` fails, and
+  // that shape is a row with no counts, no suggestion and no badge in the list.
+  const unreadableModel = 'Gemma-3-4B-Q4_K_M.gguf'
+  const unreadable = (path) => `${path}`.endsWith(unreadableModel)
+
   /*
    * The release lookup, as a state rather than a call: the real binding answers one
    * of the three shapes below, so the panel's row has a fixture for each. The
@@ -3512,6 +3573,7 @@ Available tools: {{tool_list}}`,
       // The GPU layers the picker offers. This app's own three words rather than
       // llama.cpp's spellings: `off` is how KiChat names `--gpu-layers 0`.
       offloadModes: ['auto', 'all', 'off'],
+      expertOffloadModes: ['auto', 'cpu', 'layers'],
       // What the installed build can use. Measured shape of `--list-devices` on
       // the Vulkan build; `?devices=none` empties it for the CPU-only case the
       // panel has to render as a warning, and `?fit=large` nearly fills the card
@@ -3617,6 +3679,22 @@ Available tools: {{tool_list}}`,
       { model: 'lmstudio-community/Ministral-3-3B-Instruct-2512-GGUF', name: 'Ministral-3-3B-Instruct-2512-Q4_K_M.gguf', size: 2146498240 },
       { model: 'lmstudio-community/LFM2.5-2.6B-GGUF', name: 'LFM2.5-2.6B-Q4_K_M.gguf', size: 1674454368 },
       { model: 'empero-ai/Qwen3.8-4B-Distill-GGUF', name: 'Qwen3.8-4B-Q4_K_M.gguf', size: 2783446304 },
+      // The one mixture of experts in the library, so the list's badge has a row to
+      // land on and a dense file beside it to stay off.
+      { model: 'unsloth/Qwen3.6-35B-A3B-GGUF', name: 'Qwen3.6-35B-A3B-Q4_K_M.gguf', size: 20395000000 },
+      // A second quantisation of the same mixture of experts, so the panel has two files
+      // whose expert placement can be told apart.
+      { model: 'unsloth/Qwen3.6-35B-A3B-GGUF', name: 'Qwen3.6-35B-A3B-Q8_0.gguf', size: 38600000000 },
+      // The same mixture converted with its MTP heads: the list marks it and the panel
+      // offers multi-token prediction, while the two files above do not.
+      { model: 'unsloth/Qwen3.6-35B-A3B-MTP-GGUF', name: 'Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf', size: 20420000000 },
+      // A header that will not parse: a corrupt byte, or a download that stopped early
+      // while keeping the .gguf name. The panel keeps the expert row — silence is not
+      // evidence of a dense model — shows no counts, and offers neither the suggested
+      // count nor the button that applies it. Its own name, not the catalogue's
+      // `Qwen3-8B-Q4_K_M` row, which is a loaded-model fixture rather than a file in a
+      // folder and must not start answering probes.
+      { model: 'google/gemma-3-4b-it-GGUF', name: 'Gemma-3-4B-Q4_K_M.gguf', size: 3576000000 },
     ],
     // The second library, remembered from an earlier session: a model LM Studio
     // would not run, which is the reason a user keeps a folder of their own.
@@ -3852,8 +3930,29 @@ Available tools: {{tool_list}}`,
       return Promise.resolve(null)
     },
     SendMessage: (req) => {
+      // A message sent while a turn runs waits behind it instead of being refused, as the
+      // engine does now: nothing goes wrong, and the queue above the composer shows it.
+      if (timers.has(req.chatId)) {
+        const list = queuedTurns.get(req.chatId) || []
+        // The three fields the engine's QueuedTurn carries, and no others: a fixture with more
+        // than the bridge sends would let a reader depend on something that is not there.
+        list.push({ id: nextId('queued'), text: req.text, attachmentIds: req.attachmentIds || [] })
+        queuedTurns.set(req.chatId, list)
+        emitQueue(req.chatId)
+        return Promise.resolve(null)
+      }
       startTurn(req.chatId, req.text, req.regenerate)
       return Promise.resolve(null)
+    },
+    // Taking one waiting message back out, by the id the engine gave it.
+    DropQueuedMessage: (chatId, id) => {
+      const list = queuedTurns.get(chatId) || []
+      const kept = list.filter((q) => q.id !== id)
+      if (kept.length === list.length) return Promise.resolve(false)
+      if (kept.length) queuedTurns.set(chatId, kept)
+      else queuedTurns.delete(chatId)
+      emitQueue(chatId)
+      return Promise.resolve(true)
     },
     /*
      * The answer to a waiting change. The real one sends on a channel the blocked turn is
@@ -3911,6 +4010,9 @@ Available tools: {{tool_list}}`,
       return Promise.resolve(null)
     },
     StopGeneration: (chatId) => {
+      // Stop ends the answer and nothing else: the queue stays as it is, and the next message
+      // starts the moment the chat is free — exactly as the engine does it, which is why the
+      // window has a sentence for it.
       const timer = timers.get(chatId)
       if (timer) clearTimeout(timer)
       timers.delete(chatId)
@@ -3918,7 +4020,10 @@ Available tools: {{tool_list}}`,
       const last = list[list.length - 1]
       if (last && last.role === 'assistant') last.status = 'stopped'
       emit('chat:done', { chatId, messageId: last ? last.id : '', lastMessageId: last ? last.id : '', status: 'stopped' })
-      return Promise.resolve(null)
+      drainQueue(chatId)
+      // The real binding reports whether it found a turn to stop, which is what decides whether
+      // the window says anything about the queue behind it.
+      return Promise.resolve(!!timer)
     },
 
     GetSearchStatus: () => Promise.resolve(searchStatus),
@@ -4027,6 +4132,66 @@ Available tools: {{tool_list}}`,
       console.log('[harness] old builds removed', removed)
       return Promise.resolve(removed)
     },
+    // The panel asks for a model's header facts before it shows the expert-offload
+    // row, so the fixture answers like a real GGUF would: a name that says MoE is one,
+    // everything else is dense and hides the row. The suggestion is the share of the
+    // file that does not fit, applied to the layer count — the same arithmetic as
+    // rt.SuggestExpertLayers. One file answers with an error instead, which is the
+    // panel's state for a header that would not parse.
+    InspectManagedModel: (path, modelBytes, freeBytes) => {
+      // The backend measures the file when the caller does not know its size, which is how
+      // the chat picker asks: it has a path, not a listing row.
+      if (!modelBytes) modelBytes = sizeOfModel(path)
+      if (unreadable(path)) {
+        // What ProbeGGUF answers for a header it cannot read. The panel catches it and
+        // keeps its row without counts; the chat's picker catches it and starts untuned.
+        return Promise.reject(new Error(`${path}: GGUF header is truncated — the file is not complete`))
+      }
+      const moe = /moe|a3b|35b|expert/i.test(String(path))
+      // A name that says MTP is a file converted with the heads, which is the only
+      // thing that lets llama.cpp speculate from them.
+      const mtp = /mtp/i.test(String(path))
+      const blockCount = moe ? 48 : 32
+      const expertCount = moe ? 256 : 0
+      const fits = !freeBytes || !(modelBytes > freeBytes)
+      const suggested =
+        !moe || fits
+          ? 0
+          : Math.min(blockCount, Math.max(1, Math.ceil((blockCount * (modelBytes - freeBytes)) / modelBytes)))
+      return Promise.resolve({
+        traits: {
+          architecture: moe ? 'qwen3moe' : 'llama',
+          blockCount,
+          expertCount,
+          expertUsedCount: moe ? 8 : 0,
+          mtpLayers: mtp ? 1 : 0,
+        },
+        suggestedLayers: suggested,
+        suggestedMtpTokens: mtp ? 3 : 0,
+        suggestedMtpConfidence: mtp ? 0.75 : 0,
+      })
+    },
+    // The whole listing in one call, keyed by path — the same rule as the single
+    // file above, so a badge in the list and the panel's own detection agree.
+    InspectManagedModels: (paths) => {
+      const out = {}
+      for (const path of paths || []) {
+        // A file that cannot be read is left out of the map, as the backend does: a badge
+        // in the list is only shown for the files whose header answered.
+        if (unreadable(path)) continue
+        const moe = /moe|a3b|35b|expert/i.test(String(path))
+        // The same reading as the single-file call above, by the same naming rule.
+        const mtp = /mtp/i.test(String(path))
+        out[path] = {
+          architecture: moe ? 'qwen3moe' : 'qwen3',
+          blockCount: moe ? 48 : 32,
+          expertCount: moe ? 256 : 0,
+          expertUsedCount: moe ? 8 : 0,
+          mtpLayers: mtp ? 1 : 0,
+        }
+      }
+      return Promise.resolve(out)
+    },
     PickManagedModelFile: () => Promise.resolve('/models/Qwen3-4B-Q4_K_M.gguf'),
     // Empty means "the folder the backend would use", which is what the panel
     // asks for when it opens, before the user has chosen anything.
@@ -4132,6 +4297,13 @@ Available tools: {{tool_list}}`,
         goVersion: 'go mock',
         platform: 'mock/harness',
       }),
+    // The app-update row, which reads the cached answer first and spends a request only
+    // when there is none. The mock starts checked and current, so a harness build never
+    // claims a newer release exists; the Check button and the row's states are exercised
+    // by the real lookup. The URL is the release list, which is what the download link
+    // opens when a newer release does exist.
+    GetAppUpdate: () => Promise.resolve(mockAppUpdate),
+    CheckAppUpdate: () => Promise.resolve(mockAppUpdate),
     // The terminal the coding hand-off would open, as the About row shows it. A fake program
     // name on purpose: the row exists so a person can check their own platform's launcher, and
     // a fixture that named one of them would look like a claim about this machine.

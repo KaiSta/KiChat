@@ -25,6 +25,8 @@ export function UnlockScreen({ status }: { status: main.DatabaseStatus }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [askFresh, setAskFresh] = useState(false)
+  const [restoreOpen, setRestoreOpen] = useState(false)
+  const [restorePassphrase, setRestorePassphrase] = useState('')
 
   const mismatch = status.setup && confirm.length > 0 && passphrase !== confirm
   const short = status.setup && passphrase.length > 0 && passphrase.length < 8
@@ -42,6 +44,28 @@ export function UnlockScreen({ status }: { status: main.DatabaseStatus }) {
       // The passphrase is not kept in the window once it has been used.
       setPassphrase('')
       setConfirm('')
+      await bootstrap()
+    } catch (err) {
+      setError(errText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const restore = async () => {
+    if (!restorePassphrase || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      // The Go side asks for the two files and does not touch this installation until
+      // their passphrase and key have opened the copy in a temporary directory.
+      await App.RestoreDatabase(
+        restorePassphrase,
+        t('db.restore.pickDatabase'),
+        t('db.restore.pickKey'),
+      )
+      setRestorePassphrase('')
+      setRestoreOpen(false)
       await bootstrap()
     } catch (err) {
       setError(errText(err))
@@ -123,6 +147,65 @@ export function UnlockScreen({ status }: { status: main.DatabaseStatus }) {
             ? t('db.unlock.unlocking')
             : t(status.setup ? 'db.unlock.setupButton' : 'db.unlock.button')}
         </button>
+
+        {/* A copied installation arrives as two files with fixed names. They are
+            checked before the current database is moved anywhere, so a wrong
+            passphrase or a key from another database is safe to try. */}
+        <div className="mt-4 border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+          {!restoreOpen ? (
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              onClick={() => {
+                setRestoreOpen(true)
+                setError('')
+              }}
+              disabled={busy}
+            >
+              {t('db.restore.button')}
+            </button>
+          ) : (
+            <>
+              <p className="faint mb-2 text-[12px]">{t('db.restore.hint')}</p>
+              <Field label={t('db.restore.passphrase')}>
+                <input
+                  className="input"
+                  type="password"
+                  autoComplete="current-password"
+                  value={restorePassphrase}
+                  onChange={(e) => setRestorePassphrase(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      void restore()
+                    }
+                  }}
+                />
+              </Field>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  onClick={() => void restore()}
+                  disabled={!restorePassphrase || busy}
+                >
+                  {busy ? t('db.restore.busy') : t('db.restore.confirm')}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-ghost"
+                  onClick={() => {
+                    setRestoreOpen(false)
+                    setRestorePassphrase('')
+                  }}
+                  disabled={busy}
+                >
+                  {t('common.cancel')}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
 
         {/* Moving the database aside is the only way out of a lost key, so it takes a
             second click and says what happens to the old file. */}

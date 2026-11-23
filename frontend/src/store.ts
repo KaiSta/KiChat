@@ -10,6 +10,7 @@ import {
   type ImageProgressPayload,
   type llm,
   type main,
+  type QueuePayload,
   type research,
   type store as storeTypes,
   type ToolOutputPayload,
@@ -124,6 +125,17 @@ interface State {
   lang: Lang
   theme: 'dark' | 'light'
   view: 'chat' | 'settings'
+  /**
+   * The last look at KiChat's own releases, from the daily background check or from the
+   * panel's own Check. Null means none has been made in this session.
+   */
+  appUpdate: main.AppUpdate | null
+  /**
+   * A DuckDuckGo bot check waiting to be answered. The backend keeps its own copy — it is the
+   * one the answer is posted with — and this is what the dialog draws; both are dropped when
+   * the answer is sent or the dialog closed.
+   */
+  searchChallenge: research.Challenge | null
 
   settings: config.Settings | null
   models: llm.ModelInfo[]
@@ -175,6 +187,12 @@ interface State {
    */
   fileChanges: Record<string, main.FileChange[]>
   running: Record<string, boolean>
+  /**
+   * chatId -> the messages waiting behind that chat's running turn, oldest first. The backend
+   * owns the order, so this is replaced wholesale from `chat:queue` and from the chat's own
+   * state; nothing here sorts or edits the list.
+   */
+  queued: Record<string, chat.QueuedTurn[]>
   /** chatId -> phase such as "tool" or "compacting". */
   phase: Record<string, string>
   /**
@@ -261,6 +279,8 @@ interface State {
   setLang: (lang: Lang) => void
   setTheme: (theme: 'dark' | 'light') => void
   setView: (view: 'chat' | 'settings') => void
+  /** Show a bot check, or clear it (null) once it was answered or dismissed. */
+  setSearchChallenge: (challenge: research.Challenge | null) => void
 
   /**
    * Re-read the settings blob. An install writes the recorded build — its tag, the
@@ -294,6 +314,12 @@ interface State {
 
   send: (text: string) => Promise<void>
   stop: () => Promise<void>
+  /**
+   * Take one waiting message back out of the queue, by the id the backend gave it. The row is
+   * dropped from the list before the call for the reason an answered question is: the entry
+   * may already be starting, and a row that stays on screen invites a second click.
+   */
+  dropQueued: (chatId: string, id: string) => Promise<void>
   regenerate: (backend?: string, model?: string) => Promise<void>
 
   updateChat: (patch: Partial<storeTypes.Chat>) => Promise<void>
@@ -339,6 +365,8 @@ export const useStore = create<State>((set, get) => {
     lang: 'en',
     theme: 'dark',
     view: 'chat',
+    appUpdate: null,
+    searchChallenge: null,
 
     settings: null,
     models: [],
@@ -357,6 +385,7 @@ export const useStore = create<State>((set, get) => {
     approvals: {},
     fileChanges: {},
     running: {},
+    queued: {},
     phase: {},
     phaseWaitMs: {},
     toasts: [],
@@ -374,7 +403,8 @@ export const useStore = create<State>((set, get) => {
         setTimeout(() => get().dismissToast(id), 6000)
       }
     },
-    dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+          dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+      setSearchChallenge: (challenge) => set({ searchChallenge: challenge }),
 
     bootstrap: async () => {
       try {
@@ -410,6 +440,11 @@ export const useStore = create<State>((set, get) => {
         // the buffer twice and the reply would read double. Subscriptions are app-wide,
         // not per bootstrap, so this is guarded.
         wireEventsOnce(set, get, clearStreaming, upsertMessage)
+        // The daily check runs on the Go side and may finish before or after this point:
+        // the cached reading covers the first case, and the app:update event the second.
+        void App.GetAppUpdate()
+          .then((update) => set({ appUpdate: update.checked ? update : null }))
+          .catch(() => undefined)
 
         // The chat list is a local query; health and the catalogue are probes that ask
         // every backend over the network, one behind another (see Registry.Health and
@@ -513,7 +548,7 @@ export const useStore = create<State>((set, get) => {
         const state = await App.GetChatState(id)
         // Ignore a response for a chat the user has already navigated away from.
         if (get().activeChatId !== id) return
-        set({ chatState: state })
+        set({ chatState: state, queued: { ...get().queued, [id]: state.queue ?? [] } })
         const running = { ...get().running, [id]: state.running }
         set({ running })
         // A project's changed files come with it: the header's count is part of what the
@@ -566,7 +601,7 @@ export const useStore = create<State>((set, get) => {
       try {
         const state = await App.GetChatState(id)
         if (get().activeChatId !== id) return
-        set({ chatState: state })
+        set({ chatState: state, queued: { ...get().queued, [id]: state.queue ?? [] } })
       } catch {
         /* transient read failure; the next event will refresh */
       }
@@ -602,7 +637,11 @@ export const useStore = create<State>((set, get) => {
       try {
         await App.DeleteChat(id)
         const chats = get().chats.filter((c) => c.id !== id)
-        set({ chats })
+        // The queue went with the chat: a message waiting for a conversation that no longer
+        // exists would never be sent, and nothing would say so.
+        const queued = { ...get().queued }
+        delete queued[id]
+        set({ chats, queued })
         if (get().activeChatId === id) {
           set({ activeChatId: null, chatState: null })
           if (chats.length > 0) await get().selectChat(chats[0].id)
@@ -640,7 +679,7 @@ export const useStore = create<State>((set, get) => {
         // A command whose output was on screen belongs to the conversation that was just
         // dropped, so its text goes with it — and so does a hand-off, which is about a turn
         // that no longer exists.
-        set({ toolOutput: {}, handoffs: {} })
+        set({ toolOutput: {}, handoffs: {}, queued: { ...get().queued, [id]: [] } })
         // The undo records go with the conversation too (`Store.ClearChat`), so the changes
         // panel's list is re-read rather than left as it was: a stale row would keep the
         // header's count and offer a revert that silently does nothing.
@@ -651,16 +690,22 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
+    /*
+     * Sending while a turn runs queues the message rather than refusing it, so there is no
+     * guard on `running` here: the backend decides, and answers by putting it in the queue.
+     */
     send: async (text) => {
       const state = get()
       const chatId = state.activeChatId
       if (!chatId || !state.chatState) return
-      if (state.running[chatId]) return
+      const wasRunning = !!state.running[chatId]
 
-      // Attachments that have not been assigned to a message yet travel with
-      // this turn.
+      // Attachments no message holds yet travel with this turn, by the same rule the chips are
+      // drawn by: a file a queued message carries has already gone somewhere, and handing it to
+      // this message too would move it off the turn the user gave it to.
+      const claimed = claimedAttachmentIds(state)
       const attachmentIds = state.chatState.attachments
-        .filter((a) => !a.messageId)
+        .filter((a) => !a.messageId && !claimed.has(a.id))
         .map((a) => a.id)
 
       const override = state.nextModel?.chatId === chatId ? state.nextModel : null
@@ -676,7 +721,20 @@ export const useStore = create<State>((set, get) => {
           regenerate: false,
         })
       } catch (err) {
-        set({ running: { ...get().running, [chatId]: false } })
+        // Only the flag this call set. A send queued behind a running turn must not clear the
+        // indicator of the turn that is still streaming.
+        if (!wasRunning) set({ running: { ...get().running, [chatId]: false } })
+        get().toast('error', errText(err))
+      }
+    },
+
+    dropQueued: async (chatId, id) => {
+      set((s) => ({
+        queued: { ...s.queued, [chatId]: (s.queued[chatId] ?? []).filter((q) => q.id !== id) },
+      }))
+      try {
+        await App.DropQueuedMessage(chatId, id)
+      } catch (err) {
         get().toast('error', errText(err))
       }
     },
@@ -684,8 +742,14 @@ export const useStore = create<State>((set, get) => {
     stop: async () => {
       const chatId = get().activeChatId
       if (!chatId) return
+      // Read before the call, because the answer to it is what frees the chat for the queue.
+      const waiting = (get().queued[chatId] ?? []).length
       try {
-        await App.StopGeneration(chatId)
+        const stopped = await App.StopGeneration(chatId)
+        // Stop ends the answer and leaves what the user typed in the queue, so the next message
+        // starts straight away. Said out loud: an answer appearing right after a click that
+        // read as "stop everything" is otherwise unexplained.
+        if (stopped && waiting > 0) get().toast('info', get().t('chat.queue.afterStop'))
       } catch (err) {
         get().toast('error', errText(err))
       }
@@ -840,6 +904,14 @@ function wireEvents(
 ) {
   const active = () => get().activeChatId
 
+  // A newer release, found in the background. Nothing here is filtered by chat: the
+  // badge is about the installation, and it stays until a later check says otherwise.
+  on<main.AppUpdate>(EV.appUpdate, (p) => set({ appUpdate: p }))
+  // A refused search that carried a solvable check opens the dialog. There is one check at a
+  // time: a second refusal replaces the first rather than queueing behind it, because the
+  // newer one is the one the host will still accept an answer to.
+  on<research.Challenge>(EV.searchChallenge, (check) => set({ searchChallenge: check }))
+
   on<{ chatId: string; messageId: string; text: string }>(EV.start, (p) => {
     if (p.chatId !== active()) return
     set((s) => ({
@@ -963,6 +1035,15 @@ function wireEvents(
     const state = get()
     if (!state.chatState || state.chatState.chat.id !== p.chatId) return
     set({ chatState: { ...state.chatState, budget: p.budget } })
+  })
+
+  /*
+   * The queue changed: a message was added, a turn took the next one, or one was taken back
+   * out. Not filtered by the open chat, for the reason the approval below is not — the list is
+   * keyed by chat, and a chat that is opened later reads its own from `GetChatState` anyway.
+   */
+  on<QueuePayload>(EV.queue, (p) => {
+    set((s) => ({ queued: { ...s.queued, [p.chatId]: p.queue } }))
   })
 
   on<{ chatId: string; status: string }>(EV.done, (p) => {
@@ -1113,9 +1194,33 @@ function handoffCommand(argsJSON: string): string {
   }
 }
 
-/** Convenience selector for the active chat's pending (unsent) attachments. */
+/**
+ * The attachments of the open chat that are already spoken for: written onto a message, or
+ * carried by a message that is still waiting in its queue.
+ *
+ * One definition, because the composer's chips and the ids a send hands over have to agree about
+ * what is free. A file a queued turn carries is not waiting to be sent: attaching it to the next
+ * message would move it off the turn the user gave it to.
+ */
+function claimedAttachmentIds(state: State): Set<string> {
+  const claimed = new Set<string>()
+  const waiting = (state.activeChatId ? state.queued[state.activeChatId] : undefined) ?? []
+  for (const entry of waiting) {
+    for (const id of entry.attachmentIds ?? []) claimed.add(id)
+  }
+  return claimed
+}
+
+/**
+ * Convenience selector for the active chat's pending (unsent) attachments — the chips the
+ * composer offers to send or remove.
+ *
+ * A file a queued message carries is not one of them: its turn already has it, and the queue
+ * row above the field is where it is shown.
+ */
 export function pendingAttachments(state: State): storeTypes.Attachment[] {
-  return (state.chatState?.attachments ?? []).filter((a) => !a.messageId)
+  const claimed = claimedAttachmentIds(state)
+  return (state.chatState?.attachments ?? []).filter((a) => !a.messageId && !claimed.has(a.id))
 }
 
 /** The text a message should render: the live buffer while streaming, else the

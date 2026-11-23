@@ -246,6 +246,16 @@ body {
 
 /* --- markdown ----------------------------------------------------------- */
 
+/* An in-chat search hit inside rendered Markdown. Softer than the picker's mark: a
+   paragraph can hold half a dozen of them, and a strong wash over every one makes the
+   answer unreadable exactly when someone is reading it. */
+.chat-hit {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0;
+}
+
 .md {
   word-wrap: break-word;
   overflow-wrap: anywhere;

@@ -126,6 +126,14 @@ type openAICompatProvider struct {
 	ceilingMu       sync.Mutex
 	requestCeilings map[string]Ceiling
 
+	// windowMu guards learnedWindows: the context window a refusal stated for a
+	// model, remembered because the listing of a backend that publishes none —
+	// NVIDIA hosted, a plain OpenAI-compatible server — never will. It is the only
+	// source of a window that arrives after the app has already talked to the
+	// model, and it is what keeps one refusal from being paid again every turn.
+	windowMu       sync.Mutex
+	learnedWindows map[string]int
+
 	// requestBudgets remembers, per model, the last thing a response said about the
 	// minute's token allowance: what was left of it and how long that lasts. It is
 	// what a turn is paced against, so a chat that would otherwise spend the minute
@@ -204,6 +212,84 @@ func (p *openAICompatProvider) RequestCeiling(model string) Ceiling {
 	return p.requestCeilings[model]
 }
 
+// noteContextWindow remembers the window a refusal stated for a model.
+//
+// Only a refusal that named the model's own window reaches this (limits.go), and
+// the newest reading is the one kept: a deployment can be raised or lowered, and
+// the latest refusal is the only evidence of either. What it may not do is widen a
+// window a listing publishes — that direction is handled in applyLearnedWindows,
+// where a stale learned number cannot override a larger published one.
+func (p *openAICompatProvider) noteContextWindow(model string, window int) {
+	if model == "" || window <= 0 {
+		return
+	}
+	p.windowMu.Lock()
+	defer p.windowMu.Unlock()
+	if p.learnedWindows == nil {
+		p.learnedWindows = map[string]int{}
+	}
+	p.learnedWindows[model] = window
+}
+
+// learnedWindow is the window a refusal stated for one model, or 0 when none has.
+func (p *openAICompatProvider) learnedWindow(model string) int {
+	p.windowMu.Lock()
+	defer p.windowMu.Unlock()
+	return p.learnedWindows[model]
+}
+
+// learnedWindowSnapshot copies the measured windows, for a registry that is about
+// to replace this provider and wants to carry them across the rebuild.
+func (p *openAICompatProvider) learnedWindowSnapshot() map[string]int {
+	p.windowMu.Lock()
+	defer p.windowMu.Unlock()
+	if len(p.learnedWindows) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(p.learnedWindows))
+	for model, window := range p.learnedWindows {
+		out[model] = window
+	}
+	return out
+}
+
+// adoptLearnedWindows takes over measurements made by the provider this one
+// replaces. The registry only calls it for the same backend id at the same address
+// and kind, so a window learned from one deployment is never applied to another.
+func (p *openAICompatProvider) adoptLearnedWindows(windows map[string]int) {
+	if len(windows) == 0 {
+		return
+	}
+	p.windowMu.Lock()
+	defer p.windowMu.Unlock()
+	if p.learnedWindows == nil {
+		p.learnedWindows = make(map[string]int, len(windows))
+	}
+	for model, window := range windows {
+		if window > 0 {
+			p.learnedWindows[model] = window
+		}
+	}
+}
+
+// applyLearnedWindows overlays the windows refusals have stated onto a listing.
+//
+// A learned window replaces an absent one and tightens a larger published one; it
+// never widens a smaller one. The two errors are not symmetric: planning against a
+// window that is too large spends a refused request, while planning against one
+// that is too small costs a fold that was not needed. That is the same direction
+// `fromLMStudioEntry` takes when it prefers a model's loaded context length to its
+// maximum, and the same one noteRequestCeiling takes with a vendor's ceiling.
+func (p *openAICompatProvider) applyLearnedWindows(models []ModelInfo) []ModelInfo {
+	for i := range models {
+		learned := p.learnedWindow(models[i].ID)
+		if learned > 0 && (models[i].ContextLimit <= 0 || learned < models[i].ContextLimit) {
+			models[i].ContextLimit = learned
+		}
+	}
+	return models
+}
+
 // requestBudget learns a model's per-request ceiling from the budget a response
 // carries. It is attached to a Groq chat request's context, where the model being
 // planned for is known and a budget exists.
@@ -272,9 +358,11 @@ func newLMStudioProvider(baseURL, apiKey string) *openAICompatProvider {
 func (p *openAICompatProvider) ID() string   { return p.id }
 func (p *openAICompatProvider) Name() string { return p.name }
 
-// ReplaysToolReasoning reports whether tool requests include assistant reasoning.
-func (p *openAICompatProvider) ReplaysToolReasoning() bool {
-	return p.modelsFlavour == flavourDeepSeek
+// ReplaysReasoning reports that this wire carries an assistant reply's reasoning only for the one
+// vendor that requires it beside tool calls; every other OpenAI-compatible backend here receives
+// the reply without it.
+func (p *openAICompatProvider) ReplaysReasoning(withTools bool) bool {
+	return withTools && p.modelsFlavour == flavourDeepSeek
 }
 
 // CanToggleThinking reports whether this backend accepts `enable_thinking` in the
@@ -341,7 +429,7 @@ func (p *openAICompatProvider) ListModels(ctx context.Context) ([]ModelInfo, err
 		}
 		err := doJSON(ctx, jsonClient, http.MethodGet, p.modelsPath, p.authHeaders(), nil, &resp)
 		if err == nil {
-			return p.enrichLlamaCpp(ctx, p.mapModelEntries(resp.Data)), nil
+			return p.applyLearnedWindows(p.enrichLlamaCpp(ctx, p.mapModelEntries(resp.Data))), nil
 		}
 		if he, ok := err.(*HTTPError); !ok || he.StatusCode != 404 {
 			// A real failure (connection refused, auth) — surface it.
@@ -354,7 +442,7 @@ func (p *openAICompatProvider) ListModels(ctx context.Context) ([]ModelInfo, err
 	if err != nil {
 		return nil, err
 	}
-	return p.enrichLlamaCpp(ctx, models), nil
+	return p.applyLearnedWindows(p.enrichLlamaCpp(ctx, models)), nil
 }
 
 // mapModelEntries reads a rich listing with the mapper for its flavour. An entry
@@ -429,13 +517,17 @@ func (p *openAICompatProvider) fromLMStudioEntry(m lmStudioModelEntry) ModelInfo
 	}
 }
 
-// listOpenAIModels is the lowest-common-denominator listing. It cannot report a
-// context window or tool support, so context limits must come from the user's
-// per-model overrides.
+// listOpenAIModels is the lowest-common-denominator listing. It reads the
+// context window only when the server publishes one: vLLM — and a self-hosted
+// NVIDIA NIM built on it — puts `max_model_len` on every entry, while a bare
+// OpenAI-compatible server states no window at all, and there the user's
+// per-model override is where the number comes from. Tool support is never
+// reported by this shape.
 func (p *openAICompatProvider) listOpenAIModels(ctx context.Context) ([]ModelInfo, error) {
 	var resp struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID          string `json:"id"`
+			MaxModelLen int    `json:"max_model_len"`
 		} `json:"data"`
 	}
 	if err := doJSON(ctx, jsonClient, http.MethodGet, p.openAIModelsPath, p.authHeaders(), nil, &resp); err != nil {
@@ -444,9 +536,10 @@ func (p *openAICompatProvider) listOpenAIModels(ctx context.Context) ([]ModelInf
 	out := make([]ModelInfo, 0, len(resp.Data))
 	for _, m := range resp.Data {
 		out = append(out, ModelInfo{
-			ID:      m.ID,
-			Backend: p.id,
-			State:   StateNotLoaded,
+			ID:           m.ID,
+			Backend:      p.id,
+			State:        StateNotLoaded,
+			ContextLimit: m.MaxModelLen,
 		})
 	}
 	return out, nil
@@ -1097,7 +1190,7 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 	}
 	body := map[string]any{
 		"model":       req.Model,
-		"messages":    toWireMessages(req.Messages, p.ReplaysToolReasoning() && len(req.Tools) > 0),
+		"messages":    toWireMessages(req.Messages, p.ReplaysReasoning(len(req.Tools) > 0)),
 		"stream":      true,
 		"temperature": req.Temperature,
 		// OpenAI-compatible servers omit usage from a stream unless it is asked
@@ -1184,6 +1277,9 @@ func (p *openAICompatProvider) Chat(ctx context.Context, req ChatRequest) (<-cha
 			// limit they are describing.
 			if too, ok := RequestTooLarge(err); ok {
 				p.noteRequestCeiling(req.Model, Ceiling{Tokens: too.Limit, Source: CeilingFromRefusal})
+				// A refusal that names the model's window is the only place a
+				// deployment which publishes none ever states it (limits.go).
+				p.noteContextWindow(req.Model, too.Window)
 			}
 			// The minute's request rate is stated nowhere else — the header family's
 			// `requests` numbers are the day's — so a refusal that names one is the

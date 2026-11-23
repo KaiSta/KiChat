@@ -270,75 +270,6 @@ func TestTheToolCardIsToldHowMuchWasCut(t *testing.T) {
 	}
 }
 
-// TestAWithheldResultIsNotReportedAsASize is the case a reader hit: a search whose
-// results never reached the model, because the answer's tool budget was already spent.
-// The card used to print "4,374 → 41 tokens" for it — the 41 were the exhausted notice —
-// which reads as a summary the second model wrote. The record must say the result was
-// withheld, and the size the model actually read must not be the one it is compared to.
-func TestAWithheldResultIsNotReportedAsASize(t *testing.T) {
-	st := newTestStore(t)
-	makeChat(t, st)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, `<html><body><article><p>`+strings.Repeat("Ein Absatz mit Inhalt. ", 400)+
-			`</p></article></body></html>`)
-	}))
-	t.Cleanup(srv.Close)
-
-	settings := digestSettings()
-	// No summary model: this is the budget alone, which is what a spent budget looks
-	// like in a chat that never switched the condensation on.
-	settings.Digest.Model = llm.Ref{}
-	scraper := research.NewScraper(st, research.ScrapeOptions{
-		AllowPrivateHosts: true, RespectRobots: false, Timeout: 5 * time.Second,
-	}, nil)
-	log := &eventLog{}
-	engine := NewEngine(st, llm.NewRegistry(nil), tools.New(st, nil, scraper),
-		func() config.Settings { return settings }, log.emit)
-
-	// One token of budget: nothing of the page can fit, so the model gets the notice.
-	budget := &toolOutputBudget{remaining: 1}
-	engine.runTool(context.Background(), "chat-1", store.Message{ID: "m1", ChatID: "chat-1"},
-		scrapeCall(srv.URL), budget, tools.TurnRef{BackendID: "fake"})
-
-	record := persistedToolCall(t, st)
-	if record.SourceTokens == 0 {
-		t.Fatal("the page's own size was not recorded, so the card has nothing to say")
-	}
-	if !record.Withheld {
-		t.Errorf("a withheld result is reported as a size: %+v", record)
-	}
-	if record.Condensed {
-		t.Error("a withheld result claims a condensation nobody wrote")
-	}
-	if record.ContextTokens >= record.SourceTokens {
-		t.Errorf("a withheld result reports the page as its context size: %d >= %d",
-			record.ContextTokens, record.SourceTokens)
-	}
-	// And the event the live card renders, not only the row.
-	last := store.ToolCallRecord{}
-	for _, ev := range log.snapshot() {
-		if ev.name == "chat:tool" {
-			if reported, ok := ev.payload["toolCall"].(store.ToolCallRecord); ok {
-				last = reported
-			}
-		}
-	}
-	if !last.Withheld {
-		t.Errorf("the emitted card does not know the result was withheld: %+v", last)
-	}
-	// The model was told the budget was spent, rather than handed a fragment of the
-	// page that would read as the whole of it.
-	msgs, err := st.ListMessages("chat-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(msgs) != 1 || msgs[0].Content != exhaustedNotice {
-		t.Fatalf("the model received %q, want the exhausted notice", msgs[0].Content)
-	}
-}
-
 // persistedToolCall reads back the chat's one tool call, which is what a reopened chat
 // builds its cards from.
 func persistedToolCall(t *testing.T, st *store.Store) store.ToolCallRecord {
@@ -821,28 +752,70 @@ func TestTheNoticeSpeaksTheInterfaceLanguage(t *testing.T) {
 // the line numbers a page summary is allowed to drop, so one must never answer for the
 // other.
 func TestACondensationIsKeyedByTheWholeModelReference(t *testing.T) {
-	a := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite")
-	b := digestKey(digestJobPage, llm.Ref{Backend: "nvidia", Model: "same-id"}, 600, 1200, "die Seite")
+	a := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite")
+	b := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "nvidia", Model: "same-id"}, 600, 1200, "die Seite")
 	if a == b {
 		t.Fatal("the same model id on two backends shares a condensation")
 	}
-	if again := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); again != a {
+	if again := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); again != a {
 		t.Error("the same page and model produced a different key")
 	}
-	if changed := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite, geändert"); changed == a {
+	if changed := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite, geändert"); changed == a {
 		t.Error("a changed page inherited the old condensation")
 	}
-	if asFile := digestKey(digestJobFile, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); asFile == a {
+	if asFile := digestKey(digestJobFile, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); asFile == a {
 		t.Error("a file condensation is served out of a page's cache entry")
 	}
 	// The target is in the prompt, and the same ceiling can serve two targets, so the
 	// key has to carry both: 600 and 1200 beside an 8000-token ceiling are two
 	// different summaries of the same words.
-	if retargeted := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 1200, 8000, "die Seite"); retargeted == a {
+	if retargeted := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 1200, 8000, "die Seite"); retargeted == a {
 		t.Error("a changed target inherited the old condensation")
 	}
-	if wider := digestKey(digestJobPage, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 8000, "die Seite"); wider == a {
+	if wider := digestKey(digestJobPage, config.LangEnglish, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 8000, "die Seite"); wider == a {
 		t.Error("a changed ceiling inherited the old condensation")
+	}
+	if german := digestKey(digestJobPage, config.LangGerman, llm.Ref{Backend: "groq", Model: "same-id"}, 600, 1200, "die Seite"); german == a {
+		t.Error("a German condensation was served the English one")
+	}
+}
+
+// TestACondensationSpeaksTheAppLanguage pins the wiring from the setting to the
+// prompt. The language is the app's, not the page's: a German page read in an English
+// window is summarised in English, so it cannot pull the next answer into German.
+func TestACondensationSpeaksTheAppLanguage(t *testing.T) {
+	cases := []struct {
+		lang    string
+		rule    string
+		wrapper string
+	}{
+		{config.LangEnglish, "Write in English.", "Summarise the following page text"},
+		{config.LangGerman, "Schreibe auf Deutsch.", "Fasse den folgenden Seitentext"},
+		{config.LangChinese, "用中文书写。", "总结以下网页文本"},
+	}
+	for _, tc := range cases {
+		settings := digestSettings()
+		settings.Language = tc.lang
+		digester := newDigester([]llm.StreamEvent{
+			{Type: llm.EventDelta, Text: "Kurzfassung"}, {Type: llm.EventDone},
+		})
+		engine, _ := newDigestEngine(t, newTestStore(t), settings, digester)
+
+		_, condensed := engine.condenseToolOutput(context.Background(), "chat-1",
+			scrapeCall("https://example.com/a"), bigPage(), tools.TurnRef{BackendID: "fake"}, "")
+		if !condensed {
+			t.Fatalf("%s: the page was not condensed", tc.lang)
+		}
+		req := digester.lastRequest()
+		if len(req.Messages) < 2 {
+			t.Fatalf("%s: the digester was not called", tc.lang)
+		}
+		if got := req.Messages[0].Content; !strings.Contains(got, tc.rule) {
+			t.Errorf("%s: the system prompt is not in the app language:\n%s", tc.lang, got)
+		}
+		if got := req.Messages[len(req.Messages)-1].Content; !strings.Contains(got, tc.wrapper) {
+			t.Errorf("%s: the wrapper is not in the app language:\n%s", tc.lang, got)
+		}
 	}
 }
 
@@ -865,7 +838,7 @@ func TestTheTargetReachesTheModelAndTheAnswerMayFinish(t *testing.T) {
 		t.Fatalf("digester calls = %d, want one condensation", got)
 	}
 	req := digester.requestAt(0)
-	if prompt := req.Messages[len(req.Messages)-1].Content; !strings.Contains(prompt, "etwa 180 Tokens") {
+	if prompt := req.Messages[len(req.Messages)-1].Content; !strings.Contains(prompt, "about 180 tokens") {
 		t.Errorf("the target is not stated to the model: %q", truncateForTest(prompt, 160))
 	}
 	if req.MaxTokens <= 180 {
@@ -1001,7 +974,7 @@ func TestAChangedCapDoesNotReuseTheOldSummary(t *testing.T) {
 	if !strings.Contains(other, "Längere Fassung") {
 		t.Fatalf("the raised cap served the old length: %q", truncateForTest(other, 120))
 	}
-	if prompt := digester.requestAt(1).Messages[1].Content; !strings.Contains(prompt, "etwa 1200 Tokens") {
+	if prompt := digester.requestAt(1).Messages[1].Content; !strings.Contains(prompt, "about 1200 tokens") {
 		t.Errorf("the raised target was not sent: %q", truncateForTest(prompt, 160))
 	}
 }
@@ -1166,7 +1139,7 @@ func TestALargeReadIsCondensedBeforeTheModelSeesIt(t *testing.T) {
 	if !strings.Contains(asked, `<file path="big.go">`) {
 		t.Errorf("the digester was not told which file it was reading: %q", truncateForTest(asked, 200))
 	}
-	if !strings.Contains(asked, "Textdatei") {
+	if !strings.Contains(asked, "text file") {
 		t.Error("the digester was given the page prompt for a source file")
 	}
 
@@ -1590,27 +1563,6 @@ func TestExtractionRefusesPromptThatLeavesNoOutputRoom(t *testing.T) {
 	})
 	if err == nil || digester.requestCount() != 0 {
 		t.Fatalf("err = %v, requests = %d", err, digester.requestCount())
-	}
-}
-
-func TestWithheldCondensationDoesNotConsumePageEscape(t *testing.T) {
-	st := newTestStore(t)
-	makeChat(t, st)
-	digester := newDigester([]llm.StreamEvent{{Type: llm.EventDelta, Text: "summary"}})
-	engine, _ := newDigestEngine(t, st, digestSettings(), digester)
-	call := scrapeCall("https://example.com/a")
-	row := store.Message{ID: "m1", ChatID: "chat-1"}
-	out := toolOutcome{result: tools.Result{Text: bigPage()}, ran: true}
-	record := engine.startTool("chat-1", row, call)
-	engine.finishTool(context.Background(), "chat-1", row, call, record, out,
-		&toolOutputBudget{remaining: 1}, tools.TurnRef{BackendID: "fake"})
-	if engine.condensations().has(condensedIdentity("chat-1", call, bigPage())) {
-		t.Fatal("a summary withheld by the tool budget consumed the escape hatch")
-	}
-	result, condensed := engine.condenseToolOutput(context.Background(), "chat-1", call, bigPage(),
-		tools.TurnRef{BackendID: "fake"}, "")
-	if !condensed || !strings.Contains(result, "summary") {
-		t.Fatal("next read did not receive the cached summary")
 	}
 }
 

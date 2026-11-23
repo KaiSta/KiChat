@@ -29,10 +29,10 @@ export function asLang(value: unknown): Lang {
  */
 const de = {
   'gateway.title': "Externe API",
-  'gateway.hint': "Ein Spiel-Mod oder eine Anwendung mit einem von KiChat verwalteten Modell verbinden. Textchat und Funktionstools werden unterstützt.",
+  'gateway.hint': "Externe Anwendungen mit einem von KiChat verwalteten Modell verbinden. Textchat und Funktionstools werden unterstützt.",
   'gateway.enable': "Lokale API aktivieren",
   'gateway.model': "Modell für externe Anfragen",
-  'gateway.modelHint': "Anfragen verwenden diesen Anbieter und seine Zugangsdaten. Ein lokales Backend hält Spieldaten auf diesem Computer.",
+  'gateway.modelHint': "Anfragen verwenden diesen Anbieter und seine Zugangsdaten. Ein lokales Backend hält Anwendungsdaten auf diesem Computer.",
   'err.gateway.chooseModel': "Ein Modell eines aktivierten Backends auswählen.",
   'gateway.port': "Lokaler Port",
   'gateway.context': "Kontextlimit (Tokens)",
@@ -91,6 +91,14 @@ const de = {
   'db.unlock.freshHint':
     'Die bisherige Datenbank wird nicht gelöscht, sondern mit Zeitstempel umbenannt. Lesen lässt sie sich nur mit ihrem Schlüssel.',
   'db.unlock.freshConfirm': 'Trotzdem neu beginnen',
+  'db.restore.button': 'Kopie einer Datenbank wiederherstellen',
+  'db.restore.hint':
+    'Gib das Passwort der Kopie ein und wähle dann die kopierte kichat.db und den passenden kichat.key. Die bisherige Datenbank wird mit Zeitstempel zur Seite gelegt und nicht gelöscht.',
+  'db.restore.passphrase': 'Passwort der Kopie',
+  'db.restore.confirm': 'Dateien wählen und wiederherstellen',
+  'db.restore.busy': 'Wird wiederhergestellt …',
+  'db.restore.pickDatabase': 'Kopierte kichat.db wählen',
+  'db.restore.pickKey': 'Passenden kichat.key wählen',
   'err.db.shortPassphrase': 'Das Passwort muss mindestens {{1}} Zeichen lang sein.',
   'err.db.wrongPassphrase': 'Das Passwort passt nicht zu dieser Datenbank.',
   'err.db.needKeyring':
@@ -98,6 +106,13 @@ const de = {
   'err.db.needRecovery': 'Lege zuerst eine Passwort-Sicherung an, bevor der Schlüsselbund vergessen wird.',
   'err.db.noKeyring': 'Dieses System hat keinen Schlüsselbund.',
   'err.db.notLocked': 'Die Datenbank ist bereits geöffnet.',
+  'err.db.restoreLocked':
+    'Die Datenbank ist bereits geöffnet. Beende sie, bevor du eine andere wiederherstellst.',
+  'err.db.restoreNotEncrypted': 'Die gewählte Datei ist keine verschlüsselte KiChat-Datenbank.',
+  'err.db.restoreKeyMissing': 'Die gewählte Schlüsseldatei fehlt oder ist nicht lesbar.',
+  'err.db.restoreKeyDamaged': 'Die Schlüsseldatei ist beschädigt oder stammt aus einer anderen Version.',
+  'err.db.restoreWrongKey': 'Der Schlüssel passt nicht zu dieser Datenbank.',
+  'err.db.restoreFailed': 'Die gewählten Dateien konnten nicht wiederhergestellt werden: {{1}}',
   'db.reason.noKeyring': 'Kein Schlüsselbund gefunden. Ein Passwort richtet die Verschlüsselung ein.',
   'db.reason.needsPassphrase': 'Diese Datenbank ist verschlüsselt.',
   'db.reason.noKey':
@@ -169,6 +184,14 @@ const de = {
   'chat.composerLabel': 'Nachricht',
   'chat.send': 'Senden',
   'chat.stop': 'Stoppen',
+  // The composer's third send state: while an answer streams, a message is not refused, it
+  // waits, and these three lines are the whole of what that queue says.
+  'chat.queue': 'Einreihen',
+  'chat.queue.title': 'Wartet auf die laufende Antwort',
+  'chat.queue.remove': 'Aus der Warteschlange entfernen',
+  // Stop ends the answer, not the queue: the next waiting message goes out at once, and saying
+  // so is the difference between a controlled stop and a surprising one.
+  'chat.queue.afterStop': 'Antwort gestoppt — die nächste Nachricht aus der Warteschlange geht jetzt raus.',
   'chat.stopping': 'Wird gestoppt …',
   'chat.missingModel':
     'Das Modell dieses Chats — {{model}} ({{backend}}) — ist derzeit nicht verfügbar. Sein Backend ist vielleicht aus, oder das Modell wurde entfernt.',
@@ -180,6 +203,13 @@ const de = {
     'Diese Antwort braucht mehr Anfragen, als die Minute erlaubt — die nächste Runde geht in etwa {{seconds}} s raus.',
   'chat.regenerate': 'Neu generieren',
   'chat.copy': 'Kopieren',
+  'chat.search': 'Im Chat suchen …',
+  'chat.searchCount': '{{1}} von {{2}}',
+  'chat.searchHits': '{{1}} Treffer in dieser Nachricht',
+  'chat.searchNoResults': 'keine Treffer',
+  'chat.searchPrevious': 'Vorheriger Treffer',
+  'chat.searchNext': 'Nächster Treffer',
+  'chat.searchClose': 'Suche schließen',
   'chat.copied': 'Kopiert',
   'chat.copyFailed':
     'Die Zwischenablage hat die Kopie abgelehnt — markiere den Text und kopiere ihn von Hand.',
@@ -194,6 +224,11 @@ const de = {
   'images.save': 'Speichern',
   'images.saving': 'Wird gespeichert …',
   'images.saved': 'Bild gespeichert',
+  // The copy generate_image wrote into a project folder. The card names it so the file can
+  // be found without reading the tool result above the picture.
+  'images.projectPath': 'Im Projekt',
+  'images.projectPathHint':
+    'Diese Datei liegt im Wurzelordner des Projekts; der Pfad ist relativ dazu.',
   'images.loading': 'Bild wird geladen …',
   'images.unreadable': 'Bild konnte nicht gelesen werden',
   'images.zoom': 'Zum Vergrößern klicken',
@@ -415,6 +450,13 @@ const de = {
     'Ist das an, sucht KiChat vor jeder Antwort mit deiner Frage im Web und legt die Treffer in den Prompt — so antworten auch Modelle mit Quellen, die von sich aus keine Tools aufrufen. Mit LLM-Kontext kommen echte Seitenausschnitte dazu, sonst nur Überschriften und Kurztexte. Kostet pro Antwort eine Suchanfrage und gilt nur für diesen Chat.',
   'search.providers': 'Anbieter',
   'search.quota': 'Brave-Anfragen diesen Monat',
+  'search.challengeTitle': 'DuckDuckGo: Bot-Prüfung',
+  'search.challengeIntro':
+    'DuckDuckGo hat statt Ergebnissen eine Prüfung geschickt. Wähle die passenden Kacheln aus – die Antwort geht über dieselbe Verbindung wie die Suche, damit sie für diesen Rechner zählt.',
+  'search.challengeInstruction': 'Wähle alle Kacheln aus, auf denen eine Ente zu sehen ist:',
+  'search.challengeSolve': 'Antwort senden',
+  'search.challengeSolved':
+    'Antwort angenommen: {{count}} Ergebnisse. Die Suche lässt sich jetzt wiederholen.',
 
   'files.add': 'Dateien hinzufügen',
   'files.dropHint': 'Dateien hierher ziehen',
@@ -440,6 +482,16 @@ const de = {
   'settings.platform': 'Plattform',
   'settings.runtime': 'Laufzeit',
   'settings.copyVersion': 'Versionsinfo kopieren',
+  'settings.update': 'App-Update',
+  'settings.updateCheck': 'Prüfen',
+  'settings.updateChecking': 'wird geprüft …',
+  'settings.updateAvailable': 'Update verfügbar',
+  'settings.updateCurrent': 'aktuell',
+  'settings.updateDevBuild': 'Entwicklungsbuild – kein Release zum Vergleichen',
+  'settings.updateDownload': 'Herunterladen',
+  'settings.updateNotes': 'Was ist neu',
+  'settings.updateDaily': 'Täglich im Hintergrund prüfen',
+  'settings.updateDailyHint': 'Wirkt nach dem Speichern.',
   'settings.terminal': 'Terminal',
   'settings.terminalNone': 'keins gefunden',
   'settings.trace': 'Diagnose-Protokoll',
@@ -546,6 +598,7 @@ const de = {
   'settings.managed.folderForget': 'Aus der Liste entfernen',
   'settings.managed.folderLoaded': 'im Einsatz',
   'settings.managed.folderLoading': 'wird geladen',
+  'settings.managed.folderMoe': 'MoE · {{active}} von {{experts}}',
   'settings.managed.loadedOther':
     'Der laufende Server bedient noch {{model}}; ein Start übernimmt die Auswahl.',
   'settings.managed.flashAttention': 'Flash Attention (--flash-attn)',
@@ -573,10 +626,38 @@ const de = {
     'Automatisch ist llama.cpps eigener Standard: es legt so viele Layer in den Gerätespeicher, wie hineinpassen. „Alle\u201c erzwingt alle Layer, „Nur CPU\u201c rechnet alles auf der CPU. Der Start gilt ab dem nächsten Start.',
   'settings.managed.offloadReport': 'Auf {{device}}: {{layers}} von {{total}} Layern auf der GPU',
   'settings.managed.offloadCpu': '{{total}} Layer rechnen auf der CPU — kein Layer auf der GPU',
+  'settings.managed.expert': 'MoE-Experten',
+  'settings.managed.expertAuto': 'Automatisch — llama.cpp entscheidet',
+  'settings.managed.expertCpu': 'Alle Experten in den Arbeitsspeicher (--cpu-moe)',
+  'settings.managed.expertLayerCount': 'Layer (N)',
+  'settings.managed.expertLayers': 'Erste N Layer in den Arbeitsspeicher (--n-cpu-moe)',
+  'settings.managed.expertUseSuggested': 'Vorschlag übernehmen ({{n}})',
+  'settings.managed.expertUseAuto': 'Experten automatisch platzieren',
+  'settings.managed.moeDetected': '{{layers}} Layer · {{experts}} Experten, {{active}} pro Token',
+  'settings.managed.expertSuggested':
+    'Die Datei ist größer als der freie Gerätespeicher; {{n}} Layer ist ein Ausgangswert — mehr im Arbeitsspeicher ist langsamer, geht aber nicht aus dem Speicher.',
+  'settings.managed.expertHint':
+    'Nur für Mixture-of-Experts-Modelle: die Expertengewichte bleiben im Arbeitsspeicher, Aufmerksamkeit, gemeinsame Gewichte und KV-Cache weiter auf der GPU. Das macht ein 20-GB-MoE-Modell auf einer 16-GB-Karte nutzbar — langsamer als alles in der GPU, aber pro Token rechnen nur 3B Parameter. Ein dichtes Modell hat keine Experten; dort bewirkt die Einstellung nichts.',
+  'settings.managed.mtp': 'Multi-Token-Vorhersage (MTP)',
+  'settings.managed.mtpDraft': 'Entwurfs-Token (N)',
+  'settings.managed.mtpSuggested': 'Empfohlen für diese Datei: {{n}} Entwurfs-Token.',
+  'settings.managed.mtpDetected': '{{n}} MTP-Köpfe in der Datei',
+  'settings.managed.folderMTP': 'MTP',
+  'settings.managed.mtpHint':
+    'Das Modell entwirft die nächsten Token selbst und prüft sie in einem Durchlauf; veröffentlichte Qwen3.6-Läufe mit MTP berichten etwa 1,5–2× schnellere Ausgabe ohne Genauigkeitsverlust. Drei Entwürfe sind llama.cpps eigener Standard und der Wert der veröffentlichten 27–35B-Läufe; sinnvoll ist der Bereich 1–6, weil der beste Wert von der Karte abhängt. Nur GGUFs, die mit den MTP-Köpfen umgewandelt wurden, können das — deshalb erscheint die Zeile nur bei ihnen. Wirkt ab dem nächsten Start.',
+  'settings.managed.mtpStale':
+    'Diese Datei hat keine MTP-Köpfe — der gespeicherte Wert bleibt, beim Start wird aber nichts gesendet.',
+  'settings.managed.mtpFloor': 'Mindestwahrscheinlichkeit',
+  'settings.managed.mtpFloorSuggested': 'Empfohlen: {{p}} — damit lohnen sich auch mehr Entwürfe.',
+  'settings.managed.mtpFloorHint':
+    'Unterhalb dieses Werts hört der MTP-Kopf auf zu entwerfen, statt zu raten; genau das lässt vier bis sechs Entwürfe etwas bringen. 0 schaltet die Grenze aus. Wirkt ab dem nächsten Start.',
   'settings.managed.tooLarge':
     'Die Gewichte ({{model}}) sind größer als der freie Speicher der erkannten Geräte ({{free}}) — das Modell passt nicht vollständig auf die GPU und wird ganz oder teilweise auf der CPU gerechnet. Eine stärker quantisierte Datei passt eher.',
   'settings.managed.ctx': 'Kontextfenster (-c)',
   'settings.managed.extra': 'Weitere Argumente',
+  'settings.managed.singleSlot': 'Nur eine Sitzung (--parallel 1)',
+  'settings.managed.singleSlotHint':
+    'Startet llama-server mit einem Slot statt mit mehreren — das senkt den Speicherbedarf deutlich, wenn nur eine Sitzung gebraucht wird. Eine zweite gleichzeitige Anfrage wartet dann. Wirkt ab dem nächsten Start.',
   'settings.managed.start': 'Starten',
   'settings.managed.stop': 'Beenden',
   'settings.managed.state.stopped': 'beendet',
@@ -626,25 +707,33 @@ const de = {
   'settings.mlx.loadNote':
     'Der Server meldet „läuft“, sobald der Prozess antwortet; die Gewichte werden erst mit der ersten Anfrage geladen. Eine erste Antwort kann deshalb Minuten dauern.',
   'settings.prompt': 'System-Prompt',
-  'settings.promptDefault': 'Standard-Prompt',
-  'settings.promptPreset': 'Vorlage',
+  'settings.promptPreset': 'Prompt',
   'settings.promptHint':
-    'Gilt für neue Chats. Variablen in {{Klammern}} werden beim Senden aufgelöst.',
+    'Jeder Prompt hat einen Namen; die Auswahl darunter bestimmt, welchen dieser Textbereich bearbeitet. Variablen in {{Klammern}} werden beim Senden aufgelöst.',
   'settings.promptPresetHint':
-    '„Kleine lokale Modelle“ gibt nur wenige, kurze Anweisungen: knappe Antworten, keine erfundenen Fakten, ein Tool pro Runde.',
+    'Welcher benannte Prompt im Textbereich darunter bearbeitet wird. Die zweite Auswahl bestimmt, womit ein neuer Chat und ein neues Projekt starten.',
+  'settings.promptModes': 'Prompt pro Modus',
+  'settings.promptModesHint':
+    'Welchen der gespeicherten Prompts ein neuer Chat und ein neues Projekt starten. Ein bestehendes Gespräch behält seinen Prompt.',
+  'settings.promptModeChat': 'Chat',
+  'settings.promptModeChatHint': 'Neue Chats starten mit diesem Prompt.',
+  'settings.promptModeCoding': 'Code-Projekt',
+  'settings.promptModeCodingHint':
+    'Neue Projekte starten mit dieser Vorlage. Ein bestehendes Projekt behält seinen Prompt; seine Anweisungen stehen in der AGENTS.md des Ordners.',
   'preset.research': 'Recherche (Standard)',
   'preset.small-local': 'Kleine lokale Modelle',
   'preset.assistant': 'Neutraler Assistent',
   'preset.coding': 'Code & Technik',
   'preset.coding-agent': 'Coding-Agent (Projekt)',
   'preset.blank': 'Leer',
-  'settings.promptReset': 'Auf Standard zurücksetzen',
+  'preset.custom': 'Eigener Prompt',
+  'settings.promptReset': 'Änderungen an diesem Prompt verwerfen',
   'settings.promptReload': 'Gespeicherte Prompt-Vorlagen neu laden',
   'settings.promptPreview': 'Vorschau mit aktuellen Werten',
   'settings.promptVariables': 'Verfügbare Variablen',
   'settings.promptUnknownVars': 'Unbekannte Variablen',
   'settings.promptInsert': 'Einfügen',
-  'promptvar.datetime': 'Aktuelles Datum, Uhrzeit und Wochentag',
+  'promptvar.datetime': 'Datum und Wochentag, ohne Uhrzeit',
   'promptvar.date': 'Nur das Datum (TT.MM.JJJJ)',
   'promptvar.time': 'Nur die Uhrzeit (HH:MM)',
   'promptvar.weekday': 'Wochentag ausgeschrieben',
@@ -718,6 +807,9 @@ const de = {
     'Prüft die Größe vor jeder weiteren Tool-Runde erneut. Nötig für lokale Modelle, die kein Anfrage-Limit melden — kostet dafür eine Zusammenfassung mitten in der Antwort. Gilt für Chats; ein Projekt prüft immer, weil seine Antwort nicht zwischen zwei Nachrichten gefaltet werden kann.',
   'settings.threshold': 'Schwelle',
   'settings.keepTurns': 'Letzte Turns im Volltext',
+  'settings.keepTokens': 'Bleibender Verlauf (Tokens)',
+  'settings.keepTokensHint':
+    'Wie viel des jüngsten Verlaufs neben dem Gedächtnis im Volltext bleibt. 0 leitet den Wert aus dem Kontextfenster ab (ein Viertel, 2000–15000) — ein Wert, der auf jedem Modell dasselbe bedeutet. „Letzte Turns“ begrenzt weiterhin die Anzahl.',
   'settings.reserve': 'Reserve für Antwort',
   'settings.maxSummaryTokens': 'Max. Zusammenfassung (Tokens)',
   'settings.summaryModel': 'Modell für Zusammenfassungen',
@@ -725,11 +817,6 @@ const de = {
   'settings.summaryModelUnavailable': '(nicht verfügbar)',
   'settings.summaryModelHint':
     'Ein Reasoning-Modell kann sein Ausgabebudget beim Denken aufbrauchen, statt eine Zusammenfassung zu schreiben. Ein kleines Instruct-Modell umgeht das.',
-  'settings.toolBudget': 'Tool-Budget',
-  'settings.toolBudgetHint': 'Token-Budget für Tool-Ergebnisse pro Chat-Antwort',
-  'settings.codingToolBudget': 'Token-Budget für Tool-Ergebnisse im Coding-Agent',
-  'settings.codingToolBudgetHint':
-    'Gilt für Projekt-Chats. Quellcode und Build-Ausgaben sind dichter als Seiten — ein ganzer Blick in eine große Datei kostet allein über 24 000 Tokens.',
   'settings.research': 'Recherche',
   'settings.braveKey': 'Brave Search API-Key',
   'settings.braveKeySet': 'Ein Key ist gespeichert.',
@@ -792,6 +879,11 @@ const de = {
   'settings.images.cfgHint':
     'Wie stark der Prompt das Bild bestimmt (1–30, üblich 7). Niedrig malt mehr aus dem Modell selbst, hoch hält sich streng an den Prompt; destillierte bzw. Turbo-/Flow-Modelle (Flux, Qwen-Image, SDXL-Turbo) laufen mit 1, wo es keine Führung gibt.',
   'settings.images.size': 'Größe',
+  // The option that leaves both size boxes empty, which is how the model chooses the
+  // resolution itself on every generate_image call. It is a button beside the presets
+  // because the empty state is a choice, not an unfilled field.
+  'settings.images.sizeModelHint':
+    'Beide Felder leer: das Modell wählt die Größe bei jedem generate_image-Aufruf selbst — passend zum Motiv, etwa hochkant für ein Porträt oder quer für eine Landschaft. Ein eingetragener Wert gilt für jedes Bild.',
   'settings.images.sizePreset': 'Quadratische Größe',
   // The two 16:9 bases. The label names the screen size; the hint gives the arithmetic
   // that reaches it, because 4K has to start at 1920 — a pass is capped at 2×, so 2560
@@ -1117,15 +1209,15 @@ const de = {
     'Beendet nur diesen Befehl, nicht die Antwort. Das Modell liest die bisherige Ausgabe und macht weiter.',
   'tool.tokensOne': '{{tokens}} Tokens',
   'tool.tokensCut': '{{source}} → {{context}} Tokens',
-  'tool.tokensBudgetTag': 'Budget',
+  'tool.tokensBudgetTag': 'Kontext',
   'tool.tokensWithheld': '{{tokens}} Tokens verworfen',
   'tool.tokensWithheldHint':
-    'Das Tool hat {{tokens}} Tokens zurückgegeben; das Token-Budget dieser Antwort war bereits aufgebraucht, deshalb hat das Modell sie nie gelesen. Frage noch einmal, um das Ergebnis in einer neuen Antwort zu bekommen.',
+    'Das Tool hat {{tokens}} Tokens zurückgegeben; diese Anfrage hatte keinen Platz mehr dafür, deshalb hat das Modell sie nie gelesen. Frage noch einmal, um das Ergebnis in einer neuen Antwort zu bekommen.',
   'tool.tokensHint': 'Das Tool hat {{tokens}} Tokens zurückgegeben; sie stehen unverändert im Kontext.',
   'tool.tokensCondensedHint':
     'Das Tool hat {{source}} Tokens zurückgegeben; ein zweites Modell hat sie auf {{context}} Tokens gekürzt, und so stehen sie im Kontext.',
   'tool.tokensBudgetHint':
-    'Das Tool hat {{source}} Tokens zurückgegeben; das Token-Budget dieser Antwort hat nur {{context}} davon in den Kontext gelassen.',
+    'Das Tool hat {{source}} Tokens zurückgegeben; der Platz dieser Anfrage hat nur {{context}} davon in den Kontext gelassen.',
 
   // Das Schreib-Tool. Es hält den Chat an, bis geantwortet ist — deshalb steht hier, was
   // passiert, und nicht nur, was gefragt wird.
@@ -1188,6 +1280,8 @@ const de = {
     'Schreibt die Datei so zurück, wie dieser Chat sie vorgefunden hat. Eine Datei, die seitdem selbst bearbeitet wurde, bleibt unangetastet.',
   'changes.blockedOutside': 'Seit der Änderung selbst bearbeitet — bleibt unangetastet.',
   'changes.blockedBinary': 'Keine Textdatei — nicht sicherbar, deshalb kein Zurücksetzen.',
+  'changes.blockedUnreadable':
+    'Datei nicht lesbar — ihr aktueller Inhalt lässt sich nicht prüfen, deshalb kein Zurücksetzen.',
   'changes.truncated': 'Diff gekürzt.',
   'changes.close': 'Schließen',
 
@@ -1249,6 +1343,8 @@ const de = {
   'err.runtime.notManaged': '{{1}} wird nicht von KiChat gestartet',
   'err.model.notFound': 'Modell nicht gefunden: {{1}}',
   'err.search.noBraveKey': 'kein Brave API-Key angegeben',
+  'err.search.challengeGone':
+    'Diese Prüfung ist nicht mehr aktuell – bitte die Suche wiederholen.',
   'err.research.pdfTooLarge':
     'Das PDF ist größer als das Download-Limit von {{1}} MB und kann nicht vollständig gelesen werden',
   'err.model.backendOff': 'Backend {{1}} ist nicht konfiguriert oder ausgeschaltet',
@@ -1423,6 +1519,12 @@ const de = {
   'err.runtime.forkUnpublished':
     'für {{1}} auf {{2}} wird der PrismML-Build nicht veröffentlicht',
   'err.runtime.forkUnpublishedOS': 'für {{1}} wird der PrismML-Build nicht veröffentlicht',
+  'err.update.releaseQuery': 'Release-Liste abfragen: {{1}}',
+  'err.update.rateLimited':
+    'GitHub begrenzt die Anfragen (Stundenlimit erreicht) – bitte später erneut prüfen.',
+  'err.update.releaseStatus': 'GitHub antwortete mit Status {{1}}.',
+  'err.update.releaseRead': 'Release-Antwort lesen: {{1}}',
+  'err.update.noTag': 'Die Release-Antwort nannte keine Version.',
   'err.runtime.releaseQuery': 'llama.cpp-Releases abfragen: {{1}}',
   'err.runtime.rateLimited':
     'GitHub drosselt die Anfragen (Stundenlimit erreicht) — später erneut versuchen oder einen eigenen Build-Pfad angeben',
@@ -1459,6 +1561,8 @@ const de = {
   'err.runtime.binaryMissing': 'kein {{1}} installiert',
   'err.runtime.binaryNotFound': '{{1}} nicht gefunden: {{2}}',
   'err.runtime.modelIsFolder': 'Modellpfad ist ein Ordner: {{1}}',
+  'err.runtime.quantizedVCacheNeedsFlashAttention':
+    'Ein quantisierter V-Cache ({{1}}) braucht Flash Attention \u2014 stell Flash Attention auf \u201eon\u201c oder den V-Cache auf f16.',
   'err.runtime.freePort': 'freien Port finden: {{1}}',
   'err.runtime.startServer': '{{1}} starten: {{2}}',
   'err.runtime.unexpectedPortAddress': 'unerwartete Adresse für den freien Port',
@@ -1478,6 +1582,7 @@ const de = {
   'err.tools.outsideWorkspace':
     '{{1}} liegt außerhalb des Projektordners. Pfade müssen innerhalb des Projekts liegen.',
   'err.tools.fileUnreadable': '{{1}} ist nicht lesbar',
+  'err.tools.searchFailed': 'Die Suche ließ sich nicht ausführen: {{1}}',
   'err.project.badFolder':
     '{{1}} ist kein Ordner, den ein Projekt verwenden kann.',
   'err.project.alreadyOpen':
@@ -1547,10 +1652,10 @@ export type MessageKey = keyof typeof de
 
 const en: Record<keyof typeof de, string> = {
   'gateway.title': "External API",
-  'gateway.hint': "Connect a game mod or application to a model managed by KiChat. Text chat and function tools are supported.",
+  'gateway.hint': "Connect external applications to a model managed by KiChat. Text chat and function tools are supported.",
   'gateway.enable': "Enable the local API",
   'gateway.model': "Model for external requests",
-  'gateway.modelHint': "Requests use this provider, including its configured credentials. Select a local backend to keep game data on this computer.",
+  'gateway.modelHint': "Requests use this provider, including its configured credentials. Select a local backend to keep application data on this computer.",
   'err.gateway.chooseModel': "Select a model on an enabled backend.",
   'gateway.port': "Local port",
   'gateway.context': "Context limit (tokens)",
@@ -1606,6 +1711,14 @@ const en: Record<keyof typeof de, string> = {
   'db.unlock.freshHint':
     'The existing database is not deleted: it is renamed with a timestamp. Only its key can open it.',
   'db.unlock.freshConfirm': 'Start fresh anyway',
+  'db.restore.button': 'Restore from a copied database',
+  'db.restore.hint':
+    'Enter the passphrase of the copy, then choose the copied kichat.db and its matching kichat.key. The current database is moved aside with a timestamp, not deleted.',
+  'db.restore.passphrase': 'Passphrase of the copy',
+  'db.restore.confirm': 'Choose files and restore',
+  'db.restore.busy': 'Restoring …',
+  'db.restore.pickDatabase': 'Choose the copied kichat.db',
+  'db.restore.pickKey': 'Choose the matching kichat.key',
   'err.db.shortPassphrase': 'The passphrase must be at least {{1}} characters long.',
   'err.db.wrongPassphrase': 'That passphrase does not open this database.',
   'err.db.needKeyring':
@@ -1613,6 +1726,12 @@ const en: Record<keyof typeof de, string> = {
   'err.db.needRecovery': 'Add a passphrase copy first, before forgetting the keyring key.',
   'err.db.noKeyring': 'This system has no keyring.',
   'err.db.notLocked': 'The database is already open.',
+  'err.db.restoreLocked': 'The database is already open. Quit it before restoring another one.',
+  'err.db.restoreNotEncrypted': 'The selected file is not an encrypted KiChat database.',
+  'err.db.restoreKeyMissing': 'The selected key file is missing or unreadable.',
+  'err.db.restoreKeyDamaged': 'The key file is damaged or from another version.',
+  'err.db.restoreWrongKey': 'The key does not open this database.',
+  'err.db.restoreFailed': 'The selected files could not be restored: {{1}}',
   'db.reason.noKeyring': 'No keyring was found, so a passphrase sets encryption up.',
   'db.reason.needsPassphrase': 'This database is encrypted.',
   'db.reason.noKey':
@@ -1683,6 +1802,14 @@ const en: Record<keyof typeof de, string> = {
   'chat.composerLabel': 'Message',
   'chat.send': 'Send',
   'chat.stop': 'Stop',
+  // The composer's third send state: while an answer streams, a message is not refused, it
+  // waits, and these three lines are the whole of what that queue says.
+  'chat.queue': 'Queue',
+  'chat.queue.title': 'Waiting to send',
+  'chat.queue.remove': 'Remove from queue',
+  // Stop ends the answer, not the queue: the next waiting message goes out at once, and saying
+  // so is the difference between a controlled stop and a surprising one.
+  'chat.queue.afterStop': 'Answer stopped — the next queued message goes out now.',
   'chat.stopping': 'Stopping …',
   'chat.missingModel':
     'The model this chat uses — {{model}} ({{backend}}) — is not available right now. Its backend may be off, or the model was removed.',
@@ -1694,6 +1821,13 @@ const en: Record<keyof typeof de, string> = {
     'This answer needs more requests than the minute allows — the next round goes out in about {{seconds}} s.',
   'chat.regenerate': 'Regenerate',
   'chat.copy': 'Copy',
+  'chat.search': 'Search this chat …',
+  'chat.searchCount': '{{1}} of {{2}}',
+  'chat.searchHits': '{{1}} matches in this message',
+  'chat.searchNoResults': 'no matches',
+  'chat.searchPrevious': 'Previous match',
+  'chat.searchNext': 'Next match',
+  'chat.searchClose': 'Close search',
   'chat.copied': 'Copied',
   'chat.copyFailed': 'The clipboard refused the copy — select the text and copy it by hand.',
   'chat.sources': 'Sources',
@@ -1707,6 +1841,10 @@ const en: Record<keyof typeof de, string> = {
   'images.save': 'Save',
   'images.saving': 'Saving…',
   'images.saved': 'Image saved',
+  // The copy generate_image wrote into a project folder.
+  'images.projectPath': 'In project',
+  'images.projectPathHint':
+    'This file sits in the project folder’s root; the path is relative to it.',
   'images.loading': 'Loading image…',
   'images.unreadable': 'Image could not be read',
   'images.zoom': 'Click to enlarge',
@@ -1924,6 +2062,13 @@ const en: Record<keyof typeof de, string> = {
     'When on, KiChat searches the web with your question before every answer and puts the hits into the prompt — so models that never call tools themselves still answer from sources. With LLM context enabled it injects real page excerpts, otherwise only headlines and snippets. Costs one search request per answer and applies to this chat only.',
   'search.providers': 'Providers',
   'search.quota': 'Brave requests this month',
+  'search.challengeTitle': 'DuckDuckGo: bot check',
+  'search.challengeIntro':
+    'DuckDuckGo sent a check instead of results. Select the matching squares — the answer goes out over the same connection as the search, so it counts for this machine.',
+  'search.challengeInstruction': 'Select all squares containing a duck:',
+  'search.challengeSolve': 'Send answer',
+  'search.challengeSolved':
+    'Answer accepted: {{count}} results. The search can be repeated now.',
 
   'files.add': 'Add files',
   'files.dropHint': 'Drop files here',
@@ -1949,6 +2094,16 @@ const en: Record<keyof typeof de, string> = {
   'settings.platform': 'Platform',
   'settings.runtime': 'Runtime',
   'settings.copyVersion': 'Copy version info',
+  'settings.update': 'App update',
+  'settings.updateCheck': 'Check',
+  'settings.updateChecking': 'checking …',
+  'settings.updateAvailable': 'Update available',
+  'settings.updateCurrent': 'up to date',
+  'settings.updateDevBuild': 'development build — no release to compare with',
+  'settings.updateDownload': 'Download',
+  'settings.updateNotes': "What's new",
+  'settings.updateDaily': 'Check daily in the background',
+  'settings.updateDailyHint': 'Takes effect after saving.',
   'settings.terminal': 'Terminal',
   'settings.terminalNone': 'none found',
   'settings.trace': 'Diagnostic trace',
@@ -2054,6 +2209,7 @@ const en: Record<keyof typeof de, string> = {
   'settings.managed.folderForget': 'Remove from the list',
   'settings.managed.folderLoaded': 'in use',
   'settings.managed.folderLoading': 'loading',
+  'settings.managed.folderMoe': 'MoE · {{active}} of {{experts}}',
   'settings.managed.loadedOther':
     'The running server still serves {{model}}; a start applies the selection.',
   'settings.managed.flashAttention': 'Flash attention (--flash-attn)',
@@ -2081,10 +2237,38 @@ const en: Record<keyof typeof de, string> = {
     'Automatic is the server\u2019s own default: it places as many layers in the device memory as fit. \u201cAll\u201d forces every layer onto the GPU, \u201cCPU only\u201d computes everything on the CPU. A change applies from the next start.',
   'settings.managed.offloadReport': 'On {{device}}: {{layers}} of {{total}} layers on the GPU',
   'settings.managed.offloadCpu': '{{total}} layers are computed on the CPU — no layer on the GPU',
+  'settings.managed.expert': 'MoE experts',
+  'settings.managed.expertAuto': 'Automatic — llama.cpp decides',
+  'settings.managed.expertCpu': 'All experts in system RAM (--cpu-moe)',
+  'settings.managed.expertLayerCount': 'Layers (N)',
+  'settings.managed.expertLayers': 'First N layers in system RAM (--n-cpu-moe)',
+  'settings.managed.expertUseSuggested': 'Use the suggestion ({{n}})',
+  'settings.managed.expertUseAuto': 'Place the experts automatically',
+  'settings.managed.moeDetected': '{{layers}} layers · {{experts}} experts, {{active}} per token',
+  'settings.managed.expertSuggested':
+    'The file is larger than the free device memory; {{n}} layers is a starting point — more in system RAM is slower, but it does not run out of memory.',
+  'settings.managed.expertHint':
+    'Mixture-of-experts models only: the expert weights stay in system RAM while attention, the shared weights and the KV cache stay on the GPU. That is what makes a 20 GB MoE model usable on a 16 GB card — slower than holding it all in VRAM, but only 3B parameters are read per token. A dense model has no experts, so the setting does nothing there.',
+  'settings.managed.mtp': 'Multi-token prediction (MTP)',
+  'settings.managed.mtpDraft': 'Draft tokens (N)',
+  'settings.managed.mtpSuggested': 'Recommended for this file: {{n}} draft tokens.',
+  'settings.managed.mtpDetected': '{{n}} MTP heads in the file',
+  'settings.managed.folderMTP': 'MTP',
+  'settings.managed.mtpHint':
+    'The model drafts the next tokens itself and verifies them in one pass; published Qwen3.6 MTP runs report about 1.5–2× faster output with no loss of accuracy. Three drafts is llama.cpp\'s own default and the count the published 27–35B runs use; 1–6 is the range worth measuring, because the best number depends on the card. Only GGUFs converted with the MTP heads can do this, which is why the row appears only for them. Applies from the next start.',
+  'settings.managed.mtpStale':
+    'This file has no MTP heads — the stored value is kept, but nothing is sent when it starts.',
+  'settings.managed.mtpFloor': 'Confidence floor',
+  'settings.managed.mtpFloorSuggested': 'Recommended: {{p}} — this is what makes a longer draft pay.',
+  'settings.managed.mtpFloorHint':
+    'Below this probability the MTP head stops drafting instead of guessing, which is what lets four to six drafts help. 0 turns the floor off. Applies from the next start.',
   'settings.managed.tooLarge':
     'The weights ({{model}}) are larger than the free memory the reported devices have ({{free}}) — the model does not fit on the GPU in full and will be computed on the CPU, wholly or partly. A more strongly quantised file is more likely to fit.',
   'settings.managed.ctx': 'Context window (-c)',
   'settings.managed.extra': 'Further arguments',
+  'settings.managed.singleSlot': 'Single session (--parallel 1)',
+  'settings.managed.singleSlotHint':
+    'Runs llama-server with one slot instead of several, which cuts memory use significantly when only one session is needed. A second simultaneous request then waits its turn. Applies from the next start.',
   'settings.managed.start': 'Start',
   'settings.managed.stop': 'Stop',
   'settings.managed.state.stopped': 'stopped',
@@ -2134,24 +2318,33 @@ const en: Record<keyof typeof de, string> = {
   'settings.mlx.loadNote':
     'The server reports “running” as soon as the process answers; the weights load on the first request, so a first reply can take minutes.',
   'settings.prompt': 'System prompt',
-  'settings.promptDefault': 'Default prompt',
-  'settings.promptPreset': 'Preset',
-  'settings.promptHint': 'Used for new chats. Variables in {{braces}} are resolved at send time.',
+  'settings.promptPreset': 'Prompt',
+  'settings.promptHint':
+    'Every prompt has a name; the picker below chooses which one this textarea edits. Variables in {{braces}} are resolved at send time.',
   'settings.promptPresetHint':
-    '“Small local models” gives only a few short rules: brief answers, no invented facts, one tool call at a time.',
+    'Which named prompt the textarea below edits. The second picker chooses what a new chat and a new project start on.',
+  'settings.promptModes': 'Prompt per mode',
+  'settings.promptModesHint':
+    'Which of the stored prompts a new chat and a new project start on. A conversation that already exists keeps its prompt.',
+  'settings.promptModeChat': 'Chat',
+  'settings.promptModeChatHint': 'New chats start on this prompt.',
+  'settings.promptModeCoding': 'Code project',
+  'settings.promptModeCodingHint':
+    'New projects start on this preset. An existing project keeps its prompt; its instructions live in the folder’s AGENTS.md.',
   'preset.research': 'Research (default)',
   'preset.small-local': 'Small local models',
   'preset.assistant': 'Neutral assistant',
   'preset.coding': 'Code & engineering',
   'preset.coding-agent': 'Coding agent (project)',
   'preset.blank': 'Empty',
-  'settings.promptReset': 'Reset to default',
+  'preset.custom': 'Custom prompt',
+  'settings.promptReset': 'Discard edits to this prompt',
   'settings.promptReload': 'Reload the stored prompt presets',
   'settings.promptPreview': 'Preview with current values',
   'settings.promptVariables': 'Available variables',
   'settings.promptUnknownVars': 'Unknown variables',
   'settings.promptInsert': 'Insert',
-  'promptvar.datetime': 'Current date, time and weekday',
+  'promptvar.datetime': 'Date and weekday, without the clock',
   'promptvar.date': 'The date only (DD.MM.YYYY)',
   'promptvar.time': 'The time only (HH:MM)',
   'promptvar.weekday': 'Weekday written out',
@@ -2225,6 +2418,9 @@ const en: Record<keyof typeof de, string> = {
     'Re-checks the size before every further tool round. Needed for local models, which publish no per-request limit — at the cost of one summary in the middle of an answer. Applies to chats; a project always checks, because its reply cannot be folded between two messages.',
   'settings.threshold': 'Threshold',
   'settings.keepTurns': 'Recent turns kept verbatim',
+  'settings.keepTokens': 'History kept verbatim (tokens)',
+  'settings.keepTokensHint':
+    'How much of the newest history stays verbatim beside the memory. 0 derives it from the context window (a quarter, 2000–15000), which is a figure that means the same thing on every model. "Recent turns" still caps the count.',
   'settings.reserve': 'Response reserve',
   'settings.maxSummaryTokens': 'Max summary (tokens)',
   'settings.summaryModel': 'Summarisation model',
@@ -2232,11 +2428,6 @@ const en: Record<keyof typeof de, string> = {
   'settings.summaryModelUnavailable': '(not available)',
   'settings.summaryModelHint':
     'A reasoning model can spend its output budget thinking instead of writing a summary. A small instruction model avoids that.',
-  'settings.toolBudget': 'Tool budget',
-  'settings.toolBudgetHint': 'Token budget for tool results per chat reply',
-  'settings.codingToolBudget': 'Token budget for tool results in a project',
-  'settings.codingToolBudgetHint':
-    'Applies to project chats. Source files and build output are denser than pages — one whole read of a large file costs over 24 000 tokens on its own.',
   'settings.research': 'Research',
   'settings.braveKey': 'Brave Search API key',
   'settings.braveKeySet': 'A key is stored.',
@@ -2292,6 +2483,10 @@ const en: Record<keyof typeof de, string> = {
   'settings.images.cfgHint':
     'How hard the prompt drives the picture (1–30, usually 7). Low paints more out of the model itself, high holds closely to the prompt; a distilled or turbo/flow-matching model (Flux, Qwen-Image, SDXL-Turbo) runs at 1, where there is no guidance at all.',
   'settings.images.size': 'Size',
+  // The option that leaves both size boxes empty, which is how the model chooses the
+  // resolution itself on every generate_image call.
+  'settings.images.sizeModelHint':
+    'Both boxes empty: the model chooses the size on every generate_image call to fit the subject — portrait, landscape, a wallpaper. A value you type here applies to every picture.',
   'settings.images.sizePreset': 'Square size',
   // The two 16:9 bases. The label names the screen size; the hint gives the arithmetic
   // that reaches it, because 4K has to start at 1920 — a pass is capped at 2×, so 2560
@@ -2604,15 +2799,15 @@ const en: Record<keyof typeof de, string> = {
     'Ends this command only, not the answer. The model reads the output so far and carries on.',
   'tool.tokensOne': '{{tokens}} tokens',
   'tool.tokensCut': '{{source}} → {{context}} tokens',
-  'tool.tokensBudgetTag': 'budget',
+  'tool.tokensBudgetTag': 'context',
   'tool.tokensWithheld': '{{tokens}} tokens discarded',
   'tool.tokensWithheldHint':
-    'The tool returned {{tokens}} tokens; this answer’s tool budget was already spent, so the model never read them. Ask again to get the result in a fresh answer.',
+    'The tool returned {{tokens}} tokens; this request had no room left for them, so the model never read them. Ask again to get the result in a fresh answer.',
   'tool.tokensHint': 'The tool returned {{tokens}} tokens; they stand in the context unchanged.',
   'tool.tokensCondensedHint':
     'The tool returned {{source}} tokens; a second model condensed them to {{context}}, which is what stands in the context.',
   'tool.tokensBudgetHint':
-    'The tool returned {{source}} tokens; this answer’s tool budget let only {{context}} of them into the context.',
+    'The tool returned {{source}} tokens; this request had room for only {{context}} of them in the context.',
 
   // The write tool. It stops the chat until it is answered, which is why these say what
   // is happening and not only what is being asked.
@@ -2674,6 +2869,8 @@ const en: Record<keyof typeof de, string> = {
     'Writes the file back the way this chat found it. A file edited since then is left alone.',
   'changes.blockedOutside': 'Edited since the change — left alone.',
   'changes.blockedBinary': 'Not a text file — it cannot be saved, so there is no undo.',
+  'changes.blockedUnreadable':
+    'Cannot be read — its current content cannot be checked, so there is no undo.',
   'changes.truncated': 'Diff shortened.',
   'changes.close': 'Close',
 
@@ -2734,6 +2931,7 @@ const en: Record<keyof typeof de, string> = {
   'err.runtime.notManaged': '{{1}} is not started by KiChat',
   'err.model.notFound': 'model not found: {{1}}',
   'err.search.noBraveKey': 'no Brave API key set',
+  'err.search.challengeGone': 'This check is no longer current — please run the search again.',
   'err.research.pdfTooLarge':
     'the PDF is larger than the {{1}} MB download limit and cannot be read in full',
   'err.model.backendOff': 'backend {{1}} is not configured or switched off',
@@ -2905,6 +3103,12 @@ const en: Record<keyof typeof de, string> = {
   'err.runtime.platformUnpublishedOS': 'llama.cpp publishes nothing for {{1}}',
   'err.runtime.forkUnpublished': 'the PrismML build is not published for {{1}} on {{2}}',
   'err.runtime.forkUnpublishedOS': 'the PrismML build is not published for {{1}}',
+  'err.update.releaseQuery': 'querying the release list: {{1}}',
+  'err.update.rateLimited':
+    'GitHub is rate-limiting requests (hourly limit reached) — please check again later.',
+  'err.update.releaseStatus': 'GitHub answered with status {{1}}.',
+  'err.update.releaseRead': 'reading the release response: {{1}}',
+  'err.update.noTag': 'The release response named no version.',
   'err.runtime.releaseQuery': 'querying the llama.cpp releases: {{1}}',
   'err.runtime.rateLimited':
     'GitHub is throttling requests (hourly limit reached) — try again later or point KiChat at your own build',
@@ -2941,6 +3145,8 @@ const en: Record<keyof typeof de, string> = {
   'err.runtime.binaryMissing': 'no {{1}} is installed',
   'err.runtime.binaryNotFound': '{{1}} not found: {{2}}',
   'err.runtime.modelIsFolder': 'the model path is a folder: {{1}}',
+  'err.runtime.quantizedVCacheNeedsFlashAttention':
+    'A quantized V cache ({{1}}) needs flash attention \u2014 set flash attention to on, or the V cache to f16.',
   'err.runtime.freePort': 'finding a free port: {{1}}',
   'err.runtime.startServer': 'starting {{1}}: {{2}}',
   'err.runtime.unexpectedPortAddress': 'unexpected address for the free port',
@@ -2958,6 +3164,7 @@ const en: Record<keyof typeof de, string> = {
   'err.tools.outsideWorkspace':
     '{{1}} is outside the project folder. Paths have to be inside the project.',
   'err.tools.fileUnreadable': '{{1}} cannot be read',
+  'err.tools.searchFailed': 'The search could not be run: {{1}}',
   'err.project.badFolder': '{{1}} is not a folder a project can use.',
   'err.project.alreadyOpen':
     'The project "{{1}}" already works in this folder. Open it in the sidebar — or use /clear there to start over.',
@@ -3014,10 +3221,10 @@ const en: Record<keyof typeof de, string> = {
 
 const zh: Record<keyof typeof de, string> = {
   'gateway.title': "外部 API",
-  'gateway.hint': "讓遊戲 Mod 或應用程式連接 KiChat 管理的模型。支援文字聊天與函式工具呼叫。",
+  'gateway.hint': "讓外部應用程式連接 KiChat 管理的模型。支援文字聊天與函式工具呼叫。",
   'gateway.enable': "啟用本機 API",
   'gateway.model': "外部請求使用的模型",
-  'gateway.modelHint': "請求會使用此服務及其憑證。選擇本機後端可讓遊戲資料留在這台電腦。",
+  'gateway.modelHint': "請求會使用此服務及其憑證。選擇本機後端可讓應用程式資料留在這台電腦。",
   'err.gateway.chooseModel': "請選擇已啟用後端上的模型。",
   'gateway.port': "本機連接埠",
   'gateway.context': "上下文上限（tokens）",
@@ -3072,12 +3279,25 @@ const zh: Record<keyof typeof de, string> = {
   'db.unlock.fresh': '将数据库移到一边并重新开始',
   'db.unlock.freshHint': '原数据库不会被删除，只会以时间戳重命名。只有它的密钥才能打开它。',
   'db.unlock.freshConfirm': '仍然重新开始',
+  'db.restore.button': '从复制的数据库恢复',
+  'db.restore.hint': '输入副本的密码，然后选择复制的 kichat.db 及其对应的 kichat.key。当前数据库会以时间戳移到一边，不会被删除。',
+  'db.restore.passphrase': '副本的密码',
+  'db.restore.confirm': '选择文件并恢复',
+  'db.restore.busy': '正在恢复……',
+  'db.restore.pickDatabase': '选择复制的 kichat.db',
+  'db.restore.pickKey': '选择对应的 kichat.key',
   'err.db.shortPassphrase': '密码至少需要 {{1}} 个字符。',
   'err.db.wrongPassphrase': '该密码无法打开此数据库。',
   'err.db.needKeyring': '没有密钥环时不能删除密码备份——否则密钥会丢失。',
   'err.db.needRecovery': '请先创建密码备份，再忘记密钥环中的密钥。',
   'err.db.noKeyring': '此系统没有密钥环。',
   'err.db.notLocked': '数据库已经打开。',
+  'err.db.restoreLocked': '数据库已经打开。请先退出，再恢复其他数据库。',
+  'err.db.restoreNotEncrypted': '所选文件不是加密的 KiChat 数据库。',
+  'err.db.restoreKeyMissing': '所选密钥文件不存在或无法读取。',
+  'err.db.restoreKeyDamaged': '密钥文件已损坏或来自其他版本。',
+  'err.db.restoreWrongKey': '该密钥无法打开此数据库。',
+  'err.db.restoreFailed': '无法恢复所选文件：{{1}}',
   'db.reason.noKeyring': '未找到密钥环，因此需要用密码来设置加密。',
   'db.reason.needsPassphrase': '此数据库已加密。',
   'db.reason.noKey': '此数据库已没有密钥——密钥环和密码备份中都不存在。',
@@ -3140,6 +3360,10 @@ const zh: Record<keyof typeof de, string> = {
   'chat.composerLabel': '消息',
   'chat.send': '发送',
   'chat.stop': '停止',
+  'chat.queue': '排队',
+  'chat.queue.title': '等待发送',
+  'chat.queue.remove': '从队列移除',
+  'chat.queue.afterStop': '已停止回答——队列中的下一条消息现在发送。',
   'chat.stopping': '正在停止……',
   'chat.missingModel': '此对话使用的模型——{{model}}（{{backend}}）——当前不可用。其后端可能已关闭，或该模型已被移除。',
   'chat.missingModelSwitch': '切换到 {{model}}',
@@ -3148,6 +3372,13 @@ const zh: Record<keyof typeof de, string> = {
   'chat.spread': '本次回答需要的请求数超过本分钟的上限——下一轮将在约 {{seconds}} 秒后发出。',
   'chat.regenerate': '重新生成',
   'chat.copy': '复制',
+  'chat.search': '在当前聊天中搜索 …',
+  'chat.searchCount': '第 {{1}} 个，共 {{2}} 个',
+  'chat.searchHits': '本条消息中有 {{1}} 个匹配',
+  'chat.searchNoResults': '没有匹配项',
+  'chat.searchPrevious': '上一个匹配',
+  'chat.searchNext': '下一个匹配',
+  'chat.searchClose': '关闭搜索',
   'chat.copied': '已复制',
   'chat.copyFailed': '剪贴板拒绝了复制 —— 请手动选中文本并复制。',
   'chat.sources': '来源',
@@ -3161,6 +3392,8 @@ const zh: Record<keyof typeof de, string> = {
   'images.save': '保存',
   'images.saving': '正在保存…',
   'images.saved': '图像已保存',
+  'images.projectPath': '项目中',
+  'images.projectPathHint': '该文件位于项目根目录；路径相对于该目录。',
   'images.loading': '正在加载图像…',
   'images.unreadable': '无法读取图像',
   'images.zoom': '点击放大',
@@ -3369,6 +3602,12 @@ const zh: Record<keyof typeof de, string> = {
     '开启后，KiChat 会在每次回答前用你的问题搜索网络，并把命中结果放进提示词——即便模型本身不会调用工具，也能依据来源作答。启用 LLM 上下文时会注入真实网页摘录，否则仅有标题与摘要。每次回答消耗一次搜索请求，且仅对当前对话生效。',
   'search.providers': '提供商',
   'search.quota': '本月 Brave 请求数',
+  'search.challengeTitle': 'DuckDuckGo：机器人验证',
+  'search.challengeIntro':
+    'DuckDuckGo 返回的是验证而非结果。请选择相应的方格——答案会通过与搜索相同的连接发送，因此对这台机器有效。',
+  'search.challengeInstruction': '请选择所有包含鸭子的方格：',
+  'search.challengeSolve': '提交答案',
+  'search.challengeSolved': '答案已接受：{{count}} 条结果。现在可以重新搜索。',
 
   'files.add': '添加文件',
   'files.dropHint': '将文件拖到此处',
@@ -3394,6 +3633,16 @@ const zh: Record<keyof typeof de, string> = {
   'settings.platform': '平台',
   'settings.runtime': '运行时',
   'settings.copyVersion': '复制版本信息',
+  'settings.update': '应用更新',
+  'settings.updateCheck': '检查',
+  'settings.updateChecking': '正在检查…',
+  'settings.updateAvailable': '有可用更新',
+  'settings.updateCurrent': '已是最新',
+  'settings.updateDevBuild': '开发版本，无可比较的发布版',
+  'settings.updateDownload': '下载',
+  'settings.updateNotes': '更新内容',
+  'settings.updateDaily': '每天在后台检查',
+  'settings.updateDailyHint': '保存后生效。',
   'settings.terminal': '终端',
   'settings.terminalNone': '未找到',
   'settings.trace': '诊断日志',
@@ -3492,6 +3741,7 @@ const zh: Record<keyof typeof de, string> = {
   'settings.managed.folderForget': '从列表中移除',
   'settings.managed.folderLoaded': '使用中',
   'settings.managed.folderLoading': '加载中',
+  'settings.managed.folderMoe': 'MoE · {{active}}/{{experts}} 个专家',
   'settings.managed.loadedOther': '正在运行的服务器仍在使用 {{model}}；启动后才会切换。',
   'settings.managed.flashAttention': 'Flash Attention（--flash-attn）',
   'settings.managed.flashAuto': '自动（由服务器决定）',
@@ -3518,10 +3768,37 @@ const zh: Record<keyof typeof de, string> = {
     '自动是 llama.cpp 自身的默认值：尽可能多地把层放入设备内存。“全部”强制所有层放入 GPU，“仅 CPU”则完全在 CPU 上计算。修改从下次启动起生效。',
   'settings.managed.offloadReport': '在 {{device}} 上：{{layers}}/{{total}} 层运行于 GPU',
   'settings.managed.offloadCpu': '{{total}} 层在 CPU 上计算——没有层运行于 GPU',
+  'settings.managed.expert': 'MoE 专家',
+  'settings.managed.expertAuto': '自动——由 llama.cpp 决定',
+  'settings.managed.expertCpu': '全部专家放入系统内存（--cpu-moe）',
+  'settings.managed.expertLayerCount': '层数（N）',
+  'settings.managed.expertLayers': '前 N 层专家放入系统内存（--n-cpu-moe）',
+  'settings.managed.expertUseSuggested': '采用建议（{{n}}）',
+  'settings.managed.expertUseAuto': '自动放置专家',
+  'settings.managed.moeDetected': '{{layers}} 层 · {{experts}} 个专家，每个 token 激活 {{active}} 个',
+  'settings.managed.expertSuggested':
+    '文件大于可用显存；{{n}} 层是一个起点——放在系统内存里的越多越慢，但不会耗尽显存。',
+  'settings.managed.expertHint':
+    '仅适用于混合专家（MoE）模型：专家权重留在系统内存，注意力、共享权重和 KV 缓存仍在 GPU 上。这让 20 GB 的 MoE 模型能在 16 GB 显卡上运行——比全部放入显存慢，但每个 token 只读取 3B 参数。稠密模型没有专家，此设置不起作用。',
+  'settings.managed.mtp': '多 token 预测（MTP）',
+  'settings.managed.mtpDraft': '草稿 token 数（N）',
+  'settings.managed.mtpSuggested': '此文件的建议值：{{n}} 个草稿 token。',
+  'settings.managed.mtpDetected': '文件中有 {{n}} 个 MTP 头',
+  'settings.managed.folderMTP': 'MTP',
+  'settings.managed.mtpHint':
+    '模型自行草拟接下来的 token，并在一次前向中一起校验；公开的 Qwen3.6 MTP 运行报告称输出约快 1.5–2 倍且不损失精度。三个草稿 token 是 llama.cpp 的默认值，也是公开的 27–35B 运行所用的值；值得测量的是 1–6，因为最佳值取决于显卡。只有带 MTP 头转换出的 GGUF 才支持，因此该行只对它们显示。修改从下次启动起生效。',
+  'settings.managed.mtpStale': '此文件没有 MTP 头——保存的值会保留，但启动时不会发送任何参数。',
+  'settings.managed.mtpFloor': '置信度下限',
+  'settings.managed.mtpFloorSuggested': '建议值：{{p}}——有了它，更长的草稿才划算。',
+  'settings.managed.mtpFloorHint':
+    '低于该概率时，MTP 头会停止草拟而不是继续猜测；这正是四个到六个草稿能带来收益的原因。0 表示不设下限。修改从下次启动起生效。',
   'settings.managed.tooLarge':
     '权重（{{model}}）大于所识别设备的可用显存（{{free}}）——模型无法完整放入 GPU，将全部或部分在 CPU 上计算。量化程度更高的文件更有可能放得下。',
   'settings.managed.ctx': '上下文窗口（-c）',
   'settings.managed.extra': '其他参数',
+  'settings.managed.singleSlot': '单会话（--parallel 1）',
+  'settings.managed.singleSlotHint':
+    '让 llama-server 只用一个槽位而不是多个——只需要一个会话时，这样能显著降低内存占用。第二个同时到达的请求则需要等待。修改从下次启动起生效。',
   'settings.managed.start': '启动',
   'settings.managed.stop': '停止',
   'settings.managed.state.stopped': '已停止',
@@ -3571,22 +3848,28 @@ const zh: Record<keyof typeof de, string> = {
   'settings.mlx.loadNote':
     '进程一有响应服务器就显示“运行中”；权重会在第一条消息时才加载，因此首次回复可能需要几分钟。',
   'settings.prompt': '系统提示词',
-  'settings.promptDefault': '默认提示词',
-  'settings.promptPreset': '预设',
-  'settings.promptHint': '用于新建对话。{{大括号}} 中的变量在发送时解析。',
-  'settings.promptPresetHint': '“小型本地模型”只给少量简短指令：回答简短、不编造事实、每次只调用一个工具。',
+  'settings.promptPreset': '提示词',
+  'settings.promptHint': '每个提示词都有名称；下方选择框决定此处编辑哪一个。{{大括号}} 中的变量在发送时解析。',
+  'settings.promptPresetHint': '下方文本框编辑的是哪个已命名的提示词。第二组选择框决定新建对话和新建项目使用哪一个。',
+  'settings.promptModes': '各模式的提示词',
+  'settings.promptModesHint': '新建对话和新建项目分别使用哪个已保存的提示词。已存在的对话会保留原来的提示词。',
+  'settings.promptModeChat': '对话',
+  'settings.promptModeChatHint': '新建对话使用该提示词。',
+  'settings.promptModeCoding': '代码项目',
+  'settings.promptModeCodingHint': '新建项目使用该预设。已有项目会保留其提示词；项目说明放在文件夹的 AGENTS.md 中。',
   'preset.research': '研究（默认）',
   'preset.small-local': '小型本地模型',
   'preset.assistant': '中性助手',
   'preset.coding': '代码与工程',
   'preset.coding-agent': '编码代理（项目）',
   'preset.blank': '空白',
-  'settings.promptReset': '恢复默认',
+  'preset.custom': '自定义提示词',
+  'settings.promptReset': '放弃对此提示词的修改',
   'settings.promptReload': '重新加载已保存的提示词预设',
   'settings.promptPreview': '按当前变量预览',
   'settings.promptVariables': '可用变量',
   'settings.promptUnknownVars': '未知变量',
-  'promptvar.datetime': '当前日期、时间和星期',
+  'promptvar.datetime': '日期和星期，不含时间',
   'promptvar.date': '仅日期（TT.MM.JJJJ）',
   'promptvar.time': '仅时间（HH:MM）',
   'promptvar.weekday': '完整写出的星期',
@@ -3656,17 +3939,15 @@ const zh: Record<keyof typeof de, string> = {
     '在每次继续工具轮次前重新检查大小。适用于不公布单次请求上限的本地模型——代价是回答中途多一次摘要。仅适用于对话；项目始终会检查，因为它的回答无法在两条消息之间折叠。',
   'settings.threshold': '阈值',
   'settings.keepTurns': '保留原文的最近轮数',
+  'settings.keepTokens': '保留原文的历史（tokens）',
+  'settings.keepTokensHint':
+    '记忆旁保留原文的最新历史数量。0 表示按上下文窗口推算（四分之一，2000–15000）——同一数值在每种模型上含义相同。“最近轮数”仍然限制轮数。',
   'settings.reserve': '为回答预留',
   'settings.maxSummaryTokens': '摘要上限（tokens）',
   'settings.summaryModel': '摘要使用的模型',
   'settings.summaryModelDefault': '与对话相同（默认）',
   'settings.summaryModelUnavailable': '（不可用）',
   'settings.summaryModelHint': '推理模型可能把输出预算耗尽在思考上，写不出摘要。使用小型指令模型可避免这一点。',
-  'settings.toolBudget': '工具预算',
-  'settings.toolBudgetHint': '每次对话回答的工具结果 token 预算',
-  'settings.codingToolBudget': '项目对话的工具结果 token 预算',
-  'settings.codingToolBudgetHint':
-    '适用于项目对话。源代码和构建输出比网页更密集——完整读取一个大文件本身就要超过 24 000 个 token。',
   'settings.research': '研究',
   'settings.braveKey': 'Brave Search API 密钥',
   'settings.braveKeySet': '已保存密钥。',
@@ -3717,6 +3998,8 @@ const zh: Record<keyof typeof de, string> = {
   'settings.images.cfgHint':
     '提示词对画面的约束强度（1–30，通常为 7）。数值低更依赖模型自身的发挥，数值高则严格遵循提示词；蒸馏模型或 Turbo/Flow 模型（Flux、Qwen-Image、SDXL-Turbo）使用 1，此时不存在引导。',
   'settings.images.size': '尺寸',
+  'settings.images.sizeModelHint':
+    '两个框都留空：模型在每次 generate_image 调用时自行选择尺寸以贴合主题——竖幅、横幅、壁纸。填入的数值适用于每张图片。',
   'settings.images.sizePreset': '正方形尺寸',
   // The two 16:9 bases. The label names the screen size; the hint gives the arithmetic
   // that reaches it, because 4K has to start at 1920 — a pass is capped at 2×, so 2560
@@ -4002,15 +4285,15 @@ const zh: Record<keyof typeof de, string> = {
   'tool.stopCommandHint': '只结束这条命令，不停止回答。模型会读取已产生的输出并继续。',
   'tool.tokensOne': '{{tokens}} 个令牌',
   'tool.tokensCut': '{{source}} → {{context}} 个令牌',
-  'tool.tokensBudgetTag': '预算',
+  'tool.tokensBudgetTag': '上下文',
   'tool.tokensWithheld': '{{tokens}} 个令牌未采用',
   'tool.tokensWithheldHint':
-    '工具返回了 {{tokens}} 个令牌，但本回答的工具预算已经用完，模型从未读到它们。再次提问可在新的回答中获得结果。',
+    '工具返回了 {{tokens}} 个令牌，但此请求已没有空间，模型从未读到它们。再次提问可在新的回答中获得结果。',
   'tool.tokensHint': '工具返回了 {{tokens}} 个令牌，原样进入上下文。',
   'tool.tokensCondensedHint':
     '工具返回了 {{source}} 个令牌；第二个模型将其压缩为 {{context}} 个，并以此进入上下文。',
   'tool.tokensBudgetHint':
-    '工具返回了 {{source}} 个令牌；本回答的工具预算只让其中 {{context}} 个进入上下文。',
+    '工具返回了 {{source}} 个令牌；此请求的空间只让其中 {{context}} 个进入上下文。',
 
   // 写入工具。它会暂停对话直到得到答复，因此这里说明的是正在发生什么，而不只是被问什么。
   'confirm.title': '项目确认',
@@ -4057,6 +4340,7 @@ const zh: Record<keyof typeof de, string> = {
   'changes.revertHint': '把这个对话找到它时的内容写回文件。此后被编辑过的文件保持原样。',
   'changes.blockedOutside': '更改后被编辑过 —— 保持原样。',
   'changes.blockedBinary': '不是文本文件 —— 无法保存，因此不能还原。',
+  'changes.blockedUnreadable': '无法读取 —— 无法检查其当前内容，因此不能还原。',
   'changes.truncated': '差异已截短。',
   'changes.close': '关闭',
 
@@ -4110,6 +4394,7 @@ const zh: Record<keyof typeof de, string> = {
   'err.runtime.notManaged': '{{1}} 不是由 KiChat 启动的',
   'err.model.notFound': '未找到模型：{{1}}',
   'err.search.noBraveKey': '未设置 Brave API 密钥',
+  'err.search.challengeGone': '此验证已失效——请重新搜索。',
   'err.research.pdfTooLarge': 'PDF 超过 {{1}} MB 的下载上限，无法完整读取',
   'err.model.backendOff': '后端 {{1}} 未配置或已关闭',
   'err.model.backendUnreachable': '无法访问后端 {{1}}：{{2}}',
@@ -4259,6 +4544,11 @@ const zh: Record<keyof typeof de, string> = {
   'err.runtime.platformUnpublishedOS': 'llama.cpp 没有为 {{1}} 发布构建',
   'err.runtime.forkUnpublished': 'PrismML 构建没有为 {{1}} 的 {{2}} 发布',
   'err.runtime.forkUnpublishedOS': 'PrismML 构建没有为 {{1}} 发布',
+  'err.update.releaseQuery': '查询发布列表：{{1}}',
+  'err.update.rateLimited': 'GitHub 正在限流（已达到每小时上限）——请稍后再检查。',
+  'err.update.releaseStatus': 'GitHub 返回状态 {{1}}。',
+  'err.update.releaseRead': '读取发布信息：{{1}}',
+  'err.update.noTag': '发布信息中没有版本号。',
   'err.runtime.releaseQuery': '查询 llama.cpp 发布：{{1}}',
   'err.runtime.rateLimited': 'GitHub 正在限流（已达到每小时上限）——请稍后重试，或指定自己的构建路径',
   'err.runtime.releaseQueryStatus': '查询 llama.cpp 发布：HTTP {{1}}',
@@ -4293,6 +4583,8 @@ const zh: Record<keyof typeof de, string> = {
   'err.runtime.binaryMissing': '未安装 {{1}}',
   'err.runtime.binaryNotFound': '未找到 {{1}}：{{2}}',
   'err.runtime.modelIsFolder': '模型路径是一个文件夹：{{1}}',
+  'err.runtime.quantizedVCacheNeedsFlashAttention':
+    '量化的 V 缓存（{{1}}）需要 Flash Attention\u2014\u2014请把 Flash Attention 设为 on，或把 V 缓存设为 f16。',
   'err.runtime.freePort': '查找空闲端口：{{1}}',
   'err.runtime.startServer': '启动 {{1}}：{{2}}',
   'err.runtime.unexpectedPortAddress': '空闲端口返回了意外的地址',
@@ -4309,6 +4601,7 @@ const zh: Record<keyof typeof de, string> = {
   'err.tools.workspaceGone': '无法打开项目文件夹 {{1}} —— 它还存在吗？',
   'err.tools.outsideWorkspace': '{{1}} 位于项目文件夹之外。路径必须位于项目内部。',
   'err.tools.fileUnreadable': '无法读取 {{1}}',
+  'err.tools.searchFailed': '无法执行搜索：{{1}}',
   'err.project.badFolder': '{{1}} 不是项目可以使用的文件夹。',
   'err.project.alreadyOpen': '这个文件夹中已有项目“{{1}}”。请在侧边栏中打开它 —— 或在那里用 /clear 清空上下文重新开始。',
   'err.project.noTerminal': '找不到 KiChat 可以打开的终端。请自行打开一个并进入项目文件夹。',

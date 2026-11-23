@@ -120,7 +120,8 @@ fold can be decided by and hands both to the planner in one call
 - the **user's threshold**, read from `settings.Compact.Enabled` **and** the per-chat
   `AutoCompact`, and passed as **0 when either of them is off** — 0 meaning *no bound at all*
   rather than *a default*, which is why nothing defaults it on the way in. `Force` stays false,
-  so `Target` is 0 unless the ceiling below supplies one.
+  so `Target` is 0 unless the ceiling below supplies one — or the chat is a **project**, whose
+  automatic run always aims at its own threshold (§5.3).
 - the **backend's per-request ceiling** (`llm.RequestCeiling` — Groq, GROQ.md §6). It is a number
   the vendor published rather than a preference, so it folds whether or not the user asked for
   automatic compaction; it is 0 for a backend that publishes none, which is why this function
@@ -230,10 +231,11 @@ answer to a backend saying the request is too big (the vendor's own shapes are i
   now `target`, so the cut stops as soon as the kept turns plus the prompt, the reserve and the
   summary fit the ceiling (`TestAnAutomaticCeilingFoldAimsAtTheCeiling`).
 
-  And a fold cannot make a turn sendable by itself when one *tool result* is the growth: the
-  result belongs to the turn being answered, so the cut may not touch it. That half is not
-  compaction's — the result is cut to the room the next request has left as it is handed to the
-  model (GROQ.md §6.2 item 4).
+  And a fold cannot make a turn sendable when one *tool result* is the growth: the result
+  belongs to the turn being answered, so the cut may not touch it. That half is not
+  compaction's either — a result is bounded where the tool returns it (32 KiB) and otherwise
+  delivered whole, so on a backend with a per-request ceiling below its window such a turn
+  ends with the refusal (GROQ.md §6.2 item 4, §17.6).
 
   Where that ceiling comes from is what decides which turn it can save. It is the vendor's own
   number, read from **the budget header of any response** — `x-ratelimit-limit-tokens`, which
@@ -317,6 +319,18 @@ further: to the ceiling itself, through the same target walk a manual "→ 60 %"
 is decided by the ceiling's own fold point rather than by which bound fired, because a fold
 triggered by a *lower* threshold on a chat that is already at the ceiling has to reach it as well.
 
+There is one exception, and it is the floor under the threshold: when the **projected request is
+already over the effective limit**, keeping the recent turns is not a saving. The fold aims at the
+bound that fired, through the same walk, because a cut at the keep-turns boundary can leave a
+request that still does not fit. That is the shape a **project** has — a few long work sessions,
+often fewer turns than `KeepRecentTurns` — and without the aim the fold either refused (nothing
+older to fold) and the oversized request went out, or trimmed one turn and left the kept turns
+several windows large. Measured: a two-turn project priced at 23 031 estimated tokens against a
+16 384-token window folded nothing before the turn and only folded after the first tool round;
+the same fixture now folds before the request and every request it sends fits. Pinned by
+`TestPlanCompactionFoldsPastTheKeptTurnsWhenTheRequestWouldNotFit` and
+`TestAProjectFoldsAnOverfullRequestBeforeItGoesOut`.
+
 A ceiling that cannot bind cannot fold early either: it is expressed against the limit the planner
 measures with, so a ceiling above the window becomes a bound above the window's own (1.1 windows is
 0.99 of it), and one more than `1/0.9` windows away is no bound at all — at any projection that
@@ -338,14 +352,37 @@ Effective values, most specific first (`maintenance.go:463`, `:473`):
 | --- | --- | --- | --- |
 | threshold | `chats.compact_threshold` (0 < v < 1) | `Compact.Threshold` | 0.80 |
 | turns kept verbatim | `chats.keep_recent_turns` | `Compact.KeepRecentTurns` | 6 |
+| size kept verbatim | — | `Compact.KeepRecentTokens` | 0 → a quarter of the effective limit, clamped to 2000–15000 |
 
 ### 5.2 The range
 
 ```
 fromSeq  = (largest existing compaction.ToSeq) + 1   → clamped to the first message
 keepFrom = the user message that leaves keepTurns turns verbatim above it
+         → then walked forward while the kept span exceeds KeepRecentTokens
 toSeq    = keepFrom − 1
 ```
+
+**The kept tail is a size as well as a count.** `KeepRecentTurns` says how much of the
+conversation stays verbatim; it cannot say how much of the window that costs, because a
+turn is a unit of conversation and not of size. Six turns are a few hundred tokens of short
+questions and several windows of tool traffic. So the cut is walked forward one user turn
+at a time — oldest first — until the messages above it fit `KeepRecentTokens`, and it stops
+before the newest user turn, which is the exchange being answered.
+
+Measured before this existed: 1 910-token turns in an 8 192-token window, auto fold at the
+80 % threshold, and the chat came out at **179 % of the window** still over it, because the
+six kept turns alone were in the kept set. That is the shape the size bound is for. It is
+an upper bound and not a target — the smaller of the two keep rules wins — and a turn is
+never split to reach it (invariant 3), so one turn larger than the budget leaves the tail
+over it. That last case is the one the walk cannot fix, and it is recorded in §15 rather
+than papered over.
+
+The default is derived rather than fixed (a quarter of the effective limit, clamped to
+2000–15000) because the right figure is a share of what the model can hold: 15 000 tokens
+is most of an 8k window and a tenth of a 131k one. The clamp's ends are opencode's own
+(`keep.tokens` 15000, clamped 2000–15000) — the only evidence available, since this app has
+no measurement of its own for either end.
 
 Two rules make this well-behaved:
 
@@ -361,8 +398,17 @@ When the cut lands before `fromSeq` (the chat holds fewer turns than `keepTurns`
 exist — they fire in this order (the `toSeq < fromSeq` branch, then the escape hatch):
 
 - **automatic, no target**: `Needed: false` with reason `nichts zu komprimieren` (or the existing
-  reason plus `— aber kein Verlauf zum Komprimieren`). Nothing is worth doing, and nothing may be:
+  reason plus ` — aber kein Verlauf zum Komprimieren`). Nothing is worth doing, and nothing may be:
   an automatic fold has nobody to promise anything to.
+- **automatic, on a project, with a target**: a project's automatic run always aims at its own
+  threshold (`autoFold`, `Target`), before a turn as much as between its rounds, so it takes the
+  same cut a manual run would: everything before the newest user turn. A project is the shape this
+  branch used to swallow — its history is a few long work sessions, so a cut that keeps
+  `KeepRecentTurns` turns either does not exist (fewer turns than that) or leaves more context than
+  the threshold allows. A chat without an aim keeps the rule above, because it has a fold point
+  between two messages; a project's reply is the work, and its next round may never come.
+  Pinned by `TestAProjectFoldsAtItsThresholdBeforeTheTurn`, against
+  `TestABetweenRoundCheckFoldsAChatShorterThanKeepRecentTurns` for the chat's half.
 - **any run with a target, and every manual one**: fold up to the **newest user turn** — the last
   turn that could contain a tool exchange that must not be split. For a manual run the comment
   names the motive: *"A manual compaction is a promise that the context gets compacted, so it must
@@ -428,18 +474,37 @@ nothing is folded** rather than guessed (`compact.go:297`). This also keeps the 
 prompt from beginning with an assistant message.
 Pinned by `TestPlanCompactionNeverFoldsAStreamingMessage`.
 
-### 5.6 How the fold is priced
+### 5.6 How the fold is priced, and what the meter charges for
 
 ```
 TokensBefore        = Σ over folded messages ( EstimateTokens(content) + EstimateTokens(reasoning)/2 )
 TokensAfterEstimate = min(MaxSummaryTokens, TokensBefore / 2)   → clamped to ≥ 1
 ```
 
-Reasoning is counted at **half weight** throughout the planner: it is context, but it is
-not the conversation. The `TokensBefore / 2` clamp exists so a fold can never be reported
-as saving nothing — *"a summary we instruct the model to keep terse should not be budgeted
-as larger than what it replaces, or compaction would appear to save nothing"*
+The planner's own sums count reasoning at **half weight**: a folded range's size is a rough
+figure either way, and both uses (`TokensBefore`, the kept-tail walk of §5.2) decide how much to
+fold rather than whether a request fits. The `TokensBefore / 2` clamp exists so a fold can never
+be reported as saving nothing — *"a summary we instruct the model to keep terse should not be
+budgeted as larger than what it replaces, or compaction would appear to save nothing"*
 (`compact.go:272`).
+
+**The budget the meter shows does not charge half.** `historyMessageTokens` (`context.go`) prices
+a reply's reasoning only when the request carries it, and then in full, because stored reasoning
+is context only where the backend receives it again. The flag is `AssemblyInput.ReplayReasoning`,
+resolved once in `buildAssembly` (`replaysReasoning`) from `llm.ReasoningReplayer`, which one
+method answers for both shapes that carry reasoning: Ollama's message keeps a `thinking` field
+filled on every request, and DeepSeek requires it beside tool calls and nowhere else. Every other
+backend drops it — LM Studio, llama.cpp, Groq, NVIDIA, Mistral, MLX and custom endpoints all
+receive a reply without its thinking. Charging half of it anyway made the
+meter read larger than the request it describes — the same error as counting an inlined document
+twice (§11.3) — and on a project run by a thinking model that share is large enough to decide
+whether the meter reads as over the window. The delta on top of a measurement goes through the
+same function, so `count + delta` follows one rule, and the flag is also what the stored
+measurement's shape check compares: a settings change that starts or stops replaying reasoning
+invalidates the count. The one other counter that prices a request which may carry reasoning is
+the summariser's prefix path (§7); it asks `llm.EstimateMessagesTokensAs` with the chat's own
+provider, because that request re-sends the chat's messages and pays for the same reasoning
+again.
 
 `TokensBefore`/`TokensAfter` are estimates. The context meter's `measured` figure is
 separate and authoritative (§11).
@@ -530,6 +595,43 @@ the failure that produced a 20k-token 'memory' for a 13k-token fold."* *
 lower it, and on a window so small that even the minimum transcript does not fit, the cap
 collapses towards 1 token: the request fitting is non-negotiable.
 
+Being cut off at the cap is not accepted as a memory — a sentence that breaks off is a
+fact nothing can recover — but it is **retried with more room** before the fold gives up,
+by the same rule as the reasoning-budget retry: the room is **doubled**, held to what the
+window leaves beside the prompt, and taken only when that is at least a quarter more than
+the attempt had. Twice and not "the reasoning that came back", because a memory can be cut
+off with no reasoning at all, and a model that did reason has to fit that thinking plus an
+answer either way — so the two failures are one rule in the retry and two sentences in the
+outcome. What they differ in is whether a partial answer is usable, not how much room it
+needs: a cut-off memory is refused (`chat.summaryTruncated`), a condensation's cut-off page
+is kept (`TruncatedError` is nil, §17).
+
+A **window-bound** fold — the transcript already holding everything the answer allowance did
+not take — used to have nowhere to put that room, and failed. The transcript's allowance and
+the answer's are **one budget**, so the fold re-plans them instead: the transcript is
+re-budgeted at `answer + margin`, which shrinks it by exactly what the answer gains, and the
+request is made again with the bigger cap (`TestCompactShrinksTheTranscriptForACutOffSummary`).
+The fold goes straight to `maxAnswer = limit − overhead − margin − summaryMinTranscriptTokens`
+— the largest answer the window allows, the point at which the transcript is at its floor —
+rather than climbing there by doubling: the ceiling is known, and every rung in between costs
+a full summary generation that a model running to the cap would pay again and again. The
+retry still needs that ceiling to be worth **a quarter more** room than the cap it replaces,
+which is the same floor the summariser applies inside one attempt. A retry also falls back
+from the prefix path to the transcript path when the larger answer no longer fits beside the
+chat's own request, because the prefix's size is not the fold's to shrink.
+
+What is left of the refusal is what cannot be helped: a ceiling that is not a quarter more
+than the cap, a smaller transcript that can no longer be rendered at all
+(`chat.compactionNoTranscript`), or one that would drop an inline document
+(`chat.compactionAttachmentTooLarge`). Those guards report themselves rather than the
+cut-off that started the retry, because by then the cap is already at its ceiling: the
+cut-off message's advice — a bigger budget — is advice the fold has already taken, while the
+guard names the one thing left to act on.
+Pinned by `TestCompactionRetriesATruncatedSummary`, the room bound by
+`TestSummarizeDoesNotRetryATruncatedAnswerWithoutRoom`, the attempt cap by
+`TestSummarizeExplainsAReasoningOnlyAnswer`, and the refusal by
+`TestCompactionRejectsIncompleteSummary` and `TestCompactionRejectsMaxTokensStop`.
+
 ### Why the transcript is not a fraction of the window
 
 `PlanTranscriptBudget` (`compact.go:616`) says explicitly what it replaced: a fixed 4000
@@ -564,11 +666,63 @@ motivated the cap; the unit tests pin the bound, the figure itself is not re-mea
 
 Before rendering, inline text documents in the folded range are loaded into the transcript. A fold is refused if a document cannot be read or does not fit in full; inline images are also refused because a text-only summary cannot describe them faithfully. An empty transcript is refused rather than stored as a memory of unread messages. Ordinary conversation text remains subject to the deliberate trimming described below.
 
-`RenderTranscript` (`compact.go:632`) flattens the folded messages into plain text, bounded
-at **two levels**: every message is cut to `Block`, and the finished transcript is cut to
-`Total` (both cut with the `…[gekürzt]` marker). Two levels because a per-message cap
-bounds each message, not the transcript: *"enough messages still add up past the window of
-the model that has to read them."*
+`RenderTranscript` (`compact.go`) flattens the folded messages into plain text, bounded at
+**two levels**: every message is cut to `Block`, and the finished transcript to `Total`. Two
+levels because a per-message cap bounds each message, not the transcript: *"enough messages
+still add up past the window of the model that has to read them."*
+
+The second level is a **ladder**, and it replaced one cut of the finished text. That cut kept
+the beginning of the transcript, so overflowing it removed its tail — the newest folded
+messages, which are exactly the ones that join the memory to the turns kept verbatim. Now
+messages are shortened oldest first to a quarter of their block, every message reaches that
+rung before any is left out, and whole messages are dropped oldest first with a note
+(`[7 ältere Nachrichten ausgelassen]`) saying how many. **The newest message is shortened
+but never left out**, and the note's cost is taken off the budget before what to keep is
+chosen, so the sentence that reports a cut cannot be the thing that overshoots it.
+
+The tail of a *block* is kept too: `clipToTokens` shares the allowance between the beginning
+and the end of every message, because a build log's failure line and a test run's summary
+are at the end of the text. `cutToTokens` still cuts at the end only, and that is a second
+function rather than the same one because its callers say *"the first N tokens were read,
+and the rest was not"* — a document condensed for the summariser (§17) and a tool result cut
+to the room a request has left. A cut that carried the end would make that sentence false.
+
+### 8.1 The prefix path: re-sending the request instead of a transcript
+
+`summarisationPrefix` offers the summarisation the chat's own request up to the fold
+boundary — the system message, the memory in force, and the folded messages exactly as they
+were sent — and `compactWith` takes it when the request it makes still fits beside the
+output cap and the estimator margin (§7).
+
+Why: prompt caching. The user's turn has just sent that prefix, so a summary request that
+opens with the same bytes is a hit on any server that caches a prefix; on a CPU-hosted
+llama.cpp server that is the difference between reading the history and evaluating it again,
+which is most of the minutes a fold takes there. It is also lossless in a way a rendering is
+not — no search-payload distillation, no block clipping, no `(nur Reasoning)` substitution.
+
+The transcript path stays the fallback, and it is what is sent when any of these holds:
+
+| condition | why the transcript instead |
+| --- | --- |
+| prefix + the output cap + margin does not fit the window | fitting is the one thing the transcript path guarantees unconditionally |
+| the summariser is not the chat's own model (§6) | another model never processed those bytes, so the prefix is a full evaluation of a larger request |
+| the boundary cannot be named | `Assembly.MessageSeqs` is nil once a rewrite changed the request's shape (`sanitiseToolHistory`, `ageToolResults`, a continuation), and a guessed boundary would cut the history in the wrong place |
+| the prefix would be the system message alone | there is no history in it to summarise |
+| the prefix carries an image | a summarisation is a text request; the pictures belong to the conversation |
+
+**The memory is carried once.** On this path the memory in force is already the system
+message's `<conversation_memory>`, so the instruction refers to it — *"the memory in the
+system prompt above already covers the older messages; merge it with the following history"*
+— instead of quoting it again as `<existing_memory>`. The transcript path keeps the quoted
+block, because its request has no system message of its own carrying the memory. That is a
+second wording of the merge sentence in each language, and it is worth paying for: the
+sentence is what stops a fold from silently dropping the old memory, since a model told only
+"compact the following history" writes a memory of the new messages.
+
+Pinned by `TestTheSummaryResendsTheRequestPrefixWhenItFits`,
+`TestTheSummaryFallsBackToATranscriptWhenThePrefixDoesNotFit`,
+`TestThePrefixIsOnlyOfferedWhenItCanBeNamed`, `TestThePrefixRequestCarriesTheMemoryOnce` and
+`TestThePrefixTailRefersToTheMemoryAboveInsteadOfRepeatingIt`.
 
 | role | rendered as | rule |
 | --- | --- | --- |
@@ -594,29 +748,51 @@ Pinned by `TestRenderSearchSourcesDistilsTheListingFormat`,
 
 ### 9.1 The memory contract (system prompt)
 
-`summarySystemPrompt` (`compact.go:348`) is deliberately explicit about
+`summarySystemPrompt` is deliberately explicit about
 preservation: *"a compaction that loses a URL or a number silently corrupts every later
-answer."* Its rules, verbatim:
+answer."* It is written in the app's language (Settings → Language), names that
+language explicitly, and translates its headings with it: the contract being German is
+what made a German memory out of an English transcript, and the memory travels in the
+system message of every later request. Its rules, for the English contract:
 
-- Write in the language of the transcript.
+- Write in English.
 - Carry names, numbers, dates, prices, legal references and URLs over **WORD FOR WORD** —
   do not shorten or paraphrase them.
-- Invent nothing. Anything that stayed unclear goes under "Offene Punkte".
-- Be terse: bullets, no prose, no repetition.
+- Invent nothing. Anything that stayed unclear goes under "Open questions".
+- Carry findings — what was examined, what came of it, the file, the line and what is wrong
+  there — as one bullet each, with identifiers and paths word for word, and keep the brevity
+  rule off them.
+- Be brief: bullets, no prose, no repetition.
+- Record the state of the work as far as the transcript shows it: what is done, what is still open, and what the next step is.
+- Leave out what the next request carries anyway: the system instructions, the project's AGENTS.md files, and the tool descriptions. What the user asked for themselves belongs in the memory.
+- Do not mention the compaction or that context was compacted.
 
 and it fixes the output structure, omitting empty sections:
 
 ```
-## Festgestellte Fakten      ## Entscheidungen        ## Offene Punkte
-## Quellen                   ## Dateien & Dokumente  ## Vorgaben & Präferenzen
+## Festgestellte Fakten      ## Entscheidungen        ## Befunde & offene Arbeit
+## Offene Punkte             ## Quellen              ## Dateien & Dokumente
+## Vorgaben & Präferenzen
 ```
 
-This is a research-memory schema: what was established, what was decided, what is still
-open, which sources back it, which files are in play, and the user's standing preferences.
+The German contract is shown above; the English and Chinese contracts carry the same
+sections in their own language. This is a memory schema: what was established, what was
+decided, what is still open, which sources back it, which files are in play, and the
+user's standing preferences.
+
+**Findings are carried as findings, not folded into "facts".** The section exists because of
+a reported failure: a review produced a list of defects with file and line, the fold that
+followed folded the answer away, and the next request — *"fix what you found"* — was
+answered by a model that no longer had them. The contract's own brevity rule is what
+finished them off: "Stichpunkte, keine Prosa" over a 1 200-token memory turns ten findings
+into one vague sentence. So the rule that carries names and numbers verbatim now names
+findings too, and says the brevity rule does not apply to them — a finding that cannot be
+acted on from the memory alone has been lost, the same standard the contract already sets
+for a URL. Pinned by `TestTheMemoryKeepsFindingsActionable`.
 
 ### 9.2 The user message
 
-`summarisePrompt` (`compact.go:538`) is split out of `Summarize` so that the transcript
+`summarisePrompt` is split out of `Summarize` so that the transcript
 budget can be measured against *exactly* the text that will be sent — the wrappers, the
 existing memory and the focus line all share the window with the transcript and are charged
 before its allowance is set. Its shape:
@@ -639,7 +815,51 @@ Besonderer Fokus des Nutzers: …            ← only when a focus was given
 ```
 
 The merge instruction is the whole of invariant 2 in one sentence, and the `<conversation>`
-wrapper keeps the transcript distinguishable from the instructions around it.
+wrapper keeps the transcript distinguishable from the instructions around it. On the prefix
+path (§8.1) the `<existing_memory>` block is absent and the same sentence becomes *"the
+memory in the system prompt above already covers the older messages"* — the memory is in the
+request already, and quoting it twice charged the fold for it twice.
+
+### 9.3 One restructure when the shape was ignored
+
+A memory that comes back as flat prose is not an error — it still knows things — but every
+later turn has to search it instead of scanning it. So a summary that carries **none** of the
+section headings the contract asks for is sent once more, and what travels on that second
+request is the answer, not the conversation (`summaryRestructure`, per language):
+
+```
+Recast the memory below into the structure the contract above requires:
+
+<draft>
+…the first answer…
+</draft>
+
+Answer with only the memory: the ## headings the contract defines, no preamble.
+Leave no fact out and add nothing.
+```
+
+The shape check fires only when the answer carried no heading at all, so the sections it is
+missing **are** the structure, and the material for them is what the model already wrote.
+That is why the retry is cheap. It used to re-send the transcript or the prefix with one
+sentence appended — up to 80 % of the window, minutes of prompt on a CPU-hosted model, and a
+request no prefix cache can hit because of the appended sentence — to ask for headings that
+could be added to the draft. Now the draft is bounded by the summariser's output cap instead
+of by the window, so the second call is a fraction of the first rather than a second full
+pass over the history.
+
+Two things limit what this can cost further. The restructure is only sent when the shapeless
+answer is at least `summaryStructureMinTokens` (400) tokens: a model that answered a
+page-long instruction with three words is fixed by choosing another model, not by asking
+again. And nothing is rejected: a retry that also comes back shapeless leaves the first
+answer in place, because a memory with the wrong shape still carries more than no memory at
+all.
+
+The headings are matched across all three contract languages, because a model may answer in
+the transcript's language instead of the interface's, and that memory followed the structure
+even though it is not the one that was requested. Pinned by
+`TestAShapelessMemoryIsAskedOnceMore` (which also asserts the second request carries the
+draft and not `### Nutzer`), `TestAShortShapelessMemoryIsNotAskedAgain` and
+`TestARestructureAsksForTheShapeWithoutTheHistory`.
 
 ---
 
@@ -846,6 +1066,49 @@ approximate. Two things happen with it:
   discarding the list it had loaded.
 - the measurement is invalidated again, for the same reason as in §11.1.
 
+### 11.5 The measured size after a restart
+
+The count the meter treats as authoritative is the backend's own `prompt_tokens`, and it lives
+in `chat.TurnState` — which outlives an Engine but not the process. After a restart the chat was
+therefore priced by `llm.EstimateTokens`, which is a heuristic rather than the backend's own
+tokenizer and is priced in the safe direction (§5.6). On a project's history that guess can cross
+the window the chat had been running inside: the meter reports an over-limit context for a request
+that fits, and the model picker will not start a local model on that reading
+(`ModelSwitcher.commit` refuses a start whose budget is over the limit), so the session cannot be
+resumed.
+
+Every measuring request wrote its `prompt_tokens` onto the reply row it produced
+(`generate.go`, `row.PromptTokens`), so the newest such row *is* the count the chat last had.
+`measurementFromHistory` (`engine.go`) adopts it when the in-memory count is gone, and drops a
+row that cannot describe the prompt about to be sent: another backend/model's count (a different
+tokenizer), a reply written before the newest fold (its request still carried the messages that
+fold replaced — the same rule as `InvalidateMeasurement` in §11.1), a zero `prompt_tokens`
+(no measurement rather than a size), and a prompt shape the provider cannot vouch for (below).
+`Seq` is the message before that reply, since a reply cannot be inside the prompt it answers, so
+the ordinary delta accounting of `Assemble` applies unchanged: the reply itself and everything
+after it are priced as the delta. A seq one message too far back only prices an extra message as
+the delta; a seq above where its request really ended would leave a message out of the
+accounting, so the row's predecessor is the right mark.
+
+What the recovery cannot see. Each is narrow:
+
+- **Reasoning replay.** A stored row does not record whether its request replayed a reply's
+  reasoning, so the shape is read from the provider (`llm.ReasoningReplayer`). Where the answer
+  cannot vary — Ollama always, every other local backend never — the row's count describes this
+  request too. Where it can (DeepSeek, beside tools), a count is adopted only for a request that
+  carries no reasoning either: the row may have carried some, which makes the count read too
+  large, while reasoning the row left out could not be recovered at all. A DeepSeek project
+  measured with tools and resumed with them still on is therefore priced by the estimator until
+  its next reply measures it — the over-reading this section exists to avoid, but with no local
+  model start to block.
+- **An undone compaction** (§11.4). Its messages are live again while the stored count still
+  describes the folded shape, so the meter reads low until the next turn measures. The error is
+  in the direction of missing a fold, and a request that does not fit is folded by `foldForSize`.
+- **A changed system prompt or tool list.** The count describes the prompt as it was sent, so a
+  session resumed after editing the system prompt or the tools its model is offered is priced by
+  a count taken against the old one. The error runs both ways; the first reply of the resumed
+  session measures the prompt again and replaces it.
+
 ---
 
 ## 12. Settings reference
@@ -858,6 +1121,7 @@ approximate. Two things happen with it:
 | `MidTurnCheck` | `false` | ask the threshold again between the tool rounds of one answer. Off because it costs a summary inside an answer somebody waits for; it is the only mid-turn check a backend with no published ceiling gets, and a **project** asks it regardless — its reply has no fold point between two messages (§4) |
 | `Threshold` | `0.80` | projected ratio at which the threshold bound fires |
 | `KeepRecentTurns` | `6` | turns kept verbatim; also the floor for the forced-short-chat rule |
+| `KeepRecentTokens` | `0` (derived) | size budget for the kept tail; 0 means a quarter of the effective limit, clamped to 2000–15000. The smaller of the two keep rules wins (§5.2) |
 | `ReserveForResponse` | `1024` | headroom the budget keeps for the answer |
 | `SummaryTemperature` | `0.2` | near-deterministic extraction rather than creative rewriting |
 | `MaxSummaryTokens` | `1200` | **only raises** the effective 8192 output cap; the escape hatch for "spent everything on reasoning" |
@@ -884,7 +1148,9 @@ already read, a condensation decides what a tool result becomes on its way in.
 | unknown window, **automatic** | silent, the turn proceeds; the meter already says the limit is unknown | `autoFold` |
 | summary model on a missing backend | error naming model *and* backend | `maintenance.go:310` |
 | summary model's window unknown | `events.Warning`, chat window used, memory still written | `maintenance.go:186` |
-| reasoning model eats the budget | up to 3 attempts with a growing budget, then the "spent its budget on reasoning" error naming `MaxSummaryTokens` | `compact.go:520` |
+| reasoning model eats the budget | up to 3 attempts, the room doubled each time, then the "spent its budget on reasoning" error naming `MaxSummaryTokens` | `compact.go:520` |
+| the memory stops at the output limit, half written | the summariser doubles its room; the fold then shrinks the transcript and takes the answer straight to the largest the window allows; only then `chat.summaryTruncated`; a condensation still keeps its cut-off page | `extractWithBudget`, `compactWith` |
+| the fold has no room left to hand over | `maxAnswer` is not a quarter more than the cap: the refusal is reported at once, because the transcript cannot shrink enough to fund it | `compactWith` |
 | model returns only `<think>` blocks | blocks stripped, treated as reasoning, retried | `compact.go:415` |
 | model returns nothing and did not reason | one attempt, then "empty summary" | `compact.go:520` |
 | backend slower than 15 minutes | `context deadline exceeded` (the API backstop) | `api.go:344` |
@@ -948,16 +1214,18 @@ service what the unit tests can only assert about the request.
 Recorded deliberately, in the spirit of `PLAN.md` — these are the parts a reader should not
 assume are covered.
 
-- **The stored summary is not validated.** Nothing rejects or shrinks a summary that ignores
-  the structure instruction, omits sections or comes back as long prose. The only bounds are
-  the output cap (§7) and the prompt. There is no "summary too long → re-summarise" pass.
+- **The stored summary is validated for its shape only, and only once.** One restructure asks again
+  when a long answer carried no section at all (§9.3); nothing rejects or shrinks a summary
+  that omits sections, invents headings or comes back as long prose under the 400-token gate.
+  There is no "summary too long → re-summarise" pass, and none of this inspects the content.
 - **Only four thinking tag names are stripped.** `<scratchpad>`, or untagged prose emitted
   before the markdown, is not detected and lands in the memory. The prompt is front-loaded
   so the memory is still present, but it is not clean.
-- **`PlanInput.MeasuredTokens` is declared but never populated or read** (`compact.go:85`).
-  Its comment calls it "the authoritative used-token figure", which today it is not: the
-  stored `TokensBefore` is the estimated size of the folded span. Either wiring it up or
-  deleting the field would remove the discrepancy.
+- **`PlanInput.MeasuredTokens` is gone.** It was declared and never read; the authoritative
+  figure reaches the planner through `ContextBudget`, which `Assemble` builds from the last
+  response's `prompt_tokens` plus an estimate of what came after it (§11.3) — so the trigger
+  is anchored on a measurement already, and `TokensBefore` remains the estimate of the folded
+  span because that is what a fold reports.
 - **`CompactOptions.FromSeq`/`ToSeq` are plumbed end-to-end but no UI sends them.** The
   bound RPC accepts a pinned range; every caller currently passes 0/0
   (`ModelSwitcher.tsx:136`, `:394`), so the planner always decides.
@@ -965,14 +1233,14 @@ assume are covered.
   crossing folds the keep-turns cut without aiming at a ratio; `Target > 0` on an automatic run
   means the ceiling bound decided it (§5.1, §5.4). Easy to misread from the two callers that were
   separate before the merge, one of which always passed a target.
-- **The threshold's fold cannot rescue a chat the keep-turns cut leaves over the window.** The cut
-  is the floor for that bound, so a chat whose last `KeepRecentTurns` turns alone exceed the limit
-  is compacted *and stays over it*: measured with 1 910-token turns in an 8 192-token window, auto
-  folded to 179 % of the window and reported the chat as still over limit (576-token turns land at
-  82 %, which is the case the threshold was designed for). A published **ceiling** does fold past
-  the floor, because a request at one would be refused rather than merely be full — but for the
-  window alone the walk of §5.4 is still not run with a target of 1.0, since that trades the
-  keep-turns guarantee for the window: a policy decision, not an arithmetic one.
+- **A single turn larger than the size budget still leaves the tail over it.** The walk of §5.2
+  shrinks the kept history by folding whole turns, so the shape that defeated the keep-turns
+  boundary — six 1 910-token turns against an 8 192-token window, folded to 179 % of the window
+  — is now bounded by tokens instead of by count. What it cannot do is split a turn (invariant
+  3), so a chat whose *newest* turn alone exceeds `KeepRecentTokens` keeps that whole turn and
+  the fold cannot bring it under. Saying so is the honest end of it: the alternative is a prompt
+  that begins on an assistant message, or a target of 1.0 that trades the keep-turns guarantee
+  for the window.
 - **The meter's attachment figure is the stored count, not a re-derivation.** A document's
   `TokenCount` is what ingestion measured, and it is charged to `budget.Attachments`
   (`context.go:255`) on the way to `Estimated`; the `<document …>` wrapper and the base64
@@ -1022,11 +1290,17 @@ tool result can be long — a scraped page and a file read out of the project fo
 
 ### 17.1 What it does
 
-After a tool returns and before its text is charged against the tool budget, a second
+After a tool returns and before its text is stored as the message the model reads, a second
 model condenses the text. The chat's model reads the condensation; the tool-call card
 keeps what the tool actually returned. The message that is stored — and therefore
 replayed on every later turn — holds the condensation, which is the whole point: a page
 the user read once would otherwise cost every subsequent request in that chat.
+
+**The condensation is written in the app's language.** A German page read in an English
+window is summarised in English: the original's names, numbers and quotations stay
+verbatim, but the prose around them follows the app, so a German source cannot pull the
+next answer into German. The language (beside the target and the ceiling) is part of the
+digest cache key, so a window that changes language does not get the other one's summary.
 
 Inside a `scrape_url` result, only the page is condensed: the text between
 `<scraped_content>` and `</scraped_content>` is replaced by the summary, and everything
@@ -1061,7 +1335,7 @@ manual, not an edge case.
 
 `Digest.MaxTokens` is the **target length of the summary**, not the size at which
 condensing starts and not the request's hard stop. It is stated to the model in the prompt
-("Ziel: etwa N Tokens"), and the request is given whatever room the window leaves beside
+("Target: about N tokens"; "Ziel: etwa N Tokens" in a German window), and the request is given whatever room the window leaves beside
 the text — up to `MaxDigestMaxTokens = 8000` — so a summary that needs a few more tokens
 than it was aiming at finishes instead of being cut mid-sentence. Only the window or that
 8000-token line can still cut one, and a summary cut there is used as it is
@@ -1077,8 +1351,8 @@ worth a request, not the size of the page in hand, so a 40k-token page above a 2
 threshold can want far more than 2k tokens out. And `normalise` stored the capped value,
 so a chosen 3000 came back as 2000, was gone from the blob, and raising the threshold
 later did not restore it. Both are pinned by `TestTheDigestCapIsResolvedNotTrusted`. The
-bound that remains is the tool budget: a condensation still passes through
-`toolOutputBudget.take` before the model reads it.
+bound that remains is the tool service's own byte cap on the result itself (§17.6): a
+condensation is delivered whole, and no longer cut to the room the request has left.
 
 ### 17.2 The rules that make it safe to switch on
 
@@ -1185,27 +1459,22 @@ Until now the transcript showed the condensation where the model read it and the
 output on the tool card, and nothing said *how much* was cut. The card now carries both
 sizes, and they are the backend's own measurements rather than a client-side estimate:
 `ToolCallRecord.SourceTokens` is `llm.EstimateTokens` of what the tool returned, and
-`ContextTokens` is the same estimate of the exact string `toolOutputBudget.take` handed
-to `appendToolResult` — so the second number already includes the digest notice and any
-cut the answer's budget made *after* the condensation.
+`ContextTokens` is the same estimate of the exact string handed to `appendToolResult` — so
+the second number includes the digest notice and, where the tool service's own byte cap
+cut the text, that cut as well.
 
-Three outcomes produce those numbers and only one of them is a setting the user switched
-on, so the record keeps the cause rather than leaving it to be inferred from the sizes:
+Two outcomes produce those numbers and only one of them is a setting the user switched on,
+so the record keeps the cause rather than leaving it to be inferred from the sizes:
 
-| outcome | `Condensed` | `Withheld` | card |
-| --- | --- | --- | --- |
-| whole | false | false | `4,371 tokens` |
-| cut by the second model | true | false | `12,345 → 640 tokens` |
-| cut by the answer's budget | false | false | `31,280 → 2,048 tokens (budget)` |
-| withheld: the budget was spent | false | true | `4,374 tokens discarded` |
+| outcome | `Condensed` | card |
+| --- | --- | --- |
+| whole | false | `4,371 tokens` |
+| condensed by the second model | true | `12,345 → 640 tokens` |
 
-The fourth row is the one that shipped wrong. `take` answers a spent budget with
-`exhaustedNotice` instead of a prefix, and the first version of the card printed it as a
-size: `4,374 → 41 tokens` for a search whose results never reached the model, which reads
-exactly like a summary the second model wrote. `take` now returns whether the result was
-withheld, so the card says so in words and in the warning colour — no arrow, because
-there is no second size of the result to show. `ContextTokens` still holds the notice's
-size for a withheld call: it is what the model read, not what it should be compared to.
+The `Withheld` column and the `4,374 tokens discarded` card are historical: they recorded a
+result the app deliberately did not deliver because the request had no room left (§17.6), and
+no row writes the flag any more. Rows written before that change still read as what they were,
+which is why the field and the card's wording stay.
 
 The numbers live in `tool_calls` (migrations 8 and 9, appended for the usual reason),
 because the card is rebuilt from the row after a reload and a number recomputed in the
@@ -1217,11 +1486,10 @@ A call is re-emitted once the condensation has run: the card was drawn while the
 was still executing, and a count that appeared only after reopening the chat would be a
 number the reader has to go looking for. `TestTheToolCardIsToldHowMuchWasCut` pins the
 cut and uncut shapes on the emitted event *and* on the row read back, over the same page
-under a threshold it clears and one it cannot reach; `TestAWithheldResultIsNotReportedAsASize`
-pins the fourth, with one token of budget and no summary model.
+under a threshold it clears and one it cannot reach.
 
-The harness fixture for the research chat carries all four, because three of them are
-only distinguishable by the words after the number.
+The harness fixture for the research chat carries all four shapes, including the two that
+no code writes any more, because they are only distinguishable by the words after the number.
 
 ### 17.6 Reading a file out of the folder
 
@@ -1405,31 +1673,45 @@ a re-read returns the file, because the write tools drop the turn's read memory 
 (`Service.forgetReads`). The sentence is charged to the history segment rather than reported as a
 saving, so the meter keeps describing what is sent.
 
-**No single result may spend the answer.** Ageing bounds what a reply *re-sends*; the tool budget
-bounds what it *adds*, and `take` used to hand one result everything that was left of it — so the
-first enormous result spent the allowance the rest of the reply's rounds were going to need.
-A result may now take the smaller of the remainder and `toolResultShare` of the budget the
-answer started with, and is charged what it actually used: a quarter, so 30 000 tokens in a
-project (120 000) and 15 000 in a chat (60 000), and a cut result leaves room for the round's
-other results and for the rounds after it. A quarter rather than a flat figure because the
-budget it divides is already the mode's, and 30 000 sits just under the 32 000 a reply keeps
-verbatim above — one result can never be the whole of what survives a round. It bites where a
-result class has no bound of its own: measured with `llm.EstimateTokens`, a full 24 kB
-`read_file` prices at about 7 800 tokens and a 30 kB command result at about 10 800 (the
-app's own 64 kB command measurement, halved), both inside a project's share and both over a
-chat's. Under that share sits the absolute bound: no
-single result may exceed `tools.MaxToolResultBytes` (32 KiB, measured at 10 347 tokens of
-source), applied once where the result leaves the tool service, so a result the shares would
-have allowed is still cut. Pinned by `TestOneResultCannotTakeTheWholeBudget` (one
-result, then the next, then the total) and `TestAPerResultCeilingNeverExceedsTheRoom` (a share is
-a ceiling, not an entitlement: the room a request has left stays the smaller of the two).
+**A result is not rationed against the request.** Ageing bounds what a reply *re-sends*; the
+other bound used to be the room the request that reads the result had left, measured every
+round against the effective limit, the reserve and the reply just written. It was removed, for
+the reason the cards showed: it withheld the results the turn had just asked for — a page, a
+read, even a 24-token `Replace text` acknowledgement — and what it protected against is a
+refusal the turn recovers from anyway. A result is now bounded by two things only: the tool
+service's own byte cap (`tools.MaxToolResultBytes`, 32 KiB, both ends kept) and ageing.
+
+**The refusal is the recovery.** A request the backend refuses for its own size is folded and
+sent once more (`foldForSize`, `oversize.go`), which is the shape opencode calls "compact and
+retry once". The cost of that trade is real and is pinned by
+`TestAToolResultIsNotRationedAgainstTheRequest`: on a backend whose per-request ceiling is far
+below its window — Groq's per-minute allowance is the one that case was written for — a page
+larger than the ceiling now makes the next request oversized instead of arriving as nothing.
+The turn then either folds (if there is older history to fold) or ends with the refusal, which
+names the limit. That was chosen deliberately over silent withholding: a run that cannot
+verify its own edits is worse than one that stops and says why.
+
+The earlier shape is worth remembering because it looked reasonable at the time. A 65 536-token
+window, the default 1 024-token reserve, a 5 419-token reply, and a card reading
+`933 → 777 tokens (context)`; then `3 975 tokens discarded` for the `app.go` read that followed,
+by which point ageing had brought the request down to 44 694 where 14 399 tokens were free. The
+high-water mark that caused that was replaced by a per-round measurement, and the measurement
+itself is gone now: the room was computed correctly and the round still had to be told "no".
+
+**The one number that survives.** The tool service's own byte bound, because it is a fact
+about a result rather than about a window: a full 24 kB `read_file` prices at about 7 800
+tokens and a 30 kB command result at about 10 800 (the app's own 64 kB command measurement,
+halved), and no single result may exceed `tools.MaxToolResultBytes` (32 KiB, measured at
+10 347 tokens of source), applied once where the result leaves the tool service. That bound
+is pinned by the tool service's own test (`TestOneResultCannotExceedTheCap`), because it is a
+property of a result and not of a window.
 
 **The coupling that makes it safe.** Dropping a `read_file` result would otherwise be a trap:
 the app remembers which file each turn has read, and a model asking again for a range it already
 read is answered "unchanged — use a different offset". That is true about the transcript and
 useless about the request, because the request no longer carries the text. `Engine.buildAssembly`
-therefore forgets the read for exactly the files that are in **no copy at all** — stubbed by the
-budget, replaced by a later read, or both (`Service.ForgetReads`, `internal/tools/reads.go`) — so
+therefore forgets the read for exactly the files that are in **no copy at all** — stubbed by
+ageing, replaced by a later read, or both (`Service.ForgetReads`, `internal/tools/reads.go`) — so
 the ordinary way to refresh a window works again. A file whose newer read is still in the request
 is deliberately not forgotten: there the shortcut's answer is true about this request, and a
 re-read would spend a round fetching text the model was just sent. Every other read keeps the

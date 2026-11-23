@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zalando/go-keyring"
+
 	"kichat/internal/config"
 	"kichat/internal/dbkey"
 	"kichat/internal/secret"
@@ -223,6 +225,236 @@ func TestPassphraseActionsRefuseToStrandTheDatabase(t *testing.T) {
 	}
 	if err := b.UnlockDatabase("another passphrase here"); err != nil {
 		t.Fatalf("the new passphrase does not open the database: %v", err)
+	}
+}
+
+// TestAPassphraseUnlockRemembersTheKey: a database restored on a new machine has its
+// key only in kichat.key, so the first launch asks for the passphrase. Once that
+// passphrase has proved the key, it belongs in the keyring, and the next launch is
+// silent instead of asking again.
+func TestAPassphraseUnlockRemembersTheKey(t *testing.T) {
+	newApp := databaseTestEnv(t)
+	entries := map[string]string{}
+	newKeys := func(dir string) *dbkey.Store {
+		return dbkey.NewWithKeyring(dir,
+			func(_, user string) (string, error) {
+				value, ok := entries[user]
+				if !ok {
+					return "", keyring.ErrNotFound
+				}
+				return value, nil
+			},
+			func(_, user, value string) error { entries[user] = value; return nil },
+			func(_, user string) error { delete(entries, user); return nil },
+		)
+	}
+
+	// The source installation: a database with a recovery copy, as a user who is about
+	// to copy the data directory has.
+	source := newApp()
+	source.newKeys = newKeys
+	if err := source.init(); err != nil {
+		t.Fatalf("source init: %v", err)
+	}
+	const passphrase = "a passphrase long enough"
+	if err := source.SetDatabasePassphrase(passphrase); err != nil {
+		t.Fatalf("SetDatabasePassphrase: %v", err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := source.store.DB().Exec(
+		`INSERT INTO chats(id,title,created_at,updated_at) VALUES('restored','Restored',?,?)`, now, now); err != nil {
+		t.Fatalf("insert chat: %v", err)
+	}
+	if err := source.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The copy lands on a machine whose keyring does not know this database.
+	clear(entries)
+	target := newApp()
+	target.newKeys = newKeys
+	if err := target.init(); err != nil {
+		t.Fatalf("target init: %v", err)
+	}
+	status := target.GetDatabaseStatus()
+	if !status.Locked || status.Reason != "db.reason.needsPassphrase" || status.Remembered {
+		t.Fatalf("restored database status = %+v, want locked with a passphrase and no remembered key", status)
+	}
+	if err := target.UnlockDatabase(passphrase); err != nil {
+		t.Fatalf("UnlockDatabase: %v", err)
+	}
+	if got := target.GetDatabaseStatus(); !got.Remembered {
+		t.Errorf("status after the passphrase unlock = %+v, want the key remembered", got)
+	}
+	if err := target.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The launch after that finds the key in the keyring and needs no passphrase.
+	next := newApp()
+	next.newKeys = newKeys
+	if err := next.init(); err != nil {
+		t.Fatalf("next init: %v", err)
+	}
+	if got := next.GetDatabaseStatus(); got.Locked {
+		t.Fatalf("next launch status = %+v, want it opened from the keyring", got)
+	}
+	chats, err := next.ListChats(false)
+	if err != nil {
+		t.Fatalf("ListChats: %v", err)
+	}
+	if len(chats) != 1 || chats[0].Title != "Restored" {
+		t.Fatalf("chats after the silent launch = %+v, want the restored chat", chats)
+	}
+}
+
+// restoreFixture writes an encrypted database and its matching wrapped key, as a user
+// who copies both files to another machine has them.
+func restoreFixture(t *testing.T, title string) (dbPath, keyPath, passphrase string) {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath = filepath.Join(dir, "kichat.db")
+	plain, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := plain.DB().Exec(
+		`INSERT INTO chats(id,title,created_at,updated_at) VALUES('restored',?,?,?)`, title, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := plain.Close(); err != nil {
+		t.Fatal(err)
+	}
+	key, err := dbkey.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Encrypt(dbPath, key); err != nil {
+		t.Fatal(err)
+	}
+	passphrase = "a passphrase long enough"
+	if err := dbkey.NewIsolated(dir).SaveRecovery(passphrase, key); err != nil {
+		t.Fatal(err)
+	}
+	return dbPath, filepath.Join(dir, dbkey.FileName), passphrase
+}
+
+// TestRestoreInstallsACopiedDatabaseAndUnlocksIt: a fresh installation with no key at
+// all can take a copied pair and end up open on the copied history, not in setup mode.
+func TestRestoreInstallsACopiedDatabaseAndUnlocksIt(t *testing.T) {
+	copiedDB, copiedKey, passphrase := restoreFixture(t, "Restored")
+	newApp := databaseTestEnv(t)
+	a := newApp()
+	if err := a.init(); err != nil {
+		t.Fatal(err)
+	}
+	if !a.GetDatabaseStatus().Setup {
+		t.Fatalf("status before restore = %+v, want a blank setup-state installation", a.GetDatabaseStatus())
+	}
+	if err := a.restoreDatabase(copiedDB, copiedKey, passphrase); err != nil {
+		t.Fatalf("restoreDatabase: %v", err)
+	}
+	status := a.GetDatabaseStatus()
+	if status.Locked || status.Setup || !status.Recovery || !status.Encrypted {
+		t.Fatalf("status after restore = %+v, want an open encrypted database with its recovery key", status)
+	}
+	chats, err := a.ListChats(false)
+	if err != nil {
+		t.Fatalf("ListChats after restore: %v", err)
+	}
+	if len(chats) != 1 || chats[0].Title != "Restored" {
+		t.Fatalf("chats after restore = %+v, want the copied chat", chats)
+	}
+}
+
+// TestRestoreRefusesAWrongPassphraseWithoutReplacingTheCurrentDatabase makes the
+// validation step visible: the copied pair is opened in a temporary directory first, so
+// its failure leaves the database that was already here readable with its own key.
+func TestRestoreRefusesAWrongPassphraseWithoutReplacingTheCurrentDatabase(t *testing.T) {
+	copiedDB, copiedKey, _ := restoreFixture(t, "Restored")
+	newApp := databaseTestEnv(t)
+	a := newApp()
+	if err := a.init(); err != nil {
+		t.Fatal(err)
+	}
+	const oldPassphrase = "the old passphrase"
+	if err := a.UnlockDatabase(oldPassphrase); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := a.store.DB().Exec(
+		`INSERT INTO chats(id,title,created_at,updated_at) VALUES('existing','Existing',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newApp()
+	if err := b.init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.restoreDatabase(copiedDB, copiedKey, "the wrong passphrase"); err == nil || !strings.Contains(err.Error(), "db.wrongPassphrase") {
+		t.Fatalf("restore with a wrong passphrase = %v, want the db.wrongPassphrase code", err)
+	}
+	if !b.GetDatabaseStatus().Locked {
+		t.Fatal("a refused restore left the database open")
+	}
+	if err := b.UnlockDatabase(oldPassphrase); err != nil {
+		t.Fatalf("the existing database no longer unlocks: %v", err)
+	}
+	chats, err := b.ListChats(false)
+	if err != nil {
+		t.Fatalf("ListChats after the refused restore: %v", err)
+	}
+	if len(chats) != 1 || chats[0].Title != "Existing" {
+		t.Fatalf("chats after the refused restore = %+v, want the existing history", chats)
+	}
+}
+
+// TestRestoreReplacesTheCurrentDatabaseAndKeepsItAside is the successful case with
+// history already here: the restored pair takes over, and the previous database and
+// key are kept beside it rather than deleted.
+func TestRestoreReplacesTheCurrentDatabaseAndKeepsItAside(t *testing.T) {
+	copiedDB, copiedKey, passphrase := restoreFixture(t, "Restored")
+	newApp := databaseTestEnv(t)
+	a := newApp()
+	if err := a.init(); err != nil {
+		t.Fatal(err)
+	}
+	const oldPassphrase = "the old passphrase"
+	if err := a.UnlockDatabase(oldPassphrase); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := a.store.DB().Exec(
+		`INSERT INTO chats(id,title,created_at,updated_at) VALUES('existing','Existing',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b := newApp()
+	if err := b.init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.restoreDatabase(copiedDB, copiedKey, passphrase); err != nil {
+		t.Fatalf("restoreDatabase: %v", err)
+	}
+	chats, err := b.ListChats(false)
+	if err != nil {
+		t.Fatalf("ListChats after restore: %v", err)
+	}
+	if len(chats) != 1 || chats[0].Title != "Restored" {
+		t.Fatalf("chats after restore = %+v, want only the copied chat", chats)
+	}
+	for _, pattern := range []string{"kichat.db.*.orphaned", "kichat.key.*.orphaned"} {
+		matches, err := filepath.Glob(filepath.Join(b.dataDir, pattern))
+		if err != nil || len(matches) == 0 {
+			t.Errorf("restore left no %s: %v, %v", pattern, matches, err)
+		}
 	}
 }
 

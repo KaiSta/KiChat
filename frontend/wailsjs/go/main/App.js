@@ -10,6 +10,10 @@ export function AddAttachment(arg1) {
   return window['go']['main']['App']['AddAttachment'](arg1);
 }
 
+export function CheckAppUpdate() {
+  return window['go']['main']['App']['CheckAppUpdate']();
+}
+
 export function CheckLlamaRuntimeUpdate() {
   return window['go']['main']['App']['CheckLlamaRuntimeUpdate']();
 }
@@ -50,12 +54,24 @@ export function DetectTerminal() {
   return window['go']['main']['App']['DetectTerminal']();
 }
 
+export function DismissSearchChallenge() {
+  return window['go']['main']['App']['DismissSearchChallenge']();
+}
+
+export function DropQueuedMessage(arg1, arg2) {
+  return window['go']['main']['App']['DropQueuedMessage'](arg1, arg2);
+}
+
 export function ExportBackup(arg1) {
   return window['go']['main']['App']['ExportBackup'](arg1);
 }
 
 export function GetAppInfo() {
   return window['go']['main']['App']['GetAppInfo']();
+}
+
+export function GetAppUpdate() {
+  return window['go']['main']['App']['GetAppUpdate']();
 }
 
 export function GetAttachmentImage(arg1) {
@@ -144,6 +160,14 @@ export function GetUpscalerStatus() {
 
 export function ImportBackup(arg1) {
   return window['go']['main']['App']['ImportBackup'](arg1);
+}
+
+export function InspectManagedModel(arg1, arg2, arg3) {
+  return window['go']['main']['App']['InspectManagedModel'](arg1, arg2, arg3);
+}
+
+export function InspectManagedModels(arg1) {
+  return window['go']['main']['App']['InspectManagedModels'](arg1);
 }
 
 export function InstallLlamaRuntime(arg1, arg2) {
@@ -282,6 +306,10 @@ export function ResolveToolApprovalWith(arg1, arg2, arg3) {
   return window['go']['main']['App']['ResolveToolApprovalWith'](arg1, arg2, arg3);
 }
 
+export function RestoreDatabase(arg1, arg2, arg3) {
+  return window['go']['main']['App']['RestoreDatabase'](arg1, arg2, arg3);
+}
+
 export function RevertFileChange(arg1, arg2) {
   return window['go']['main']['App']['RevertFileChange'](arg1, arg2);
 }
@@ -318,6 +346,10 @@ export function Search(arg1) {
   return window['go']['main']['App']['Search'](arg1);
 }
 
+export function SearchChallengeTile(arg1) {
+  return window['go']['main']['App']['SearchChallengeTile'](arg1);
+}
+
 export function SendMessage(arg1) {
   return window['go']['main']['App']['SendMessage'](arg1);
 }
@@ -348,6 +380,10 @@ export function SetModelOverride(arg1, arg2, arg3) {
 
 export function Settings() {
   return window['go']['main']['App']['Settings']();
+}
+
+export function SolveSearchChallenge(arg1) {
+  return window['go']['main']['App']['SolveSearchChallenge'](arg1);
 }
 
 export function StartFreshDatabase() {

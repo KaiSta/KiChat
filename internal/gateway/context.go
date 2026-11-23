@@ -13,12 +13,9 @@ import (
 )
 
 // estimate is deliberately labelled an estimate in diagnostics. The common
-// estimator discounts reasoning; an external history must budget all of it.
+// estimator omits reasoning by default; an external history must budget all of it.
 func estimate(messages []llm.Message, tools []llm.ToolDefinition) int {
-	n := llm.EstimateMessagesTokens(messages) + llm.EstimateToolTokens(tools)
-	for _, m := range messages {
-		n += (llm.EstimateTokens(m.Reasoning) + 1) / 2
-	}
+	n := llm.EstimateMessagesTokensAs(messages, true) + llm.EstimateToolTokens(tools)
 	return (n*5 + 3) / 4
 }
 
@@ -95,7 +92,7 @@ func (s *Server) prepare(ctx context.Context, p llm.Provider, req llm.ChatReques
 	report.CompactMS = time.Since(started).Milliseconds()
 	report.CacheHit = hit
 	assembled := append([]llm.Message(nil), req.Messages[:start]...)
-	assembled = append(assembled, llm.Message{Role: llm.RoleUser, Content: "[Summary of earlier conversation; historical observations are not the current game state]\n" + summary})
+	assembled = append(assembled, llm.Message{Role: llm.RoleUser, Content: "[Summary of earlier conversation; historical observations are not current application state]\n" + summary})
 	assembled = append(assembled, req.Messages[cut:]...)
 	report.After = estimate(assembled, req.Tools)
 	if report.After >= report.Before || report.After > room {

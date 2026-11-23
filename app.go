@@ -32,6 +32,7 @@ import (
 	"kichat/internal/tools"
 	"kichat/internal/trace"
 	"kichat/internal/uimsg"
+	"kichat/internal/update"
 	"kichat/internal/version"
 	"kichat/internal/workspace"
 )
@@ -189,6 +190,13 @@ type App struct {
 	updateMu sync.Mutex
 	update   RuntimeUpdate
 
+	// appUpdate is the last look at KiChat's own releases, cached for the reason above
+	// and read by Settings -> About. appUpdateLookup is the seam a test replaces with a
+	// release instead of reaching GitHub; nil is the real lookup.
+	appUpdateMu     sync.Mutex
+	appUpdate       AppUpdate
+	appUpdateLookup func(ctx context.Context) (update.Release, error)
+
 	// install tracks a download in progress. It is read by the UI through a
 	// bound method rather than pushed, because a download outlives the call that
 	// asked for it and polling cannot miss the end of one.
@@ -301,6 +309,9 @@ func (a *App) startup(ctx context.Context) {
 	// choosing the kind.
 	a.startEnabledImages()
 	a.applyGateway()
+	// The daily release check, when the user switched it on. It runs in the background
+	// because nobody is waiting for its answer: the badge appears when it lands.
+	a.startUpdateCheck()
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -535,6 +546,39 @@ func (a *App) startManagedModel(backendID string) (err error) {
 	if err != nil {
 		return err
 	}
+	// The expert placement belongs to the file, not to the entry: a count tuned for a
+	// 48-layer mixture is the wrong answer for a 32-layer one, and the chat's picker
+	// moves only the path. A file with no stored choice gets llama.cpp's own placement.
+	experts := mm.ExpertFor(mm.ModelPath)
+	// Multi-token prediction is per file as well, and the header decides whether the
+	// flag can be used at all: `--spec-type draft-mtp` on a file without the heads is
+	// not ignored, it stops the server. A stored count on a file that was replaced
+	// therefore sends nothing, and an unreadable header does the same, so the model
+	// loads as it would have.
+	//
+	// An entry nobody has written is not "off": it is undecided, and a file whose header
+	// has the heads starts with the recommendation — which is what makes a pick in the chat
+	// get the same numbers the panel shows. The stored 0 is the one that says off.
+	mtpDraft, mtpConfidence, mtpOverride := 0, 0.0, ""
+	if info, err := rt.ProbeGGUF(mm.ModelPath); err == nil && info.MTP() {
+		path := strings.TrimSpace(mm.ModelPath)
+		drafts, decided := mm.MTP[path]
+		if !decided {
+			drafts = rt.SuggestMTPDraftTokens(info)
+		}
+		mtpDraft = drafts
+		if mtpDraft > 0 {
+			if floor, ok := mm.MTPConfidence[path]; ok {
+				mtpConfidence = floor
+			} else {
+				mtpConfidence = rt.SuggestMTPConfidence(info)
+			}
+			// A file whose conversion kept the head tensors and dropped the count needs
+			// that count back before llama.cpp will use them; the probe says so, and this
+			// is the one line that carries it to the command line.
+			mtpOverride = info.MTPKVOverride()
+		}
+	}
 	// Only the build this app installed is asked for its trace log. The placement
 	// reading — which device, how many layers — is printed at that level and nowhere
 	// else, but `-lv` is a flag an older binary a user points at may not know, and an
@@ -550,7 +594,13 @@ func (a *App) startManagedModel(backendID string) (err error) {
 		CacheTypeK:     mm.CacheTypeK,
 		CacheTypeV:     mm.CacheTypeV,
 		Offload:        mm.Offload,
+		ExpertOffload:  experts.Offload,
+		ExpertLayers:   experts.Layers,
+		MTPDraft:       mtpDraft,
+		MTPConfidence:  mtpConfidence,
+		MTPKVOverride:  mtpOverride,
 		Trace:          verboseTrace,
+		Parallel:       mm.Parallel,
 		Extra:          rt.SplitArgs(mm.ExtraArgs),
 	})
 	if err == nil {
@@ -762,6 +812,7 @@ func (a *App) serverFor(backendID string, settings config.Settings) *rt.Server {
 		// outlives the settings snapshot it was created from.
 		id := backendID
 		srv.SetStateHandler(func(st rt.Status) { a.onManagedState(id, st) })
+		a.attachServerLog(srv, "llama", backendID)
 		a.servers[backendID] = srv
 	}
 	srv.SetReadyTimeout(time.Duration(settings.Runtime.ReadySeconds) * time.Second)
@@ -1015,6 +1066,12 @@ func (a *App) rebuildServices(settings config.Settings) {
 	// language (config.ModelLanguage), and the supplier is read per call so a save reaches
 	// the next search rather than the next restart.
 	chain.Lang = func() string { return a.Settings().Language }
+	// A DuckDuckGo refusal that carries a solvable check is shown rather than only reported: the
+	// error keeps its classification, and this is how the window hears about it without the
+	// research package knowing what a window is.
+	chain.SetChallengeHandler(func(challenge research.Challenge) {
+		a.emit(events.SearchChallenge, challenge)
+	})
 
 	scraper := research.NewScraper(a.store, research.ScrapeOptions{
 		MaxBytes:          settings.Search.ScrapeMaxBytes,
@@ -1241,6 +1298,39 @@ func (a *App) captionImage(ctx context.Context, req images.CaptionRequest) (imag
 	return chat.Caption(ctx, provider, turn.ModelID, req)
 }
 
+// attachServerLog gives a supervisor the file its program's whole output is kept in.
+//
+// The panel shows twelve lines and the failure message quotes six, which is right for
+// a status row and wrong for a crash: llama.cpp's abort handler adds a twenty-frame
+// backtrace after the line that explains the abort. The file holds all of it, so the
+// row can name something that outlives the row. Failing to open it is a warning, not
+// a failed start: the server works without it.
+func (a *App) attachServerLog(srv *rt.Server, program, id string) {
+	if a.dataDir == "" {
+		return
+	}
+	path := a.serverLogPath(program, id)
+	if err := srv.SetServerLog(path); err != nil {
+		runtime.LogWarningf(a.ctx, "Serverprotokoll %s anlegen: %v", path, err)
+	}
+}
+
+// serverLogPath names that file inside the data directory. The id is sanitised
+// because it reaches this from saved settings, and a separator in it would put the
+// file outside the directory that is allowed to hold it.
+func (a *App) serverLogPath(program, id string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '-', r == '_', r == '.':
+			return r
+		}
+		return '_'
+	}, id)
+	return filepath.Join(a.dataDir, program+"-"+safe+".log")
+}
+
 // imageServerFor returns the supervisor of the managed picture server, creating it if
 // this is the first time it is needed.
 func (a *App) imageServerFor() *rt.Server {
@@ -1253,6 +1343,7 @@ func (a *App) imageServerFor() *rt.Server {
 	if !ok {
 		srv = rt.NewServer(imageServerID)
 		srv.SetStateHandler(a.onImageServerState)
+		a.attachServerLog(srv, "sd", imageServerID)
 		a.servers[imageServerID] = srv
 	}
 	// A diffusion model plus its VAE and text encoder is several gigabytes, and the CLI
@@ -1543,6 +1634,16 @@ func (a *App) Regenerate(chatID, backend, model string) error {
 	})
 }
 
+// DropQueuedMessage removes one message waiting behind a running turn. A false answer means it
+// was already gone — that entry's turn had started — which is not an error, in the same way
+// StopToolCommand's false is not.
+func (a *App) DropQueuedMessage(chatID, id string) (bool, error) {
+	if err := a.ensure(); err != nil {
+		return false, err
+	}
+	return a.currentEngine().DropQueued(chatID, id), nil
+}
+
 // StopGeneration cancels a running generation, keeping the partial reply.
 func (a *App) StopGeneration(chatID string) bool {
 	if err := a.ensure(); err != nil {
@@ -1601,8 +1702,7 @@ func (a *App) CreateChat(backend, model string) (store.Chat, error) {
 	newChat.ID = newID()
 	newChat.Backend = backend
 	newChat.Model = model
-	newChat.SystemPrompt = settings.DefaultSystemPrompt
-	newChat.SystemPromptPreset = config.PresetResearch
+	newChat.SystemPrompt, newChat.SystemPromptPreset = chatPrompt(settings)
 	if err := a.store.CreateChat(newChat); err != nil {
 		return store.Chat{}, err
 	}
@@ -1611,7 +1711,7 @@ func (a *App) CreateChat(backend, model string) (store.Chat, error) {
 }
 
 // CreateProject makes a new coding project: a chat that works in a folder the user
-// picked, on the prompt written for working in one.
+// picked, on the prompt chosen for code.
 //
 // The folder is resolved *here* rather than on the first tool call, and the resolved
 // path is what is stored. Three things follow from that. The user finds out immediately
@@ -1660,8 +1760,7 @@ func (a *App) CreateProject(workspacePath string) (store.Chat, error) {
 	project.Title = filepath.Base(root.Path())
 	project.Backend = backend
 	project.Model = model
-	project.SystemPrompt = codingAgentPrompt(settings)
-	project.SystemPromptPreset = config.PresetCodingAgent
+	project.SystemPrompt, project.SystemPromptPreset = projectPrompt(settings)
 	project.Mode = store.ModeCoding
 	project.Workspace = root.Path()
 
@@ -1704,6 +1803,34 @@ func codingAgentPrompt(settings config.Settings) string {
 		}
 	}
 	return config.PromptBody(config.PresetCodingAgent, settings.Language)
+}
+
+// chatPrompt is the prompt a new chat starts on: the preset the settings name for chat. The
+// fallback is the default prompt field, which only a blob normalise could not repair still
+// carries (an older settings row opened without a normalise pass); an edited one of those has
+// a name by then, so the fallback is a safety net rather than a choice.
+//
+// A selected preset's text is used even when it is empty: "Empty" is a preset somebody can
+// choose, and a chat with no system prompt is exactly what choosing it asks for.
+func chatPrompt(settings config.Settings) (string, string) {
+	for _, preset := range settings.PromptPresets {
+		if settings.ChatPromptPreset != "" && preset.ID == settings.ChatPromptPreset {
+			return preset.Prompt, preset.ID
+		}
+	}
+	return settings.DefaultSystemPrompt, config.PresetResearch
+}
+
+// projectPrompt is the prompt a new project starts on, selected the same way. An empty
+// selection is the coding-agent preset, so a project created before the selector existed
+// starts on exactly the text it used to.
+func projectPrompt(settings config.Settings) (string, string) {
+	for _, preset := range settings.PromptPresets {
+		if settings.CodingPromptPreset != "" && preset.ID == settings.CodingPromptPreset {
+			return preset.Prompt, preset.ID
+		}
+	}
+	return codingAgentPrompt(settings), config.PresetCodingAgent
 }
 
 // sameFolder reports whether two paths name the same directory on this machine.
@@ -2001,6 +2128,9 @@ func (a *App) DeleteChat(chatID string) error {
 	if err := a.ensure(); err != nil {
 		return err
 	}
+	// The queue goes first: a message waiting for this conversation belongs to it, and Stop no
+	// longer empties a queue — left there, it would start a turn for a chat that is gone.
+	a.currentEngine().DropAllQueued(chatID)
 	a.currentEngine().Stop(chatID)
 	if err := a.store.DeleteChat(chatID); err != nil {
 		return err
@@ -2029,7 +2159,8 @@ func (a *App) ClearChat(chatID string) error {
 		return err
 	}
 	if a.currentEngine().IsRunning(chatID) {
-		// The same sentence a second send gets, because it is the same condition.
+		// Not a queued command: a second *send* waits in the queue, but there is no "cleared"
+		// to defer — the clear is either done now or not at all.
 		return uimsg.Errorf("chat.turnRunning")
 	}
 	// An id nothing in the database knows is a refusal, not a no-op: a stale window would
@@ -2059,6 +2190,11 @@ type ChatState struct {
 	Documents   []store.Document   `json:"documents"`
 	Budget      chat.ContextBudget `json:"budget"`
 	Running     bool               `json:"running"`
+	// Queue is the messages waiting behind the running turn, oldest first. It travels with
+	// the state rather than being asked for separately because a chat opened while another
+	// message waits has to show that message: a queue nobody can see is a message the user
+	// would send again.
+	Queue []chat.QueuedTurn `json:"queue"`
 	// Consent is what this chat answers without a card, from the "always" clicked on one of
 	// its own. It travels with the state rather than being asked for separately because the
 	// window has to show it: a grant that only shows up as a card *not* appearing is one the
@@ -2103,6 +2239,7 @@ func (a *App) GetChatState(chatID string) (ChatState, error) {
 		Documents:   documents,
 		Budget:      budget,
 		Running:     a.currentEngine().IsRunning(chatID),
+		Queue:       a.currentEngine().Queued(chatID),
 		Consent:     a.chatConsent(chatID),
 	}, nil
 }

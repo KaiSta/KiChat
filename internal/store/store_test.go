@@ -1180,6 +1180,7 @@ func TestAnExistingInstallationGainsTheGenerationColumn(t *testing.T) {
 		{"attachments", "generation_json"},
 		{"attachments", "saved_path"},
 		{"attachments", "derivation_json"},
+		{"attachments", "project_path"},
 		{"tool_calls", "source_tokens"},
 		{"tool_calls", "context_tokens"},
 		{"tool_calls", "condensed"},

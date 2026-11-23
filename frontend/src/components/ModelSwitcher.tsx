@@ -722,6 +722,7 @@ export function ModelSwitcher() {
     return () => { live = false }
   }, [open, settings?.runtime?.modelDir, settings?.backends, scanRevision])
 
+
   /** The runtime's row for one entry, or undefined while the status has not answered. */
   const localStatus = (backendID: string) =>
     (runtimeStatus?.models ?? []).find((m) => m.backendId === backendID)
@@ -877,10 +878,35 @@ export function ModelSwitcher() {
       // The entry's own values are kept and only the file moves: a start from the picker
       // must not quietly reset a context size or an offload choice made in Settings.
       // Defaults come from the one place that defines them for an entry that has none.
+      //
+      // The expert placement is the one field the file decides. A mixture of experts whose
+      // weights outgrow the card answers only because its expert tensors stay in system
+      // RAM, and the header is the only place the file says it is one — so the count is
+      // read here rather than waited for in Settings, and a first start from the chat
+      // lands on the same placement the panel would have suggested. A choice already
+      // stored for this path — one made in Settings — is sent unchanged: this fills a gap,
+      // it does not overrule the user.
+      // Only llama.cpp has a GGUF with a header to read; an MLX start names a snapshot
+      // directory, which the probe would reject as "a folder, not a GGUF". Skipping it
+      // there is honest rather than quieter: the entry has no expert tensors to place.
+      const managedKind = settings?.backends?.find((b) => b.id === backendID)?.kind
+      let experts = stored?.experts ?? {}
+      if (managedKind === 'llamacpp' && !experts[path]) {
+        try {
+          const probe = await App.InspectManagedModel(path, 0, runtimeStatus.deviceFreeBytes ?? 0)
+          if (probe.traits.expertCount > 0 && probe.suggestedLayers > 0) {
+            experts = { ...experts, [path]: { offload: 'layers', layers: probe.suggestedLayers } }
+          }
+        } catch {
+          // An unreadable header is not a reason to refuse the start: llama.cpp's own
+          // `--fit` placement is what runs, which is exactly the untuned behaviour.
+        }
+      }
       await App.StartManagedModelWith(backendID, {
         ...defaultManagedModel(),
         ...stored,
         modelPath: path,
+        experts,
         ...(ctxSize !== undefined ? { ctxSize } : {}),
       })
       // The backend wrote the entry, so the store's copy of the settings is stale by
@@ -1208,7 +1234,11 @@ export function ModelSwitcher() {
                     <input className="input mono" type="number" min={managedCandidate ? 2048 : 0} step={1024} value={contextSize} onChange={(e) => { setPreview(null); setContextSize(e.target.value) }} />
                   </label>
                   <div className="mt-1 flex flex-wrap gap-1">
-                    {[8192, 16384, 32768, 65536].map((n) => <button key={n} type="button" className="btn btn-sm btn-ghost" onClick={() => { if (n !== contextNumber) { setPreview(null); setContextSize(String(n)) } }}>{n / 1024}K</button>)}
+                    {/* 96K and 128K are here because a long-context model's window is not a
+                        power of two in practice and 64K is no longer the top of the
+                        range; 96K is the useful middle step that does not jump the
+                        whole way to 128K. */}
+                    {[8192, 16384, 32768, 65536, 98304, 131072].map((n) => <button key={n} type="button" className="btn btn-sm btn-ghost" onClick={() => { if (n !== contextNumber) { setPreview(null); setContextSize(String(n)) } }}>{n / 1024}K</button>)}
                     {ollamaCandidate && <button type="button" className="btn btn-sm btn-ghost" onClick={() => { if (contextNumber !== 0) { setPreview(null); setContextSize('0') } }}>{t('model.contextDefault')}</button>}
                   </div>
                   <div className="faint">{t(managedCandidate ? 'model.contextManagedHint' : 'model.contextOllamaHint')}</div>

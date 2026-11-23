@@ -343,7 +343,7 @@ func TestSearchIsLiteralAndCaseInsensitive(t *testing.T) {
 
 // TestAHitIsAWindowAroundTheMatch is the file a search answers worst: one minified line, or a
 // generated JSON, is a single line of megabytes. Returning it whole spends the answer's whole
-// tool budget on one hit and holds two hundred of them in memory; returning its first 300 bytes
+// room on one hit and holds two hundred of them in memory; returning its first 300 bytes
 // hides the text that made it a hit. So a hit is a window, and the match is in it.
 func TestAHitIsAWindowAroundTheMatch(t *testing.T) {
 	line := strings.Repeat("var a=1;", 900) + "needle" + strings.Repeat(";", 900)

@@ -1,0 +1,612 @@
+package runtime
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// What a GGUF says about itself before a byte of it is loaded.
+//
+// The model panel needs three things a file name cannot give: whether the model is a
+// mixture of experts at all, how many layers it has, and how many experts fire per
+// token. All three are integers in the key/value table at the top of the file, so
+// reading them costs one bounded read that never touches the weights.
+//
+// This is a second GGUF reader beside internal/images/modelmeta.go, and the split is
+// deliberate. That one keeps the tensor names and the *string* metadata to identify a
+// diffusion checkpoint, and skips every scalar on its way past; this one keeps the
+// scalars, stops as soon as it has the four keys it wants, and never reads the tensor
+// table. Sharing one would mean exporting the picture path's internals into a package
+// that has nothing to do with pictures.
+const (
+	// ggufFirstRead is the first attempt at the header. It is an order of magnitude
+	// above what these four keys need — they sit in the first few hundred bytes of
+	// every published model — and the parse asks for more only when a file's
+	// key/value table is longer than this.
+	ggufFirstRead = 1 << 20
+	// ggufHeaderLimit bounds the second attempt. A GGUF states no header length, so
+	// this is a guard against a corrupt length field rather than a working figure: no
+	// chat model's metadata table is anywhere near 16 MiB.
+	ggufHeaderLimit = 16 << 20
+	// maxGGUFKeys caps the key/value table. A chat model publishes tens of keys;
+	// anything near this is not one.
+	maxGGUFKeys = 4096
+	// cachedProbes is how many files stay in memory, dropped whole when it fills.
+	cachedProbes = 8
+)
+
+// GGUFInfo is the part of a model's header this package reads.
+//
+// BlockCount is the layer count and the ceiling for `--n-cpu-moe`; ExpertCount is how
+// many experts one layer holds and is 0 for a dense model, which is the question the
+// panel asks. ExpertUsedCount is how many of them fire per token — the number that
+// makes a 20 GB file answer at 3B parameters. MTPLayers is how many nextn-prediction
+// heads the file carries, and 0 means it has none. MTPFromTensors says the count came
+// from the head tensors rather than from the metadata key llama.cpp reads, which is
+// the one case a start has to help llama.cpp with — see MTPKVOverride. Zeros mean "the
+// file did not say", because a header this app cannot read is not evidence of a dense
+// model.
+type GGUFInfo struct {
+	Architecture    string
+	BlockCount      int
+	ExpertCount     int
+	ExpertUsedCount int
+	MTPLayers       int
+	MTPFromTensors  bool
+}
+
+// MoE reports whether the header says the model has experts. It is deliberately not
+// "ExpertCount > 0 or unknown": the caller decides what an unreadable header means.
+func (i GGUFInfo) MoE() bool { return i.ExpertCount > 0 }
+
+// MTP reports whether the file carries multi-token prediction heads. The count is
+// normally the `{arch}.nextn_predict_layers` value llama.cpp's converter writes; when
+// that key is missing, MTPFromTensors says the answer came from the head tensors
+// themselves, which llama.cpp cannot use until the count is given back to it. A file
+// with neither cannot speculate, so the flag would stop the server rather than do
+// nothing.
+func (i GGUFInfo) MTP() bool { return i.MTPLayers > 0 }
+
+var errGGUFTruncated = errors.New("GGUF header does not fit in the read window")
+
+// ProbeGGUF reads one GGUF's architecture and expert layout, caching the result.
+//
+// The cache is keyed by path and invalidated by size and modification time, which is
+// what a re-quantisation or a replaced download changes. It exists because the panel
+// probes on every model-path change and the backend probes again when it builds the
+// status, and a header read per call would be a surprising amount of disk for a value
+// that cannot have changed between them.
+func ProbeGGUF(path string) (GGUFInfo, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return GGUFInfo{}, os.ErrNotExist
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return GGUFInfo{}, err
+	}
+	if info.IsDir() {
+		return GGUFInfo{}, fmt.Errorf("%s is a folder, not a GGUF", path)
+	}
+
+	probes.mu.Lock()
+	if entry, ok := probes.byPath[path]; ok && entry.size == info.Size() && entry.mod.Equal(info.ModTime()) {
+		probes.mu.Unlock()
+		return entry.info, entry.err
+	}
+	probes.mu.Unlock()
+
+	read, err := readGGUFInfo(path, info.Size())
+
+	probes.mu.Lock()
+	if len(probes.byPath) >= cachedProbes {
+		probes.byPath = make(map[string]cachedProbe)
+	}
+	probes.byPath[path] = cachedProbe{size: info.Size(), mod: info.ModTime(), info: read, err: err}
+	probes.mu.Unlock()
+	return read, err
+}
+
+type cachedProbe struct {
+	size int64
+	mod  time.Time
+	info GGUFInfo
+	err  error
+}
+
+var probes = struct {
+	mu     sync.Mutex
+	byPath map[string]cachedProbe
+}{byPath: make(map[string]cachedProbe)}
+
+// forgetGgufProbes drops the cache. Only a test needs it.
+func forgetGgufProbes() {
+	probes.mu.Lock()
+	probes.byPath = make(map[string]cachedProbe)
+	probes.mu.Unlock()
+}
+
+// readGGUFInfo reads as little of the file as will answer the question, and one more,
+// bounded, window when the first one ended inside the header.
+func readGGUFInfo(path string, size int64) (GGUFInfo, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return GGUFInfo{}, err
+	}
+	defer file.Close()
+
+	window, err := readGGUFWindow(file, size, ggufFirstRead)
+	if err != nil {
+		return GGUFInfo{}, err
+	}
+	info, err := parseGGUFInfo(window)
+	if errors.Is(err, errGGUFTruncated) && int64(len(window)) < size && ggufHeaderLimit > ggufFirstRead {
+		window, err = readGGUFWindow(file, size, ggufHeaderLimit)
+		if err != nil {
+			return GGUFInfo{}, err
+		}
+		info, err = parseGGUFInfo(window)
+	}
+	if errors.Is(err, errGGUFTruncated) {
+		// Bigger than the window, or cut short by a download that is still running. The
+		// old read stopped at the first tokenizer key and never hit either; walking past
+		// it must not cost the facts the file does have.
+		return parseGGUFInfoTolerant(window), nil
+	}
+	return info, err
+}
+
+func readGGUFWindow(file *os.File, size, n int64) ([]byte, error) {
+	if n > size {
+		n = size
+	}
+	data := make([]byte, n)
+	got, err := file.ReadAt(data, 0)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return data[:got], nil
+}
+
+// GGUF metadata value types, as the format defines them.
+const (
+	ggufTypeString = 8
+	ggufTypeArray  = 9
+)
+
+// The keys are namespaced by architecture in the file (`qwen3moe.block_count`), so the
+// parse keeps only the suffix and resolves the prefix at the end: a file whose
+// architecture key comes last reads the same as one whose key comes first.
+var ggufNumberKeys = []string{".block_count", ".expert_count", ".expert_used_count", ".nextn_predict_layers"}
+
+func parseGGUFInfo(data []byte) (GGUFInfo, error) { return parseGGUFInfoIn(data, false) }
+
+// parseGGUFInfoTolerant is the last resort for a header that does not fit the window or
+// a tensor table that is damaged — a file still being downloaded, mostly. It keeps the
+// keys it could read: the architecture and the expert counts are what the panel shows,
+// and they arrive long before the tail does.
+func parseGGUFInfoTolerant(data []byte) GGUFInfo {
+	info, _ := parseGGUFInfoIn(data, true)
+	return info
+}
+
+func parseGGUFInfoIn(data []byte, tolerant bool) (GGUFInfo, error) {
+	if len(data) < 4 || string(data[:4]) != "GGUF" {
+		return GGUFInfo{}, fmt.Errorf("not a GGUF file")
+	}
+	cursor := ggufCursor{data: data, off: 4}
+	version, err := cursor.u32()
+	if err != nil {
+		return GGUFInfo{}, err
+	}
+	// Versions 2 and 3 share this layout; 1 predates it and no current model uses it.
+	if version < 2 || version > 3 {
+		return GGUFInfo{}, fmt.Errorf("GGUF version %d is not read", version)
+	}
+	// The tensor table sits after the key/value table, and it is where a file whose
+	// metadata has no head count keeps the only evidence of one.
+	tensorCount, err := cursor.u64()
+	if err != nil {
+		return GGUFInfo{}, err
+	}
+	kvCount, err := cursor.u64()
+	if err != nil {
+		return GGUFInfo{}, err
+	}
+	if kvCount > maxGGUFKeys {
+		return GGUFInfo{}, fmt.Errorf("%d metadata keys are not a chat model", kvCount)
+	}
+
+	numbers := map[string]uint64{}
+	architecture := ""
+	// Every key is walked, including the tokenizer section that is by far the largest
+	// part of a header (arrays of 100k+ strings). That section used to be the stopping
+	// point, because every architecture scalar precedes it in the files llama.cpp's
+	// converter writes — and the walk has to end at the tensor table to answer a file
+	// whose metadata has no head count. Arrays are skipped by their own lengths, so this
+	// costs a few hundred kilobytes of the bounded window rather than an allocation.
+	// A tolerant pass stops at the first value the window cannot hold; the strict one
+	// returns the truncation, which is what makes readGGUFInfo retry with a bigger
+	// window before falling back to this. Either way the keys read so far stand.
+	complete := true
+	for i := uint64(0); i < kvCount; i++ {
+		key, err := cursor.str()
+		if err != nil {
+			if tolerant {
+				complete = false
+				break
+			}
+			return GGUFInfo{}, err
+		}
+		typ, err := cursor.u32()
+		if err != nil {
+			if tolerant {
+				complete = false
+				break
+			}
+			return GGUFInfo{}, err
+		}
+		if typ == ggufTypeString {
+			value, err := cursor.str()
+			if err != nil {
+				if tolerant {
+					complete = false
+					break
+				}
+				return GGUFInfo{}, err
+			}
+			if key == "general.architecture" {
+				architecture = value
+			}
+			continue
+		}
+		value, isNumber, err := cursor.value(typ)
+		if err != nil {
+			if tolerant {
+				complete = false
+				break
+			}
+			return GGUFInfo{}, err
+		}
+		if isNumber {
+			for _, suffix := range ggufNumberKeys {
+				if strings.HasSuffix(key, suffix) {
+					numbers[key] = value
+					break
+				}
+			}
+		}
+	}
+
+	prefix := architecture
+	if prefix == "" {
+		// No architecture key: take it from whichever namespaced key was found, so a
+		// header this app only partly understands still answers the layer question.
+		for key := range numbers {
+			prefix = strings.TrimSuffix(key, ".block_count")
+			if prefix != key {
+				break
+			}
+			prefix = ""
+		}
+	}
+	blockCount := int(numbers[prefix+".block_count"])
+	mtp := int(numbers[prefix+".nextn_predict_layers"])
+	mtpFromTensors := false
+	if complete && mtp == 0 && tensorCount > 0 && blockCount > 0 {
+		blocks, last, err := cursor.nextnBlocks(tensorCount)
+		if err != nil && !tolerant {
+			return GGUFInfo{}, err
+		}
+		// A single head in the block after the trunk is the layout llama.cpp splits by,
+		// so the count is unambiguous. Two heads, or one somewhere else, is a file this
+		// app will not reinterpret on a guess: the metadata path is all it trusts there.
+		if blocks == 1 && last == blockCount-1 {
+			mtp, mtpFromTensors = 1, true
+		}
+	}
+	return GGUFInfo{
+		Architecture:    prefix,
+		BlockCount:      blockCount,
+		ExpertCount:     int(numbers[prefix+".expert_count"]),
+		ExpertUsedCount: int(numbers[prefix+".expert_used_count"]),
+		MTPLayers:       mtp,
+		MTPFromTensors:  mtpFromTensors,
+	}, nil
+}
+
+// nextnBlocks walks the tensor table and counts the blocks that carry a nextn tensor
+// (`blk.N.nextn.eh_proj` and its siblings). Only the names are read: the dimensions,
+// type and offset after each name are skipped by their widths, so a table of a thousand
+// entries costs a few kilobytes of the window that already holds it.
+func (c *ggufCursor) nextnBlocks(count uint64) (blocks, last int, err error) {
+	seen := map[uint64]bool{}
+	for i := uint64(0); i < count; i++ {
+		name, err := c.str()
+		if err != nil {
+			return 0, 0, err
+		}
+		if n, ok := nextnBlockIndex(name); ok && !seen[n] {
+			seen[n] = true
+			blocks++
+			if int(n) > last {
+				last = int(n)
+			}
+		}
+		dims, err := c.u32()
+		if err != nil {
+			return 0, 0, err
+		}
+		if err := c.skipN(uint64(dims) * 8); err != nil {
+			return 0, 0, err
+		}
+		// The quantisation type and the data offset close each entry.
+		if err := c.skipN(12); err != nil {
+			return 0, 0, err
+		}
+	}
+	return blocks, last, nil
+}
+
+// nextnBlockIndex reads the block number out of a tensor named `blk.<n>.nextn.<what>`.
+func nextnBlockIndex(name string) (uint64, bool) {
+	rest, ok := strings.CutPrefix(name, "blk.")
+	if !ok {
+		return 0, false
+	}
+	dot := strings.IndexByte(rest, '.')
+	if dot <= 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(rest[:dot], 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	if !strings.HasPrefix(rest[dot:], ".nextn.") {
+		return 0, false
+	}
+	return n, true
+}
+
+// MTPKVOverride is the `--override-kv` pair that gives llama.cpp a head count the file
+// itself does not declare, and "" when the file says it in the metadata and needs no
+// help.
+//
+// llama.cpp takes `n_layer_nextn` from `{arch}.nextn_predict_layers` alone — it splits
+// the block table into trunk plus head with it — and asserts the count is positive
+// before it builds the draft graph (src/models/qwen35.cpp), so a conversion that kept
+// the nextn tensors and dropped the key would load with every head reported unused.
+// That is what the probe's tensor pass is for: the count is recovered from the block
+// index and handed back as a metadata override, which llama.cpp applies in get_key
+// before the loader reads it.
+func (i GGUFInfo) MTPKVOverride() string {
+	if !i.MTPFromTensors || i.MTPLayers <= 0 || i.Architecture == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s.nextn_predict_layers=int:%d", i.Architecture, i.MTPLayers)
+}
+
+// ggufCursor is a bounds-checked little-endian cursor over the read window. Every
+// method returns errGGUFTruncated rather than panicking when the window ends first,
+// which is what makes a partially read file harmless.
+type ggufCursor struct {
+	data []byte
+	off  int
+}
+
+func (c *ggufCursor) skipN(n uint64) error {
+	if n > uint64(len(c.data)-c.off) {
+		return errGGUFTruncated
+	}
+	c.off += int(n)
+	return nil
+}
+
+func (c *ggufCursor) u32() (uint32, error) {
+	if len(c.data)-c.off < 4 {
+		return 0, errGGUFTruncated
+	}
+	v := binary.LittleEndian.Uint32(c.data[c.off:])
+	c.off += 4
+	return v, nil
+}
+
+func (c *ggufCursor) u64() (uint64, error) {
+	if len(c.data)-c.off < 8 {
+		return 0, errGGUFTruncated
+	}
+	v := binary.LittleEndian.Uint64(c.data[c.off:])
+	c.off += 8
+	return v, nil
+}
+
+func (c *ggufCursor) str() (string, error) {
+	n, err := c.u64()
+	if err != nil {
+		return "", err
+	}
+	if n > uint64(len(c.data)-c.off) {
+		return "", errGGUFTruncated
+	}
+	s := string(c.data[c.off : c.off+int(n)])
+	c.off += int(n)
+	return s, nil
+}
+
+// value reads one metadata value, reporting whether it is an integer and returning it
+// when it is. Everything else is consumed by its own length so the cursor stays in
+// step: the keys wanted here are written as uint32 by llama.cpp's converter and as
+// int32 by some others, so both carry a number.
+func (c *ggufCursor) value(typ uint32) (uint64, bool, error) {
+	switch typ {
+	case 0: // uint8
+		if err := c.skipN(1); err != nil {
+			return 0, false, err
+		}
+		return uint64(c.data[c.off-1]), true, nil
+	case 1: // int8
+		if err := c.skipN(1); err != nil {
+			return 0, false, err
+		}
+		return uint64(int64(int8(c.data[c.off-1]))), true, nil
+	case 2: // uint16
+		if err := c.skipN(2); err != nil {
+			return 0, false, err
+		}
+		return uint64(binary.LittleEndian.Uint16(c.data[c.off-2:])), true, nil
+	case 3: // int16
+		if err := c.skipN(2); err != nil {
+			return 0, false, err
+		}
+		return uint64(int64(int16(binary.LittleEndian.Uint16(c.data[c.off-2:])))), true, nil
+	case 4: // uint32
+		v, err := c.u32()
+		return uint64(v), err == nil, err
+	case 5: // int32
+		v, err := c.u32()
+		return uint64(int64(int32(v))), err == nil, err
+	case 6: // float32
+		return 0, false, c.skipN(4)
+	case 7: // bool
+		return 0, false, c.skipN(1)
+	case ggufTypeString:
+		_, err := c.str()
+		return 0, false, err
+	case 10: // uint64
+		v, err := c.u64()
+		return v, err == nil, err
+	case 11: // int64
+		v, err := c.u64()
+		return uint64(int64(v)), err == nil, err
+	case 12: // float64
+		return 0, false, c.skipN(8)
+	case ggufTypeArray:
+		return 0, false, c.skipArray()
+	default:
+		return 0, false, fmt.Errorf("GGUF value type %d is not read", typ)
+	}
+}
+
+// skipArray walks an array by its element type and count. The count is read rather
+// than trusted, so a corrupt length cannot run past the window.
+func (c *ggufCursor) skipArray() error {
+	element, err := c.u32()
+	if err != nil {
+		return err
+	}
+	count, err := c.u64()
+	if err != nil {
+		return err
+	}
+	if size, fixed := ggufFixedSize(element); fixed {
+		if count > uint64(len(c.data)-c.off)/size {
+			return errGGUFTruncated
+		}
+		return c.skipN(count * size)
+	}
+	if element != ggufTypeString {
+		return fmt.Errorf("GGUF array element type %d is not read", element)
+	}
+	for i := uint64(0); i < count; i++ {
+		if _, err := c.str(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ggufFixedSize is the width of a fixed-size GGUF value, and false for strings and
+// arrays.
+func ggufFixedSize(typ uint32) (uint64, bool) {
+	switch typ {
+	case 0, 1, 7:
+		return 1, true
+	case 2, 3:
+		return 2, true
+	case 4, 5, 6:
+		return 4, true
+	case 10, 11, 12:
+		return 8, true
+	default:
+		return 0, false
+	}
+}
+
+// SuggestExpertLayers is a starting point for `--n-cpu-moe N`: the share of the file
+// that does not fit in the free device memory, applied to the layer count.
+//
+// It treats the whole file as shareable, which over-offloads a little — the KV cache
+// and the attention weights are on the card either way. That is the safe direction for
+// a first try, because too much in RAM costs speed while too little costs an
+// out-of-memory start; the panel says so rather than presenting it as a measurement.
+// 0 means "nothing has to leave": the file fits, so there is nothing to suggest.
+func SuggestExpertLayers(blockCount int, modelBytes, freeBytes int64) int {
+	if blockCount <= 0 || modelBytes <= 0 {
+		return 0
+	}
+	// No device memory reported is not "no memory": a CPU-only build or a missing
+	// runtime cannot say, and suggesting all of it would be inventing an answer.
+	if freeBytes <= 0 || modelBytes <= freeBytes {
+		return 0
+	}
+	share := float64(modelBytes-freeBytes) / float64(modelBytes)
+	n := int(float64(blockCount)*share + 0.999999)
+	return min(max(n, 1), blockCount)
+}
+
+// SuggestForModel is SuggestExpertLayers for a header that has been read.
+//
+// A dense model has no expert tensors, so there is nothing to place and nothing to
+// suggest, whatever its size: the flags would be null operations at best. A number here
+// would reach `--n-cpu-moe` from the panel, which fills an undecided file with the
+// suggestion, and from the chat's picker, which does the same at a first start — a
+// setting on a model that has no experts to move.
+func SuggestForModel(info GGUFInfo, modelBytes, freeBytes int64) int {
+	if info.ExpertCount <= 0 {
+		return 0
+	}
+	return SuggestExpertLayers(info.BlockCount, modelBytes, freeBytes)
+}
+
+// SuggestMTPDraftTokens is the starting `--spec-draft-n-max` for a file that has
+// multi-token prediction heads, and 0 for one that has none.
+//
+// Three, for three reasons that agree: it is llama.cpp's own default
+// (docs/speculative.md), it is the count the published Qwen3.6 27B/35B runs use, and a
+// direct 2-against-3 comparison on one machine measured 3 higher — about 18–21 tok/s
+// against 16, at 72% draft acceptance against 82%. A draft that is mostly accepted
+// earns more per verification pass than a short one that always is, which is why the
+// lower count is not automatically the safer one. The values above 4 that the measured
+// guides recommend are all paired with `--spec-draft-p-min`, so the head stops drafting
+// when it is unsure; without that floor a longer draft is where throughput starts to
+// fall. Unsloth's 2 is a starting point for smaller and older models and says as much.
+// It stays a starting point: the panel says "recommended" and the hint names the range
+// worth measuring, rather than presenting one number as the answer for every card.
+func SuggestMTPDraftTokens(info GGUFInfo) int {
+	if info.MTPLayers <= 0 {
+		return 0
+	}
+	return 3
+}
+
+// SuggestMTPConfidence is the starting `--spec-draft-p-min` for a file with
+// multi-token prediction heads, and 0 — llama.cpp's own "no floor" — for one without.
+//
+// 0.75 is the value every measured guide that drafts 4–6 tokens uses (llama.cpp
+// discussion #25198 at 0.8, the per-GPU Qwen guide at 0.75). The floor is what makes a
+// longer draft pay: below it the head stops instead of guessing, so the acceptance rate
+// stops collapsing as the count rises. Setting it does not make a count of 1 cheaper,
+// which is why it is a separate setting rather than folded into the count.
+func SuggestMTPConfidence(info GGUFInfo) float64 {
+	if info.MTPLayers <= 0 {
+		return 0
+	}
+	return 0.75
+}

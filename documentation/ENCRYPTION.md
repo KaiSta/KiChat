@@ -160,6 +160,19 @@ prompt is instant. The wrapped copy is what makes a keyring reset, an OS reinsta
 new machine recoverable rather than fatal; without it, "the key lives in the keyring"
 means "the key is lost with the keyring".
 
+A passphrase unlock writes the recovered key into the OS keyring when one is available. A
+restored database therefore asks once on the new machine and starts silently afterwards; a
+failed keyring write is logged and does not fail the unlock, because the database is already
+open and the next launch can simply ask again.
+
+A copied installation can also be restored from the database screen: choose the copied
+`kichat.db` and `kichat.key`, then enter the passphrase that protects the key. The pair is
+opened in a temporary directory before anything is moved, so a wrong passphrase, a key from
+another database, or a plaintext file leaves the current installation untouched. A
+successful restore moves the previous database, key and sidecars aside with `.orphaned`
+names, installs the validated files, and unlocks them through the normal passphrase path.
+The keyring write described above then applies to the restored key as well.
+
 The keyring is read once per run, not once per question. The start asks for the key while
 it opens the database and again for the status the unlock screen reads, and on macOS a read
 is the `/usr/bin/security` process `go-keyring` spawns — so `dbkey` memoises the answer,
@@ -316,7 +329,9 @@ Encryption covers `kichat.db`, not the directory around it. In the same owner-on
 directory (`0700`) live `kichat.log` (the launch and why it ended, `0644`, rolled at
 1 MiB), `kichat.key` (the passphrase-wrapped copy of the key, useless without the
 passphrase, §4), and `kichat-trace.jsonl` (the diagnostic trace, `0600`, rolled at
-2 MiB with one previous file). The keyring entry is outside the directory altogether.
+2 MiB with one previous file), and one `llama-<id>.log` or `sd-<id>.log` per managed
+server — that program's own output, verbatim, `0600`, rolled at 4 MiB with one previous
+file, because it names the model's path and the arguments it was started with. The keyring entry is outside the directory altogether.
 
 The trace is the one that could have been a leak, so its schema is **closed rather than
 redacted**: `internal/trace.Event` has 21 fields, every one an identifier, a count, a
@@ -359,9 +374,10 @@ its cost is the policy (how often, how much data, how much churn), not the crypt
   gap: a keyring reset with no copy now ends at `db.reason.noKey` and a database moved
   aside. The argument for forcing it — the choice is free only once — still holds, and it
   is the first thing to add if the gap turns out to bite.
-- **"Do not remember" is persistent, not per launch.** Removing the keyring key in Settings
-  makes every launch ask; there is no checkbox on the unlock screen to skip the keyring for
-  one session while keeping it.
+- **"Do not remember" lasts until the next unlock.** Removing the keyring key in Settings
+  makes the next launch ask; once the passphrase has opened the database, the key is stored
+  in the keyring again and the launch after that is silent. There is no checkbox on the
+  unlock screen to skip the keyring for one session while keeping it.
 - Does the encrypted file need an **export to plaintext** for a user who wants their data
   back without KiChat, or is the encrypted archive (`internal/backup`) enough? Unchanged;
   the backup archive is still the only export.

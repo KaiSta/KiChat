@@ -62,6 +62,80 @@ func TestOffloadAndTraceReachTheCommandLine(t *testing.T) {
 	if tr := argsOf(Options{Model: "/m.gguf", Trace: true}); !has(tr, "-lv", "4") {
 		t.Errorf("a traced start = %v, want -lv 4", tr)
 	}
+	// The expert flags: nothing for "auto", llama.cpp's own two spellings for the
+	// explicit modes, and the user's count still last.
+	contains := func(args []string, want string) bool {
+		for _, a := range args {
+			if a == want {
+				return true
+			}
+		}
+		return false
+	}
+	if expertAuto := argsOf(Options{Model: "/m.gguf"}); contains(expertAuto, "--cpu-moe") || contains(expertAuto, "--n-cpu-moe") {
+		t.Errorf("an auto expert offload sent a flag: %v", expertAuto)
+	}
+	if allExperts := argsOf(Options{Model: "/m.gguf", ExpertOffload: ExpertOffloadCPU}); !contains(allExperts, "--cpu-moe") {
+		t.Errorf("expert offload cpu = %v, want --cpu-moe", allExperts)
+	}
+	someExperts := argsOf(Options{Model: "/m.gguf", ExpertOffload: ExpertOffloadLayers, ExpertLayers: 13})
+	if !has(someExperts, "--n-cpu-moe", "13") {
+		t.Errorf("expert offload layers = %v, want --n-cpu-moe 13", someExperts)
+	}
+	// A count of zero is llama.cpp's own "none of them", not a reason to drop the flag.
+	if zero := argsOf(Options{Model: "/m.gguf", ExpertOffload: ExpertOffloadLayers}); !has(zero, "--n-cpu-moe", "0") {
+		t.Errorf("expert offload layers 0 = %v, want --n-cpu-moe 0", zero)
+	}
+	// Multi-token prediction needs both flags: the type turns the model's own heads on
+	// and the count says how far ahead they draft. No count is llama.cpp's own default
+	// of no speculation, so a start without one sends neither.
+	if mtp := argsOf(Options{Model: "/m.gguf", MTPDraft: 2}); !has(mtp, "--spec-type", SpecTypeDraftMTP) {
+		t.Errorf("an MTP start = %v, want --spec-type %s", mtp, SpecTypeDraftMTP)
+	} else if !has(mtp, "--spec-draft-n-max", "2") {
+		t.Errorf("an MTP start = %v, want --spec-draft-n-max 2", mtp)
+	}
+	if quiet := argsOf(Options{Model: "/m.gguf"}); contains(quiet, "--spec-type") || contains(quiet, "--spec-draft-n-max") {
+		t.Errorf("a start without MTP sent a speculative flag: %v", quiet)
+	}
+	// The floor rides with the count, printed as the shortest probability that reads
+	// back the same; without a count there is nothing to truncate, so it is not sent.
+	if floored := argsOf(Options{Model: "/m.gguf", MTPDraft: 4, MTPConfidence: 0.75}); !has(floored, "--spec-draft-p-min", "0.75") {
+		t.Errorf("an MTP start with a floor = %v, want --spec-draft-p-min 0.75", floored)
+	}
+	if stray := argsOf(Options{Model: "/m.gguf", MTPConfidence: 0.75}); contains(stray, "--spec-draft-p-min") {
+		t.Errorf("a floor without a draft count was sent: %v", stray)
+	}
+	// A file whose conversion dropped the head count gets it back as a metadata
+	// override, and only alongside the flags that use it — an override alone would
+	// change how llama.cpp reads the block table for nothing.
+	repaired := argsOf(Options{Model: "/m.gguf", MTPDraft: 3, MTPKVOverride: "qwen35.nextn_predict_layers=int:1"})
+	if !has(repaired, "--override-kv", "qwen35.nextn_predict_layers=int:1") {
+		t.Errorf("an MTP start on a file missing its count = %v, want the override", repaired)
+	}
+	if lone := argsOf(Options{Model: "/m.gguf", MTPKVOverride: "qwen35.nextn_predict_layers=int:1"}); contains(lone, "--override-kv") {
+		t.Errorf("an override without a draft count was sent: %v", lone)
+	}
+	// llama.cpp applies the first matching `--override-kv`, so the app must not put a
+	// duplicate in front of the user's own pair for the same key.
+	theirs := argsOf(Options{Model: "/m.gguf", MTPDraft: 3,
+		MTPKVOverride: "qwen35.nextn_predict_layers=int:1",
+		Extra:         []string{"--override-kv", "qwen35.nextn_predict_layers=int:1"}})
+	pairs := 0
+	for _, arg := range theirs {
+		if arg == "--override-kv" {
+			pairs++
+		}
+	}
+	if pairs != 1 {
+		t.Errorf("the app's override doubled the user's: %v", theirs)
+	}
+	// Another key is another question: the app's pair still goes in.
+	otherKey := argsOf(Options{Model: "/m.gguf", MTPDraft: 3,
+		MTPKVOverride: "qwen35.nextn_predict_layers=int:1",
+		Extra:         []string{"--override-kv", "qwen35.block_count=int:70"}})
+	if !has(otherKey, "--override-kv", "qwen35.nextn_predict_layers=int:1") {
+		t.Errorf("a different key suppressed the app's override: %v", otherKey)
+	}
 	// Both new flags come before the user's own, so a verbosity or a layer count
 	// typed into *Further arguments* is the one that counts.
 	both := argsOf(Options{Model: "/m.gguf", Offload: OffloadAll, Trace: true, Extra: []string{"-ngl", "24"}})
@@ -70,6 +144,38 @@ func TestOffloadAndTraceReachTheCommandLine(t *testing.T) {
 	}
 	if !has(both, "--gpu-layers", "all") || !has(both, "-lv", "4") {
 		t.Errorf("missing one of the app's own flags: %v", both)
+	}
+}
+
+// One slot is this app's default and has to be asked for: llama.cpp's own default is
+// auto, which resolves to four, so leaving the flag out is the parallel case. A slot
+// count the user typed into *Further arguments* still wins, because theirs is last.
+func TestAManagedStartAsksForOneSlotUnlessParallelIsChosen(t *testing.T) {
+	argsOf := func(o Options) []string { return o.args() }
+	// The pair rather than the bare flag: `--parallel` alone is a count llama.cpp would
+	// read from the next argument, and a test that accepted the flag with no value would
+	// pass on a command line that never had one.
+	hasPair := func(args []string, flag, value string) bool {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == flag && args[i+1] == value {
+				return true
+			}
+		}
+		return false
+	}
+
+	one := argsOf(Options{Model: "/m.gguf"})
+	if !hasPair(one, "--parallel", "1") {
+		t.Errorf("a default start = %v, want --parallel 1", one)
+	}
+	// The opt-in sends no slot flag at all: naming a number would be this app inventing a
+	// count llama.cpp owns, and its auto is the four this choice is asking for.
+	if shared := argsOf(Options{Model: "/m.gguf", Parallel: true}); contains(shared, "--parallel") {
+		t.Errorf("a parallel start sent a slot count of its own: %v", shared)
+	}
+	theirs := argsOf(Options{Model: "/m.gguf", Extra: []string{"-np", "2"}})
+	if len(theirs) < 2 || theirs[len(theirs)-2] != "-np" || theirs[len(theirs)-1] != "2" {
+		t.Errorf("the user's own slot count is not last: %v", theirs)
 	}
 }
 

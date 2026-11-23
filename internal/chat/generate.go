@@ -83,10 +83,12 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 	if maxIter <= 0 {
 		maxIter = 1
 	}
-	// Tool results are charged against one budget for the whole answer, so a
-	// single large scrape cannot fill the window on its own. The figure is the mode's
-	// (maxToolResultTokens): a project's reads and build output against a chat's pages.
-	toolBudget := newToolOutputBudget(maxToolResultTokens(in.Chat, in.Settings))
+	// Tool results are handed over whole, bounded only by the size one result may reach
+	// (tools.MaxToolResultBytes) and by ageing, which stubs a reply's older results
+	// (toolhistory.go). There is deliberately no allowance measured against the request's
+	// remaining room: that ration withheld results the turn had just asked for, and what it
+	// protected was a refusal the turn now recovers from instead — a request the backend
+	// refuses for its size is folded and sent once more (foldForSize).
 
 	// A tool-heavy turn is many requests back to back, and the minute's *request*
 	// allowance can be smaller than the rounds the model will ask for. Reading it before
@@ -417,12 +419,11 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 
 		if usage != nil && usage.PromptTokens > 0 {
 			e.setMeasurement(in.Chat.ID, Measurement{
-				Backend:             in.BackendID,
-				Model:               in.ModelID,
-				PromptTokens:        usage.PromptTokens,
-				Seq:                 assembly.MaxIncludedSeq,
-				ReplayToolReasoning: assembly.ReplayToolReasoning,
-				At:                  time.Now(),
+				Backend:         in.BackendID,
+				Model:           in.ModelID,
+				PromptTokens:    usage.PromptTokens,
+				Seq:             assembly.MaxIncludedSeq,
+				ReplayReasoning: assembly.ReplayReasoning,
 			})
 		}
 
@@ -454,30 +455,8 @@ func (e *Engine) generate(ctx context.Context, in generateInput) (generateResult
 			return result, ctx.Err()
 		}
 
-		// A tool result is read by the *next* request, so it is budgeted against the room
-		// that request has left rather than only against the user's figure for an answer.
-		// On a backend whose per-request ceiling is a fraction of its window those are
-		// different numbers, and the difference is a refused turn: Groq's allowance is a
-		// few thousand tokens while the tool budget defaults to 60000, so one scraped page
-		// was enough to make the round that reads it unsendable — and no fold can take it
-		// back, because the result belongs to the turn being answered.
-		//
-		// The prompt the backend just described is its own count when it reports one, and
-		// that is worth more than the assembly's estimate here: an estimate that runs low
-		// leaves too much room, and the room is the whole point.
-		promptTokens := 0
-		if usage != nil {
-			promptTokens = usage.PromptTokens
-		}
-		replyTokens := historyMessageTokens(llm.Message{
-			Role: llm.RoleAssistant, Content: text, Reasoning: reasoning, ToolCalls: calls,
-		}, assembly.ReplayToolReasoning)
-		if room, bounded := roomForToolResults(assembly.Budget, promptTokens, replyTokens); bounded {
-			toolBudget.capTo(room)
-		}
-
 		e.emitStatus(in.Chat.ID, "tool")
-		if err := e.runRound(ctx, in.Chat.ID, row, calls, toolBudget, tools.TurnRef{
+		if err := e.runRound(ctx, in.Chat.ID, row, calls, tools.TurnRef{
 			BackendID: in.BackendID,
 			ModelID:   in.ModelID,
 			Turn:      in.Turn,
@@ -589,7 +568,7 @@ func (e *Engine) executeCall(ctx context.Context, chatID string, row store.Messa
 
 // finishTool records what a call produced: the status, the two sizes, the text the model
 // reads, and the trace line. It is the half that must stay in call order.
-func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, record store.ToolCallRecord, out toolOutcome, budget *toolOutputBudget, turn tools.TurnRef) {
+func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, record store.ToolCallRecord, out toolOutcome, turn tools.TurnRef) {
 	execErr := out.err
 	output := out.result.Text
 	record.DurationMs = out.ms
@@ -655,47 +634,37 @@ func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Messag
 	// turn replays — holds what it was given instead. Storing the summary as the
 	// result would hide the page from the user; storing the page in the message is
 	// the cost this exists to avoid.
-	//
-	// It is skipped when the budget is already spent: take would replace the summary
-	// with the exhausted notice, so the request would be paid for and thrown away.
 	condensed := output
 	condensedByModel := false
-	if execErr == nil && budget.remaining > 0 {
+	if execErr == nil {
 		normalized := call
 		normalized.Arguments = tools.NormalizeArguments(call.Name, call.Arguments)
 		condensed, condensedByModel = e.condenseToolOutput(ctx, chatID, normalized, output, turn, out.result.DocumentID)
 	}
-	delivered, withheld := budget.take(condensed)
-	// A withheld or truncated summary was not delivered in full, so it must not
-	// consume the page's next-read escape hatch.
-	if condensedByModel && !withheld && delivered == condensed && call.Name == tools.ToolScrapeURL {
+	// The summary is what the model read, so the page counts as read and a repeat request
+	// for it is answered from the summary rather than paid for again.
+	if condensedByModel && call.Name == tools.ToolScrapeURL {
 		normalized := call
 		normalized.Arguments = tools.NormalizeArguments(call.Name, call.Arguments)
 		e.condensations().add(condensedIdentity(chatID, normalized, output))
 	}
 	// What the result cost and what of it the model actually reads is what makes the
 	// condensation visible: without it the feature is indistinguishable from a page
-	// that happened to be short. Both numbers are measured on the strings that travel
-	// — the tool's own output and the exact text `take` returns — so a result cut by
-	// the answer's budget, by the second model, or by neither is reported as it is.
-	//
-	// One outcome has no size to report: a budget with nothing left answers with the
-	// notice rather than with a prefix of the result, and a card that printed both sizes
-	// anyway would say the model read 41 tokens of a search it never saw. `withheld`
-	// records that, so the card can say so.
+	// that happened to be short. Both numbers are measured on the strings that travel —
+	// the tool's own output and the exact text handed to the model — so a result the second
+	// model shortened is reported as two sizes and one it left alone as one.
 	//
 	// The card is re-emitted rather than only stored: it was drawn before the second
 	// model ran, and a count that appeared only after reopening the chat would be a
 	// number the reader had to go looking for.
 	if execErr == nil {
 		record.SourceTokens = llm.EstimateTokens(output)
-		record.ContextTokens = llm.EstimateTokens(delivered)
+		record.ContextTokens = llm.EstimateTokens(condensed)
 		record.Condensed = condensedByModel
-		record.Withheld = withheld
 		e.persist(chatID, uimsg.Errorf("chat.thingToolCall"), e.Store.UpsertToolCall(record))
 		e.emit(events.Tool, map[string]any{"chatId": chatID, "toolCall": record})
 	}
-	e.appendToolResult(chatID, call, delivered, record.Status)
+	e.appendToolResult(chatID, call, condensed, record.Status)
 }
 
 // runRound executes every call the model asked for in one round.
@@ -706,7 +675,7 @@ func (e *Engine) finishTool(ctx context.Context, chatID string, row store.Messag
 // those is a person reading a diff and two questions at once is a race for the same attention.
 // Finishing is back in call order, so the transcript reads the way the model wrote it however
 // the work overlapped.
-func (e *Engine) runRound(ctx context.Context, chatID string, row store.Message, calls []llm.ToolCall, budget *toolOutputBudget, turn tools.TurnRef) error {
+func (e *Engine) runRound(ctx context.Context, chatID string, row store.Message, calls []llm.ToolCall, turn tools.TurnRef) error {
 	records := make([]store.ToolCallRecord, len(calls))
 	for i, call := range calls {
 		records[i] = e.startTool(chatID, row, call)
@@ -751,7 +720,7 @@ func (e *Engine) runRound(ctx context.Context, chatID string, row store.Message,
 	// history with a tool call that has no result at all.
 	for i := range calls {
 		if outcomes[i].ran {
-			e.finishTool(ctx, chatID, row, calls[i], records[i], outcomes[i], budget, turn)
+			e.finishTool(ctx, chatID, row, calls[i], records[i], outcomes[i], turn)
 			continue
 		}
 		e.cancelRemainingCalls(chatID, row, calls[i:i+1], 0)
@@ -764,155 +733,9 @@ func (e *Engine) runRound(ctx context.Context, chatID string, row store.Message,
 
 // runTool runs one call end to end. It is runRound for a single call, and it stays because a
 // caller with one call in hand should not have to build a slice to say so.
-func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, budget *toolOutputBudget, turn tools.TurnRef) {
+func (e *Engine) runTool(ctx context.Context, chatID string, row store.Message, call llm.ToolCall, turn tools.TurnRef) {
 	record := e.startTool(chatID, row, call)
-	e.finishTool(ctx, chatID, row, call, record, e.executeCall(ctx, chatID, row, call, turn), budget, turn)
-}
-
-// toolResultShare is how much of an answer's tool budget one result may take: a quarter
-// of it.
-//
-// The budget alone does not give that guarantee, because take hands a single result
-// everything that is left — so one enormous answer, a scraped page or a JSON dump read
-// back, could arrive in one call and spend the allowance that thirty later rounds of the
-// same reply were going to need, leaving them notices instead of file contents. Cline
-// caps each tool result the same way, at a fixed size a call rather than at whatever the
-// conversation has left; the model's remedy is the one a read's own caps already offer,
-// ask for less or for another slice.
-//
-// A quarter rather than Cline's flat figure because the budget it divides is already the
-// mode's: 120 000 tokens in a project gives a result 30 000, which is more than the 32 000
-// of tool text a reply keeps verbatim (internal/chat/toolhistory.go) — so one result can
-// never be the whole of what survives a round.
-const toolResultShare = 4
-
-// toolOutputBudget bounds how many tokens of tool results one answer carries into
-// its next request. The setting is per answer rather than per call, so several
-// tools cannot together exceed it. The budget is shared across the tool rounds
-// of a single generate call.
-type toolOutputBudget struct {
-	remaining int
-	// perResult is one result's own ceiling, so spending it cannot spend the next
-	// one's room. Zero means the field was never set — a hand-built literal — and
-	// then a result may use whatever is left, which is what the budget did before
-	// this field existed.
-	perResult int
-}
-
-// newToolOutputBudget starts the answer's budget from the mode's figure. A zero is read as
-// the default — a hand-edited blob or a settings literal — and the figure is tightened to
-// each request's remaining room as the rounds go (capTo).
-func newToolOutputBudget(tokens int) *toolOutputBudget {
-	if tokens <= 0 {
-		tokens = config.DefaultToolTokenBudget
-	}
-	return &toolOutputBudget{remaining: tokens, perResult: tokens / toolResultShare}
-}
-
-// capTo tightens the budget to the room one request has left for tool results.
-//
-// The user's figure bounds an answer; it says nothing about whether the request
-// that reads the answer will fit the backend. Where those differ, the backend wins,
-// because the cost of ignoring it is not a shorter answer but a refused turn: on
-// Groq the per-minute token allowance is also the largest single request the
-// account may send, and it is a few thousand tokens against a setting that defaults
-// to 60000. A result is not something a history fold can take back either — it
-// belongs to the turn being answered, which the fold keeps verbatim — so the cut has
-// to happen where the result is handed to the model.
-//
-// It only ever tightens, which is what keeps a backend that had nothing to cap against
-// exactly as it was: a window larger than the spare tool budget leaves `remaining`
-// where the setting put it, and a model whose limit nobody reported never reaches this
-// call at all. A window *smaller* than the budget does cap now — that request was
-// already unsendable, and the fold that answers the refusal cannot touch the result.
-// A later round with more room cannot undo a cut an earlier one needed, because the
-// rounds of one answer build one history between them.
-func (b *toolOutputBudget) capTo(room int) {
-	if room < 0 {
-		room = 0
-	}
-	if room < b.remaining {
-		b.remaining = room
-	}
-}
-
-// roomForToolResults is how much of one request this round's tool results may fill,
-// and whether there is a limit to answer at all.
-//
-// It is the request's own arithmetic rather than a second estimate: the assembly in
-// hand priced everything the next request will carry except the reply this round just
-// wrote and the results it asks for, so subtracting the first sizes the second. The
-// reserve keeps room for the answer the next round has to produce.
-//
-// promptTokens is the backend's own count of the request that just went out, and it is
-// used in place of the assembly's figure whenever it is reported. The assembly's number
-// is a heuristic, and the error points the dangerous way here: an estimate that runs low
-// leaves room that is not there, so the result is cut too late and the request is
-// refused for its size — the failure this budget exists to prevent. Zero means the
-// backend stated nothing, which is the case of a local server that reports no usage.
-//
-// bounded is false when no limit is known — a model whose window nobody reported,
-// which is also the only case in which the tool budget is left alone. There is nothing
-// to aim at then, and a bare 0 would mean "no room" rather than "nobody said", which
-// is the difference between a withheld result and an untouched budget.
-func roomForToolResults(budget ContextBudget, promptTokens, replyTokens int) (room int, bounded bool) {
-	if budget.EffectiveLimit <= 0 {
-		return 0, false
-	}
-	base := budget.Projected
-	if promptTokens > 0 {
-		base = promptTokens + budget.Reserve
-	}
-	room = budget.EffectiveLimit - base - replyTokens
-	if room < 0 {
-		room = 0
-	}
-	return room, true
-}
-
-// exhaustedNotice is what the model sees once the budget is spent, so it learns
-// that a result was withheld instead of reading an empty answer as a result.
-const exhaustedNotice = "Das Token-Budget für Tool-Ergebnisse in dieser Antwort ist aufgebraucht. " +
-	"Weitere Tool-Ergebnisse werden nicht mehr in den Kontext übernommen."
-
-// take returns the part of a tool result the model may see and charges it
-// against the budget. A result that does not fit is cut with the shared
-// truncation marker, so the model can tell a short result from a shortened one.
-//
-// What a result may use is the smaller of the budget's remainder and one result's share
-// of it (perResult), and what it actually used is what it is charged — not the rest of
-// the budget. A cut result therefore leaves room for the round's other results and for
-// the rounds after it, which is the point of a share: the answer keeps working with
-// slices of a large file instead of one slice and then nothing.
-//
-// The second return value says the model got none of it and the notice instead. It is
-// reported rather than left to be recognised from the text, because it is the one
-// outcome a tool card must not render as a size: "4,374 → 41 tokens" is what a spent
-// budget looked like on the card, and it reads as a summary the model wrote when in
-// fact the search results never arrived.
-func (b *toolOutputBudget) take(output string) (string, bool) {
-	allowance := b.remaining
-	if b.perResult > 0 && b.perResult < allowance {
-		allowance = b.perResult
-	}
-	if allowance <= 0 {
-		return exhaustedNotice, true
-	}
-	if tokens := llm.EstimateTokens(output); tokens <= allowance {
-		b.remaining -= tokens
-		return output, false
-	}
-	cut := cutToTokens(output, allowance)
-	// Nothing came back either because the allowance is smaller than the marker, or
-	// because the cut text would have been empty. Both are "you got none of it".
-	if cut == "" {
-		return exhaustedNotice, true
-	}
-	b.remaining -= llm.EstimateTokens(cut)
-	if b.remaining < 0 {
-		b.remaining = 0
-	}
-	return cut, false
+	e.finishTool(ctx, chatID, row, call, record, e.executeCall(ctx, chatID, row, call, turn), turn)
 }
 
 // executeTool runs one tool call. The requesting message id travels with the

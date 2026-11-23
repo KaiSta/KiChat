@@ -65,6 +65,10 @@ func RenderPrompt(tmpl string, vars TemplateVars) string {
 	// exact time is not lost — it travels in the request's tail (turnClock in context.go),
 	// where a block that changes costs only its own tokens. `{{time}}` is left as it is: a
 	// template that asks for the clock is asking to give up the cache.
+	//
+	// `{{datetime}}` is the weekday and the date, `{{date}}` the date alone: two spellings of
+	// the same day, which is why the variable list describes them as such rather than promising
+	// a clock neither renders.
 	replacements := map[string]string{
 		"datetime":      fmt.Sprintf("%s, %s", germanWeekdays[now.Weekday()], now.Format("02.01.2006")),
 		"date":          now.Format("02.01.2006"),

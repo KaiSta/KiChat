@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"kichat/internal/config"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -534,5 +536,318 @@ func TestDuckDuckGoPostsTheEndpointsOwnFields(t *testing.T) {
 	}
 	if posted.Has("kl") {
 		t.Errorf("kl is not a field of this form, but was sent: %v", posted)
+	}
+}
+
+// ddgGridFixture is the check as a reader met it on 2026-11-22, trimmed from the live interstitial
+// that the test does not ship: the answer form is `#challenge-form`, the page carries `#img-form`
+// (the frame target the answer is posted from) before it, the form's own hidden field is `ct`, and
+// every square is a checkbox named `image-check_<hash>` whose picture is
+// `../assets/anomaly/images/challenge/<hash>.jpg` — relative to the page, which is why the parse
+// needs the page's address. The pictures are listed after the boxes and in reverse on purpose: a
+// pairing by position would pass a fixture that listed them in step and then pair the wrong
+// picture with the wrong box on the real page.
+const ddgGridFixture = `<!DOCTYPE html><html lang="de"><head>
+  <title>DuckDuckGo</title>
+</head><body>
+  <form id="img-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=sre&gk=d4cd0dabcf4caa22ad92fab40844c786" target="ifr" method="POST"></form>
+  <form id="challenge-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=sre&gk=d4cd0dabcf4caa22ad92fab40844c786" method="POST">
+    <div class="anomaly-modal__mask">
+      <div class="anomaly-modal__modal is-ie" data-testid="anomaly-modal">
+        <div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+        <div class="anomaly-modal__description">Please complete the following challenge to confirm this search was made by a human.</div>
+        <input type="hidden" name="ct" value="AgEAB5wdSrjEZZ2e">
+        <div class="anomaly-modal__instructions">Select all squares containing a duck:</div>
+        <div class="anomaly-modal__puzzle">
+          <div class="anomaly-modal__box" data-index="0"><input type="checkbox" class="anomaly-modal__check" name="image-check_036ef386126084b6275ff34fabda050d" id="image-check_036ef386126084b6275ff34fabda050d"></div>
+          <div class="anomaly-modal__box" data-index="1"><input type="checkbox" class="anomaly-modal__check" name="image-check_4f03c9125f97677d3fa603568fc1e2a8" id="image-check_4f03c9125f97677d3fa603568fc1e2a8"></div>
+          <div class="anomaly-modal__box" data-index="2"><input type="checkbox" class="anomaly-modal__check" name="image-check_978d9b368b0c4230ea350737bfac6838" id="image-check_978d9b368b0c4230ea350737bfac6838"></div>
+          <div class="anomaly-modal__box" data-index="3"><input type="checkbox" class="anomaly-modal__check" name="image-check_2715fb5fbd4f8b0e5f866ddcaafe1a6c" id="image-check_2715fb5fbd4f8b0e5f866ddcaafe1a6c"></div>
+          <div class="anomaly-modal__box" data-index="4"><input type="checkbox" class="anomaly-modal__check" name="image-check_9d5e5407b2f04d4f295d2fc1814c6ddd" id="image-check_9d5e5407b2f04d4f295d2fc1814c6ddd"></div>
+          <div class="anomaly-modal__box" data-index="5"><input type="checkbox" class="anomaly-modal__check" name="image-check_cb61254942740da72a6dae65642b577d" id="image-check_cb61254942740da72a6dae65642b577d"></div>
+          <div class="anomaly-modal__box" data-index="6"><input type="checkbox" class="anomaly-modal__check" name="image-check_386bbfda8ebf70ab247457acc6aaf1ff" id="image-check_386bbfda8ebf70ab247457acc6aaf1ff"></div>
+          <div class="anomaly-modal__box" data-index="7"><input type="checkbox" class="anomaly-modal__check" name="image-check_19a35de270e182a720528e91465f7484" id="image-check_19a35de270e182a720528e91465f7484"></div>
+          <div class="anomaly-modal__box" data-index="8"><input type="checkbox" class="anomaly-modal__check" name="image-check_b81a45b3407b44b7318acc768eb01c88" id="image-check_b81a45b3407b44b7318acc768eb01c88"></div>
+        </div>
+        <img class="anomaly-modal__image" alt=" " id="image-b81a45b3407b44b7318acc768eb01c88" src="../assets/anomaly/images/challenge/b81a45b3407b44b7318acc768eb01c88.jpg" data-id="b81a45b3407b44b7318acc768eb01c88.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-19a35de270e182a720528e91465f7484" src="../assets/anomaly/images/challenge/19a35de270e182a720528e91465f7484.jpg" data-id="19a35de270e182a720528e91465f7484.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-386bbfda8ebf70ab247457acc6aaf1ff" src="../assets/anomaly/images/challenge/386bbfda8ebf70ab247457acc6aaf1ff.jpg" data-id="386bbfda8ebf70ab247457acc6aaf1ff.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-cb61254942740da72a6dae65642b577d" src="../assets/anomaly/images/challenge/cb61254942740da72a6dae65642b577d.jpg" data-id="cb61254942740da72a6dae65642b577d.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-9d5e5407b2f04d4f295d2fc1814c6ddd" src="../assets/anomaly/images/challenge/9d5e5407b2f04d4f295d2fc1814c6ddd.jpg" data-id="9d5e5407b2f04d4f295d2fc1814c6ddd.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-2715fb5fbd4f8b0e5f866ddcaafe1a6c" src="../assets/anomaly/images/challenge/2715fb5fbd4f8b0e5f866ddcaafe1a6c.jpg" data-id="2715fb5fbd4f8b0e5f866ddcaafe1a6c.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-978d9b368b0c4230ea350737bfac6838" src="../assets/anomaly/images/challenge/978d9b368b0c4230ea350737bfac6838.jpg" data-id="978d9b368b0c4230ea350737bfac6838.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-4f03c9125f97677d3fa603568fc1e2a8" src="../assets/anomaly/images/challenge/4f03c9125f97677d3fa603568fc1e2a8.jpg" data-id="4f03c9125f97677d3fa603568fc1e2a8.jpg">
+        <img class="anomaly-modal__image" alt=" " id="image-036ef386126084b6275ff34fabda050d" src="../assets/anomaly/images/challenge/036ef386126084b6275ff34fabda050d.jpg" data-id="036ef386126084b6275ff34fabda050d.jpg">
+        <input type="submit" class="anomaly-modal__submit" value="Submit">
+      </div>
+    </div>
+  </form>
+</body></html>`
+
+// ddgResultsAfterCheck is the page the answer redirects to: one ordinary result.
+const ddgResultsAfterCheck = `<html><body>
+<div class="result results_links"><div class="result__body"><h2 class="result__title">
+<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fsolved">Gelöst</a></h2>
+<a class="result__snippet">Nach der Prüfung.</a></div></div>
+</body></html>`
+
+// TestParseDDGChallengeGrid pins the parse: the tiles, each one paired with its own image by the
+// hash the checkbox and the image share, the form's action made absolute, the hidden field kept
+// (it is the form's own token and inventing it would be guessing), and the instruction.
+func TestParseDDGChallengeGrid(t *testing.T) {
+	challenge, ok := parseDDGChallenge(ddgGridFixture, "Mietrecht", config.LangGerman, ddgHTMLEndpoint)
+	if !ok {
+		t.Fatal("the grid did not parse as a check")
+	}
+	if len(challenge.Tiles) != 9 {
+		t.Fatalf("tiles = %d, want 9: %+v", len(challenge.Tiles), challenge.Tiles)
+	}
+	for _, tile := range challenge.Tiles {
+		hash := strings.TrimPrefix(tile.Name, "image-check_")
+		want := "https://html.duckduckgo.com/assets/anomaly/images/challenge/" + hash + ".jpg"
+		if tile.URL != want {
+			t.Errorf("tile %s names %q, want %q — the pairing is by hash, not by position", tile.Name, tile.URL, want)
+		}
+	}
+	if want := "https://duckduckgo.com/anomaly.js?sv=html&cc=sre&gk=d4cd0dabcf4caa22ad92fab40844c786"; challenge.Action != want {
+		t.Errorf("action = %q, want %q", challenge.Action, want)
+	}
+	if challenge.Fields["ct"] != "AgEAB5wdSrjEZZ2e" {
+		t.Errorf("fields = %v, want the form's hidden token", challenge.Fields)
+	}
+	if !strings.Contains(challenge.Instruction, "duck") {
+		t.Errorf("instruction = %q", challenge.Instruction)
+	}
+	if challenge.Query != "Mietrecht" {
+		t.Errorf("query = %q, want the one that was refused", challenge.Query)
+	}
+}
+
+// TestDuckDuckGoOffersTheCheckToTheWindow is the shape the window depends on: the refusal stays a
+// refusal (the chain must still fall through) and the check the page carried reaches the pending
+// store and the handler, which is what opens the dialog on it.
+func TestDuckDuckGoOffersTheCheckToTheWindow(t *testing.T) {
+	ClearPendingChallenge()
+	t.Cleanup(ClearPendingChallenge)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, ddgGridFixture)
+	}))
+	defer srv.Close()
+
+	p := newTestDDGProvider(srv.URL, srv.URL)
+	var offered Challenge
+	p.onChallenge = func(challenge Challenge) { offered = challenge }
+
+	_, err := p.Search(context.Background(), SearchRequest{
+		Query: "Mietrecht", Count: 5, Lang: config.LangGerman})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err = %v, want it to still classify as ErrBlocked", err)
+	}
+	if len(offered.Tiles) != 9 {
+		t.Errorf("the handler was told about %d tiles, want 9", len(offered.Tiles))
+	}
+	pending, ok := PendingChallenge()
+	if !ok || len(pending.Tiles) != 9 {
+		t.Errorf("pending = %+v (%v), want the check kept for the window", pending, ok)
+	}
+	if !strings.Contains(err.Error(), "Captcha") {
+		t.Errorf("err = %v, the sentence the model reads must still name the check", err)
+	}
+}
+
+// TestSolveChallengeSaysWhenTheAnswerWasNotAccepted pins the sentence a reader gets when the host
+// judges the ticks wrong: the check is replaced with the new one rather than the old grid
+// remaining under a verdict, and the failure is worded as an answer that was not accepted — not as
+// the first refusal, which would send them to a browser and promise a pause that never started.
+func TestSolveChallengeSaysWhenTheAnswerWasNotAccepted(t *testing.T) {
+	ClearPendingChallenge()
+	t.Cleanup(ClearPendingChallenge)
+
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, strings.ReplaceAll(ddgGridFixture, "//duckduckgo.com", srv.URL))
+	}))
+	defer srv.Close()
+
+	p := newTestDDGProvider(srv.URL, srv.URL+"/lite")
+	p.client.jar, _ = cookiejar.New(nil)
+	p.client.insecure = true
+	var offered Challenge
+	p.onChallenge = func(challenge Challenge) { offered = challenge }
+
+	rememberChallenge(Challenge{
+		Query:  "Mietrecht",
+		Action: srv.URL + "/anomaly.js",
+		Fields: map[string]string{"ct": "x"},
+		Tiles:  []Tile{{Name: "image-check_1a", URL: srv.URL + "/assets/anomaly/images/challenge/1a.jpg"}},
+		Lang:   config.LangGerman,
+	})
+	_, err := p.SolveChallenge(context.Background(), []string{"image-check_1a"})
+	if err == nil {
+		t.Fatal("a refused answer was reported as the search succeeding")
+	}
+	if !errors.Is(err, ErrBlocked) {
+		t.Errorf("err = %v, want it to stay an ErrBlocked", err)
+	}
+	if !strings.Contains(err.Error(), "nicht angenommen") {
+		t.Errorf("err = %v, want the sentence that says the answer was not accepted", err)
+	}
+	if strings.Contains(err.Error(), "Browser lösen") {
+		t.Errorf("err = %v, want no advice to solve it in a browser after the reader just did", err)
+	}
+	if next, ok := PendingChallenge(); !ok || len(next.Tiles) != 9 {
+		t.Errorf("pending = %+v (%v), want the check the host drew instead", next, ok)
+	}
+	if len(offered.Tiles) != 9 {
+		t.Errorf("the handler was told about %d tiles, want the new check's 9", len(offered.Tiles))
+	}
+}
+
+// TestSolveChallengePostsTheTickedTilesAndReturnsTheResults covers the whole answer: the ticks and
+// the form's own fields are posted to the form's action over the same client, the redirect is
+// followed, the cookies the check and the answer set come along, the results are returned, and the
+// pause the refusal started is lifted so the next search asks the host again.
+func TestSolveChallengePostsTheTickedTilesAndReturnsTheResults(t *testing.T) {
+	ClearPendingChallenge()
+	t.Cleanup(ClearPendingChallenge)
+
+	var (
+		mu            sync.Mutex
+		answers       url.Values
+		cookieAtEnd   string
+		searches      int
+		answerOrigin  string
+		answerReferer string
+		answerSite    string
+	)
+	// TLS, because the answer is only allowed to leave over https: the guard that keeps the
+	// form's action from pointing anywhere is not loosened for a fixture.
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/assets/anomaly/images/challenge/") {
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = io.WriteString(w, "\xff\xd8tile")
+			return
+		}
+		switch r.URL.Path {
+		case "/anomaly.js":
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			answers = r.PostForm
+			answerOrigin = r.Header.Get("Origin")
+			answerReferer = r.Header.Get("Referer")
+			answerSite = r.Header.Get("Sec-Fetch-Site")
+			mu.Unlock()
+			http.SetCookie(w, &http.Cookie{Name: "solved", Value: "1", Path: "/"})
+			http.Redirect(w, r, "/results?q=Mietrecht", http.StatusSeeOther)
+		case "/results":
+			mu.Lock()
+			cookieAtEnd = r.Header.Get("Cookie")
+			mu.Unlock()
+			_, _ = io.WriteString(w, ddgResultsAfterCheck)
+		default:
+			mu.Lock()
+			searches++
+			attempt := searches
+			mu.Unlock()
+			if attempt == 1 {
+				// The first search is refused with the check; the host trusts the identity
+				// again once it has been answered.
+				http.SetCookie(w, &http.Cookie{Name: "issued", Value: "1", Path: "/"})
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, strings.ReplaceAll(ddgGridFixture, "//duckduckgo.com", srv.URL))
+				return
+			}
+			_, _ = io.WriteString(w, ddgResultsAfterCheck)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestDDGProvider(srv.URL, srv.URL+"/lite")
+	// A jar of this test's own: the process-wide one belongs to the identity and other tests
+	// would then be reading this one's cookies.
+	p.client.jar, _ = cookiejar.New(nil)
+	p.client.insecure = true
+
+	if _, err := p.Search(context.Background(), SearchRequest{
+		Query: "Mietrecht", Count: 5, Lang: config.LangGerman}); !errors.Is(err, ErrBlocked) {
+		t.Fatalf("search err = %v, want ErrBlocked", err)
+	}
+	challenge, ok := PendingChallenge()
+	if !ok {
+		t.Fatal("no check was kept for the window")
+	}
+
+	// A tile is asked for by the name the window shows, over the same identity, and a name the
+	// check does not have is answered without a request.
+	body, kind, err := p.fetchTile(context.Background(), challenge.Tiles[2].Name)
+	if err != nil {
+		t.Fatalf("fetchTile: %v", err)
+	}
+	if string(body) != "\xff\xd8tile" || kind != "image/jpeg" {
+		t.Errorf("tile = %q (%s), want the picture the host served", body, kind)
+	}
+	if _, _, err := p.fetchTile(context.Background(), "image-check_none"); !errors.Is(err, ErrNoChallenge) {
+		t.Errorf("a tile the check does not have: err = %v, want ErrNoChallenge", err)
+	}
+
+	ticked := []string{challenge.Tiles[0].Name, challenge.Tiles[4].Name}
+	results, err := p.SolveChallenge(context.Background(), ticked)
+	if err != nil {
+		t.Fatalf("SolveChallenge: %v", err)
+	}
+	if len(results) != 1 || results[0].URL != "https://example.org/solved" {
+		t.Fatalf("results = %+v, want the page the answer redirected to", results)
+	}
+
+	mu.Lock()
+	posted, cookie := answers, cookieAtEnd
+	origin, referer, site := answerOrigin, answerReferer, answerSite
+	mu.Unlock()
+	// The answer left as the search page would have posted it: that page's origin and address,
+	// and the hop's fetch metadata. The page is this fixture, so same-origin here — the site's own
+	// subdomain hops are covered by the browserclient test.
+	if origin != srv.URL {
+		t.Errorf("answer Origin = %q, want the search page's %q", origin, srv.URL)
+	}
+	if !strings.HasPrefix(referer, srv.URL) {
+		t.Errorf("answer Referer = %q, want the search page's address", referer)
+	}
+	if site != "same-origin" {
+		t.Errorf("answer Sec-Fetch-Site = %q, want same-origin for the page it was served on", site)
+	}
+	for _, name := range ticked {
+		if posted.Get(name) != "on" {
+			t.Errorf("posted %v, want %s=on", posted, name)
+		}
+	}
+	if unticked := challenge.Tiles[1].Name; posted.Get(unticked) != "" {
+		t.Errorf("an unticked tile was sent: %s", unticked)
+	}
+	if posted.Get("ct") != "AgEAB5wdSrjEZZ2e" {
+		t.Errorf("the form's own hidden field was dropped: %v", posted)
+	}
+	if !strings.Contains(cookie, "issued=1") || !strings.Contains(cookie, "solved=1") {
+		t.Errorf("cookies on the results request = %q, want the ones the check and the answer set", cookie)
+	}
+	if _, pending := PendingChallenge(); pending {
+		t.Error("the answered check was left pending")
+	}
+
+	// The pause the refusal started is over: without that, this search would be refused by our
+	// own cooldown before the host was asked at all.
+	again, err := p.Search(context.Background(), SearchRequest{
+		Query: "Mietrecht zwei", Count: 5, Lang: config.LangGerman})
+	if err != nil {
+		t.Fatalf("search after the answer: %v", err)
+	}
+	if len(again) != 1 {
+		t.Errorf("results after the answer = %+v, want the host's answer", again)
 	}
 }

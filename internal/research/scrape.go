@@ -24,10 +24,11 @@ import (
 	"kichat/internal/uimsg"
 )
 
-// browserUserAgent is what the page fetcher presents to an arbitrary site: a browser name over
-// Go's own TLS identity. The DuckDuckGo provider cannot do that, because the host judges the
-// handshake (browserclient.go); a page fetched for its text is judged by its robots rules and
-// its size instead, so the cheaper client is what it uses.
+// browserUserAgent is what the page fetcher presents to an arbitrary site by default: a
+// browser name over Go's own TLS identity. The DuckDuckGo provider cannot do that, because the
+// host judges the handshake (browserclient.go); a page fetched for its text is normally judged
+// by its robots rules and its size instead, so the cheaper client is the default. A 403 or 503
+// is retried once over the browser identity (fetchWithBrowser).
 const browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
 // ScrapeOptions configures the scraper.
@@ -85,16 +86,35 @@ type Scraper struct {
 	robotsMu    sync.Mutex
 	robotsCache map[string]robotsRules
 
-	// Lang answers the interface language, so the sentences this package writes into a
-	// result or an error follow it (config.ModelLanguage). It is a supplier rather than a
-	// string because a settings save must reach the next scrape, not the next restart, and
-	// it is set after construction so Configure — which runs on every save — leaves it alone.
-	// Nil means English, which is config.Default()'s language and what a test's scraper speaks.
+	// Lang answers the interface language. The sentences this package writes into a result
+	// or an error follow its resolved form (lang, config.ModelLanguage); the request's
+	// Accept-Language follows the raw setting (appLang), because a Chinese window asks for
+	// Chinese pages even though there is no Chinese wording for the model-facing sentences.
+	// It is a supplier rather than a string because a settings save must reach the next
+	// scrape, not the next restart, and it is set after construction so Configure — which
+	// runs on every save — leaves it alone. Nil means English, which is config.Default()'s
+	// language and what a test's scraper speaks.
 	Lang func() string
 }
 
 // lang is the resolved model language for the text this scraper writes.
 func (s *Scraper) lang() string { return config.LangOf(s.Lang) }
+
+// appLang is the raw interface language, for a header that names the language the reader
+// asked for rather than the language this package's sentences are translated into. It keeps
+// Chinese, which config.ModelLanguage collapses to English, and an unrecognised setting is
+// English so the header cannot claim a language the app does not offer.
+func (s *Scraper) appLang() string {
+	if s.Lang == nil {
+		return config.LangEnglish
+	}
+	switch lang := strings.ToLower(strings.TrimSpace(s.Lang())); lang {
+	case config.LangGerman, config.LangEnglish, config.LangChinese:
+		return lang
+	default:
+		return config.LangEnglish
+	}
+}
 
 // NewScraper builds a scraper.
 func NewScraper(st *store.Store, opts ScrapeOptions, pdf pdfExtractor) *Scraper {
@@ -171,6 +191,41 @@ func proxyConfigured() bool {
 		URL: &url.URL{Scheme: "https", Host: "proxy-probe.invalid"},
 	})
 	return err == nil && probe != nil
+}
+
+// browserRetryStatus reports the two refusals a browser identity can plausibly fix. A 429 is a
+// rate limit, not a verdict on the client, and is left to the caller rather than dodged with a
+// new handshake.
+func browserRetryStatus(status int) bool {
+	return status == http.StatusForbidden || status == http.StatusServiceUnavailable
+}
+
+// fetchWithBrowser retries a refused page as the browser profile. It is one attempt, with the
+// same guards as the ordinary fetch: guardHost and robots rules on the URL and every redirect
+// hop, and the dial-time private-address check on the connection. A configured HTTP proxy
+// disables the retry, because this client speaks to the origin directly and would otherwise
+// bypass the proxy the ordinary client honours.
+func (s *Scraper) fetchWithBrowser(ctx context.Context, target *url.URL, opts ScrapeOptions) (*http.Response, bool) {
+	if proxyConfigured() {
+		return nil, false
+	}
+	client := newBrowserClient(chromeWindows)
+	client.timeout = opts.Timeout
+	client.dialer.Control = privateDialControl(opts.AllowPrivateHosts, s.lang())
+	guard := func(u *url.URL) error {
+		if err := s.guardHost(ctx, u, opts); err != nil {
+			return err
+		}
+		if opts.RespectRobots {
+			return s.checkRobots(ctx, u)
+		}
+		return nil
+	}
+	resp, err := client.get(ctx, target, s.appLang(), guard)
+	if err != nil {
+		return nil, false
+	}
+	return resp, true
 }
 
 // privateDialControl rejects a connection whose target is a loopback, private or
@@ -268,7 +323,9 @@ func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 	}
 	req.Header.Set("User-Agent", browserUserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/pdf,application/json,text/plain;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "de-DE,de;q=0.9,en;q=0.8")
+	// The request asks in the language the window is set to; a fixed German header from an
+	// English or Chinese window was a pair no browser produces.
+	req.Header.Set("Accept-Language", acceptLanguage(s.appLang()))
 
 	client := s.client
 	if client == nil {
@@ -278,6 +335,15 @@ func (s *Scraper) scrape(ctx context.Context, rawURL string, maxTokens int) (Scr
 	if err != nil {
 		return ScrapeResult{}, fmt.Errorf(text(s.lang(),
 			"Abruf fehlgeschlagen: %w", "the fetch failed: %w"), err)
+	}
+	// A 403 or 503 is often the client identity rather than the page. One retry as the
+	// browser profile costs one request and keeps both guards; the ordinary client stays the
+	// default because it is faster and reuses connections.
+	if browserRetryStatus(resp.StatusCode) {
+		if next, ok := s.fetchWithBrowser(ctx, parsed, opts); ok {
+			_ = resp.Body.Close()
+			resp = next
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

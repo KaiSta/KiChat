@@ -558,7 +558,12 @@ func (s *Service) searchFiles(chatID, argsJSON string) (Result, error) {
 	lang := s.Language()
 	matches, err := root.Search(args.Query, limit)
 	if err != nil {
-		return Result{}, s.projectError(args.Query, err)
+		// Not projectError: that one names a *path* the model should correct, and the
+		// argument here is the text to look for. Telling a model its query "does not exist in
+		// the project folder" sends it looking for a path that never was one.
+		return Result{}, uimsg.Detailf("tools.searchFailed",
+			fmt.Sprintf(text(lang, "die Suche ließ sich nicht ausführen: %v",
+				"the search could not be run: %v"), err))
 	}
 	var sb strings.Builder
 	switch {

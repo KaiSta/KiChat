@@ -89,6 +89,16 @@ KICHAT_LIVE=1 KICHAT_SD_CLI=~/sdMaster/buildVulkan/sd-cli \
 # a 64x64 source, seconds each — a probe and a real 4x — and the log line says how long.
 KICHAT_LIVE=1 KICHAT_ESRGAN=~/Downloads/realesrgan-ncnn-vulkan/realesrgan-ncnn-vulkan \
   go test ./internal/images/ -run TestLiveESRGAN -v
+
+# The app's own update check: one unauthenticated request, no key. Reads what GitHub
+# calls the latest release and compares it with the version in VERSION.
+KICHAT_LIVE=1 go test ./ -run TestLiveAppUpdate -v
+
+# DuckDuckGo's bot check as the host really serves it: one search, one tile, one answer, no key.
+# It fails when the parse no longer matches the markup, and leaves the pages and the answer's
+# reply in scratch/ (ddg-interstitial.html, ddg-answer.html, ddg-answer.txt). It skips when the
+# host is serving results rather than a check.
+KICHAT_LIVE=1 go test ./internal/research/ -run TestLiveDDGInterstitialMarkup -v
 ```
 
 ## What each one buys
@@ -107,6 +117,8 @@ KICHAT_LIVE=1 KICHAT_ESRGAN=~/Downloads/realesrgan-ncnn-vulkan/realesrgan-ncnn-v
 | `TestLiveSDServer` | `sd-server` really ships beside `sd-cli`, the listener flag exists, the readiness route answers, `cfg_scale` parses, and the time to ready plus two draws is printed |
 | `TestLiveFlux3KleinProfile` | the profile is identified from the checkpoint's own tensors, `Health` names a missing VAE before a multi-gigabyte load, 16 steps at CFG 1.0 really draw, and the negative prompt the profile drops really is inert |
 | `TestLiveESRGAN` | the released Vulkan build starts on this machine, its weights load, and a real 4× comes back — the three things a stand-in program cannot say, and the one archive trap (a build with no `models/` that exits 0 writing a black picture) reported as `ErrUpscalerNoModels` |
+| `TestLiveAppUpdate` | the release endpoint, the headers and the field names still agree with the real API, the tag is one `Newer` can order, and the reading the panel receives is coherent — one request out of GitHub's anonymous hourly budget |
+| `TestLiveDDGInterstitialMarkup` | the interstitial's real markup: the answer form is an id rather than a class, the tiles are paths relative to the page, the parse finds nine of them plus the form's hidden field, a tile comes back as image bytes over the same client, and the answer is posted as the search page posts it (the page's Origin and address, `Sec-Fetch-Site: same-site`) with its whole reply captured to `scratch/ddg-answer.html` and summarised in `scratch/ddg-answer.txt` — new squares mean the host judged the ticks, the same squares mean the answer was not taken. Skips with the page dumped when the host is serving results, so no check exists to answer |
 
 ## Rules
 

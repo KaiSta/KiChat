@@ -33,6 +33,11 @@ const (
 	// revertBlockedBinary is a file the app will not rewrite — binary, or larger than a change
 	// may touch — so no pre-image was ever kept for it.
 	revertBlockedBinary = "not-text"
+	// revertBlockedUnreadable is a file whose current state cannot be read at all: a permission
+	// this app no longer has, or a folder where the file was. Undo cannot be offered for it
+	// either, and calling it "not a text file" would be a false explanation of the user's own
+	// file — the app did not refuse the shape, it could not look.
+	revertBlockedUnreadable = "unreadable"
 )
 
 // FileChange is one file this chat changed, as the panel lists it.
@@ -59,7 +64,8 @@ type FileChange struct {
 	NewlineOnly bool `json:"newlineOnly"`
 	// CanRevert is "pressing undo would restore this file". False comes with a Blocked code.
 	CanRevert bool `json:"canRevert"`
-	// Blocked is why not: revertBlockedOutside, revertBlockedBinary, or empty.
+	// Blocked is why not: revertBlockedOutside, revertBlockedBinary, revertBlockedUnreadable,
+	// or empty.
 	Blocked string `json:"blocked"`
 	// ChangedAt is when this chat last wrote the file.
 	ChangedAt time.Time `json:"changedAt"`
@@ -114,8 +120,10 @@ func describeChange(root workspace.Root, snap store.FileSnapshot) FileChange {
 	switch {
 	case err != nil:
 		// The file cannot be read (a permission, a folder where a file was): the diff falls
-		// back to what was written, and undo is off rather than attempted blind.
-		change.Blocked = revertBlockedBinary
+		// back to what was written, and undo is off rather than attempted blind. Its own code,
+		// because this is not a file the app refuses to write — it is one it cannot see, and the
+		// panel must not tell the person their text file is a binary.
+		change.Blocked = revertBlockedUnreadable
 		return withDiff(change, workspace.CompareDiff(snap.BeforeText, ""))
 	case !current.Existed:
 		// Gone from the disk. Undo puts it back, and the diff says so by showing every line as

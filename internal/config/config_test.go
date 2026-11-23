@@ -66,12 +66,11 @@ func TestLoadKeepsDefaultsForFieldsAddedLater(t *testing.T) {
 	}
 }
 
-// TestToolLoopDefaultsSuitACodingProject pins the figures the two modes are measured
-// against: a project's reply gets enough rounds to read, edit and run a check more than
-// once — more than an ordinary chat, which ends when the model stops asking for tools —
-// and enough tool-result tokens for a failing check plus several reads. Both round figures
-// used to be one, sized for a research turn (6, then 24), which a two-file change exhausts
-// before it has read the failure.
+// TestToolLoopDefaultsSuitACodingProject pins the round figures the two modes are
+// measured against: a project's reply gets enough rounds to read, edit and run a check more
+// than once — more than an ordinary chat, which ends when the model stops asking for tools.
+// Both used to be one, sized for a research turn (6, then 24), which a two-file change
+// exhausts before it has read the failure.
 func TestToolLoopDefaultsSuitACodingProject(t *testing.T) {
 	def := Default()
 	if def.ToolIterations != 24 {
@@ -80,21 +79,11 @@ func TestToolLoopDefaultsSuitACodingProject(t *testing.T) {
 	if def.CodingToolIterations != 60 {
 		t.Errorf("CodingToolIterations = %d, want 60", def.CodingToolIterations)
 	}
-	if def.ToolTokenBudget != 60000 {
-		t.Errorf("ToolTokenBudget = %d, want 60000", def.ToolTokenBudget)
-	}
-	if def.CodingToolTokenBudget != 120000 {
-		t.Errorf("CodingToolTokenBudget = %d, want 120000", def.CodingToolTokenBudget)
-	}
 	// A project must not be the smaller of the two: the field it reads is the one that has
 	// to survive a refactor, and a chat's figure was never sized for one.
 	if def.CodingToolIterations <= def.ToolIterations {
 		t.Errorf("CodingToolIterations = %d, want more than the chat's %d",
 			def.CodingToolIterations, def.ToolIterations)
-	}
-	if def.CodingToolTokenBudget <= def.ToolTokenBudget {
-		t.Errorf("CodingToolTokenBudget = %d, want more than the chat's %d",
-			def.CodingToolTokenBudget, def.ToolTokenBudget)
 	}
 	// The ceiling has to leave room above both defaults, or the default is the ceiling: a
 	// refactor with a few more files than usual is a choice the user can make.
@@ -122,14 +111,6 @@ func TestToolLoopRepairKeepsAChoiceAndBoundsAHandEditedBlob(t *testing.T) {
 		t.Errorf("an unset CodingToolIterations became %d, want the default %d",
 			unset.CodingToolIterations, DefaultCodingToolIterations)
 	}
-	if unset.ToolTokenBudget != DefaultToolTokenBudget {
-		t.Errorf("an unset ToolTokenBudget became %d, want the default %d",
-			unset.ToolTokenBudget, DefaultToolTokenBudget)
-	}
-	if unset.CodingToolTokenBudget != DefaultCodingToolTokenBudget {
-		t.Errorf("an unset CodingToolTokenBudget became %d, want the default %d",
-			unset.CodingToolTokenBudget, DefaultCodingToolTokenBudget)
-	}
 
 	huge := Settings{ToolIterations: 5000, CodingToolIterations: 5000}
 	huge.normalise()
@@ -141,17 +122,13 @@ func TestToolLoopRepairKeepsAChoiceAndBoundsAHandEditedBlob(t *testing.T) {
 			huge.CodingToolIterations, MaxToolIterations)
 	}
 
-	chosen := Settings{ToolIterations: 6, CodingToolIterations: 12, ToolTokenBudget: 30000, CodingToolTokenBudget: 90000}
+	chosen := Settings{ToolIterations: 6, CodingToolIterations: 12}
 	chosen.normalise()
 	if chosen.ToolIterations != 6 {
 		t.Errorf("a stored 6 became %d, want it kept", chosen.ToolIterations)
 	}
 	if chosen.CodingToolIterations != 12 {
 		t.Errorf("a stored coding 12 became %d, want it kept", chosen.CodingToolIterations)
-	}
-	if chosen.ToolTokenBudget != 30000 || chosen.CodingToolTokenBudget != 90000 {
-		t.Errorf("stored token budgets became %d/%d, want 30000/90000 kept",
-			chosen.ToolTokenBudget, chosen.CodingToolTokenBudget)
 	}
 }
 
@@ -616,12 +593,18 @@ func TestSwitchingTheLanguageKeepsEditedAndCustomPrompts(t *testing.T) {
 	s.Language = LangEnglish
 	s.normalise()
 
-	if got := s.DefaultSystemPrompt; got != "mein eigener Standard-Prompt" {
-		t.Errorf("the edited default prompt was overwritten: %q", got)
-	}
+	// An edited default prompt opens a chat in whatever language it was written in, so it moves
+	// into a named prompt of its own and the field returns to the shipped body. The switch must
+	// not translate the text on its way there, and it must not drop it either.
 	byID := map[string]string{}
 	for _, p := range s.PromptPresets {
 		byID[p.ID] = p.Prompt
+	}
+	if got := s.DefaultSystemPrompt; got != PromptBody(PresetResearch, LangEnglish) {
+		t.Errorf("the edited default prompt was not moved out of the field: %q", got)
+	}
+	if got := byID[PresetCustom]; got != "mein eigener Standard-Prompt" {
+		t.Errorf("the edited default prompt was translated or lost: %q", got)
 	}
 	if got := byID[PresetCoding]; got != "mein eigener Coding-Prompt" {
 		t.Errorf("the preset the user edited was rewritten: %q", got)
@@ -1161,6 +1144,37 @@ func TestRememberedModelFoldersAreThinnedAndBounded(t *testing.T) {
 // where llama-server would reject it at startup. The GPU offload of the same test
 // is the third of those fields and follows the same rule: the two explicit words
 // are passed on, everything else means "as many layers as fit".
+// One slot is the default, and it is stored as the absence of the parallel opt-in — so a
+// blob written before the field existed arrives on one slot, which is the whole migration.
+// A parallel choice that was made has to survive the save like any other answer.
+func TestOneSlotIsTheDefaultAndParallelIsRemembered(t *testing.T) {
+	s := Default()
+	if err := json.Unmarshal([]byte(`{"runtime":{"models":{"llamacpp":{"modelPath":"/a.gguf"}}}}`), &s); err != nil {
+		t.Fatalf("unmarshal an older blob: %v", err)
+	}
+	s.normalise()
+	if s.Runtime.Models["llamacpp"].Parallel {
+		t.Error("an older blob arrived opting into parallel sessions")
+	}
+
+	stored := Default()
+	stored.Runtime = RuntimeSettings{Models: map[string]ManagedModel{
+		"llamacpp": {ModelPath: "/a.gguf", Parallel: true},
+	}}
+	blob, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	again := Default()
+	if err := json.Unmarshal(blob, &again); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	again.normalise()
+	if !again.Runtime.Models["llamacpp"].Parallel {
+		t.Error("the stored parallel choice came back off")
+	}
+}
+
 func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 	// Absent fields keep their meaning: "auto" and f16, the server's own defaults.
 	s := Default()
@@ -1206,10 +1220,34 @@ func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 		}
 	}
 
+	// The expert modes survive with their count, including the count 0 that means
+	// "none of the experts leaves the device" — keyed by the file the entry names,
+	// because the placement belongs to the file.
+	for _, mode := range ExpertOffloadModes() {
+		s = Default()
+		s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
+			ModelPath: "/models/a.gguf", ExpertOffload: mode, ExpertLayers: 13,
+		}}}
+		s.normalise()
+		got := s.Runtime.Models["llamacpp"]
+		choice := got.ExpertFor("/models/a.gguf")
+		if mode == ExpertOffloadAuto {
+			if choice.Offload != ExpertOffloadAuto || len(got.Experts) != 0 {
+				t.Errorf("auto became %q/%d with %d stored choices, want none",
+					choice.Offload, choice.Layers, len(got.Experts))
+			}
+			continue
+		}
+		if choice.Offload != mode || choice.Layers != 13 {
+			t.Errorf("expert offload %q/13 became %q/%d", mode, choice.Offload, choice.Layers)
+		}
+	}
+
 	// Junk falls back to the default rather than being passed on.
 	s = Default()
 	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
 		FlashAttention: "maybe", CacheTypeK: "q3_k", CacheTypeV: "  ", Offload: "gpu",
+		ExpertOffload: "experts", ExpertLayers: -4,
 	}}}
 	s.normalise()
 	mm = s.Runtime.Models["llamacpp"]
@@ -1221,6 +1259,120 @@ func TestRuntimeNormalisesFlashAttentionAndCacheTypes(t *testing.T) {
 	}
 	if mm.Offload != OffloadAuto {
 		t.Errorf("offload = %q, want an unknown value replaced by %q", mm.Offload, OffloadAuto)
+	}
+	if mm.ExpertOffload != ExpertOffloadAuto {
+		t.Errorf("expert offload = %q, want an unknown value replaced by %q", mm.ExpertOffload, ExpertOffloadAuto)
+	}
+	if mm.ExpertLayers != 0 {
+		t.Errorf("expert layers = %d, want a negative count clamped to 0", mm.ExpertLayers)
+	}
+}
+
+// TestExpertChoiceStaysWithItsFile pins why the placement is keyed by path: the chat's
+// model picker moves only the path, so a count chosen for one mixture must not become
+// the next file's — and a file nobody tuned keeps llama.cpp's own placement.
+func TestExpertChoiceStaysWithItsFile(t *testing.T) {
+	m := ManagedModel{
+		ModelPath: "/models/a.gguf",
+		Experts:   map[string]ExpertChoice{"/models/a.gguf": {Offload: ExpertOffloadLayers, Layers: 13}},
+	}
+	if got := m.ExpertFor("/models/b.gguf"); got.Offload != ExpertOffloadAuto || got.Layers != 0 {
+		t.Errorf("another file got %q/%d, want the default placement", got.Offload, got.Layers)
+	}
+	if got := m.ExpertFor("/models/a.gguf"); got.Offload != ExpertOffloadLayers || got.Layers != 13 {
+		t.Errorf("the file's own choice became %q/%d", got.Offload, got.Layers)
+	}
+
+	// A negative count is not a count and an unknown mode is not a mode: both are
+	// repaired here, where every other out-of-range value is, so the map holds only
+	// choices a server can be given. A literal auto is kept without a count beside it,
+	// because the panel fills an undecided file with the count it suggests — so
+	// "automatic" has to stay distinguishable from "nobody has looked at this yet".
+	s := Default()
+	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
+		ModelPath: "/models/a.gguf",
+		Experts: map[string]ExpertChoice{
+			"/models/a.gguf": {Offload: ExpertOffloadLayers, Layers: -4},
+			"/models/b.gguf": {Offload: ExpertOffloadAuto, Layers: 7},
+			"/models/c.gguf": {Offload: "experts", Layers: 2},
+		},
+	}}}
+	s.normalise()
+	got := s.Runtime.Models["llamacpp"]
+	if choice := got.ExpertFor("/models/a.gguf"); choice.Offload != ExpertOffloadLayers || choice.Layers != 0 {
+		t.Errorf("a negative count became %q/%d, want %q/0", choice.Offload, choice.Layers, ExpertOffloadLayers)
+	}
+	if choice := got.ExpertFor("/models/b.gguf"); choice.Offload != ExpertOffloadAuto || choice.Layers != 0 {
+		t.Errorf("a stored auto became %q/%d, want auto with no count", choice.Offload, choice.Layers)
+	}
+	if _, ok := got.Experts["/models/c.gguf"]; ok {
+		t.Error("an unknown mode was stored, want it dropped as auto")
+	}
+}
+
+// The MTP count is per file for the same reason as the expert placement, and its zero is
+// a real value: it is the stored "off", which is the only way to say that about a file
+// whose header has the heads, since an absent path follows the recommendation. A
+// negative count and a blank path drop out, and a count past the maximum is clamped
+// rather than thrown away.
+func TestMTPCountStaysWithItsFile(t *testing.T) {
+	s := Default()
+	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
+		ModelPath: "/models/a.gguf",
+		MTP: map[string]int{
+			"/models/a.gguf": 4,
+			"/models/b.gguf": 0,
+			"/models/c.gguf": -3,
+			"/models/d.gguf": 99,
+			"  ":             2,
+		},
+	}}}
+	s.normalise()
+	got := s.Runtime.Models["llamacpp"]
+	if got.MTP["/models/a.gguf"] != 4 {
+		t.Errorf("the chosen count became %d, want 4", got.MTP["/models/a.gguf"])
+	}
+	if drafts, ok := got.MTP["/models/b.gguf"]; !ok || drafts != 0 {
+		t.Errorf("the stored off for /models/b.gguf became %d (present=%v), want 0", drafts, ok)
+	}
+	for _, path := range []string{"/models/c.gguf", "  "} {
+		if _, ok := got.MTP[path]; ok {
+			t.Errorf("%q kept an entry, want it dropped", path)
+		}
+	}
+	if got.MTP["/models/d.gguf"] != MaxMTPDrafts {
+		t.Errorf("an oversized count became %d, want it clamped to %d", got.MTP["/models/d.gguf"], MaxMTPDrafts)
+	}
+}
+
+// The confidence floor is stored the same way and for the same reason, but it is a
+// probability: 0 is a deliberate "no floor" and is kept, 1 passes no draft at all and a
+// negative value is not a probability, so those two drop out. A number in between is
+// kept exactly as entered — the flag takes a probability, not a shape.
+func TestMTPConfidenceIsAPerFileFloor(t *testing.T) {
+	s := Default()
+	s.Runtime = RuntimeSettings{Models: map[string]ManagedModel{"llamacpp": {
+		ModelPath: "/models/a.gguf",
+		MTPConfidence: map[string]float64{
+			"/models/a.gguf": 0.75,
+			"/models/b.gguf": 0,
+			"/models/c.gguf": 1,
+			"/models/d.gguf": -0.2,
+			"  ":             0.5,
+		},
+	}}}
+	s.normalise()
+	got := s.Runtime.Models["llamacpp"]
+	if got.MTPConfidence["/models/a.gguf"] != 0.75 {
+		t.Errorf("the chosen floor became %v, want 0.75", got.MTPConfidence["/models/a.gguf"])
+	}
+	if floor, ok := got.MTPConfidence["/models/b.gguf"]; !ok || floor != 0 {
+		t.Errorf("the stored \"no floor\" for /models/b.gguf became %v (present=%v), want 0", floor, ok)
+	}
+	for _, path := range []string{"/models/c.gguf", "/models/d.gguf", "  "} {
+		if _, ok := got.MTPConfidence[path]; ok {
+			t.Errorf("%q kept a floor that cannot change anything, want it dropped", path)
+		}
 	}
 }
 
@@ -1262,6 +1414,41 @@ func TestAutoApproveShipsOffAndStaysOffWhenAbsent(t *testing.T) {
 	}
 	if !again.AutoApprove.Files || again.AutoApprove.Commands {
 		t.Errorf("the stored answer came back as %+v, want files allowed only", again.AutoApprove)
+	}
+}
+
+// The daily update check ships on — the deliberate exception to "a switch costing a
+// request ships off" — and an explicit no stays a no. The default being the migration is
+// what carries the field to installations that predate it, so the case this pins is the
+// one that matters: a person who turned it off must not be switched back on by a restart.
+func TestTheDailyUpdateCheckShipsOnAndRemembersANo(t *testing.T) {
+	if s := Default(); !s.Updates.CheckDaily || s.Updates.LastCheckUnix != 0 {
+		t.Fatalf("Default() = %+v, want the daily check on and never run", s.Updates)
+	}
+
+	// An older blob has no `updates` object at all; it arrives on, which is the intended
+	// price of the default being the whole migration story.
+	older := Default()
+	if err := json.Unmarshal([]byte(`{"language":"en","toolIterations":6}`), &older); err != nil {
+		t.Fatalf("unmarshal an older blob: %v", err)
+	}
+	if !older.Updates.CheckDaily {
+		t.Errorf("an older blob arrived with the check off although that is now the default: %+v", older.Updates)
+	}
+
+	// The no the user gave is stored, and survives into the next process.
+	stored := Default()
+	stored.Updates = UpdateSettings{CheckDaily: false, LastCheckUnix: 1762700000}
+	blob, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	again := Default()
+	if err := json.Unmarshal(blob, &again); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if again.Updates.CheckDaily || again.Updates.LastCheckUnix != 1762700000 {
+		t.Errorf("the stored switch came back as %+v", again.Updates)
 	}
 }
 

@@ -462,7 +462,7 @@ func TestToolRoundLimitIsReportedToTheUser(t *testing.T) {
 		}
 	}
 	if warning == "" {
-		t.Fatal("the user was never told the tool budget ran out")
+		t.Fatal("the user was never told the tool rounds ran out")
 	}
 	// A code rather than a sentence: the window words it, and the code is what the
 	// dictionary test can check for a translation in all three languages.
@@ -880,7 +880,9 @@ func TestCancelledToolCallsLeaveNoOrphan(t *testing.T) {
 }
 
 // TestGenerationsAreSerialisedPerChat guards against two turns interleaving and
-// corrupting each other's message sequence.
+// corrupting each other's message sequence. A message sent while a turn runs waits in the
+// queue, and the serialisation is what makes that waiting safe: it is sent after the first
+// turn has released the chat, never beside it.
 func TestGenerationsAreSerialisedPerChat(t *testing.T) {
 	st := newTestStore(t)
 	makeChat(t, st)
@@ -896,11 +898,79 @@ func TestGenerationsAreSerialisedPerChat(t *testing.T) {
 	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "erst"}); err != nil {
 		t.Fatalf("first Send: %v", err)
 	}
-	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "zweite"}); err == nil {
-		t.Fatal("expected the second Send to be rejected while a turn is running")
+	if err := engine.Send(TurnRequest{ChatID: "chat-1", Text: "zweite"}); err != nil {
+		t.Fatalf("the second Send was refused instead of queued: %v", err)
+	}
+	if got := engine.Queued("chat-1"); len(got) != 1 || got[0].Text != "zweite" {
+		t.Fatalf("Queued = %+v, want the second message waiting", got)
+	}
+	// Taken back out by hand: Stop leaves the queue alone now, and this test is about one chat
+	// never running two turns at once.
+	if waiting := engine.Queued("chat-1"); !engine.DropQueued("chat-1", waiting[0].ID) {
+		t.Fatal("DropQueued did not find the message it had just listed")
 	}
 	engine.Stop("chat-1")
 	waitFor(t, 3*time.Second, func() bool { return !engine.IsRunning("chat-1") })
+	// Nothing started behind the stopped turn: the transcript holds the question that was asked
+	// and nothing else.
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var users int
+	for _, m := range messages {
+		if m.Role == string(llm.RoleUser) {
+			users++
+		}
+	}
+	if users != 1 {
+		t.Errorf("the transcript holds %d user message(s), want 1", users)
+	}
+}
+
+// TestAnAttachmentIsNotTakenOverByALaterMessage is the two-sends-one-file case: the second was
+// typed while the first was still being answered, so the window had not yet heard that the file
+// was queued. It goes with the message that stored it first; taking it over would leave that
+// message without the file the user gave it.
+func TestAnAttachmentIsNotTakenOverByALaterMessage(t *testing.T) {
+	st := newTestStore(t)
+	makeChat(t, st)
+	engine, _ := newTestEngine(t, st, &fakeProvider{
+		model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 8192},
+	})
+
+	if err := st.CreateAttachment(store.Attachment{
+		ID: "att-1", ChatID: "chat-1", Filename: "notes.txt", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create attachment: %v", err)
+	}
+
+	if err := engine.appendUserMessage(TurnRequest{
+		ChatID: "chat-1", Text: "erste Frage", AttachmentIDs: []string{"att-1"},
+	}, "fake", "fake-model"); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	if err := engine.appendUserMessage(TurnRequest{
+		ChatID: "chat-1", Text: "zweite Frage", AttachmentIDs: []string{"att-1"},
+	}, "fake", "fake-model"); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+
+	messages, err := st.ListMessages("chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("the transcript holds %d message(s), want 2", len(messages))
+	}
+	attachment, err := st.GetAttachment("att-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attachment.MessageID != messages[0].ID {
+		t.Errorf("the file sits on message %q, want the first one %q",
+			attachment.MessageID, messages[0].ID)
+	}
 }
 
 // TestRegenerateDropsTrailingAssistant keeps a regenerate from appending a second
@@ -1069,7 +1139,7 @@ func TestMeasurementIncludesTheGeneratedAnswerInNextBudget(t *testing.T) {
 
 type reasoningReplayProvider struct{ *fakeProvider }
 
-func (*reasoningReplayProvider) ReplaysToolReasoning() bool { return true }
+func (*reasoningReplayProvider) ReplaysReasoning(withTools bool) bool { return withTools }
 
 func TestMeasurementIsDiscardedWhenToolReasoningReplayChanges(t *testing.T) {
 	st := newTestStore(t)
@@ -1090,13 +1160,13 @@ func TestMeasurementIsDiscardedWhenToolReasoningReplayChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(defs) == 0 || !assembly.ReplayToolReasoning {
+	if len(defs) == 0 || !assembly.ReplayReasoning {
 		t.Fatal("test needs a tool-enabled reasoning replay request")
 	}
 	if assembly.Budget.MeasuredValid {
 		t.Fatal("a tool-free measurement was reused for a tool-reasoning request")
 	}
-	engine.setMeasurement(chat.ID, Measurement{Backend: "fake", Model: "fake-model", PromptTokens: 100, Seq: 1, ReplayToolReasoning: true})
+	engine.setMeasurement(chat.ID, Measurement{Backend: "fake", Model: "fake-model", PromptTokens: 100, Seq: 1, ReplayReasoning: true})
 	settings.NativeTools = false
 	assembly, _, err = engine.buildAssembly(context.Background(), &chat, "fake", "fake-model", settings, model, "", "", "")
 	if err != nil {
@@ -1104,6 +1174,203 @@ func TestMeasurementIsDiscardedWhenToolReasoningReplayChanges(t *testing.T) {
 	}
 	if assembly.Budget.MeasuredValid {
 		t.Fatal("a tool-reasoning measurement was reused for a tool-free request")
+	}
+}
+
+// TestARestartResumesFromTheCountTheBackendGave pins the meter across a restart.
+//
+// The count a backend reports lives in the turn state, which is per process. A chat that had
+// been measured all day was therefore priced by the estimator again after a restart — a heuristic
+// rather than the backend's tokenizer, and one priced in the safe direction — and on a project's
+// history that guess can read as over the window the conversation had been running inside, which
+// is what stops the picker from starting a local model for it. Every measuring request stored its
+// prompt_tokens on the reply row it produced, so the newest row is used instead of the guess.
+func TestARestartResumesFromTheCountTheBackendGave(t *testing.T) {
+	st := newTestStore(t)
+	c := makeChat(t, st)
+	base := time.Now().Add(-time.Hour)
+	answer := strings.Repeat("Der Stand des Projekts in einem Absatz. ", 40)
+	reasoning := strings.Repeat("Ich prüfe die Datei. ", 200)
+	write := func(m store.Message) {
+		t.Helper()
+		m.ChatID = c.ID
+		if m.Status == "" {
+			m.Status = store.StatusComplete
+		}
+		if err := st.CreateMessage(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(store.Message{ID: "m1", Seq: 1, Role: "user", Content: "Wie ist der Stand?", CreatedAt: base})
+	write(store.Message{ID: "m2", Seq: 2, Role: "assistant", Content: answer, Reasoning: reasoning,
+		CreatedAt: base.Add(time.Second), Backend: "fake", Model: "fake-model", PromptTokens: 5000})
+	write(store.Message{ID: "m3", Seq: 3, Role: "user", Content: "Und weiter?", CreatedAt: base.Add(2 * time.Second)})
+
+	provider := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 64000}}
+	// A new engine has an empty turn state, which is what starting the app gives.
+	engine, _ := newTestEngine(t, st, provider)
+
+	budget, err := engine.PreviewBudget(context.Background(), c.ID, "fake", "fake-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !budget.MeasuredValid || budget.Measured != 5000 {
+		t.Fatalf("a restart priced the prompt by the estimator: %+v", budget)
+	}
+	if budget.DeltaSince <= 0 {
+		t.Fatalf("the reply and the question after the count were not priced: %+v", budget)
+	}
+	if budget.Used != 5000+budget.DeltaSince {
+		t.Errorf("used = %d, want %d (the count plus what was added after it)",
+			budget.Used, 5000+budget.DeltaSince)
+	}
+	if budget.OverLimit {
+		t.Errorf("a 5000-token prompt in a 64000-token window reads as over the limit: %+v", budget)
+	}
+}
+
+// TestARestartIgnoresACountThatCannotDescribeThePrompt covers the rows a restart must not adopt:
+// another model's count (a different tokenizer), a reply written before the newest fold (its
+// request still carried the messages the fold replaced — the fold here ends before the reply, so
+// only this rule can reject it), and a reply that never measured itself.
+func TestARestartIgnoresACountThatCannotDescribeThePrompt(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		replyModel string
+		prompt     int
+		foldAfter  bool
+	}{
+		{name: "another model's tokenizer", replyModel: "other-model", prompt: 5000},
+		{name: "a count from before the fold", replyModel: "fake-model", prompt: 5000, foldAfter: true},
+		{name: "a reply that never measured", replyModel: "fake-model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newTestStore(t)
+			c := makeChat(t, st)
+			base := time.Now().Add(-time.Hour)
+			write := func(m store.Message) {
+				t.Helper()
+				m.ChatID = c.ID
+				if m.Status == "" {
+					m.Status = store.StatusComplete
+				}
+				if err := st.CreateMessage(m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(store.Message{ID: "m1", Seq: 1, Role: "user", Content: "Die alte Frage", CreatedAt: base})
+			write(store.Message{ID: "m2", Seq: 2, Role: "assistant", Content: "Die alte Antwort",
+				CreatedAt: base.Add(time.Second), Backend: "fake", Model: tc.replyModel, PromptTokens: tc.prompt})
+			write(store.Message{ID: "m3", Seq: 3, Role: "user", Content: "Und weiter?", CreatedAt: base.Add(2 * time.Second)})
+			if tc.foldAfter {
+				if err := st.CreateCompaction(store.Compaction{
+					ID: "k1", ChatID: c.ID, Trigger: "manual", FromSeq: 1, ToSeq: 1,
+					Summary: "Erinnerung an die alte Frage", CreatedAt: base.Add(30 * time.Second),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			provider := &fakeProvider{model: llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 64000}}
+			engine, _ := newTestEngine(t, st, provider)
+			budget, err := engine.PreviewBudget(context.Background(), c.ID, "fake", "fake-model")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if budget.MeasuredValid {
+				t.Fatalf("a count that cannot describe this prompt was adopted: %+v", budget)
+			}
+		})
+	}
+}
+
+// TestARestartOnlyAdoptsACountWhoseReasoningShapeItCanRead pins the recovery's one judgement call:
+// a row records the count its request reported, not whether that request replayed a reply's
+// reasoning. A provider whose answer cannot vary — Ollama always, every other local backend never
+// — can vouch for the shape. DeepSeek beside tools cannot, so a count is adopted there only for a
+// request that carries no reasoning either, where it can read too large but never too small.
+func TestARestartOnlyAdoptsACountWhoseReasoningShapeItCanRead(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	reply := []store.Message{
+		{ID: "m1", Seq: 1, Role: "user", Content: "Wie ist der Stand?", Status: store.StatusComplete,
+			CreatedAt: base},
+		{ID: "m2", Seq: 2, Role: "assistant", Content: "Antwort", Status: store.StatusComplete,
+			CreatedAt: base.Add(time.Second), Backend: "fake", Model: "fake-model", PromptTokens: 5000},
+		{ID: "m3", Seq: 3, Role: "user", Content: "Und weiter?", Status: store.StatusComplete,
+			CreatedAt: base.Add(2 * time.Second)},
+	}
+	toolsOnly := &reasoningReplayProvider{&fakeProvider{}}
+	always := &alwaysReasons{&fakeProvider{}}
+	for _, tc := range []struct {
+		name         string
+		provider     llm.Provider
+		toolsOffered bool
+		adopted      bool
+	}{
+		{name: "tools offered, so the count may have left reasoning out", provider: toolsOnly, toolsOffered: true},
+		{name: "no tools, so the count can only read too large", provider: toolsOnly, adopted: true},
+		{name: "a shape that cannot vary", provider: always, toolsOffered: true, adopted: true},
+		{name: "a backend that carries no reasoning", provider: &fakeProvider{}, toolsOffered: true, adopted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			measurement, ok := measurementFromHistory(reply, nil, "fake", "fake-model", tc.provider, tc.toolsOffered)
+			if ok != tc.adopted {
+				t.Fatalf("adopted = %v, want %v", ok, tc.adopted)
+			}
+			if tc.adopted && (measurement.PromptTokens != 5000 || measurement.Seq != 1) {
+				t.Errorf("measurement = %+v, want the row's count and the message before it", measurement)
+			}
+		})
+	}
+}
+
+// alwaysReasons is a backend whose message shape carries a reply's reasoning in every request,
+// the way Ollama's `thinking` field does (llm.ReasoningReplayer).
+type alwaysReasons struct{ *fakeProvider }
+
+func (*alwaysReasons) ReplaysReasoning(bool) bool { return true }
+
+// TestOnlyABackendThatCarriesReasoningPaysForIt pins the resolution the budget rests on: the same
+// stored reasoning is priced on a backend that replays it and costs nothing on one that does not,
+// which is every LM Studio, llama.cpp, Groq and NVIDIA request. The second half is the number the
+// user reads — a project's thinking model was charged for text no request carried.
+func TestOnlyABackendThatCarriesReasoningPaysForIt(t *testing.T) {
+	st := newTestStore(t)
+	chat := makeChat(t, st)
+	reasoning := strings.Repeat("Ich prüfe die Datei. ", 300)
+	for i, m := range []store.Message{
+		{ID: "m1", Seq: 1, Role: "user", Content: "Frage", Status: store.StatusComplete},
+		{ID: "m2", Seq: 2, Role: "assistant", Content: "Antwort", Reasoning: reasoning,
+			Status: store.StatusComplete},
+	} {
+		m.ChatID = chat.ID
+		m.CreatedAt = time.Now().Add(time.Duration(i) * time.Second)
+		if err := st.CreateMessage(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := llm.ModelInfo{ID: "fake-model", Backend: "fake", ContextLimit: 100000}
+	settings := config.Default()
+	settings.AutoTitle = false
+
+	preview := func(provider llm.Provider) ContextBudget {
+		t.Helper()
+		registry := llm.NewRegistry(nil)
+		registry.Register(provider)
+		engine := NewEngine(st, registry, &tools.Service{Store: st},
+			func() config.Settings { return settings }, nil)
+		budget, err := engine.PreviewBudget(context.Background(), chat.ID, "fake", "fake-model")
+		if err != nil {
+			t.Fatalf("PreviewBudget: %v", err)
+		}
+		return budget
+	}
+	plain := preview(&fakeProvider{model: model})
+	replayed := preview(&alwaysReasons{&fakeProvider{model: model}})
+
+	if got, want := replayed.History-plain.History, llm.EstimateTokens(reasoning); got != want {
+		t.Fatalf("reasoning priced at %d tokens, want %d on the backend that carries it and 0 "+
+			"on the one that does not (plain=%d, replayed=%d)", got, want, plain.History, replayed.History)
 	}
 }
 
@@ -1229,209 +1496,5 @@ func TestToolProtocolFollowsAdvertisedCapabilities(t *testing.T) {
 				t.Errorf("text-protocol hint present = %v, want %v", got, tc.wantHint)
 			}
 		})
-	}
-}
-
-// TestToolOutputBudgetCapsPerAnswer pins the setting the Settings screen exposes:
-// tool results are charged against one budget for the whole answer, a result
-// over the limit is cut with the truncation marker, and once the budget is spent
-// the model is told so rather than handed empty text.
-func TestToolOutputBudgetCapsPerAnswer(t *testing.T) {
-	budget := newToolOutputBudget(100)
-
-	small := strings.Repeat("wort ", 5)
-	if got, withheld := budget.take(small); got != small || withheld {
-		t.Fatalf("a result inside the budget should pass through, got %q (withheld %v)", got, withheld)
-	}
-
-	big := strings.Repeat("wort ", 5000)
-	got, withheld := budget.take(big)
-	if tokens := llm.EstimateTokens(got); tokens > 100 {
-		t.Errorf("truncated result is over budget: %d tokens", tokens)
-	}
-	if !strings.Contains(got, "gekürzt") {
-		t.Errorf("a shortened result must say so, got %q", got)
-	}
-	if withheld {
-		t.Error("a cut result was reported as withheld: the model reads a prefix of it")
-	}
-	// The distinction the tool card renders: a spent budget is not a short result. A
-	// cut result is charged what it used rather than what was left, so spending the
-	// budget takes as many results as its share allows — which is the subject of the
-	// test after this one.
-	for spent, calls := false, 0; !spent; calls++ {
-		if calls > 20 {
-			t.Fatal("the budget never ran out: a share that is charged is still charged")
-		}
-		next, withheld := budget.take(big)
-		if !withheld && next == "" {
-			t.Fatal("a result neither arrived nor was reported as withheld")
-		}
-		spent = withheld
-	}
-	if next, withheld := budget.take("kurz"); next != exhaustedNotice || !withheld {
-		t.Errorf("after the budget is spent got %q (withheld %v), want the notice and true",
-			next, withheld)
-	}
-}
-
-// TestOneResultCannotTakeTheWholeBudget is the guarantee the budget alone did not give.
-//
-// take charges a result the smaller of the budget's remainder and one result's share, and
-// charges it what it actually used. Before that, the first result bigger than the budget
-// was cut to everything that was left and the budget was over: a single scraped page or
-// JSON dump spent an answer's whole allowance in one call, and every later round of the same
-// reply read notices instead of file contents.
-func TestOneResultCannotTakeTheWholeBudget(t *testing.T) {
-	const total = 400
-	budget := newToolOutputBudget(total)
-	share := total / toolResultShare
-	huge := strings.Repeat("wort ", 5000)
-
-	first, withheld := budget.take(huge)
-	if withheld {
-		t.Fatal("a cut result was reported as withheld: the model reads a prefix of it")
-	}
-	if tokens := llm.EstimateTokens(first); tokens > share {
-		t.Errorf("one result took %d tokens of a %d-token budget, want at most its share of %d",
-			tokens, total, share)
-	}
-	// The room it did not spend is still there, which is the difference between a share
-	// and the old "cut to whatever is left".
-	if budget.remaining <= 0 {
-		t.Fatalf("one cut result spent the whole %d-token budget", total)
-	}
-	second, withheld := budget.take(huge)
-	if withheld {
-		t.Fatalf("the second result was withheld with %d tokens left", budget.remaining+llm.EstimateTokens(second))
-	}
-	if llm.EstimateTokens(second) == 0 {
-		t.Error("the second result arrived empty")
-	}
-	// And the total still holds: a share bounds each result, it does not multiply the
-	// budget.
-	spent := total - budget.remaining
-	for !withheld {
-		got, didWithhold := budget.take(huge)
-		withheld = didWithhold
-		if !withheld {
-			spent += llm.EstimateTokens(got)
-		}
-		if spent > total {
-			t.Fatalf("%d tokens were charged against a %d-token budget", spent, total)
-		}
-	}
-}
-
-// TestAPerResultCeilingNeverExceedsTheRoom pins the other direction: a share is a ceiling,
-// not an entitlement, and the room a request has left stays the smaller of the two.
-func TestAPerResultCeilingNeverExceedsTheRoom(t *testing.T) {
-	budget := newToolOutputBudget(config.DefaultToolTokenBudget)
-	budget.capTo(50)
-
-	got, _ := budget.take(strings.Repeat("wort ", 5000))
-	if tokens := llm.EstimateTokens(got); tokens > 50 {
-		t.Errorf("a result cut to the room left is %d tokens, want at most 50", tokens)
-	}
-}
-
-// TestToolOutputBudgetDefaultsWhenUnset keeps an unset setting from silently
-// disabling the bound.
-func TestToolOutputBudgetDefaultsWhenUnset(t *testing.T) {
-	if b := newToolOutputBudget(0); b.remaining != config.DefaultToolTokenBudget {
-		t.Errorf("remaining = %d, want the %d default", b.remaining, config.DefaultToolTokenBudget)
-	}
-}
-
-// TestToolOutputBudgetFollowsTheRoomARequestHasLeft pins the half of the bound the
-// user's own figure cannot do. 60000 tokens of tool results is a reasonable answer on
-// a 131k-window model and impossible on a backend whose per-request ceiling is a few
-// thousand, which is Groq's shape exactly — so the room left in the next request, and
-// not the setting, is what decides how much of a result may be carried.
-func TestToolOutputBudgetFollowsTheRoomARequestHasLeft(t *testing.T) {
-	budget := newToolOutputBudget(config.DefaultToolTokenBudget)
-	budget.capTo(400)
-
-	got, _ := budget.take(strings.Repeat("wort ", 5000))
-	if tokens := llm.EstimateTokens(got); tokens > 400 {
-		t.Fatalf("a result cut to the room left is %d tokens, want at most 400", tokens)
-	}
-	if !strings.Contains(got, "gekürzt") {
-		t.Fatalf("a shortened result must say so, got %q", got)
-	}
-}
-
-// TestToolOutputBudgetNeverLoosens keeps the cap pointing one way: a later round with
-// more room than an earlier one must not hand back what the earlier round had to give
-// up, because the rounds of one answer produce one history between them.
-func TestToolOutputBudgetNeverLoosens(t *testing.T) {
-	budget := newToolOutputBudget(100)
-	budget.capTo(5000)
-
-	got, _ := budget.take(strings.Repeat("wort ", 5000))
-	if tokens := llm.EstimateTokens(got); tokens > 100 {
-		t.Fatalf("a cap of 5000 loosened the 100-token budget: %d tokens", tokens)
-	}
-}
-
-// TestRoomForToolResultsIsTheRequestsOwnArithmetic pins the sum a tool result is
-// budgeted against: what the assembly already priced, the reserve for the answer it
-// holds back, and the reply this round wrote — which the assembly predates.
-func TestRoomForToolResultsIsTheRequestsOwnArithmetic(t *testing.T) {
-	// A model whose limit nobody reported has no room to report, which is not the same
-	// as zero room: the budget must stay untouched rather than withhold every result.
-	if room, bounded := roomForToolResults(ContextBudget{}, 0, 1); bounded {
-		t.Fatalf("a budget with no known limit reported room %d as bounded", room)
-	}
-	// A window with no ceiling beside it is still a limit: the smaller of the two is
-	// what a request has to fit, and a tool result that ignored it would be the request
-	// no fold can shrink.
-	if room, bounded := roomForToolResults(ContextBudget{
-		Limit: 8192, EffectiveLimit: 8192, Projected: 4000,
-	}, 0, 0); !bounded || room != 4192 {
-		t.Fatalf("room = %d (bounded %v) for a window with 4192 tokens left, want 4192", room, bounded)
-	}
-
-	reply := strings.Repeat("wort ", 300)
-	budget := ContextBudget{Limit: 131072, Ceiling: 8000, EffectiveLimit: 8000, Projected: 5000}
-	room, bounded := roomForToolResults(budget, 0, llm.EstimateTokens(reply))
-	if !bounded {
-		t.Fatal("a budget with a ceiling reported no room")
-	}
-	if want := 8000 - 5000 - llm.EstimateTokens(reply); room != want {
-		t.Fatalf("room = %d, want %d", room, want)
-	}
-	// The reply can be larger than what is left; a negative room is zero room.
-	if room, _ := roomForToolResults(ContextBudget{
-		Limit: 131072, EffectiveLimit: 1000, Projected: 900,
-	}, 0, llm.EstimateTokens(strings.Repeat("wort ", 300))); room != 0 {
-		t.Fatalf("room = %d for a reply that does not fit, want 0", room)
-	}
-}
-
-// TestRoomForToolResultsPrefersTheBackendsOwnCount pins the one number that can make a
-// room too large. The assembly's figure is an estimate, and its error points the
-// dangerous way: where it counts low the room is too big, the result is cut too late,
-// and the request is refused for its size — which is the failure this budget exists to
-// prevent. So a prompt size the backend states is what the room is computed from, with
-// the reserve still held back for the answer the next round has to write.
-func TestRoomForToolResultsPrefersTheBackendsOwnCount(t *testing.T) {
-	reply := strings.Repeat("wort ", 100)
-	budget := ContextBudget{
-		Limit: 131072, Ceiling: 8000, EffectiveLimit: 8000,
-		Used: 400, Projected: 1424, Reserve: 1024,
-	}
-
-	estimated, bounded := roomForToolResults(budget, 0, llm.EstimateTokens(reply))
-	if !bounded {
-		t.Fatal("a budget with a ceiling reported no room")
-	}
-	measured, _ := roomForToolResults(budget, 5000, llm.EstimateTokens(reply))
-	if measured >= estimated {
-		t.Fatalf("room from the backend's own count = %d, from the estimate = %d; the count has to tighten",
-			measured, estimated)
-	}
-	if want := 8000 - 5000 - 1024 - llm.EstimateTokens(reply); measured != want {
-		t.Fatalf("room = %d, want %d (limit - stated prompt - reserve - reply)", measured, want)
 	}
 }

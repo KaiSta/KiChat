@@ -122,6 +122,23 @@ export namespace chat {
 		    return a;
 		}
 	}
+	
+	export class QueuedTurn {
+	    id: string;
+	    text: string;
+	    attachmentIds: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new QueuedTurn(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.text = source["text"];
+	        this.attachmentIds = source["attachmentIds"];
+	    }
+	}
 
 }
 
@@ -146,6 +163,7 @@ export namespace config {
 	    midTurnCheck: boolean;
 	    threshold: number;
 	    keepRecentTurns: number;
+	    keepRecentTokens: number;
 	    reserveForResponse: number;
 	    summaryTemperature: number;
 	    maxSummaryTokens: number;
@@ -161,6 +179,7 @@ export namespace config {
 	        this.midTurnCheck = source["midTurnCheck"];
 	        this.threshold = source["threshold"];
 	        this.keepRecentTurns = source["keepRecentTurns"];
+	        this.keepRecentTokens = source["keepRecentTokens"];
 	        this.reserveForResponse = source["reserveForResponse"];
 	        this.summaryTemperature = source["summaryTemperature"];
 	        this.maxSummaryTokens = source["maxSummaryTokens"];
@@ -218,6 +237,20 @@ export namespace config {
 		    }
 		    return a;
 		}
+	}
+	export class ExpertChoice {
+	    offload: string;
+	    layers: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ExpertChoice(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.offload = source["offload"];
+	        this.layers = source["layers"];
+	    }
 	}
 	export class GatewaySettings {
 	    enabled: boolean;
@@ -425,7 +458,13 @@ export namespace config {
 	    cacheTypeK: string;
 	    cacheTypeV: string;
 	    offload: string;
+	    expertOffload: string;
+	    expertLayers: number;
+	    experts?: Record<string, ExpertChoice>;
+	    mtp?: Record<string, number>;
+	    mtpConfidence?: Record<string, number>;
 	    extraArgs: string;
+	    parallel: boolean;
 	    mlx?: MLXOptions;
 	
 	    static createFrom(source: any = {}) {
@@ -442,7 +481,13 @@ export namespace config {
 	        this.cacheTypeK = source["cacheTypeK"];
 	        this.cacheTypeV = source["cacheTypeV"];
 	        this.offload = source["offload"];
+	        this.expertOffload = source["expertOffload"];
+	        this.expertLayers = source["expertLayers"];
+	        this.experts = this.convertValues(source["experts"], ExpertChoice, true);
+	        this.mtp = source["mtp"];
+	        this.mtpConfidence = source["mtpConfidence"];
 	        this.extraArgs = source["extraArgs"];
+	        this.parallel = source["parallel"];
 	        this.mlx = this.convertValues(source["mlx"], MLXOptions);
 	    }
 	
@@ -586,6 +631,20 @@ export namespace config {
 	        this.scrapeCacheHours = source["scrapeCacheHours"];
 	    }
 	}
+	export class UpdateSettings {
+	    checkDaily: boolean;
+	    lastCheckUnix?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.checkDaily = source["checkDaily"];
+	        this.lastCheckUnix = source["lastCheckUnix"];
+	    }
+	}
 	export class Settings {
 	    gateway: GatewaySettings;
 	    language: string;
@@ -600,17 +659,18 @@ export namespace config {
 	    defaultModel: llm.Ref;
 	    defaultSystemPrompt: string;
 	    promptPresets: PromptPreset[];
+	    chatPromptPreset: string;
+	    codingPromptPreset: string;
 	    autoTitle: boolean;
 	    toolIterations: number;
 	    codingToolIterations: number;
-	    toolTokenBudget: number;
-	    codingToolTokenBudget: number;
 	    nativeTools: boolean;
 	    runtime: RuntimeSettings;
 	    hiddenModels?: string[];
 	    images: ImageSettings;
 	    imageProfiles?: ImageProfile[];
 	    autoApprove: AutoApproveSettings;
+	    updates: UpdateSettings;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -631,17 +691,18 @@ export namespace config {
 	        this.defaultModel = this.convertValues(source["defaultModel"], llm.Ref);
 	        this.defaultSystemPrompt = source["defaultSystemPrompt"];
 	        this.promptPresets = this.convertValues(source["promptPresets"], PromptPreset);
+	        this.chatPromptPreset = source["chatPromptPreset"];
+	        this.codingPromptPreset = source["codingPromptPreset"];
 	        this.autoTitle = source["autoTitle"];
 	        this.toolIterations = source["toolIterations"];
 	        this.codingToolIterations = source["codingToolIterations"];
-	        this.toolTokenBudget = source["toolTokenBudget"];
-	        this.codingToolTokenBudget = source["codingToolTokenBudget"];
 	        this.nativeTools = source["nativeTools"];
 	        this.runtime = this.convertValues(source["runtime"], RuntimeSettings);
 	        this.hiddenModels = source["hiddenModels"];
 	        this.images = this.convertValues(source["images"], ImageSettings);
 	        this.imageProfiles = this.convertValues(source["imageProfiles"], ImageProfile);
 	        this.autoApprove = this.convertValues(source["autoApprove"], AutoApproveSettings);
+	        this.updates = this.convertValues(source["updates"], UpdateSettings);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -922,6 +983,34 @@ export namespace main {
 	        this.platform = source["platform"];
 	    }
 	}
+	export class AppUpdate {
+	    checked: boolean;
+	    available: boolean;
+	    current?: string;
+	    latest?: string;
+	    url?: string;
+	    publishedAt?: string;
+	    notes?: string;
+	    devBuild?: boolean;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AppUpdate(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.checked = source["checked"];
+	        this.available = source["available"];
+	        this.current = source["current"];
+	        this.latest = source["latest"];
+	        this.url = source["url"];
+	        this.publishedAt = source["publishedAt"];
+	        this.notes = source["notes"];
+	        this.devBuild = source["devBuild"];
+	        this.error = source["error"];
+	    }
+	}
 	export class AttachmentInput {
 	    chatId: string;
 	    path: string;
@@ -1088,6 +1177,7 @@ export namespace main {
 	    documents: store.Document[];
 	    budget: chat.ContextBudget;
 	    running: boolean;
+	    queue: chat.QueuedTurn[];
 	    consent: ChatConsent;
 	
 	    static createFrom(source: any = {}) {
@@ -1103,6 +1193,7 @@ export namespace main {
 	        this.documents = this.convertValues(source["documents"], store.Document);
 	        this.budget = this.convertValues(source["budget"], chat.ContextBudget);
 	        this.running = source["running"];
+	        this.queue = this.convertValues(source["queue"], chat.QueuedTurn);
 	        this.consent = this.convertValues(source["consent"], ChatConsent);
 	    }
 	
@@ -1390,6 +1481,63 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class ManagedModelTraits {
+	    architecture?: string;
+	    blockCount: number;
+	    expertCount: number;
+	    expertUsedCount: number;
+	    mtpLayers: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ManagedModelTraits(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.architecture = source["architecture"];
+	        this.blockCount = source["blockCount"];
+	        this.expertCount = source["expertCount"];
+	        this.expertUsedCount = source["expertUsedCount"];
+	        this.mtpLayers = source["mtpLayers"];
+	    }
+	}
+	export class ManagedModelProbe {
+	    traits: ManagedModelTraits;
+	    suggestedLayers: number;
+	    suggestedMtpTokens: number;
+	    suggestedMtpConfidence: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ManagedModelProbe(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.traits = this.convertValues(source["traits"], ManagedModelTraits);
+	        this.suggestedLayers = source["suggestedLayers"];
+	        this.suggestedMtpTokens = source["suggestedMtpTokens"];
+	        this.suggestedMtpConfidence = source["suggestedMtpConfidence"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class ManagedStatus {
 	    backendId: string;
 	    kind?: string;
@@ -1527,6 +1675,7 @@ export namespace main {
 	    flashAttentionModes: string[];
 	    cacheTypes: string[];
 	    offloadModes: string[];
+	    expertOffloadModes: string[];
 	    update: RuntimeUpdate;
 	    restartPending: boolean;
 	    mlxSupported: boolean;
@@ -1567,6 +1716,7 @@ export namespace main {
 	        this.flashAttentionModes = source["flashAttentionModes"];
 	        this.cacheTypes = source["cacheTypes"];
 	        this.offloadModes = source["offloadModes"];
+	        this.expertOffloadModes = source["expertOffloadModes"];
 	        this.update = this.convertValues(source["update"], RuntimeUpdate);
 	        this.restartPending = source["restartPending"];
 	        this.mlxSupported = source["mlxSupported"];
@@ -2030,6 +2180,7 @@ export namespace store {
 	    // Go type: time
 	    createdAt: any;
 	    savedPath?: string;
+	    projectPath?: string;
 	    generation?: GenerationRecipe;
 	    derivation?: Derivation;
 	
@@ -2054,6 +2205,7 @@ export namespace store {
 	        this.warning = source["warning"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	        this.savedPath = source["savedPath"];
+	        this.projectPath = source["projectPath"];
 	        this.generation = this.convertValues(source["generation"], GenerationRecipe);
 	        this.derivation = this.convertValues(source["derivation"], Derivation);
 	    }

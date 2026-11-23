@@ -36,6 +36,15 @@ const (
 	// CacheTypeF16 is llama.cpp's default KV cache type. Passing it is a no-op, so
 	// it is omitted rather than sent.
 	CacheTypeF16 = "f16"
+	// CacheTypeF32 and CacheTypeBF16 are the other two KV cache types that are not
+	// quantized, so they are the company a quantized V cache needs flash attention
+	// without. Spelled here for the same reason as F16, and pinned by a test.
+	CacheTypeF32  = "f32"
+	CacheTypeBF16 = "bf16"
+	// SpecTypeDraftMTP is llama.cpp's name for speculative decoding that uses the
+	// model's own multi-token prediction heads (docs/speculative.md). The heads ship in
+	// the model's own GGUF, so there is no second file to name.
+	SpecTypeDraftMTP = "draft-mtp"
 )
 
 // Options describe one server to start.
@@ -85,12 +94,40 @@ type Options struct {
 	// for the two explicit modes, empty for the server's own default — as many
 	// layers as fit in the device memory. See gpuLayers.
 	Offload string
+	// ExpertOffload keeps a mixture-of-experts model's expert tensors in system
+	// RAM: ExpertOffloadCPU passes `--cpu-moe`, ExpertOffloadLayers passes
+	// `--n-cpu-moe ExpertLayers`. Empty passes nothing, which is llama.cpp's own
+	// placement and the right answer for a dense model.
+	ExpertOffload string
+	// ExpertLayers is the N of `--n-cpu-moe N`, read only with ExpertOffloadLayers.
+	ExpertLayers int
+	// MTPDraft is the N of `--spec-draft-n-max N`, sent with `--spec-type draft-mtp`:
+	// the model's own heads draft that many tokens and the model verifies them in one
+	// batch. Zero sends nothing, which is llama.cpp's default of no speculation, and is
+	// also what a file without the heads gets — see the header check at the start.
+	MTPDraft int
+	// MTPConfidence is the P of `--spec-draft-p-min P`: the head stops drafting once it
+	// is less sure than this, which is what lets a longer draft pay. Zero is
+	// llama.cpp's own "no floor" and sends nothing; it is only read with MTPDraft.
+	MTPConfidence float64
+	// MTPKVOverride is one `--override-kv` pair for the metadata key a file is missing,
+	// sent only alongside a draft count. The value this app builds is
+	// GGUFInfo.MTPKVOverride(): the head count of a file whose conversion kept the nextn
+	// tensors and dropped the key llama.cpp splits the block table by, which would
+	// otherwise load with every head reported unused.
+	MTPKVOverride string
 	// Trace asks for the server's log at llama.cpp's trace level, which is where it
 	// names the device it chose and how many layers it placed there; the reading
 	// this app reports comes from those two lines and nowhere else. See
 	// TraceVerbosity. It is placed before Extra, so a verbosity the user typed
 	// themselves still wins.
 	Trace bool
+	// Parallel leaves llama.cpp its own several slots. Off, a start passes
+	// `--parallel 1`: a slot keeps prompt-processing and compute buffers of its own,
+	// so slots nobody uses are memory nobody gets back — measured at about 1.35 GiB
+	// over three of them on a 27B file with MTP. The KV cache is not part of that:
+	// `-c` sizes the pool once and one slot may reach all of it.
+	Parallel bool
 	// Extra is the rest of the user's command line, already split.
 	Extra []string
 	// Host defaults to 127.0.0.1. A server is only ever started on the loopback
@@ -140,6 +177,10 @@ type Server struct {
 	stopRequested bool
 	status        Status
 	log           *ring
+	// output is the file every log line is appended to as well, with its own mutex so
+	// a failure message can name it without holding the state lock.
+	outputMu sync.Mutex
+	output   *ServerLog
 
 	// probe reports whether a server at url is answering yet. It is a field so a
 	// test can answer without a real server loading a real model.
@@ -176,6 +217,44 @@ func (s *Server) SetReadyTimeout(d time.Duration) { s.readyTimeout = d }
 // SetStateHandler registers the callback that reports state changes.
 func (s *Server) SetStateHandler(fn func(Status)) { s.onState = fn }
 
+// SetServerLog attaches the file every line of this server's output is also written
+// to, replacing one that was attached earlier. It is set once, before the first
+// start, by the caller that knows the data directory; the ring keeps the pointer, so
+// the file is written without another lock being taken on the way.
+//
+// A file that cannot be opened is an error rather than a silent no-op: diagnostics
+// are not worth failing a start over, but they are worth a line in the launch log.
+func (s *Server) SetServerLog(path string) error {
+	file, err := NewServerLog(path)
+	if err != nil {
+		return err
+	}
+	s.outputMu.Lock()
+	previous := s.output
+	s.output = file
+	s.outputMu.Unlock()
+	s.log.setOutput(file)
+	previous.Close()
+	return nil
+}
+
+// LogPath is the file the whole output is written to, empty when none is attached.
+func (s *Server) LogPath() string {
+	s.outputMu.Lock()
+	defer s.outputMu.Unlock()
+	return s.output.Path()
+}
+
+// logHint names that file on a failed row. The message already quotes the lines that
+// explain the failure when it can pick them out of a backtrace; this is where the
+// rest of it is, including the frames the message drops.
+func (s *Server) logHint() string {
+	if path := s.LogPath(); path != "" {
+		return fmt.Sprintf("\n— vollständiges Protokoll: %s", path)
+	}
+	return ""
+}
+
 // probeHealth reports whether a llama-server at url is ready to answer.
 //
 // /health answers 503 with "Loading model" while the weights are still coming in
@@ -202,6 +281,12 @@ func probeHealth(ctx context.Context, url string) error {
 // is reported through Status: the caller gets a "starting" server immediately
 // rather than a bound method that blocks for minutes.
 func (s *Server) Start(opts Options) error {
+	// First, because it is a contradiction between two settings rather than anything
+	// about the files: a start that got as far as the binary would report the wrong
+	// reason for the same failure.
+	if err := opts.cacheAttentionRefusal(); err != nil {
+		return err
+	}
 	label := opts.label()
 	if opts.Binary == "" {
 		return uimsg.Errorf("runtime.binaryMissing", label)
@@ -255,8 +340,10 @@ func (s *Server) Start(opts Options) error {
 	// user's own arguments, not for the loader.
 	cmd.Dir = dirOf(opts.Binary)
 	cmd.Env = serverEnv(opts.Binary)
-	cmd.Stdout = s.log.writer()
-	cmd.Stderr = s.log.writer()
+	// One writer for both streams: two would buffer a partial line each, and the
+	// order the program wrote its last words in is part of what explains a crash.
+	output := s.log.writer()
+	cmd.Stdout, cmd.Stderr = output, output
 	proc.StartInOwnGroup(cmd)
 
 	// A fresh Status rather than an update: the placement reading belongs to the
@@ -292,15 +379,19 @@ func (s *Server) Start(opts Options) error {
 
 	s.log.addf("%s gestartet (PID %d) auf %s", label, cmd.Process.Pid, url)
 	s.log.addf("Aufruf: %s %s", opts.Binary, strings.Join(args, " "))
-	go s.monitor(cmd, url, readyPath, waited)
+	go s.monitor(cmd, url, readyPath, waited, output)
 	return nil
 }
 
 // monitor waits for the process to become ready, then for it to exit.
-func (s *Server) monitor(cmd *exec.Cmd, url, readyPath string, waited chan struct{}) {
+func (s *Server) monitor(cmd *exec.Cmd, url, readyPath string, waited chan struct{}, output *lineWriter) {
 	exit := make(chan error, 1)
 	go func() {
 		err := cmd.Wait()
+		// Wait also waits for the goroutines that copied the two pipes, so nothing is
+		// writing now: a line a crash left without its newline — the assert itself, on a
+		// bad day — is flushed before the tail is read, into the ring and the file both.
+		output.flush()
 		close(waited)
 		exit <- err
 	}()
@@ -375,8 +466,11 @@ func (s *Server) program() string {
 
 // finished records the exit of a process that is no longer running.
 func (s *Server) finished(cmd *exec.Cmd, err error) {
-	// Take the log tail before the state lock: the log watcher also takes it.
-	tail := s.log.tail(6)
+	// Take the log tail before the state lock: the log watcher also takes it. The
+	// whole ring rather than its last six lines, because a crash pads the end with a
+	// backtrace and the reason sits above it — see failureTail.
+	tail := s.log.snapshot()
+	reason := s.log.failureReason()
 	s.mu.Lock()
 	if s.cmd != cmd {
 		s.mu.Unlock()
@@ -403,10 +497,10 @@ func (s *Server) finished(cmd *exec.Cmd, err error) {
 		}
 	case err != nil:
 		s.status.State = StateFailed
-		s.status.Error = fmt.Sprintf("%s wurde beendet: %v%s", label, err, formatTail(tail))
+		s.status.Error = fmt.Sprintf("%s wurde beendet: %v%s%s", label, err, formatTail(failureTail(tail, reason)), s.logHint())
 	default:
 		s.status.State = StateFailed
-		s.status.Error = fmt.Sprintf("%s hat sich beendet", label)
+		s.status.Error = fmt.Sprintf("%s hat sich beendet%s", label, s.logHint())
 	}
 	s.status.PID, s.status.Port, s.status.URL = 0, 0, ""
 	s.status.Offload = Offload{}
@@ -553,9 +647,10 @@ func (s *Server) setState(state string) {
 }
 
 func (s *Server) fail(message string) {
+	hint := s.logHint()
 	s.mu.Lock()
 	s.status.State = StateFailed
-	s.status.Error = message
+	s.status.Error = message + hint
 	s.status.PID = 0
 	// The reading described the process that just died, whether it died while
 	// loading or hours later. A failed row that still says which device the layers
@@ -575,6 +670,27 @@ func (s *Server) publish() {
 	if s.onState != nil {
 		s.onState(s.Status())
 	}
+}
+
+// cacheAttentionRefusal reports a V cache type the server cannot load with flash
+// attention off.
+//
+// llama.cpp implements a quantized V cache through flash attention and refuses the model
+// otherwise — "quantized V cache requires flash_attn to be enabled", measured on build
+// 12189 — so the contradiction is caught here, where it can be a sentence about the two
+// settings instead of a log line from a load that already failed. "auto" is not a
+// contradiction: the server switches flash attention on by itself for such a cache
+// (same build, a q8_0 cache starts with no flag and is refused only with `off`).
+func (o Options) cacheAttentionRefusal() error {
+	v := strings.TrimSpace(o.CacheTypeV)
+	if v == "" || o.FlashAttention != FlashAttentionOff {
+		return nil
+	}
+	switch v {
+	case CacheTypeF16, CacheTypeF32, CacheTypeBF16:
+		return nil
+	}
+	return uimsg.Errorf("runtime.quantizedVCacheNeedsFlashAttention", v)
 }
 
 // label is what the messages call this program.
@@ -615,6 +731,40 @@ func (o Options) args() []string {
 	if n := gpuLayers(o.Offload); n != "" {
 		args = append(args, "--gpu-layers", n)
 	}
+	// A mixture-of-experts model reads only the few experts that fire per token, so
+	// keeping the expert tensors in system RAM costs bandwidth rather than
+	// correctness — which is what makes a 20.4 GB model answer on a 16 GB card. The
+	// two flags are llama.cpp's own; "auto" passes neither, because the placement
+	// that fits is what `--fit` already does.
+	switch o.ExpertOffload {
+	case ExpertOffloadCPU:
+		args = append(args, "--cpu-moe")
+	case ExpertOffloadLayers:
+		args = append(args, "--n-cpu-moe", strconv.Itoa(o.ExpertLayers))
+	}
+	// Multi-token prediction, from the model's own heads. Both flags are needed: the
+	// type is what turns the heads on, and the count is how far ahead they draft. Only
+	// sent when there is a count, because llama.cpp's default is no speculation at all.
+	if o.MTPDraft > 0 {
+		// The key a conversion dropped comes first: llama.cpp reads metadata overrides in
+		// get_key, so this is what makes the head count exist before the flags that use it.
+		if kv := strings.TrimSpace(o.MTPKVOverride); kv != "" {
+			// The user's own pair wins: llama.cpp applies the first matching
+			// `--override-kv` it reads, so a duplicate appended after theirs would shadow
+			// them despite coming later on the command line.
+			key, _, _ := strings.Cut(kv, "=")
+			if !o.userOverridesKV(key) {
+				args = append(args, "--override-kv", kv)
+			}
+		}
+		args = append(args, "--spec-type", SpecTypeDraftMTP, "--spec-draft-n-max", strconv.Itoa(o.MTPDraft))
+		// The floor is only meaningful with a count to truncate, so it rides along with
+		// it. FormatFloat with -1 prints the shortest form that round-trips, which is
+		// "0.75" rather than "0.750000" — the flag takes a probability, not a shape.
+		if o.MTPConfidence > 0 {
+			args = append(args, "--spec-draft-p-min", strconv.FormatFloat(o.MTPConfidence, 'f', -1, 64))
+		}
+	}
 	// The level whose output carries the placement reading. Before Extra, so a
 	// verbosity the user typed themselves is the one that counts.
 	if o.Trace {
@@ -635,6 +785,13 @@ func (o Options) args() []string {
 	if v := strings.TrimSpace(o.CacheTypeV); v != "" && v != CacheTypeF16 {
 		args = append(args, "--cache-type-v", v)
 	}
+	// One slot is the default here and has to be asked for: llama.cpp's own default is
+	// auto, which resolves to four. `Parallel` therefore sends no slot flag at all —
+	// naming a number would be this app inventing a count llama.cpp owns. Before Extra,
+	// so a `-np` typed into the further arguments is still the one that counts.
+	if !o.Parallel {
+		args = append(args, "--parallel", "1")
+	}
 	// The projector is the other half of a vision model. Before Extra, like every
 	// flag above: a user who names a different one themselves types it as an extra
 	// argument, and theirs is the one that counts.
@@ -642,6 +799,29 @@ func (o Options) args() []string {
 		args = append(args, "--mmproj", p)
 	}
 	return append(args, o.Extra...)
+}
+
+// userOverridesKV reports whether the user's own arguments already set this metadata
+// key, as `--override-kv KEY=TYPE:VALUE` with the pair possibly inside a comma list.
+func (o Options) userOverridesKV(key string) bool {
+	key = strings.TrimSpace(key)
+	for i := 0; i < len(o.Extra); i++ {
+		var value string
+		switch {
+		case o.Extra[i] == "--override-kv" && i+1 < len(o.Extra):
+			value = o.Extra[i+1]
+		case strings.HasPrefix(o.Extra[i], "--override-kv="):
+			value = strings.TrimPrefix(o.Extra[i], "--override-kv=")
+		default:
+			continue
+		}
+		for _, pair := range strings.Split(value, ",") {
+			if k, _, ok := strings.Cut(pair, "="); ok && strings.TrimSpace(k) == key {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FreePort asks the kernel for an unused port.
@@ -721,6 +901,126 @@ func SplitArgs(s string) []string {
 	return args
 }
 
+// failureTail is the part of a dead process's log worth quoting in the message.
+//
+// The last lines of an abort are not the reason for it. llama.cpp's crash handler
+// forks gdb on SIGABRT, so a failed assert — the line that says what went wrong —
+// is followed by twenty-odd frames and gdb's notes about the sources it could not
+// find. Reporting the raw tail of that leaves the user with "signal: aborted (core
+// dumped)" and a stack trace that starts at __libc_start_call_main, which is
+// exactly the report this function was written from. The frames are dropped and the
+// last six lines that are the program's own are kept, so the assert is in the
+// message.
+func failureTail(lines []string, reason string) []string {
+	// A reason recorded as it arrived outlives the window, and on an abort it has to:
+	// gdb prints the stop location, then a frame and a warning about the source file it
+	// cannot find for every frame, so forty lines are gone before the process is even
+	// reaped. The assert that explains the crash was already off the end of the ring.
+	if reason != "" {
+		return []string{reason}
+	}
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !isCrashFrame(line) {
+			kept = append(kept, line)
+		}
+	}
+	// Everything was backtrace: report what there is rather than nothing.
+	if len(kept) == 0 {
+		kept = lines
+	}
+	if len(kept) > 6 {
+		kept = kept[len(kept)-6:]
+	}
+	return kept
+}
+
+// reasonMarkers are how a program says why it is about to die. They are substrings
+// rather than a grammar because there is no grammar: ggml asserts, CUDA and HIP report,
+// the C++ runtime unwinds, and every one of them has its own phrasing.
+var reasonMarkers = []string{
+	"GGML_ASSERT", "GGML_ABORT", "assertion failed",
+	"terminate called", "what():", "std::bad_alloc",
+	"CUDA error", "HIP error", "out of memory", "failed to allocate",
+	"failed to load", "error loading", "error:",
+}
+
+// isReasonLine reports whether a line is the program's own explanation of a failure.
+func isReasonLine(line string) bool {
+	for _, marker := range reasonMarkers {
+		if strings.Contains(line, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCrashFrame reports whether a line belongs to the backtrace a crash handler adds
+// to the log, rather than to the program's own report of what happened.
+//
+// The shapes are gdb's: `#16 0x00007f… in __libc_start_call_main (…) at …`,
+// `warning: 58	../sysdeps/nptl/libc_start_call_main.h: No such file or directory`,
+// and the `[Inferior 1 (process 8315) detached]` gdb writes as it lets go.
+func isCrashFrame(line string) bool {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "#") {
+		// A frame is a number, then the address: `#0  0x00007f…`. A log line that
+		// merely starts with a hash has a word there instead.
+		i := 1
+		for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+			i++
+		}
+		if i > 1 && strings.HasPrefix(strings.TrimSpace(line[i:]), "0x") {
+			return true
+		}
+	}
+	if strings.HasPrefix(line, "[") && strings.Contains(line, "process") {
+		return true
+	}
+	if strings.HasPrefix(line, "[New LWP") || strings.HasPrefix(line, "[Thread debugging") {
+		return true
+	}
+	if strings.HasPrefix(line, "warning:") {
+		// gdb numbers the source file it could not find: `warning: 58\t../…`.
+		// llama.cpp's own warnings are prose after the colon and stay.
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "warning:"))
+		if rest != "" && rest[0] >= '0' && rest[0] <= '9' && strings.ContainsRune(rest, '\t') {
+			return true
+		}
+	}
+	// gdb's attach stop, which carries no frame number: `0x00007f… in __GI___wait4 (…)
+	// at …`, followed by the source line it stopped on (`30\tin ../sysdeps/…`) and the
+	// thread it belongs to. The aborting process is inside gdb's own wait4 when gdb
+	// looks at it, which is why this pair was the whole message in the second report.
+	if strings.HasPrefix(line, "0x") && strings.Contains(line, " in ") {
+		return true
+	}
+	if sourceLineNumber(line) > 0 {
+		return true
+	}
+	if strings.HasPrefix(line, "Thread ") && strings.Contains(line, "(process ") {
+		return true
+	}
+	return strings.Contains(line, "libthread_db")
+}
+
+// sourceLineNumber is the number of gdb's `30\tin ../sysdeps/…`, the source line it
+// prints for the frame it stopped on, and 0 for anything else.
+func sourceLineNumber(line string) int {
+	i := 0
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i == 0 || !strings.HasPrefix(strings.TrimLeft(line[i:], " \t"), "in ") {
+		return 0
+	}
+	n, err := strconv.Atoi(line[:i])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 func formatTail(lines []string) string {
 	if len(lines) == 0 {
 		return ""
@@ -744,6 +1044,17 @@ type ring struct {
 	mu    sync.Mutex
 	lines []string
 	max   int
+	// out, when set, is the file every line is appended to as well. It is the whole
+	// output rather than the window, which is what makes a crash readable afterwards;
+	// outBroken stops a file that stopped accepting writes from reporting that once
+	// per line.
+	out       *ServerLog
+	outBroken bool
+	// reason is the last line that looked like the program's explanation of a failure.
+	// It is kept beside the window rather than in it because the crash handler's own
+	// output is longer than the window: by the time the process is reaped, the sentence
+	// that names the crash has been evicted.
+	reason string
 	// watch, when set, is handed every line as it arrives, outside the lock. It is
 	// for the readings that have to survive the window being small — the placement
 	// of a model's layers is printed early and the log after it is long. It must
@@ -763,9 +1074,18 @@ func (r *ring) add(line string) {
 		return
 	}
 	r.mu.Lock()
-	r.lines = append(r.lines, line)
-	if len(r.lines) > r.max {
-		r.lines = r.lines[len(r.lines)-r.max:]
+	r.push(line)
+	if isReasonLine(line) {
+		r.reason = line
+	}
+	// Under the ring's lock, so the file carries the lines in the order the program
+	// wrote them. A write that fails does not stop the server: the notice goes into
+	// the window instead, once, and the file is left alone from then on.
+	if r.out != nil {
+		if _, err := r.out.Write([]byte(line + "\n")); err != nil && !r.outBroken {
+			r.outBroken = true
+			r.push(fmt.Sprintf("Protokolldatei nicht beschreibbar: %v", err))
+		}
 	}
 	watch := r.watch
 	r.mu.Unlock()
@@ -775,6 +1095,39 @@ func (r *ring) add(line string) {
 	if watch != nil {
 		watch(line)
 	}
+}
+
+// setOutput attaches the file the lines are also written to.
+func (r *ring) setOutput(file *ServerLog) {
+	r.mu.Lock()
+	r.out = file
+	r.outBroken = false
+	r.mu.Unlock()
+}
+
+// failureReason is the last explanation the program gave, empty when it gave none.
+func (r *ring) failureReason() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reason
+}
+
+// push appends one line to the window, dropping the oldest. The caller holds the lock.
+func (r *ring) push(line string) {
+	r.lines = append(r.lines, line)
+	if len(r.lines) > r.max {
+		r.lines = r.lines[len(r.lines)-r.max:]
+	}
+}
+
+// snapshot copies every line the ring still holds; a failure has to look further
+// back than the tail the panel shows.
+func (r *ring) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.lines))
+	copy(out, r.lines)
+	return out
 }
 
 func (r *ring) tail(n int) []string {
@@ -809,6 +1162,17 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+// flush adds the line the program was in the middle of writing, if any. It is called
+// once the process is reaped and nothing can write any more.
+func (w *lineWriter) flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.part.Len() > 0 {
+		w.r.add(w.part.String())
+		w.part.Reset()
+	}
 }
 
 // writer is the io.Writer both output streams share, so the order of a server's

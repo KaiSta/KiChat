@@ -135,19 +135,7 @@ func elevationRequest(line string) (string, bool) {
 		return false
 	})
 	for _, segment := range segments {
-		words := strings.Fields(segment)
-		// Leading assignments are not the command: `DEBIAN_FRONTEND=noninteractive sudo …`
-		// asks for elevation just as plainly as the bare line.
-		for len(words) > 0 && isAssignment(words[0]) {
-			words = words[1:]
-		}
-		// `env sudo …` names the program one word later, and `env -i sudo …` two.
-		if len(words) > 0 && strings.ToLower(words[0]) == "env" {
-			words = words[1:]
-			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
-				words = words[1:]
-			}
-		}
+		words := stripCommandPrefix(strings.Fields(segment))
 		if len(words) == 0 {
 			continue
 		}
@@ -156,6 +144,33 @@ func elevationRequest(line string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// stripCommandPrefix removes what a shell runs before the command word: leading `NAME=value`
+// assignments and `env` with its own options, in whichever order they appear. `env
+// DEBIAN_FRONTEND=noninteractive sudo …` and `A=1 env B=2 git …` are the same request as the
+// bare program, and reading assignments only *before* an `env` missed both — so a line the app
+// cannot run, or one that discards work, reached the person as an ordinary question.
+//
+// It is the prefix only: the word it returns is the program, and everything after it is left
+// for the caller to read.
+func stripCommandPrefix(words []string) []string {
+	for {
+		// `DEBIAN_FRONTEND=noninteractive sudo …` asks for elevation just as plainly as the
+		// bare line.
+		for len(words) > 0 && isAssignment(words[0]) {
+			words = words[1:]
+		}
+		if len(words) == 0 || strings.ToLower(words[0]) != "env" {
+			return words
+		}
+		// `env sudo …` names the program one word later, and `env -i sudo …` two. What follows
+		// may itself be an assignment, which is why this is a loop rather than two passes.
+		words = words[1:]
+		for len(words) > 0 && strings.HasPrefix(words[0], "-") {
+			words = words[1:]
+		}
+	}
 }
 
 // isAssignment reports whether a word is a leading `NAME=value` of a command, as opposed to
@@ -640,7 +655,29 @@ var outputHandoff = strings.NewReplacer("||", " ", "2>&1", " ", ">&1", " ")
 // `2>&1` points stderr at the stream this app already captures — a line that carries only that
 // prints into the result like any other.
 func buffersOutput(line string) bool {
-	return strings.ContainsAny(outputHandoff.Replace(line), "|>")
+	return strings.ContainsAny(outputHandoff.Replace(stripQuoted(line)), "|>")
+}
+
+// stripQuoted removes single- and double-quoted spans, so a pipe or a redirect written inside
+// an argument is not read as a handoff: `go test -run 'TestA|TestB'` prints as it goes, and a
+// note telling the model to drop a pipe it never wrote sends it to fix the wrong thing. An
+// unterminated quote drops the rest, which is a line the shell would reject anyway.
+func stripQuoted(line string) string {
+	var b strings.Builder
+	var quote rune
+	for _, r := range line {
+		switch {
+		case quote != 0 && r == quote:
+			quote = 0
+		case quote != 0:
+			continue
+		case r == '\'' || r == '"':
+			quote = r
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // commandResult is what the model reads: what ran, what it printed, and how it ended.

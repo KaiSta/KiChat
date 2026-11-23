@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+// TestARequestCounterLeavesOutReasoning pins what a request costs on the wire. Only the backends
+// that replay it receive a reply's reasoning (ReasoningReplayer); charging
+// half of it — as this counter did — prices text the vendor never tokenises, and the pacing of a
+// turn is decided from this figure.
+func TestARequestCounterLeavesOutReasoning(t *testing.T) {
+	withThinking := []Message{{Role: RoleAssistant, Content: "Antwort",
+		Reasoning: strings.Repeat("gedacht ", 200)}}
+	without := []Message{{Role: RoleAssistant, Content: "Antwort"}}
+	if got, want := EstimateMessagesTokens(withThinking), EstimateMessagesTokens(without); got != want {
+		t.Fatalf("a reply with %d characters of reasoning costs %d tokens, want the same %d as its "+
+			"answer alone", len(withThinking[0].Reasoning), got, want)
+	}
+	// The message still has to be priced for something, or the comparison says nothing.
+	if EstimateMessagesTokens(without) <= 0 {
+		t.Fatal("the counter reports nothing for a message with content")
+	}
+	// A caller that knows the backend replays it asks for the other answer.
+	if got, bare := EstimateMessagesTokensAs(withThinking, true), EstimateMessagesTokens(without); got <= bare {
+		t.Fatalf("a replayed reasoning priced at %d tokens, want more than the answer's %d", got, bare)
+	}
+}
+
 // TestAToolSchemaIsPricedByItsOwnText keeps the tool block honest about what it costs.
 //
 // A schema travels as JSON: every property name, type and description is on the wire

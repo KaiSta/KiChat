@@ -54,6 +54,16 @@ function LocalModelSection({
     ...defaultManagedModel(),
     ...saved,
   }))
+  // What the selected GGUF says about itself: its layer count and whether it has
+  // experts at all. Read from the header rather than by starting it, so the panel can
+  // hide the expert-offload row on a dense model and offer a starting layer count on a
+  // mixture — the two facts a file name cannot give.
+  const [probe, setProbe] = useState<Awaited<ReturnType<typeof App.InspectManagedModel>> | null>(null)
+  // The same header facts for every file in the folder, by path. A list that named
+  // the mixtures of experts by matching the file name would be guessing: the header
+  // is the only place a GGUF states it, and the row that acts on it is one click
+  // away from this list.
+  const [fileTraits, setFileTraits] = useState<Record<string, main.ManagedModelTraits>>({})
 
   const refresh = async () => {
     try {
@@ -294,6 +304,30 @@ function LocalModelSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelDir])
 
+  // One call for the whole listing rather than one per row: each probe is a stat and
+  // a few kilobytes of the same metadata block, and a folder of forty models should
+  // not be forty trips through the bridge. A path the map does not mention is a file
+  // whose header would not parse, which the row reads as "nothing to say" — the same
+  // silence as a dense file, and the badge is only shown for the case that is known.
+  useEffect(() => {
+    const paths = (scan?.files ?? []).map((f) => f.path)
+    if (paths.length === 0) {
+      setFileTraits({})
+      return
+    }
+    let live = true
+    App.InspectManagedModels(paths)
+      .then((next) => {
+        if (live) setFileTraits(next ?? {})
+      })
+      .catch(() => {
+        if (live) setFileTraits({})
+      })
+    return () => {
+      live = false
+    }
+  }, [scan])
+
   // The chips: the folders the user has picked, in the order they picked them, then
   // the places LM Studio keeps models, each path shown once. The picked ones come from
   // the draft's list rather than from the backend's — forgetting one has to drop its
@@ -389,6 +423,12 @@ function LocalModelSection({
   const offloadModes = status?.offloadModes?.length ? status.offloadModes : ['auto', 'all', 'off']
   const offloadLabel = (id: string) =>
     tDynamic(`settings.managed.offload${id.charAt(0).toUpperCase()}${id.slice(1)}`)
+  // The same shape for the expert modes, with a fallback list for a status that
+  // predates the field — a picker with no options would leave the stored mode
+  // unchangeable, which is worse than a stale option.
+  const expertModes = status?.expertOffloadModes?.length ? status.expertOffloadModes : ['auto', 'cpu', 'layers']
+  const expertLabel = (id: string) =>
+    tDynamic(`settings.managed.expert${id.charAt(0).toUpperCase()}${id.slice(1)}`)
 
   const folderLabel = (kind: string, path: string) =>
     kind === 'custom'
@@ -466,6 +506,133 @@ function LocalModelSection({
   // A CPU family is not a mistake to warn about, and a build that reported no
   // memory has nothing to compare against — that case already has its own row.
   const tooLarge = chosenAccel !== 'cpu' && deviceFreeBytes > 0 && selectedBytes > deviceFreeBytes
+  // The header's own verdict, once there is one: a dense model has no expert tensors to
+  // move, so the row that moves them is not shown at all. No probe (no model, or a
+  // header that would not parse) keeps the row — silence is not evidence of a dense
+  // model, and hiding the control on a guess would take it from the model that needs it.
+  const traits = probe?.traits ?? null
+  const expertRow = !traits || traits.expertCount > 0
+  const suggestedLayers = probe?.suggestedLayers ?? 0
+  // Multi-token prediction is a second per-file capability. Its row exists only for a
+  // file whose header declares the heads — or for a file that still carries a count,
+  // which is how one gets turned off after the file was replaced.
+  //
+  // Three states, and the row has to show the same one the start uses: a stored 0 is a
+  // deliberate off, a stored count is used as it is, and an absent entry is undecided —
+  // so a file whose header has the heads starts with the recommendation, which is why
+  // the box arrives ticked rather than at 0.
+  const storedMTP = (model.mtp ?? {})[model.modelPath]
+  const mtpSupported = (traits?.mtpLayers ?? 0) > 0
+  const suggestedMTP = probe?.suggestedMtpTokens ?? 0
+  const mtpDrafts = storedMTP ?? (mtpSupported ? suggestedMTP : 0)
+  const mtpRow = mtpSupported || storedMTP !== undefined
+  // The confidence floor is the count's companion: the head stops drafting below it,
+  // and that is what makes a longer draft pay. Same three states: a stored 0 is "no floor"
+  // on purpose, an absent entry follows the recommendation.
+  const storedFloor = (model.mtpConfidence ?? {})[model.modelPath]
+  const suggestedMTPFloor = probe?.suggestedMtpConfidence ?? 0
+  // The fallback follows the count, not the header: with MTP off nothing is sent, so a
+  // suggested floor sitting in the disabled field would claim a setting in effect.
+  const mtpFloor = storedFloor ?? (mtpDrafts > 0 && mtpSupported ? suggestedMTPFloor : 0)
+
+  // The expert placement of the file on screen. It is kept per file, not per entry: a
+  // layer count that fits a 48-layer mixture is the wrong answer for a 32-layer one,
+  // and the chat's picker moves only the path, so one number per backend used to
+  // follow the next file picked there. Changing the path above is enough to switch
+  // which choice this row shows and edits.
+  const expertChoice = (model.experts ?? {})[model.modelPath] ?? { offload: 'auto', layers: 0 }
+  const setExpertChoice = (offload: string, layers: number) => {
+    const path = model.modelPath
+    if (!path) return
+    // Automatic carries no count: the field beside it is disabled, and a leftover number
+    // there would read as the value in use. normaliseExpertChoices zeroes it on the way
+    // to disk, so this is only so the row does not mislead before that save.
+    update({
+      experts: { ...(model.experts ?? {}), [path]: { offload, layers: offload === 'auto' ? 0 : layers } },
+    })
+  }
+  // Whether the row already shows what the header and the free memory add up to. A
+  // suggestion of 0 is not "no advice": it means the file fits, and the recommended
+  // placement for a file that fits is the automatic one.
+  const atSuggestion =
+    suggestedLayers > 0
+      ? expertChoice.offload === 'layers' && expertChoice.layers === suggestedLayers
+      : expertChoice.offload === 'auto'
+  const useSuggestion = () =>
+    setExpertChoice(suggestedLayers > 0 ? 'layers' : 'auto', suggestedLayers)
+  // The MTP count for the file on screen. Turning it on fills the recommendation rather
+  // than leaving a 1 nobody asked for; turning it off writes a 0, because deleting the
+  // entry would mean "undecided" and the next start would turn the flags back on.
+  const setMTP = (drafts: number) => {
+    const path = model.modelPath
+    if (!path) return
+    const next = { ...(model.mtp ?? {}), [path]: drafts }
+    const floors = { ...(model.mtpConfidence ?? {}) }
+    if (drafts > 0) {
+      // The floor is part of the recommendation, not a second decision: past four drafts
+      // it is what keeps the acceptance rate from collapsing, so switching MTP on fills
+      // it as well — unless a floor is already there, which is a choice of the user's.
+      if (floors[path] === undefined && suggestedMTPFloor > 0) floors[path] = suggestedMTPFloor
+    } else {
+      // A floor with no count to truncate describes nothing, and dropping it means
+      // switching MTP back on fills the recommendation again rather than an old number.
+      delete floors[path]
+    }
+    update({ mtp: next, mtpConfidence: floors })
+  }
+  // The floor is written even at 0: an absent entry follows the recommendation, so a
+  // field the user cleared has to store "no floor" rather than fall back to the advice.
+  const setMTPFloor = (floor: number) => {
+    const path = model.modelPath
+    if (!path) return
+    update({ mtpConfidence: { ...(model.mtpConfidence ?? {}), [path]: floor } })
+  }
+
+  // Probed again when the numbers it is computed from change, so the suggestion is not
+  // frozen at whatever the panel knew on its first render.
+  useEffect(() => {
+    const path = model.modelPath
+    if (!path) {
+      setProbe(null)
+      return
+    }
+    let live = true
+    App.InspectManagedModel(path, selectedBytes, deviceFreeBytes)
+      .then((next) => {
+        if (live) setProbe(next)
+      })
+      .catch(() => {
+        if (live) setProbe(null)
+      })
+    return () => {
+      live = false
+    }
+  }, [model.modelPath, selectedBytes, deviceFreeBytes])
+
+  // A file nobody has decided on yet is filled with the recommendation as soon as the
+  // header answers, so the row states what a start would send instead of "automatic, 0"
+  // — a count the user would otherwise have to discover by switching the mode, then
+  // read as advice rather than as the setting. A file that already has a choice is left
+  // alone, and so is one set back to automatic: that stored "auto" is the answer, not an
+  // empty slot, and the ref keeps a probe that recomputes from overwriting either. A dense
+  // file is left out even though its row is hidden — a count for expert tensors it does
+  // not have would become a flag that moves nothing.
+  const prefilled = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const path = model.modelPath
+    const suggested = probe?.suggestedLayers ?? 0
+    if (
+      !path ||
+      suggested <= 0 ||
+      (probe?.traits.expertCount ?? 0) <= 0 ||
+      (model.experts ?? {})[path] ||
+      prefilled.current.has(path)
+    ) {
+      return
+    }
+    prefilled.current.add(path)
+    update({ experts: { ...(model.experts ?? {}), [path]: { offload: 'layers', layers: suggested } } })
+  }, [model.modelPath, model.experts, probe, update])
 
   // What the backend knows about a newer llama.cpp build. The reading counts only
   // when it is about the build the app installs for — the family and the source the
@@ -874,6 +1041,11 @@ function LocalModelSection({
           <div className="max-h-40 overflow-auto rounded-md" style={{ border: '1px solid var(--border)' }}>
             {scan.files.map((file) => {
               const picked = file.path === model.modelPath
+              // A mixture of experts is the one family whose placement setting matters,
+              // and its count is the fact the expert-offload row is built on — so the
+              // list answers "which of these benefits?" before a file is selected.
+              const fileTrait = fileTraits[file.path]
+              const isMoE = !!fileTrait && fileTrait.expertCount > 0
               return (
                 <button
                   key={file.path}
@@ -908,6 +1080,32 @@ function LocalModelSection({
                       "what is in use" beside "what is on disk". It appears while the
                       model is still loading too, because that is the moment a user
                       waiting on it looks here. */}
+                  {isMoE && fileTrait && (
+                    <span
+                      className="badge shrink-0"
+                      title={t('settings.managed.moeDetected', {
+                        layers: formatNumber(fileTrait.blockCount),
+                        experts: formatNumber(fileTrait.expertCount),
+                        active: formatNumber(fileTrait.expertUsedCount),
+                      })}
+                    >
+                      {t('settings.managed.folderMoe', {
+                        active: formatNumber(fileTrait.expertUsedCount),
+                        experts: formatNumber(fileTrait.expertCount),
+                      })}
+                    </span>
+                  )}
+                  {/* The other capability a header can declare, on the same row and for
+                      the same reason: whether this file can speculate from its own heads
+                      is not something its name says. */}
+                  {fileTrait && fileTrait.mtpLayers > 0 && (
+                    <span
+                      className="badge shrink-0"
+                      title={t('settings.managed.mtpDetected', { n: formatNumber(fileTrait.mtpLayers) })}
+                    >
+                      {t('settings.managed.folderMTP')}
+                    </span>
+                  )}
                   {file.path === loadedModel && (
                     <span className={`badge shrink-0 ${state === 'starting' ? '' : 'badge-ok'}`}>
                       {t(
@@ -964,6 +1162,24 @@ function LocalModelSection({
           />
         </label>
       </div>
+
+      {/* One slot rather than the four llama.cpp allocates when it is told nothing, and
+          that is the default: a slot that is never used still reserves its own compute
+          buffers, so a single-session machine pays for parallelism it does not get —
+          1.35 GiB of it on the file measured in documentation/LLAMACPP.md. Unticking is
+          the opt-in for concurrency: a second simultaneous request then runs beside the
+          first. Applies from the next start, like the two controls below. */}
+      <label
+        className="mb-2 flex items-center gap-2 text-[12px]"
+        title={t('settings.managed.singleSlotHint')}
+      >
+        <input
+          type="checkbox"
+          checked={!model.parallel}
+          onChange={(e) => update({ parallel: !e.target.checked })}
+        />
+        {t('settings.managed.singleSlot')}
+      </label>
 
       {/* Flash attention and a quantised KV cache trade memory for precision, and
           the choice only takes effect on the next start — a running server is
@@ -1051,6 +1267,177 @@ function LocalModelSection({
         </label>
         <div className="mt-1 text-[11px] faint">{t('settings.managed.offloadHint')}</div>
       </div>
+
+      {/* A mixture-of-experts model can keep its routed experts in system RAM while
+          attention, the shared weights and the KV cache stay on the card — that is
+          what makes a 20 GB MoE model answer on a 16 GB card. It is a row of its own
+          rather than part of the GPU layers above because it moves a different tensor
+          set: the layer count there is still about attention and the KV cache. The
+          header decides whether the row exists at all. */}
+      {expertRow && (
+        <>
+      <div className="mb-2 grid grid-cols-2 gap-2">
+        <label className="text-[11px]">
+          {t('settings.managed.expert')}
+          <select
+            className="input mono mt-1"
+            value={expertChoice.offload}
+            onChange={(e) =>
+              setExpertChoice(
+                e.target.value,
+                // A starting count the moment the mode is chosen, so the field is never
+                // left at 0 — which means "all of them on the card" — by accident.
+                e.target.value === 'layers' && expertChoice.layers <= 0 && suggestedLayers > 0
+                  ? suggestedLayers
+                  : expertChoice.layers,
+              )
+            }
+          >
+            {expertModes.map((id) => (
+              <option key={id} value={id}>
+                {expertLabel(id)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[11px]">
+          {t('settings.managed.expertLayerCount')}
+          <input
+            className="input mono mt-1"
+            type="number"
+            min={0}
+            step={1}
+            max={traits?.blockCount || undefined}
+            disabled={expertChoice.offload !== 'layers'}
+            value={expertChoice.layers}
+            onChange={(e) => setExpertChoice(expertChoice.offload, Number(e.target.value) || 0)}
+          />
+        </label>
+      </div>
+      {/* Back to what this file's header and the free memory add up to. The suggestion
+          is a reading rather than a memory: a count typed once survives a switch to
+          another file and back, and this is the one control that returns to the number
+          the app would have chosen — or to automatic placement when the file fits.
+
+          Offered only once there is a reading. With no file, or a header that would not
+          parse, there is no recommendation to return to: a button naming one would be
+          inventing it, and on an empty path it could not act at all. */}
+      {traits && (
+        <div className="mb-2">
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={atSuggestion}
+            onClick={useSuggestion}
+          >
+            {suggestedLayers > 0
+              ? t('settings.managed.expertUseSuggested', { n: formatNumber(suggestedLayers) })
+              : t('settings.managed.expertUseAuto')}
+          </button>
+        </div>
+      )}
+      <div className="mb-2 text-[11px] faint">{t('settings.managed.expertHint')}</div>
+          {traits && traits.expertCount > 0 && (
+            <div className="mb-2 text-[11px] faint">
+              {t('settings.managed.moeDetected', {
+                layers: formatNumber(traits.blockCount),
+                experts: formatNumber(traits.expertCount),
+                active: formatNumber(traits.expertUsedCount),
+              })}
+            </div>
+          )}
+          {suggestedLayers > 0 && (
+            <div className="mb-2 text-[11px] faint">
+              {t('settings.managed.expertSuggested', { n: formatNumber(suggestedLayers) })}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* The model's own heads drafting the next tokens, verified in one batch. The row
+          appears only when the header declares them: the flag on a file without MTP
+          heads stops the server rather than doing nothing, which is why the start checks
+          the same header again. */}
+      {mtpRow && (
+        <>
+          <div className="mb-2 flex items-center gap-2">
+            <input
+              type="checkbox"
+              className="h-3 w-3"
+              checked={mtpDrafts > 0}
+              onChange={(e) =>
+                setMTP(e.target.checked ? (suggestedMTP > 0 ? suggestedMTP : 1) : 0)
+              }
+            />
+            <span className="text-[11px]">{t('settings.managed.mtp')}</span>
+          </div>
+          <div className="mb-2">
+            <label className="text-[11px]">
+              {t('settings.managed.mtpDraft')}
+              {/* Committed on blur for the same reason as the floor: clearing the field to
+                  type a new count would otherwise switch MTP off — and wipe the floor it
+                  carries — between two keystrokes. */}
+              <input
+                key={`mtp-count:${model.modelPath}:${mtpDrafts}`}
+                className="input mono mt-1"
+                type="number"
+                min={1}
+                max={16}
+                step={1}
+                disabled={mtpDrafts <= 0}
+                defaultValue={mtpDrafts}
+                onBlur={(e) => {
+                  const typed = Math.round(Number(e.target.value))
+                  if (!Number.isFinite(typed) || typed <= 0) setMTP(0)
+                  else setMTP(Math.min(typed, 16))
+                }}
+              />
+            </label>
+          </div>
+          {mtpSupported && suggestedMTP > 0 && (
+            <div className="mb-2 text-[11px] faint">
+              {t('settings.managed.mtpSuggested', { n: formatNumber(suggestedMTP) })}
+            </div>
+          )}
+          {/* A count whose file was replaced by one without the heads: the row is kept so
+              it can be turned off, but the start probes the header and sends nothing, and
+              a ticked box with no such line would claim otherwise. */}
+          {mtpDrafts > 0 && traits && !mtpSupported && (
+            <div className="mb-2 text-[11px] faint">{t('settings.managed.mtpStale')}</div>
+          )}
+          <div className="mb-2">
+            <label className="text-[11px]">
+              {t('settings.managed.mtpFloor')}
+              {/* Uncontrolled while it is being typed, and committed on blur: coercing
+                  every keystroke makes a decimal impossible, because "0." parses to 0 and
+                  the field resets before the "8" arrives. The key re-mounts the input
+                  when the stored number changes underneath — ticking the box fills it. */}
+              <input
+                key={`mtp-floor:${model.modelPath}:${mtpFloor}`}
+                className="input mono mt-1"
+                type="number"
+                min={0.05}
+                max={0.95}
+                step={0.05}
+                disabled={mtpDrafts <= 0}
+                defaultValue={mtpFloor}
+                onBlur={(e) => {
+                  const typed = Number(e.target.value)
+                  if (!Number.isFinite(typed) || typed <= 0) setMTPFloor(0)
+                  else setMTPFloor(Math.min(typed, 0.95))
+                }}
+              />
+            </label>
+          </div>
+          {mtpSupported && suggestedMTPFloor > 0 && (
+            <div className="mb-2 text-[11px] faint">
+              {t('settings.managed.mtpFloorSuggested', { p: formatNumber(suggestedMTPFloor) })}
+            </div>
+          )}
+          <div className="mb-2 text-[11px] faint">{t('settings.managed.mtpFloorHint')}</div>
+          <div className="mb-2 text-[11px] faint">{t('settings.managed.mtpHint')}</div>
+        </>
+      )}
 
       <div className="flex items-center gap-2">
         <button type="button" className="btn btn-sm" disabled={!status?.installed || !model.modelPath} onClick={() => void start()}>

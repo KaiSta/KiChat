@@ -15,6 +15,8 @@ export function ActiveGenerations():Promise<Array<string>>;
 
 export function AddAttachment(arg1:main.AttachmentInput):Promise<store.Attachment>;
 
+export function CheckAppUpdate():Promise<main.AppUpdate>;
+
 export function CheckLlamaRuntimeUpdate():Promise<main.RuntimeUpdate>;
 
 export function ClearChat(arg1:string):Promise<void>;
@@ -35,9 +37,15 @@ export function DeleteCompaction(arg1:string,arg2:string):Promise<void>;
 
 export function DetectTerminal():Promise<main.TerminalStatus>;
 
+export function DismissSearchChallenge():Promise<void>;
+
+export function DropQueuedMessage(arg1:string,arg2:string):Promise<boolean>;
+
 export function ExportBackup(arg1:main.BackupExportRequest):Promise<main.BackupExportResult>;
 
 export function GetAppInfo():Promise<main.AppInfo>;
+
+export function GetAppUpdate():Promise<main.AppUpdate>;
 
 export function GetAttachmentImage(arg1:string):Promise<string>;
 
@@ -82,6 +90,10 @@ export function GetUpscalerInstall():Promise<main.UpscalerInstall>;
 export function GetUpscalerStatus():Promise<tools.UpscalerStatus>;
 
 export function ImportBackup(arg1:Array<string>):Promise<main.BackupImportResult>;
+
+export function InspectManagedModel(arg1:string,arg2:number,arg3:number):Promise<main.ManagedModelProbe>;
+
+export function InspectManagedModels(arg1:Array<string>):Promise<Record<string, main.ManagedModelTraits>>;
 
 export function InstallLlamaRuntime(arg1:string,arg2:string):Promise<void>;
 
@@ -151,6 +163,8 @@ export function ResolveToolApproval(arg1:string,arg2:string):Promise<boolean>;
 
 export function ResolveToolApprovalWith(arg1:string,arg2:string,arg3:string):Promise<boolean>;
 
+export function RestoreDatabase(arg1:string,arg2:string,arg3:string):Promise<void>;
+
 export function RevertFileChange(arg1:string,arg2:string):Promise<void>;
 
 export function RevokeChatConsent(arg1:string,arg2:string):Promise<main.ChatConsent>;
@@ -169,6 +183,8 @@ export function ScrapeIntoChat(arg1:string,arg2:string,arg3:number):Promise<stor
 
 export function Search(arg1:string):Promise<research.SearchOutcome>;
 
+export function SearchChallengeTile(arg1:string):Promise<string>;
+
 export function SendMessage(arg1:main.SendMessageRequest):Promise<void>;
 
 export function SetAttachmentPlacement(arg1:string,arg2:string):Promise<store.Attachment>;
@@ -184,6 +200,8 @@ export function SetManagedModel(arg1:string,arg2:config.ManagedModel):Promise<vo
 export function SetModelOverride(arg1:string,arg2:string,arg3:llm.ModelOverride):Promise<void>;
 
 export function Settings():Promise<config.Settings>;
+
+export function SolveSearchChallenge(arg1:Array<string>):Promise<research.SearchOutcome>;
 
 export function StartFreshDatabase():Promise<void>;
 

@@ -1,8 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { Virtuoso } from 'react-virtuoso'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { OnFileDrop, OnFileDropOff } from '../../wailsjs/runtime/runtime'
-import { App, folderName, formatNumber, modelLabel, type config, type store as storeTypes } from '../lib/api'
+import {
+  App,
+  folderName,
+  formatNumber,
+  modelLabel,
+  type chat,
+  type config,
+  type store as storeTypes,
+} from '../lib/api'
 import { type MessageKey } from '../lib/i18n'
 import { messageText, pendingAttachments, useStore } from '../store'
 import {
@@ -21,6 +29,7 @@ import {
   ToolCallCard,
 } from './MessageParts'
 import { Markdown } from './Markdown'
+import { ChatSearch } from './ChatSearch'
 import { Confirmation } from './Confirmation'
 import { Handoff } from './Handoff'
 import { ProjectChanges } from './ProjectChanges'
@@ -29,8 +38,96 @@ type Item =
   | { kind: 'message'; key: string; message: storeTypes.Message }
   | { kind: 'compaction'; key: string; compaction: storeTypes.Compaction }
 
+type ChatMatch = {
+  /** Index into `items`, which is what Virtuoso scrolls by. */
+  itemIndex: number
+  messageId: string
+  /** Where the hit starts in the message text, for the snippet. */
+  at: number
+  /** One flattened line around the hit, with an ellipsis where it was cut. */
+  snippet: string
+}
+
+/** How much of a message a snippet keeps on either side of the hit. */
+const SNIPPET_BEFORE = 32
+const SNIPPET_AFTER = 48
+
+/** The ranges of a message's markdown that never become text: link and image targets. */
+function linkTargets(source: string): [number, number][] {
+  const out: [number, number][] = []
+  for (let at = source.indexOf(']('); at >= 0; at = source.indexOf('](', at + 2)) {
+    // Balanced parentheses, because a URL can hold them (`.../wiki/Foo_(bar)`), and a
+    // newline ends the attempt: an unclosed `](` in a fence must not swallow the message.
+    let depth = 1
+    let end = at + 2
+    for (; end < source.length && depth > 0; end++) {
+      const ch = source[end]
+      if (ch === '(') depth++
+      else if (ch === ')') depth--
+      else if (ch === '\n') break
+    }
+    if (depth === 0) out.push([at + 2, end - 1])
+  }
+  return out
+}
+
+/**
+ * Every place the query appears in the visible transcript, in reading order.
+ *
+ * The transcript is what the bar searches, which is also what the counter has to describe:
+ * a hit inside a folded compaction is not on screen, so a jump to it would land on a card
+ * with none of the matched text in it. The match is a plain case-insensitive substring —
+ * the text a person typed is the text they are looking for, unlike the model picker's
+ * separated-word search.
+ */
+function searchTranscript(items: Item[], query: string): ChatMatch[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return []
+  const out: ChatMatch[] = []
+  items.forEach((item, itemIndex) => {
+    if (item.kind !== 'message') return
+    const text = item.message.content ?? ''
+    if (!text) return
+    const haystack = text.toLowerCase()
+    const hidden = linkTargets(text)
+    let from = 0
+    for (;;) {
+      const at = haystack.indexOf(needle, from)
+      if (at < 0) break
+      // A hit in a link's target is not a word on screen: counting it gave a counter that
+      // stepped to a message with nothing marked in it.
+      if (hidden.some(([start, end]) => at >= start && at < end)) {
+        from = at + needle.length
+        continue
+      }
+      const start = Math.max(0, at - SNIPPET_BEFORE)
+      const end = Math.min(text.length, at + needle.length + SNIPPET_AFTER)
+      out.push({
+        itemIndex,
+        messageId: item.message.id,
+        at,
+        snippet: `${start > 0 ? '…' : ''}${text.slice(start, end).replace(/\s+/g, ' ').trim()}${end < text.length ? '…' : ''}`,
+      })
+      from = at + needle.length
+      // A pathological query (one letter in a book-length reply) would otherwise build
+      // tens of thousands of entries for a counter nobody reads past "500 of 48 119".
+      if (out.length >= 5000) return out
+    }
+  })
+  return out
+}
+
 /** The one slash command the composer answers itself: empty this conversation, keep the chat. */
 const CLEAR_COMMAND = '/clear'
+
+/**
+ * The queue of a chat with nothing waiting in it.
+ *
+ * One shared array rather than a fresh `[]` per selector call: the selector below builds the
+ * value zustand compares, and a new array on every read is a new snapshot every read (see
+ * the note on `pending`).
+ */
+const NO_QUEUE: chat.QueuedTurn[] = []
 
 export function ChatView() {
   const t = useStore((s) => s.t)
@@ -38,6 +135,10 @@ export function ChatView() {
   const activeChatId = useStore((s) => s.activeChatId)
   const chatLoading = useStore((s) => s.chatLoading)
   const running = useStore((s) => (s.activeChatId ? !!s.running[s.activeChatId] : false))
+  // Messages waiting behind the running turn, in the order the backend will send them.
+  const queued = useStore(
+    useShallow((s) => (s.activeChatId ? s.queued[s.activeChatId] : undefined) ?? NO_QUEUE),
+  )
   const phase = useStore((s) => (s.activeChatId ? s.phase[s.activeChatId] : undefined))
   const phaseWaitMs = useStore((s) => (s.activeChatId ? (s.phaseWaitMs[s.activeChatId] ?? 0) : 0))
   const send = useStore((s) => s.send)
@@ -48,6 +149,14 @@ export function ChatView() {
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // The transcript is virtualised, so a jump has to go through Virtuoso's own scroll
+  // rather than through the DOM node of a message that may not be mounted.
+  const virtuoso = useRef<VirtuosoHandle>(null)
+  // In-chat search: whether the bar is up, what was typed, and the match the reader is on.
+  // The matches themselves are derived from the transcript below.
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchAt, setSearchAt] = useState(0)
   // Whether the newest content should be followed, the element that shows it, and the
   // furthest down the view has been. All three are refs: they belong to scroll and height
   // callbacks, and none of that should cost a render of the transcript.
@@ -63,6 +172,10 @@ export function ChatView() {
   //    React spins in an infinite update loop (#185), which blanks the window
   //    the same way.
   const pending = useStore(useShallow(pendingAttachments))
+  // The files a waiting message carries, by the names its chips showed before it was queued.
+  // One that is no longer in the chat is left out: the row must not name a file that is gone.
+  const queuedFiles = (ids: string[]) =>
+    ids.map((id) => chatState?.attachments.find((a) => a.id === id)?.filename ?? '').filter(Boolean)
   // What the composer's permission note has to say. Read from the stored settings rather
   // than from the chat, because the answer is the same for every chat in the window.
   const autoApprove = useStore((s) => s.settings?.autoApprove)
@@ -240,6 +353,66 @@ export function ChatView() {
     return out
   }, [chatState, collapsed])
 
+  const matches = useMemo(() => searchTranscript(items, searchQuery), [items, searchQuery])
+  // A transcript that shrank under a search — a compaction folded, a chat switched — can
+  // leave the stored index past the end, so the index in use is clamped rather than trusted.
+  const searchIndex = matches.length > 0 ? Math.min(searchAt, matches.length - 1) : 0
+  const activeMatch = searchOpen ? matches[searchIndex] : undefined
+
+  // How many hits each message holds. Marking only the message the search is on made the
+  // rest of the transcript look unmatched, so every message with a hit is marked and says
+  // how many it has. Empty while the bar is closed: the query is kept for the next Ctrl+F,
+  // and a transcript still wearing the last search's marks would read as a stuck state.
+  const hitCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    if (!searchOpen) return counts
+    for (const match of matches) counts.set(match.messageId, (counts.get(match.messageId) ?? 0) + 1)
+    return counts
+  }, [matches, searchOpen])
+
+  // A new query starts at the first match: the old index described the old query.
+  useEffect(() => {
+    setSearchAt(0)
+  }, [searchQuery])
+
+  /* Ctrl+F, and Cmd+F on macOS.
+   *
+   * The browser's own find would search the rendered window — the sidebar, the settings
+   * behind it, and only the messages Virtuoso happens to have mounted — so it is taken over
+   * while a chat is open, and only while one is: there is nothing to search otherwise. */
+  useEffect(() => {
+    if (!activeChatId) return
+    const onFind = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return
+      if (event.key.toLowerCase() !== 'f') return
+      event.preventDefault()
+      setSearchOpen(true)
+    }
+    window.addEventListener('keydown', onFind)
+    return () => window.removeEventListener('keydown', onFind)
+  }, [activeChatId])
+
+  // Stepping through matches scrolls the message into view. Centred rather than aligned to
+  // its top: a match can sit halfway down a long answer, and its first line is not it.
+  useEffect(() => {
+    if (!searchOpen) return
+    const match = matches[Math.min(searchAt, matches.length - 1)]
+    if (!match) return
+    virtuoso.current?.scrollToIndex({ index: match.itemIndex, align: 'center' })
+  }, [searchOpen, searchAt, matches])
+
+  const stepSearch = (delta: number) => {
+    if (matches.length === 0) return
+    setSearchAt((at) => (((at % matches.length) + delta + matches.length) % matches.length))
+  }
+
+  const closeSearch = () => {
+    setSearchOpen(false)
+    // Back where the user was typing: the bar took the caret, and closing it should not
+    // leave the window with nothing focused.
+    textareaRef.current?.focus()
+  }
+
   const submit = async () => {
     const text = input.trim()
     if (!text) return
@@ -255,7 +428,8 @@ export function ChatView() {
       await useStore.getState().clearChat(activeChatId)
       return
     }
-    if (running) return
+    // No `running` guard: a message typed while the answer streams is queued behind it
+    // rather than refused, and the queue above the field is where it shows up.
     setInput('')
     // Sending is a deliberate move to the newest content, so the list follows again even
     // if the user had scrolled up to read: their own message and the reply to it belong
@@ -343,6 +517,19 @@ export function ChatView() {
         <SearchFirstToggle />
       </div>
 
+      {searchOpen && (
+        <ChatSearch
+          query={searchQuery}
+          at={searchIndex}
+          total={matches.length}
+          snippet={activeMatch?.snippet ?? ''}
+          onQuery={setSearchQuery}
+          onNext={() => stepSearch(1)}
+          onPrev={() => stepSearch(-1)}
+          onClose={closeSearch}
+        />
+      )}
+
       {/* Messages */}
       <div
         className="min-h-0 flex-1"
@@ -365,6 +552,7 @@ export function ChatView() {
           </div>
         ) : (
           <Virtuoso
+            ref={virtuoso}
             data={items}
             scrollerRef={trackScroller}
             // A new item and a growing item are both a height change, and that is the one
@@ -379,7 +567,13 @@ export function ChatView() {
             itemContent={(_index, item) =>
               item.kind === 'message' ? (
                 <div className="px-4 pb-1">
-                  <MessageRow message={item.message} folded={item.message.seq <= foldedUpTo} />
+                  <MessageRow
+                    message={item.message}
+                    folded={item.message.seq <= foldedUpTo}
+                    active={activeMatch?.messageId === item.message.id}
+                    hits={hitCounts.get(item.message.id) ?? 0}
+                    query={searchOpen ? searchQuery : ''}
+                  />
                 </div>
               ) : (
                 <div className="px-4">
@@ -468,6 +662,49 @@ export function ChatView() {
           </div>
         )}
 
+        {/* The messages waiting behind this turn, oldest first. Above the field because that is
+            what the next Enter adds to, and every row is deletable: a queue the user cannot
+            shrink is a queue that makes them wait before they can correct themselves. */}
+        {queued.length > 0 && (
+          <div className="mb-2">
+            <div className="faint mb-1 text-[11px]">{t('chat.queue.title')}</div>
+            <ul className="flex flex-col gap-1">
+              {queued.map((entry, index) => (
+                <li
+                  key={entry.id}
+                  className="flex items-center gap-2 rounded-md px-2 py-1 text-[12px]"
+                  style={{ background: 'var(--surface-2)' }}
+                >
+                  <span className="faint shrink-0">{index + 1}</span>
+                  <span className="min-w-0 flex-1 truncate" title={entry.text}>
+                    {entry.text.replace(/\s+/g, ' ')}
+                  </span>
+                  {/* The files this message carries. Their chips left the composer when it was
+                      queued — they are not pending any more — so the row is where they are
+                      shown, and it is the only place that names them. */}
+                  {entry.attachmentIds.length > 0 && (
+                    <span
+                      className="faint max-w-[10rem] shrink-0 truncate"
+                      title={queuedFiles(entry.attachmentIds).join(', ')}
+                    >
+                      📎 {queuedFiles(entry.attachmentIds).join(', ') || entry.attachmentIds.length}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    title={t('chat.queue.remove')}
+                    aria-label={`${t('chat.queue.remove')}: ${entry.text}`}
+                    onClick={() => void useStore.getState().dropQueued(activeChatId, entry.id)}
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <div className="flex items-end gap-2">
           <textarea
             ref={textareaRef}
@@ -482,20 +719,22 @@ export function ChatView() {
             onKeyDown={onKeyDown}
             disabled={running && phase === 'compacting'}
           />
-          {running ? (
+          {running && (
             <button type="button" className="btn btn-danger h-[42px]" onClick={() => void stop()}>
               ⏹ {t('chat.stop')}
             </button>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-primary h-[42px]"
-              disabled={!input.trim()}
-              onClick={() => void submit()}
-            >
-              {t('chat.send')}
-            </button>
           )}
+          {/* While a turn runs this queues the message instead of sending it now, and says so:
+              a button reading “Send” that would not send for another minute is the one lie
+              left in this row. */}
+          <button
+            type="button"
+            className="btn btn-primary h-[42px]"
+            disabled={!input.trim()}
+            onClick={() => void submit()}
+          >
+            {running ? t('chat.queue') : t('chat.send')}
+          </button>
         </div>
 
         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -537,9 +776,18 @@ export function ChatView() {
 function MessageRow({
   message,
   folded,
+  active = false,
+  hits = 0,
+  query = '',
 }: {
   message: storeTypes.Message
   folded: boolean
+  /** The message the in-chat search is on, ringed so a jump has a visible landing. */
+  active?: boolean
+  /** How many search hits this message contains; 0 when the search is closed. */
+  hits?: number
+  /** The query those hits are for, marked in the body; empty when the search is closed. */
+  query?: string
 }) {
   const t = useStore((s) => s.t)
   // Only the message being written subscribes to its own stream buffer. Reading
@@ -574,7 +822,10 @@ function MessageRow({
   }
 
   return (
-    <div className="group py-2" style={folded ? { opacity: 0.72 } : undefined}>
+    <div
+      className="group py-2"
+      style={folded ? { opacity: 0.72 } : undefined}
+    >
       <div className="mb-1 flex items-center gap-2 text-[11px]">
         <span className="font-semibold" style={{ color: isUser ? 'var(--text-dim)' : 'var(--accent)' }}>
           {isUser ? t('chat.you') : t('chat.assistant')}
@@ -588,6 +839,16 @@ function MessageRow({
           </span>
         )}
         {folded && <span className="badge" title={t('compact.title')}>🗜</span>}
+        {/* What the mark is for: one hit and four hits look the same on an outlined card. */}
+        {hits > 0 && (
+          <span
+            className="badge"
+            title={t('chat.searchHits', { '1': String(hits) })}
+            style={{ color: 'var(--accent)' }}
+          >
+            {hits}
+          </span>
+        )}
         {/* A reply the backend stopped delivering is not a finished answer, and it
             has to say so next to the text rather than only in a toast that is gone
             by the time the conversation is read again. */}
@@ -601,11 +862,27 @@ function MessageRow({
 
       <div
         className="rounded-lg px-3 py-2"
-        style={
-          isUser
-            ? { background: 'var(--user-bubble)', border: '1px solid var(--border)' }
-            : { background: 'var(--surface)', border: '1px solid var(--border)' }
-        }
+        /* The mark of a search hit sits on the card rather than inside the text. The body
+           is rendered Markdown, and wrapping every occurrence in a node would fight React's
+           own tree and the renderer's structure; a tinted card and an accent border show
+           which messages hold hits while the reader scrolls, which is what the count and
+           the snippet in the bar cannot show away from the active hit. */
+        style={{
+          background:
+            hits > 0
+              ? `color-mix(in srgb, var(--accent) ${active ? 12 : 6}%, ${
+                  isUser ? 'var(--user-bubble)' : 'var(--surface)'
+                })`
+              : isUser
+                ? 'var(--user-bubble)'
+                : 'var(--surface)',
+          border: `1px solid ${
+            hits > 0
+              ? `color-mix(in srgb, var(--accent) ${active ? 85 : 45}%, var(--border))`
+              : 'var(--border)'
+          }`,
+          ...(active ? { boxShadow: '0 0 0 1px var(--accent)' } : {}),
+        }}
       >
         <MessageImages attachments={message.attachments ?? []} />
         <AttachmentChips attachments={message.attachments ?? []} />
@@ -620,7 +897,12 @@ function MessageRow({
         )}
 
         {live.text ? (
-          <Markdown text={live.text} streaming={live.streaming} sources={message.sources} />
+          <Markdown
+            text={live.text}
+            streaming={live.streaming}
+            sources={message.sources}
+            query={query}
+          />
         ) : live.streaming ? (
           <span className="streaming-cursor" />
         ) : (

@@ -6,11 +6,18 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +26,7 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
+	utls "github.com/refraction-networking/utls"
 )
 
 // capturedRequest is one request as it appeared on the wire: the header block in the order it
@@ -354,4 +362,582 @@ func TestBrowserClientDecodesChainedAndEmptyBodies(t *testing.T) {
 			t.Errorf("body = %q, want empty", got)
 		}
 	})
+}
+
+// measuredSecChUA is what real Chrome builds sent, read from the per-release notes at
+// clearcotelabs.com/chrome-user-agent (measured there on branded Chrome 151–158). Eight versions
+// cover all six brand orders, all three GREASE versions and enough of the separator list to make
+// the generator's rules testable rather than self-referential.
+var measuredSecChUA = map[int]string{
+	151: `"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"`,
+	152: `"Chromium";v="152", "Not?A_Brand";v="24", "Google Chrome";v="152"`,
+	153: `"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"`,
+	154: `"Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99"`,
+	155: `"Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24"`,
+	156: `"Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156"`,
+	157: `"Not-A.Brand";v="99", "Google Chrome";v="157", "Chromium";v="157"`,
+	158: `"Chromium";v="158", "Not.A/Brand";v="24", "Google Chrome";v="158"`,
+}
+
+// TestSecChUAMatchesChromiumsRules pins the generator against those measurements, and pins what
+// this build sends to the measured 158 value. The hand-copied literal this replaced had drifted
+// in all three of brand order, GREASE version and pair, and nothing noticed — "it looks
+// plausible" is not the standard for a header a bot check reads.
+func TestSecChUAMatchesChromiumsRules(t *testing.T) {
+	for major, want := range measuredSecChUA {
+		if got := chromeSecChUa(major); got != want {
+			t.Errorf("chromeSecChUa(%d) = %s, want %s", major, got, want)
+		}
+	}
+	want, ok := measuredSecChUA[chromeMajor]
+	if !ok {
+		t.Fatalf("no measured Sec-CH-UA for Chrome %d — add the row from a real build before "+
+			"moving chromeMajor", chromeMajor)
+	}
+	if chromeWindows.secChUa != want {
+		t.Errorf("the profile sends %s, want the measured %s", chromeWindows.secChUa, want)
+	}
+}
+
+// TestIdentityMajorsAgree is the point of deriving the strings from one number: the user agent,
+// the hints and the hello have to describe the same browser. It fails when the constant has been
+// moved past the captured hello, and it fails when the hello has been swapped for one the user
+// agent does not name — uTLS' HelloChrome_Auto resolves to 155 today and would follow a
+// dependency bump without this.
+func TestIdentityMajorsAgree(t *testing.T) {
+	const uaPrefix, uaSuffix = "Chrome/", ".0.0.0 Safari/537.36"
+	agent := chromeWindows.userAgent
+	index := strings.Index(agent, uaPrefix)
+	if index < 0 || !strings.HasSuffix(agent, uaSuffix) {
+		t.Fatalf("user agent = %q, want a Chrome major between %q and %q", agent, uaPrefix, uaSuffix)
+	}
+	uaMajor, err := strconv.Atoi(strings.TrimSuffix(agent[index+len(uaPrefix):], uaSuffix))
+	if err != nil {
+		t.Fatalf("user agent does not carry a numeric major: %v", err)
+	}
+	if uaMajor != chromeWindows.major || chromeWindows.major != chromeMajor {
+		t.Errorf("user agent says %d, the profile says %d, the constant says %d",
+			uaMajor, chromeWindows.major, chromeMajor)
+	}
+
+	// Two brands carry the real major; the third is Chromium's fake one and carries its own
+	// version on purpose.
+	if got := strings.Count(chromeWindows.secChUa, fmt.Sprintf("v=%q", strconv.Itoa(chromeMajor))); got != 2 {
+		t.Errorf("hints name the major %d times, want 2: %s", got, chromeWindows.secChUa)
+	}
+
+	capture, ok := chromeHelloFor(chromeMajor)
+	if !ok {
+		t.Fatalf("no captured ClientHello covers Chrome %d — add one to chromeHellos", chromeMajor)
+	}
+	if chromeWindows.hello != capture.hello {
+		t.Errorf("hello = %+v, want the capture taken from Chrome %d", chromeWindows.hello, capture.version)
+	}
+	if got := chromeWindows.hello.Version; got != "155" {
+		t.Errorf("hello version = %q, want 155 pinned by name: HelloChrome_Auto moves with the dependency", got)
+	}
+}
+
+// captureClientHello listens for one connection, records the first TLS record it sends and then
+// closes: the ClientHello is the subject, and a server that never answers ends the client's
+// handshake with an error the caller ignores.
+func captureClientHello(t *testing.T) (string, <-chan []byte) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	hellos := make(chan []byte, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+		header := make([]byte, 5)
+		if _, err := io.ReadFull(conn, header); err != nil {
+			return
+		}
+		payload := make([]byte, int(binary.BigEndian.Uint16(header[3:])))
+		if _, err := io.ReadFull(conn, payload); err != nil {
+			return
+		}
+		hellos <- append(header, payload...)
+	}()
+	return listener.Addr().String(), hellos
+}
+
+// helloFrom reads the capture, or fails rather than hanging on a connection that never spoke.
+func helloFrom(t *testing.T, hellos <-chan []byte) []byte {
+	t.Helper()
+	select {
+	case record := <-hellos:
+		return record
+	case <-time.After(10 * time.Second):
+		t.Fatal("no ClientHello was captured")
+		return nil
+	}
+}
+
+// isGREASE reports whether a value is one of the reserved GREASE codepoints
+// (draft-davidben-tls-grease-01): the same byte twice, with 0a0a in the low nibbles. JA4 ignores
+// them in both counts and both hashes.
+func isGREASE(value uint16) bool {
+	return value&0x0f0f == 0x0a0a && byte(value>>8) == byte(value)
+}
+
+// truncatedJA4Hash is a SHA-256 of the comma-joined list, in lower case, cut to twelve characters.
+func truncatedJA4Hash(input string) string {
+	sum := sha256.Sum256([]byte(input))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// rawExtension is one extension of a captured ClientHello: its codepoint and the bytes after the
+// length prefix.
+type rawExtension struct {
+	id   uint16
+	data []byte
+}
+
+// parsedHello is the part of a ClientHello these tests read.
+type parsedHello struct {
+	ciphers    []uint16
+	extensions []rawExtension
+}
+
+// extension answers the first extension with id, or nil when the hello does not carry one.
+func (h parsedHello) extension(id uint16) []byte {
+	for _, ext := range h.extensions {
+		if ext.id == id {
+			return ext.data
+		}
+	}
+	return nil
+}
+
+// parseClientHello walks the record a client actually put on the wire. It is a hand-written walk
+// rather than a call into uTLS' own fingerprinting because the assertion has to be about the
+// bytes the server sees, not about the spec we believe we configured.
+func parseClientHello(t *testing.T, record []byte) parsedHello {
+	t.Helper()
+	if len(record) < 5 || record[0] != 0x16 {
+		t.Fatalf("captured %d bytes, which is not a TLS handshake record", len(record))
+	}
+	handshake := record[5:]
+	if len(handshake) < 4 || handshake[0] != 0x01 {
+		t.Fatalf("handshake type = %#x, want a ClientHello", handshake[0])
+	}
+	body := handshake[4:]
+
+	pos := 0
+	take := func(length int) []byte {
+		if length < 0 || pos+length > len(body) {
+			t.Fatalf("ClientHello ends inside a field at offset %d (need %d of %d)", pos, length, len(body))
+		}
+		out := body[pos : pos+length]
+		pos += length
+		return out
+	}
+	_ = take(2)  // legacy_version, frozen at 1.2 by every TLS 1.3 client
+	_ = take(32) // random
+	_ = take(int(take(1)[0]))
+	cipherBlock := take(int(binary.BigEndian.Uint16(take(2))))
+	_ = take(int(take(1)[0])) // compression methods
+	extensionBlock := take(int(binary.BigEndian.Uint16(take(2))))
+
+	out := parsedHello{ciphers: make([]uint16, 0, len(cipherBlock)/2)}
+	for i := 0; i+1 < len(cipherBlock); i += 2 {
+		out.ciphers = append(out.ciphers, binary.BigEndian.Uint16(cipherBlock[i:]))
+	}
+	for i := 0; i+4 <= len(extensionBlock); {
+		id := binary.BigEndian.Uint16(extensionBlock[i:])
+		length := int(binary.BigEndian.Uint16(extensionBlock[i+2:]))
+		i += 4
+		if i+length > len(extensionBlock) {
+			t.Fatalf("extension %04x overruns the block", id)
+		}
+		out.extensions = append(out.extensions, rawExtension{id: id, data: extensionBlock[i : i+length]})
+		i += length
+	}
+	return out
+}
+
+// applicationProtocols decodes the ALPN and ALPS framing: a list length, then length-prefixed
+// names.
+func applicationProtocols(data []byte) []string {
+	if len(data) < 2 {
+		return nil
+	}
+	length := int(binary.BigEndian.Uint16(data))
+	data = data[2:]
+	if length > len(data) {
+		length = len(data)
+	}
+	var protocols []string
+	for i := 0; i < length; {
+		size := int(data[i])
+		i++
+		if i+size > len(data) {
+			return protocols
+		}
+		protocols = append(protocols, string(data[i:i+size]))
+		i += size
+	}
+	return protocols
+}
+
+// ja4Of computes the JA4 fingerprint of one captured ClientHello record, following FoxIO's
+// specification: transport, version, SNI, cipher and extension counts and the first ALPN value;
+// then a truncated SHA-256 of the hex-sorted cipher list; then one of the hex-sorted extension ids
+// (without SNI and ALPN, which the prefix already carries) joined to the signature algorithms in
+// the order they were sent.
+//
+// It is computed from the bytes rather than from the spec that produced them, so the assertion is
+// about what a bot check would hash, not about what we believe we configured.
+func ja4Of(t *testing.T, record []byte) string {
+	t.Helper()
+	parsed := parseClientHello(t, record)
+	ciphers, extensions := parsed.ciphers, parsed.extensions
+
+	var (
+		hasSNI     bool
+		firstALPN  string
+		signatures []uint16
+		versions   []uint16
+	)
+	for _, ext := range extensions {
+		switch ext.id {
+		case 0x0000:
+			hasSNI = true
+		case 0x0010:
+			// A list length, then one length-prefixed name: JA4 describes the first.
+			if len(ext.data) >= 3 {
+				nameLength := int(ext.data[2])
+				if 3+nameLength <= len(ext.data) {
+					firstALPN = string(ext.data[3 : 3+nameLength])
+				}
+			}
+		case 0x000d:
+			for i := 2; i+1 < len(ext.data); i += 2 {
+				signatures = append(signatures, binary.BigEndian.Uint16(ext.data[i:]))
+			}
+		case 0x002b:
+			for i := 1; i+1 < len(ext.data); i += 2 {
+				versions = append(versions, binary.BigEndian.Uint16(ext.data[i:]))
+			}
+		}
+	}
+
+	version := uint16(0x0303)
+	for _, candidate := range versions {
+		if !isGREASE(candidate) && candidate > version {
+			version = candidate
+		}
+	}
+	versionWords := map[uint16]string{
+		0x0304: "13", 0x0303: "12", 0x0302: "11", 0x0301: "10", 0x0300: "s3",
+	}
+	versionWord, known := versionWords[version]
+	if !known {
+		t.Fatalf("unexpected version %04x in the hello", version)
+	}
+
+	alpn := "00"
+	if firstALPN != "" {
+		first, last := firstALPN[0], firstALPN[len(firstALPN)-1]
+		if isASCIIAlphanumeric(first) && isASCIIAlphanumeric(last) {
+			alpn = string(first) + string(last)
+		}
+	}
+
+	cipherHex := make([]string, 0, len(ciphers))
+	for _, cipher := range ciphers {
+		if isGREASE(cipher) {
+			continue
+		}
+		cipherHex = append(cipherHex, fmt.Sprintf("%04x", cipher))
+	}
+	extensionCount := 0
+	extensionHex := make([]string, 0, len(extensions))
+	for _, ext := range extensions {
+		if isGREASE(ext.id) {
+			continue
+		}
+		extensionCount++
+		if ext.id == 0x0000 || ext.id == 0x0010 {
+			continue
+		}
+		extensionHex = append(extensionHex, fmt.Sprintf("%04x", ext.id))
+	}
+	signatureHex := make([]string, 0, len(signatures))
+	for _, signature := range signatures {
+		if isGREASE(signature) {
+			continue
+		}
+		signatureHex = append(signatureHex, fmt.Sprintf("%04x", signature))
+	}
+	sort.Strings(cipherHex)
+	sort.Strings(extensionHex)
+
+	count := func(n int) string {
+		if n > 99 {
+			n = 99
+		}
+		return fmt.Sprintf("%02d", n)
+	}
+	sni := "i"
+	if hasSNI {
+		sni = "d"
+	}
+	prefix := "t" + versionWord + sni + count(len(cipherHex)) + count(extensionCount) + alpn
+	return prefix + "_" + truncatedJA4Hash(strings.Join(cipherHex, ",")) + "_" +
+		truncatedJA4Hash(strings.Join(extensionHex, ",")+"_"+strings.Join(signatureHex, ","))
+}
+
+func isASCIIAlphanumeric(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
+}
+
+// helloServerName is the name the captured connections claim. It is not the fixture's address:
+// SNI is part of the fingerprint, and a hello sent to an address measures as "i" instead of "d".
+const helloServerName = "html.duckduckgo.com"
+
+// helloAsThePreset captures the ClientHello uTLS builds for the profile with no edit of ours: the
+// browser that was captured. The fixture never answers, so the handshake ends in an error that is
+// the point — the hello has already been sent by then.
+func helloAsThePreset(t *testing.T) []byte {
+	t.Helper()
+	addr, hellos := captureClientHello(t)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	uconn := utls.UClient(conn, &utls.Config{
+		ServerName:         helloServerName,
+		InsecureSkipVerify: true,
+	}, chromeWindows.hello)
+	_ = uconn.Handshake()
+	return helloFrom(t, hellos)
+}
+
+// helloAsThisClient captures the ClientHello browserClient actually puts on the wire, through the
+// same handshake path a search takes.
+func helloAsThisClient(t *testing.T) []byte {
+	t.Helper()
+	addr, hellos := captureClientHello(t)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	client := newBrowserClient(chromeWindows)
+	_, _ = client.handshake(context.Background(), conn, helloServerName)
+	return helloFrom(t, hellos)
+}
+
+// TestBrowserClientPresentsChromesJa4 pins the handshake against the value the outside world
+// computes from it. The published JA4 of the captured Chrome 155 ClientHello is
+// t13d1517h2_8daaf6152771_cb7bf5808d99 (the 133 one was t13d1516h2_…_d8a2da3f94cd); if our bytes
+// produce it, the hello is Chrome's and not merely Chrome-shaped.
+func TestBrowserClientPresentsChromesJa4(t *testing.T) {
+	const chrome155JA4 = "t13d1517h2_8daaf6152771_cb7bf5808d99"
+
+	t.Run("profile", func(t *testing.T) {
+		if got := ja4Of(t, helloAsThePreset(t)); got != chrome155JA4 {
+			t.Errorf("JA4 = %s, want the published %s", got, chrome155JA4)
+		}
+	})
+
+	// The one place this client is deliberately not a browser: it speaks HTTP/1.1, so the ALPN
+	// field of the fingerprint is h1. Asserted rather than assumed, so the difference cannot
+	// grow unnoticed.
+	t.Run("client", func(t *testing.T) {
+		const want = "t13d1517h1_8daaf6152771_cb7bf5808d99"
+		if got := ja4Of(t, helloAsThisClient(t)); got != want {
+			t.Errorf("JA4 = %s, want %s", got, want)
+		}
+	})
+}
+
+// TestALPNAndALPSSendOneProtocolList pins the pair the two protocol lists have to make. Chrome
+// derives its ALPS list from the protocols it offers in ALPN, so a client that advertises h2 in
+// ALPS while its ALPN says http/1.1 only is offering something no browser sends — which is what
+// this package did while the two lists were set independently. The preset half proves the cut is
+// still needed (a uTLS release could change the preset), the client half pins what we send.
+func TestALPNAndALPSSendOneProtocolList(t *testing.T) {
+	// 0x0010 is ALPN; 0x44cd is the codepoint uTLS uses for Chrome's newer ALPS form.
+	const alpnCode, alpsCode uint16 = 0x0010, 0x44cd
+
+	protocolsOf := func(t *testing.T, record []byte) (alpn, alps []string) {
+		t.Helper()
+		hello := parseClientHello(t, record)
+		alpn = applicationProtocols(hello.extension(alpnCode))
+		alps = applicationProtocols(hello.extension(alpsCode))
+		if len(alpn) == 0 {
+			t.Fatal("the hello carries no ALPN extension")
+		}
+		if len(alps) == 0 {
+			t.Fatal("the hello carries no ALPS extension, so it is not the Chrome profile")
+		}
+		return alpn, alps
+	}
+
+	t.Run("the captured profile offers h2 in both", func(t *testing.T) {
+		alpn, alps := protocolsOf(t, helloAsThePreset(t))
+		if !slices.Contains(alpn, "h2") || !slices.Contains(alps, "h2") {
+			t.Fatalf("preset offers ALPN %v and ALPS %v, want h2 in both — the cut below exists for this", alpn, alps)
+		}
+	})
+
+	t.Run("this client offers only what it speaks", func(t *testing.T) {
+		alpn, alps := protocolsOf(t, helloAsThisClient(t))
+		want := []string{chromeALPN}
+		if !slices.Equal(alpn, want) {
+			t.Errorf("ALPN = %v, want %v", alpn, want)
+		}
+		if !slices.Equal(alps, want) {
+			t.Errorf("ALPS = %v, want %v — a browser derives its ALPS list from ALPN, so a mismatch is a pair no client produces",
+				alps, want)
+		}
+	})
+}
+
+// TestBrowserClientCarriesTheSitesCookies pins the jar: the first request goes out as a profile
+// that has never been to the site, the second one carries what the site set. Without it every
+// search was a stranger and a solved bot check had nothing to be remembered in.
+func TestBrowserClientCarriesTheSitesCookies(t *testing.T) {
+	var (
+		mu                       sync.Mutex
+		requests                 int
+		firstCookie, nextCookies string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		if requests == 1 {
+			firstCookie = r.Header.Get("Cookie")
+		} else {
+			nextCookies = r.Header.Get("Cookie")
+		}
+		mu.Unlock()
+		http.SetCookie(w, &http.Cookie{Name: "dc", Value: "de-de", Path: "/"})
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	client := newBrowserClient(chromeWindows)
+	// A jar of its own: the process-wide one belongs to the identity and the other tests share
+	// it, so asserting on it here would be asserting on their traffic.
+	client.jar, _ = cookiejar.New(nil)
+	for range 2 {
+		resp, err := client.postForm(context.Background(), srv.URL+"/html/", url.Values{"q": {"x"}}, "de")
+		if err != nil {
+			t.Fatalf("postForm: %v", err)
+		}
+		_ = resp.Body.Close()
+	}
+	if firstCookie != "" {
+		t.Errorf("the first request carried cookies: %q", firstCookie)
+	}
+	if !strings.Contains(nextCookies, "dc=de-de") {
+		t.Errorf("the second request carried %q, want the cookie the first answer set", nextCookies)
+	}
+}
+
+// TestBrowserClientEscapesTheQueryOnTheRequestLine pins the measured failure behind a 400: the
+// anomaly form's action carries its query verbatim — `&q=Bürostuhl hohe Rückenlehne…` — and a space
+// on the request line is not a request at all, so the host answered 400 Bad Request and an answer
+// to the check could never be posted.
+func TestBrowserClientEscapesTheQueryOnTheRequestLine(t *testing.T) {
+	target, err := url.Parse("https://duckduckgo.com/anomaly.js?sv=html&q=Bürostuhl hohe Rückenlehne&r=euw")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := requestURI(target)
+	want := "/anomaly.js?sv=html&q=B%C3%BCrostuhl%20hohe%20R%C3%BCckenlehne&r=euw"
+	if got != want {
+		t.Errorf("request line target = %q, want %q", got, want)
+	}
+	if strings.ContainsAny(got, " \t") {
+		t.Errorf("%q still carries whitespace on the request line", got)
+	}
+
+	// An escape the host already made is not escaped a second time.
+	escaped, err := url.Parse("https://duckduckgo.com/anomaly.js?q=B%C3%BCrostuhl%20hohe")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := requestURI(escaped); got != "/anomaly.js?q=B%C3%BCrostuhl%20hohe" {
+		t.Errorf("an already escaped query was rewritten: %q", got)
+	}
+}
+
+// TestBrowserClientPostsTheAnswerAsTheSearchPage pins the hop the bot check's answer makes. The
+// form lives on html.duckduckgo.com and posts to duckduckgo.com; a browser carries the search page's
+// own origin and address across that hop and calls it same-site. An answer that names the site
+// itself as its origin is a hop no browser makes, and the host judges it as automation rather than
+// as an answer.
+func TestBrowserClientPostsTheAnswerAsTheSearchPage(t *testing.T) {
+	client := newBrowserClient(chromeWindows)
+	target, err := url.Parse("https://duckduckgo.com/anomaly.js?cc=sre&sv=html")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	from, err := url.Parse("https://html.duckduckgo.com/html/")
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	request := client.requestText(target, url.Values{"ct": {"x"}}, "de", from)
+	for _, want := range []string{
+		"Origin: https://html.duckduckgo.com\r\n",
+		"Referer: https://html.duckduckgo.com/html/\r\n",
+		"Sec-Fetch-Site: same-site\r\n",
+		"Sec-Fetch-Mode: navigate\r\n",
+		"Sec-Fetch-User: ?1\r\n",
+		"Sec-Fetch-Dest: document\r\n",
+	} {
+		if !strings.Contains(request, want) {
+			t.Errorf("the answer's request has no %q:\n%s", want, request)
+		}
+	}
+	if strings.Contains(request, "Origin: https://duckduckgo.com\r\n") {
+		t.Errorf("the answer claims to come from the site it posts to:\n%s", request)
+	}
+
+	// A page posting to itself — the search form on the page that carries it — is same-origin, and
+	// the address is the page's own rather than the site's root.
+	own, err := url.Parse("https://html.duckduckgo.com/html/")
+	if err != nil {
+		t.Fatalf("parse page: %v", err)
+	}
+	request = client.requestText(own, url.Values{"q": {"Mietrecht"}}, "de", own)
+	for _, want := range []string{
+		"Origin: https://html.duckduckgo.com\r\n",
+		"Referer: https://html.duckduckgo.com/html/\r\n",
+		"Sec-Fetch-Site: same-origin\r\n",
+	} {
+		if !strings.Contains(request, want) {
+			t.Errorf("a page posting to itself has no %q:\n%s", want, request)
+		}
+	}
+
+	// A page that is not known at all — a check kept without one — falls back to the search form's
+	// shape rather than naming an origin no host has.
+	request = client.requestText(target, url.Values{"ct": {"x"}}, "de", &url.URL{})
+	for _, want := range []string{
+		"Origin: https://duckduckgo.com\r\n",
+		"Referer: https://duckduckgo.com/\r\n",
+		"Sec-Fetch-Site: same-site\r\n",
+	} {
+		if !strings.Contains(request, want) {
+			t.Errorf("a check with no page has no %q:\n%s", want, request)
+		}
+	}
+	if site := formFetchSite(target, &url.URL{}); site != "same-site" {
+		t.Errorf("fetch site with no page = %q, want same-site", site)
+	}
 }

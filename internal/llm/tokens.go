@@ -76,14 +76,28 @@ const imageTokensEach = 1024
 // EstimateImageTokens returns the conservative token cost of n image payloads.
 func EstimateImageTokens(n int) int { return n * imageTokensEach }
 
-// EstimateMessagesTokens approximates the token cost of a full message list,
-// including the image payloads that are sent as data URLs.
+// EstimateMessagesTokens approximates the token cost of a message list as it is sent:
+// the content, the tool calls and the image payloads that travel as data URLs.
+//
+// A reply's reasoning is not counted, because most backends never receive it: see
+// EstimateMessagesTokensAs for the two shapes that do. That keeps this counter honest
+// for what it prices — the pacing of a turn, the room a summarisation spends — where
+// charging for text the backend never tokenises would hold a request back for nothing.
 func EstimateMessagesTokens(messages []Message) int {
+	return EstimateMessagesTokensAs(messages, false)
+}
+
+// EstimateMessagesTokensAs is EstimateMessagesTokens for a backend whose message shape
+// carries an assistant reply's reasoning back to the model (ReasoningReplayer), where
+// those messages are prompt on every round and have to be priced as such.
+func EstimateMessagesTokensAs(messages []Message, replayReasoning bool) int {
 	total := 0
 	for _, m := range messages {
 		total += perMessageOverhead
 		total += EstimateTokens(m.Content)
-		total += EstimateTokens(m.Reasoning) / 2 // reasoning is often trimmed
+		if replayReasoning && m.Role == RoleAssistant {
+			total += EstimateTokens(m.Reasoning)
+		}
 		for _, tc := range m.ToolCalls {
 			total += EstimateTokens(tc.Name) + EstimateTokens(tc.Arguments) + 8
 		}

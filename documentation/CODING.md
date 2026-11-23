@@ -33,10 +33,17 @@ filesystem (`os.SameFile`) rather than comparing strings, because a symlink and 
 one folder with two names. Archived projects do not claim one: an archived chat is one the
 user has finished with.
 
-The prompt a project starts on is the user's **coding-agent preset** when they have edited it
-(`codingAgentPrompt` in `app.go`), and the shipped body otherwise — the textarea under
-Settings → Prompts is where those instructions are meant to live, so a rewritten one has to be
-what the next project starts with.
+The prompt a project starts on is chosen under **Settings → Prompts → Code project**: one of
+the named stored prompts, with the coding-agent one as the default (`projectPrompt` in
+`app.go`). That default is what every project created before the selector existed still gets,
+so a rewritten coding-agent prompt is what the next project starts with unless somebody picks
+another name. Chats are chosen the same way, and default to the research prompt (`chatPrompt`).
+The tab edits one named prompt at a time — the list beside the textarea chooses which — so every
+prompt a conversation can start on has a name the selectors can show. A default prompt edited
+before the selectors existed had no name; `normalise` moves it into a `custom` preset and selects
+that for chat, rather than dropping the text. Neither selector moves an existing conversation —
+a project stores its prompt in `store.Chat.SystemPrompt` — and a project's own instructions
+still belong in the folder's `AGENTS.md`.
 
 ## 2. The folder boundary
 
@@ -342,7 +349,7 @@ user who trusted it would be worse off than one who reads the card.
 
 | Bound | Value | Why |
 | --- | --- | --- |
-| Output kept | 32 KiB from the start, 32 KiB from the end, the middle dropped and counted | A build says what it is doing first and what failed last. Keeping one end loses the story or its conclusion. |
+| Output kept | 15 KiB from the start, 15 KiB from the end, the middle dropped and counted | A build says what it is doing first and what failed last. Keeping one end loses the story or its conclusion. The two ends sit under `tools.MaxToolResultBytes` (32 KiB) rather than at half of it, so the note saying where the body was cut still fits. |
 | Default timeout | 120 s | Sized for a test suite or a build on a slow machine. Too short is worse than too long: it turns a working command into a mystery. |
 | Maximum timeout | 600 s | Beyond that it is not a command, it is a service, and a service belongs in a terminal the user owns. |
 | stdin | closed | A command that stops to ask a question gets EOF immediately — `git commit` without `-m` complains instead of a two-minute silence. |
@@ -416,7 +423,7 @@ an empty answer does not read as an empty folder).
 **A hit is a window, not a line.** `search_files` returns at most `MaxHitLine` bytes per hit,
 taken *around* the match with an ellipsis on whichever side was cut (`workspace.clipHit`). A
 line is the unit a reader thinks in, but a minified bundle or a generated JSON is one line of
-megabytes: returning it whole spends the answer's tool budget on a single hit, and cutting from
+megabytes: returning it whole spends the request's room on a single hit, and cutting from
 the start hides the very text that made the line a hit. The same bound is why a `read_file`
 whose line is larger than the whole 24 kB window answers *"line 1 is longer than the window,
 search for it"* instead of *"the file is empty"* — the window never starts, and the second

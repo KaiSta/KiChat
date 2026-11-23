@@ -512,11 +512,11 @@ func (s *Store) CreateAttachment(a Attachment) error {
 	_, err = s.db.Exec(`
 INSERT INTO attachments (id,chat_id,message_id,kind,filename,mime,size_bytes,
   sha256,pages,token_estimate,placement,document_id,warning,created_at,generation_json,
-  derivation_json)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  derivation_json,project_path)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.ChatID, a.MessageID, a.Kind, a.Filename, a.Mime, a.SizeBytes,
 		a.SHA256, a.Pages, a.TokenEstimate, a.Placement, a.DocumentID,
-		a.Warning, millis(a.CreatedAt), generation, derivation)
+		a.Warning, millis(a.CreatedAt), generation, derivation, a.ProjectPath)
 	return err
 }
 
@@ -620,7 +620,7 @@ func (s *Store) PruneExpiredCaches() (int64, error) {
 
 const attachmentColumns = `id,chat_id,message_id,kind,filename,mime,size_bytes,
   sha256,pages,token_estimate,placement,document_id,warning,created_at,generation_json,
-  saved_path,derivation_json`
+  saved_path,derivation_json,project_path`
 
 func scanAttachment(row interface{ Scan(...any) error }) (Attachment, error) {
 	var a Attachment
@@ -628,7 +628,8 @@ func scanAttachment(row interface{ Scan(...any) error }) (Attachment, error) {
 	var generation, derivation string
 	err := row.Scan(&a.ID, &a.ChatID, &a.MessageID, &a.Kind, &a.Filename, &a.Mime,
 		&a.SizeBytes, &a.SHA256, &a.Pages, &a.TokenEstimate, &a.Placement,
-		&a.DocumentID, &a.Warning, &created, &generation, &a.SavedPath, &derivation)
+		&a.DocumentID, &a.Warning, &created, &generation, &a.SavedPath, &derivation,
+		&a.ProjectPath)
 	if err != nil {
 		return Attachment{}, err
 	}

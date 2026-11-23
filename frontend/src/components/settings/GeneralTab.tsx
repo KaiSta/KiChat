@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { App, toDate, type config, type main, type runtime } from '../../lib/api'
-import { useStore } from '../../store'
+import { errText, useStore } from '../../store'
 import { asLang, LANGS } from '../../lib/i18n'
 import { ModelPicker } from '../ModelPicker'
 import { Section, Field } from './shared'
@@ -177,7 +177,7 @@ export function GeneralTab({
         </Field>
       </Section>
 
-      <AboutSection info={info} />
+      <AboutSection info={info} draft={draft} patch={patch} />
     </>
   )
 }
@@ -191,7 +191,15 @@ export function GeneralTab({
  * in a bug report. The copy button exists because the usual way to answer "what
  * version are you on?" is a screenshot — this makes it one click of text.
  */
-function AboutSection({ info }: { info: main.AppInfo | null }) {
+function AboutSection({
+  info,
+  draft,
+  patch,
+}: {
+  info: main.AppInfo | null
+  draft: config.Settings
+  patch: (c: Partial<config.Settings>) => void
+}) {
   const t = useStore((s) => s.t)
   const [copied, setCopied] = useState(false)
   const [copiedTrace, setCopiedTrace] = useState(false)
@@ -201,6 +209,8 @@ function AboutSection({ info }: { info: main.AppInfo | null }) {
   // the list that picks it can only be exercised on the operating system it belongs to.
   const [term, setTerm] = useState<main.TerminalStatus | null>(null)
   const [termFailed, setTermFailed] = useState(false)
+  const [update, setUpdate] = useState<main.AppUpdate | null>(null)
+  const [checking, setChecking] = useState(false)
   // The trace belongs to the start rather than to a chat, so it is asked for once
   // and shown even when no model is configured yet.
   useEffect(() => {
@@ -209,9 +219,43 @@ function AboutSection({ info }: { info: main.AppInfo | null }) {
       .then(setTerm)
       .catch(() => setTermFailed(true))
   }, [])
+  // The cached reading first, and one request only if there is none: the answer is
+  // held on the Go side, so opening Settings twice does not spend a second request
+  // out of GitHub's unauthenticated budget. The button re-checks on demand.
+  useEffect(() => {
+    let live = true
+    void App.GetAppUpdate()
+      .then((cached) => {
+        if (!live) return
+        setUpdate(cached)
+        if (cached.checked) return
+        setChecking(true)
+        return App.CheckAppUpdate().then((reading) => {
+          if (live) setUpdate(reading)
+        })
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (live) setChecking(false)
+      })
+    return () => {
+      live = false
+    }
+  }, [])
   // The row only appears once the backend has answered, so a failed bridge
   // shows nothing rather than a row of blanks.
   if (!info) return null
+
+  const checkNow = () => {
+    setChecking(true)
+    void App.CheckAppUpdate()
+      .then(setUpdate)
+      .catch(() => undefined)
+      .finally(() => setChecking(false))
+  }
+  // The download is a link to the release page and never a fetch: see api_update.go
+  // for why the app does not replace its own package.
+  const downloadURL = update?.available ? update.url : ''
 
   // The commit is what makes the version actionable, so it travels with it. A
   // build with no commit (the package defaults) shows the bare version.
@@ -241,6 +285,99 @@ function AboutSection({ info }: { info: main.AppInfo | null }) {
           </div>
         ))}
       </div>
+      {/* The one row here that costs a request. It says what it could not ask rather
+          than "current": a rate limit is not an up-to-date installation. */}
+      <div
+        className="mt-3 flex flex-wrap items-center gap-3 border-t pt-3 text-[12px]"
+        style={{ borderColor: 'var(--border)' }}
+      >
+        <span className="faint w-24 shrink-0">{t('settings.update')}</span>
+        {checking ? (
+          <span className="faint min-w-0 flex-1">{t('settings.updateChecking')}</span>
+        ) : update?.error ? (
+          <span
+            className="min-w-0 flex-1 truncate"
+            style={{ color: 'var(--danger)' }}
+            title={errText(update.error)}
+          >
+            {errText(update.error)}
+          </span>
+        ) : update?.devBuild ? (
+          <span className="faint min-w-0 flex-1">{t('settings.updateDevBuild')}</span>
+        ) : update?.available ? (
+          <>
+            <span className="badge badge-warn shrink-0">{t('settings.updateAvailable')}</span>
+            {/* The pair is the answer, so it never breaks at the arrow and never
+                shrinks into an ellipsis: at a narrow window the wrapping row gives it a
+                line of its own, which is what the 560 px check showed it doing. */}
+            <span
+              className="mono shrink-0 whitespace-nowrap"
+              title={`${update.current} → ${update.latest}`}
+            >
+              {update.current} → {update.latest}
+            </span>
+          </>
+        ) : (
+          <span className="faint min-w-0 flex-1">{t('settings.updateCurrent')}</span>
+        )}
+        {downloadURL && (
+          <button
+            type="button"
+            className="btn btn-sm shrink-0"
+            onClick={() => void App.OpenExternal(downloadURL)}
+          >
+            {t('settings.updateDownload')}
+          </button>
+        )}
+        <button type="button" className="btn btn-sm shrink-0" disabled={checking} onClick={checkNow}>
+          {t('settings.updateCheck')}
+        </button>
+      </div>
+      {/* What changed, in the release's own words. Only when an update exists: the notes
+          of a version you are already running are not news. Plain text rather than the
+          chat's markdown renderer, because a release body is a short bullet list written
+          for a page, and the page — one click away — is the reader for the links in it. */}
+      {update?.available && update.notes && (
+        <div className="mt-2 text-[11px]">
+          <div className="faint">{t('settings.updateNotes')}</div>
+          {/* Unboxed and three lines: the notes answer "what changed" at a glance, and the
+              release page is the reader for the rest. A filled panel made a changelog the
+              loudest thing on the screen a fresh install opens first.
+
+              The body is --text-dim rather than .faint. At 11px the faint colour measures
+              about 3.2:1 in the light theme, which is a note nobody can read; dim is still
+              secondary text, and it clears the contrast the size needs. */}
+          <div
+            className="line-clamp-3 whitespace-pre-line break-words"
+            style={{ color: 'var(--text-dim)' }}
+          >
+            {update.notes}
+          </div>
+        </div>
+      )}
+      {/* On by default, and still a switch: the check is one request a day, so this is
+          how it is turned *off* rather than opted into. It is saved with the rest of the
+          panel, which is why the hint says a change takes effect on Save. */}
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+        <input
+          id="settings-update-daily"
+          type="checkbox"
+          checked={draft.updates?.checkDaily ?? false}
+          onChange={(e) =>
+            patch({
+              updates: {
+                checkDaily: e.target.checked,
+                lastCheckUnix: draft.updates?.lastCheckUnix ?? 0,
+              },
+            })
+          }
+        />
+        <label htmlFor="settings-update-daily" className="faint">
+          {t('settings.updateDaily')}
+        </label>
+        <span className="faint">{t('settings.updateDailyHint')}</span>
+      </div>
+
       <button
         type="button"
         className="btn btn-sm mt-3"

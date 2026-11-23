@@ -18,6 +18,9 @@ import (
 //     There is no context window, no modality list and no capability object, so
 //     nothing in the listing says which models can hold a conversation. `created`
 //     is the same placeholder (735790403) on all 80, i.e. it is not a date.
+//     A *self-hosted* NIM container (vLLM behind the same route) adds
+//     `max_model_len` to each entry — the window it is serving — so that field is
+//     read when present and the hosted catalogue keeps 0 when it is not.
 //   - GET /v1/models/<id> is not a richer route: it answers the same four fields,
 //     so no per-model metadata can be fetched either.
 //   - the listing is the **global catalogue, not this account's entitlement**.
@@ -113,6 +116,10 @@ type nvidiaModelEntry struct {
 	// also the first half of the id, which is what makes the id a fully
 	// qualified model name rather than a bare one.
 	OwnedBy string `json:"owned_by"`
+	// MaxModelLen is the context window the server is serving. A self-hosted NIM
+	// container publishes it — vLLM's `/v1/models` does — while the hosted
+	// catalogue omits it on every entry, so it is 0 there.
+	MaxModelLen int `json:"max_model_len"`
 }
 
 // fromNvidiaEntry maps one listing entry. There is no second return value: this
@@ -128,12 +135,13 @@ func (p *openAICompatProvider) fromNvidiaEntry(m nvidiaModelEntry) ModelInfo {
 		// it must not be reported as awaiting a load. The picker greys those out
 		// and the default-model choice skips them.
 		State: StateLoaded,
-		// The context window is not published by any route of this API — not on
-		// the listing and not on the per-model route — so it is left at zero
-		// rather than guessed. Zero is the state the app already handles for a
-		// plain OpenAI-compatible server: the per-model override in Settings is
-		// where the number comes from.
-		ContextLimit: 0,
+		// The hosted catalogue publishes no context window on any route — not on
+		// the listing and not on the per-model route — so a hosted model keeps 0
+		// rather than a guess, and the per-model override in Settings is where
+		// that number comes from. A self-hosted NIM does publish one, though:
+		// vLLM states the window it is serving as `max_model_len`, so the field
+		// is used when the server sends it.
+		ContextLimit: m.MaxModelLen,
 	}
 	// Tools are claimed for every model, the same way DeepSeek's are and for the
 	// same reason: the app only uses the native tool protocol when a model

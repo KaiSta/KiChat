@@ -73,6 +73,16 @@ export function ContextTab({
               onChange={(e) => patch({ compact: { ...compact, keepRecentTurns: Number(e.target.value) } })}
             />
           </Field>
+          <Field label={t('settings.keepTokens')} hint={t('settings.keepTokensHint')}>
+            <input
+              className="input"
+              type="number"
+              min="0"
+              step="1000"
+              value={compact.keepRecentTokens}
+              onChange={(e) => patch({ compact: { ...compact, keepRecentTokens: Number(e.target.value) } })}
+            />
+          </Field>
           <Field label={t('settings.reserve')}>
             <input
               className="input"
@@ -89,32 +99,6 @@ export function ContextTab({
               min="100"
               value={compact.maxSummaryTokens}
               onChange={(e) => patch({ compact: { ...compact, maxSummaryTokens: Number(e.target.value) } })}
-            />
-          </Field>
-        </div>
-      </Section>
-
-      <Section title={t('settings.toolBudget')}>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={t('settings.toolBudgetHint')}>
-            <input
-              className="input"
-              type="number"
-              min="1000"
-              value={draft.toolTokenBudget}
-              onChange={(e) => patch({ toolTokenBudget: Number(e.target.value) })}
-            />
-          </Field>
-          {/* A project's own figure, beside the chat's: source files and build output
-              spend a budget faster than pages, and the two replies are not the same
-              shape. */}
-          <Field label={t('settings.codingToolBudget')} hint={t('settings.codingToolBudgetHint')}>
-            <input
-              className="input"
-              type="number"
-              min="1000"
-              value={draft.codingToolTokenBudget}
-              onChange={(e) => patch({ codingToolTokenBudget: Number(e.target.value) })}
             />
           </Field>
         </div>

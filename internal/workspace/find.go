@@ -17,7 +17,7 @@ import (
 )
 
 // MaxFindResults is how many paths one call returns. A cap exists because a pattern like
-// `**` in a large tree would otherwise spend the turn's whole tool budget on filenames.
+// `**` in a large tree would otherwise spend the request's whole room on filenames.
 const MaxFindResults = 500
 
 // maxFindScanned bounds the walk the same way a search's budget does: a pattern that matches

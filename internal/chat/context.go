@@ -107,8 +107,10 @@ type AssemblyInput struct {
 	// back; the engine always passes the full set.
 	KnownTools []string
 
-	// ReplayToolReasoning counts reasoning when the selected backend sends it with tools.
-	ReplayToolReasoning bool
+	// ReplayReasoning says this request carries an assistant reply's reasoning back to the
+	// model, which is the only case in which the budget may charge for that text. Two provider
+	// shapes do; Engine.buildAssembly resolves it from both (see replaysReasoning).
+	ReplayReasoning bool
 
 	Limit       int
 	LimitSource string
@@ -154,8 +156,15 @@ type Assembly struct {
 	// MaxIncludedSeq is the highest stored message sequence present in the
 	// request. It lets a backend's reported prompt_tokens be tied to an exact
 	// conversation state.
-	MaxIncludedSeq      int
-	ReplayToolReasoning bool
+	MaxIncludedSeq int
+	// MessageSeqs is aligned with Messages and names the stored message each one came
+	// from, 0 for a part the assembly synthesised (the system message, the trailing turn
+	// notes, a continuation). It exists for one caller: a summarisation that wants to
+	// re-send this request's prefix unchanged instead of rendering a transcript of it
+	// (summarisationPrefix). It is nil when a helper rewrote the request's shape and the
+	// alignment no longer holds, so that caller falls back rather than guessing.
+	MessageSeqs     []int
+	ReplayReasoning bool
 
 	// AgedReads are the files whose `read_file` result was dropped from the request's tail
 	// to keep the reply from re-sending everything it has ever read (see ageToolResults).
@@ -352,6 +361,9 @@ func Assemble(in AssemblyInput) Assembly {
 
 	msgs := make([]llm.Message, 0, len(in.Messages)+1)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: strings.Join(systemParts, "\n\n")})
+	// seqs follows msgs (see Assembly.MessageSeqs). The system message is the assembly's
+	// own, which is what the leading 0 says.
+	seqs := []int{0}
 
 	// The newest user message opens the reply being assembled, and that boundary is what tool
 	// ageing is scoped to: the results of *this* answer are the ones that grow between the
@@ -418,7 +430,7 @@ func Assemble(in AssemblyInput) Assembly {
 		// Priced before the attachment text is appended: inlined document text
 		// belongs to Attachments below, and counting it here as well made the
 		// meter read half again as large as the request it describes.
-		historyTokens := historyMessageTokens(lm, in.ReplayToolReasoning)
+		historyTokens := historyMessageTokens(lm, in.ReplayReasoning)
 		if imgs := lm.Images; len(imgs) > 0 {
 			tokens := llm.EstimateImageTokens(len(imgs))
 			budget.Attachments += tokens
@@ -450,6 +462,7 @@ func Assemble(in AssemblyInput) Assembly {
 		budget.History += historyTokens
 		historyCount++
 		msgs = append(msgs, lm)
+		seqs = append(seqs, m.Seq)
 		currentReply = append(currentReply, m.Seq > newestUserSeq)
 		applied = append(applied, lm.Role == llm.RoleTool && m.Status == store.ToolOK)
 	}
@@ -574,7 +587,7 @@ func Assemble(in AssemblyInput) Assembly {
 	// the messages that are now replaced by the summary, so it over-reports the
 	// window by their full size and has to be dropped as well.
 	measuredValid := budget.MeasuredValid && budget.Measured > 0 &&
-		in.MeasuredSeq >= firstVerbatim && in.MeasuredSeq >= 0
+		in.MeasuredSeq >= firstVerbatim
 	budget.MeasuredValid = measuredValid
 	if measuredValid {
 		// The measurement predates the newest messages, so add their estimated
@@ -589,7 +602,7 @@ func Assemble(in AssemblyInput) Assembly {
 				len(inlineByMessage[m.ID]) == 0 {
 				continue
 			}
-			delta += historyMessageTokens(lm, in.ReplayToolReasoning)
+			delta += historyMessageTokens(lm, in.ReplayReasoning)
 			// Attachments of newer messages are part of the next request and no
 			// measurement can have counted them: they were added afterwards.
 			delta += llm.EstimateImageTokens(len(imagesByMessage[m.ID]))
@@ -616,16 +629,25 @@ func Assemble(in AssemblyInput) Assembly {
 		budget.OverLimit = budget.Projected > budget.EffectiveLimit
 	}
 
+	// The two slices are aligned only while nothing after the loop changed the count.
+	// sanitiseToolHistory and ageToolResults rewrite messages in place, and the trailing
+	// continuation appends one; a shape this function did not build is one a caller must
+	// not use to name a boundary, so it is reported as unknown instead of off by one.
+	if len(seqs) != len(msgs) {
+		seqs = nil
+	}
+
 	return Assembly{
-		Messages:            msgs,
-		Budget:              budget,
-		FirstVerbatimSeq:    firstVerbatim,
-		MemorySummary:       memorySummary,
-		MemoryCompactionID:  memoryID,
-		AttachmentNotice:    notice,
-		MaxIncludedSeq:      maxIncluded,
-		ReplayToolReasoning: in.ReplayToolReasoning,
-		AgedReads:           agedReads,
+		Messages:           msgs,
+		MessageSeqs:        seqs,
+		Budget:             budget,
+		FirstVerbatimSeq:   firstVerbatim,
+		MemorySummary:      memorySummary,
+		MemoryCompactionID: memoryID,
+		AttachmentNotice:   notice,
+		MaxIncludedSeq:     maxIncluded,
+		ReplayReasoning:    in.ReplayReasoning,
+		AgedReads:          agedReads,
 	}
 }
 
@@ -721,13 +743,17 @@ func buildAttachmentNotice(in AssemblyInput) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// historyMessageTokens prices tool calls and the reasoning the backend will replay.
+// historyMessageTokens prices a message as it travels: its content, the tool calls the backend
+// receives again, and — only when this request carries it — the reasoning.
+//
+// Stored reasoning is not context a backend sees. The OpenAI-compatible path drops it unless the
+// vendor requires it beside tool calls, so a thinking model's reply costs its answer and not its
+// thinking; charging half of it anyway made the meter read larger than the request it describes,
+// and on a project's history that alone can report an over-limit context for a request that fits.
 func historyMessageTokens(m llm.Message, replayReasoning bool) int {
 	tokens := llm.EstimateTokens(m.Content)
 	if replayReasoning && m.Role == llm.RoleAssistant {
 		tokens += llm.EstimateTokens(m.Reasoning)
-	} else {
-		tokens += llm.EstimateTokens(m.Reasoning) / 2
 	}
 	for _, call := range m.ToolCalls {
 		tokens += llm.EstimateTokens(call.Name) + llm.EstimateTokens(call.Arguments) + 8

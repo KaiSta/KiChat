@@ -61,7 +61,16 @@ type Settings struct {
 	DefaultModel        llm.Ref        `json:"defaultModel"`
 	DefaultSystemPrompt string         `json:"defaultSystemPrompt"`
 	PromptPresets       []PromptPreset `json:"promptPresets"`
-	AutoTitle           bool           `json:"autoTitle"`
+	// ChatPromptPreset is the prompt a new chat starts on, named by preset id. Every prompt a
+	// conversation can start on therefore has a name in the settings view. An empty value is
+	// a blob from before the selector existed; normalise turns it into a named preset, moving
+	// an edited default prompt into one of its own (PresetCustom) rather than dropping it.
+	ChatPromptPreset string `json:"chatPromptPreset"`
+	// CodingPromptPreset is the prompt a new project starts on. The coding-agent preset is
+	// the default, so a project created before the selector existed starts on exactly the
+	// text it used to, and a selection whose preset has been removed falls back to it.
+	CodingPromptPreset string `json:"codingPromptPreset"`
+	AutoTitle          bool   `json:"autoTitle"`
 	// ToolIterations is the round budget of an ordinary chat's reply, and
 	// CodingToolIterations the one a project replies on. There are two fields because
 	// the two turns are different shapes: a chat's answer ends when the model stops
@@ -69,17 +78,9 @@ type Settings struct {
 	// the tests, read the failure, edit again — that a figure tuned for questions
 	// would cut short. Sharing one number meant exactly that: a chat set to ten
 	// stopped a refactor at ten rounds. The mode picks (chat.maxToolRounds).
-	ToolIterations       int `json:"toolIterations"`
-	CodingToolIterations int `json:"codingToolIterations"`
-	// ToolTokenBudget is how much tool-result text one reply of an ordinary chat may
-	// carry into its next request, CodingToolTokenBudget the same for a project. They
-	// are separate for the reason the round figures are: a project's reply spends its
-	// budget on source files and test output, where a chat's spends it on pages. Two
-	// whole reads of a file the size of `app.go` measure 48 858 tokens, most of the
-	// chat figure — so a project's answer ran dry while it still had rounds left.
-	ToolTokenBudget       int  `json:"toolTokenBudget"`
-	CodingToolTokenBudget int  `json:"codingToolTokenBudget"`
-	NativeTools           bool `json:"nativeTools"`
+	ToolIterations       int  `json:"toolIterations"`
+	CodingToolIterations int  `json:"codingToolIterations"`
+	NativeTools          bool `json:"nativeTools"`
 	// Runtime is the llama.cpp that KiChat runs itself, as opposed to the one a
 	// user started and pointed a backend at. Every field here describes a
 	// capability the app provides rather than a server it contacts, which is why
@@ -120,6 +121,32 @@ type Settings struct {
 	// starts out silent about what it changes is an install whose first surprise is a file
 	// it did not expect.
 	AutoApprove AutoApproveSettings `json:"autoApprove"`
+	// Updates configures KiChat's own release check: at most one request a day, on by
+	// default so a newer release is offered rather than waited for. It is the one switch
+	// here that both costs a request and is on out of the box, and it earns that by being
+	// cheap and silent — one unauthenticated request a day, no account, nothing about the
+	// user sent — with a switch in Settings -> About for anyone who disagrees.
+	Updates UpdateSettings `json:"updates"`
+}
+
+// UpdateSettings is the app's own release check: whether it looks on its own, and when
+// it last did.
+//
+// It ships on, which is a deliberate exception to the rule that a switch costing a request
+// ships off. The cost is one unauthenticated request a day, the answer is only "a newer
+// version exists" plus its release page, and nothing about the user travels; the other
+// side is a person sitting on a build with a fixed bug and no way to learn of the fix.
+// A blob written before this object existed therefore arrives with it on — the default is
+// the migration — and the switch in Settings -> About is how it is turned off. The manual
+// Check works either way.
+type UpdateSettings struct {
+	// CheckDaily looks for a newer release at start, at most once a day. On by default;
+	// see above for why this one is.
+	CheckDaily bool `json:"checkDaily"`
+	// LastCheckUnix is when the last look was made, in Unix seconds, 0 never. It is
+	// the app's own record rather than a control in the panel, which is why
+	// SaveSettings keeps it from the live snapshot instead of taking the draft's.
+	LastCheckUnix int64 `json:"lastCheckUnix,omitempty"`
 }
 
 // AutoApproveSettings is which of a project's guarded tools skip the question.
@@ -787,14 +814,83 @@ type ManagedModel struct {
 	// whose KV cache does not fit beside its own weights needs as well.
 	// Empty is normalised to "auto".
 	Offload string `json:"offload"`
+	// ExpertOffload and ExpertLayers are the pre-Experts pair: one placement for
+	// the whole entry, written by a version that did not keep one per file. They
+	// are read only so that blob keeps its setting — normalise moves the pair to
+	// Experts under ModelPath and leaves these at "auto"/0, and nothing reads
+	// them after that. Passing no flag leaves the placement to llama.cpp's own
+	// `--fit`; "cpu" is `--cpu-moe`, every expert in system RAM; "layers" is
+	// `--n-cpu-moe N`.
+	ExpertOffload string `json:"expertOffload"`
+	ExpertLayers  int    `json:"expertLayers"`
+	// Experts keeps each file's expert placement, keyed by the GGUF's path, because
+	// the placement is a property of the file: a layer count that fits a 48-layer
+	// mixture is the wrong answer for a 32-layer one, and the chat's model picker
+	// moves only ModelPath — one pair per entry would follow the next file picked
+	// there. An absent path means the file has not been decided on yet — the panel
+	// fills it with the count it suggests — while a stored "auto" is a decision of
+	// its own: this file keeps llama.cpp's own `--fit` placement whatever the panel
+	// would otherwise suggest for it.
+	Experts map[string]ExpertChoice `json:"experts,omitempty"`
+	// MTP keeps, per file, how many tokens multi-token prediction may draft before the
+	// model verifies them — llama.cpp's `--spec-type draft-mtp` with
+	// `--spec-draft-n-max N`. Keyed by path for the same reason as Experts: the ranks
+	// are a property of the file, and the chat's picker moves only the path.
+	//
+	// Three states, and the difference matters: absent means nobody has decided, so a
+	// file whose header declares the heads starts with the recommendation; a stored 0 is
+	// a deliberate off — the only way to start such a file without the flags; and a stored
+	// count is used as it is. The start still checks the header, because the flag on a
+	// file without MTP heads stops the server rather than being ignored.
+	MTP map[string]int `json:"mtp,omitempty"`
+	// MTPConfidence keeps, per file, the `--spec-draft-p-min` floor: the probability
+	// below which the MTP head stops drafting instead of guessing. It is a second value
+	// rather than a field of one because the useful count and the useful floor move
+	// together — a longer draft only pays with a floor — yet either can be set alone.
+	// Absent follows the recommendation (0.75); a stored 0 is a deliberate "no floor".
+	MTPConfidence map[string]float64 `json:"mtpConfidence,omitempty"`
 	// ExtraArgs is the rest of the command line, for the flags this app has no
 	// field for (--n-gpu-layers 24, a chat template).
 	ExtraArgs string `json:"extraArgs"`
+	// Parallel keeps llama.cpp's own several server slots. Left off — which is what every
+	// entry decodes to, including those written before the field existed — a start passes
+	// `--parallel 1`, so a machine that serves one session at a time pays for one slot's
+	// buffers instead of four: measured at 1.35 GiB on a 27B file with MTP
+	// (documentation/LLAMACPP.md), and the context window is unaffected because `-c`
+	// sizes the pool once rather than per slot. Turning it on passes no slot flag at all,
+	// which is llama.cpp's auto default of four, and lets a second simultaneous request
+	// run beside the first instead of waiting.
+	//
+	// Stored this way round, and not as a "single slot" switch, because the default has to
+	// be the one-slot answer while an absent bool decodes to false: the field can only be
+	// the opt-in for concurrency.
+	Parallel bool `json:"parallel"`
 	// MLX carries the options only an Apple-silicon run has, because the program
 	// is not llama.cpp and its flags are not llama.cpp's. Nil for every other
 	// kind, which is what keeps a llama.cpp entry from growing a section of
 	// fields that mean nothing to it.
 	MLX *MLXOptions `json:"mlx,omitempty"`
+}
+
+// ExpertChoice is one file's expert placement: the mode and, for the layer mode, the
+// count that goes with it. It is a type rather than two fields because the pair has to
+// travel together — a count left beside another file's mode is the bug keying by path
+// exists to stop.
+type ExpertChoice struct {
+	Offload string `json:"offload"`
+	Layers  int    `json:"layers"`
+}
+
+// ExpertFor is the placement this entry uses for one file: the choice stored for that
+// path, or "auto" when the file has none. An unknown path deliberately does not get the
+// last file's setting — llama.cpp's own `--fit` placement is the safe answer for a model
+// nobody has tuned, and the alternative is a layer count built for a different number of
+// layers.
+func (m ManagedModel) ExpertFor(path string) ExpertChoice {
+	if choice, ok := m.Experts[strings.TrimSpace(path)]; ok {
+		return choice
+	}
+	return ExpertChoice{Offload: ExpertOffloadAuto}
 }
 
 // MLXOptions is how mlx_lm.server is started for one model.
@@ -998,6 +1094,144 @@ func IsOffload(value string) bool {
 	return false
 }
 
+// Expert-offload modes, for the routed experts of a mixture-of-experts model.
+// "auto" is the default and passes no flag: llama.cpp's `--fit` already places the
+// experts as far into the device as they go. The other two words are llama.cpp's
+// own flag names (`--cpu-moe`, `--n-cpu-moe N`) rather than a vocabulary of this
+// app's, because the hint has to teach the flags anyway, and a second name for the
+// same thing would only be one more word to translate.
+const (
+	ExpertOffloadAuto   = "auto"
+	ExpertOffloadCPU    = "cpu"
+	ExpertOffloadLayers = "layers"
+)
+
+// MaxMTPDrafts bounds a stored `--spec-draft-n-max`. The model verifies every drafted
+// token in one batch, so the useful range is single digits and a larger number is a
+// typed mistake rather than a preference; a value past this is clamped, not rejected,
+// because losing the setting would be worse than lowering it.
+const MaxMTPDrafts = 16
+
+// ExpertOffloadModes is every value the expert-offload field may hold, in the
+// order a picker should offer them: the placement llama.cpp does on its own
+// first, the two explicit ones after it.
+func ExpertOffloadModes() []string {
+	return []string{ExpertOffloadAuto, ExpertOffloadCPU, ExpertOffloadLayers}
+}
+
+// IsExpertOffload reports whether a value names an expert-offload mode.
+func IsExpertOffload(value string) bool {
+	for _, v := range ExpertOffloadModes() {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+
+// normaliseExpertOffload maps an absent or unrecognised value onto "auto" for the
+// same reason as the other modes: a word nothing here knows would reach
+// `--n-cpu-moe` as a layer count and stop the server from starting.
+func normaliseExpertOffload(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !IsExpertOffload(value) {
+		return ExpertOffloadAuto
+	}
+	return value
+}
+
+// normaliseExpertChoices repairs the per-file expert placement and moves a blob's single
+// legacy pair onto the file it names.
+//
+// The entry-level pair is migration, not a default: it was written when one entry carried
+// one placement, and leaving it in place would let it shadow a file's own choice the next
+// time a different model was picked on the same backend. After this the placement lives
+// in Experts, and an absent path means "auto". A stored auto is kept rather than dropped:
+// the panel fills an undecided file with the count it suggests, so an empty slot and a
+// deliberate "leave the placement to llama.cpp" have to stay distinguishable — otherwise
+// choosing automatic would be overwritten by the next suggestion.
+func normaliseExpertChoices(mm *ManagedModel) {
+	mm.ExpertOffload = normaliseExpertOffload(mm.ExpertOffload)
+	if mm.ExpertLayers < 0 {
+		mm.ExpertLayers = 0
+	}
+	if path := strings.TrimSpace(mm.ModelPath); path != "" && len(mm.Experts) == 0 && mm.ExpertOffload != ExpertOffloadAuto {
+		mm.Experts = map[string]ExpertChoice{path: {Offload: mm.ExpertOffload, Layers: mm.ExpertLayers}}
+	}
+	mm.ExpertOffload, mm.ExpertLayers = ExpertOffloadAuto, 0
+
+	out := make(map[string]ExpertChoice, len(mm.Experts))
+	for path, choice := range mm.Experts {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		stored := strings.TrimSpace(choice.Offload)
+		choice.Offload = normaliseExpertOffload(stored)
+		if choice.Layers < 0 || choice.Offload == ExpertOffloadAuto {
+			// Automatic has no layer count: a number left beside it is sent by nothing
+			// and shown by nothing, and the next reader would take it as current.
+			choice.Layers = 0
+		}
+		// A literal auto is a decision and is kept. Anything else that fell back to it
+		// is damage, not a choice — storing that would hide a corrupt value behind the
+		// word that means "llama.cpp decides", and the panel would stop suggesting for
+		// a file nobody ever chose anything for.
+		if choice.Offload == ExpertOffloadAuto && stored != ExpertOffloadAuto {
+			continue
+		}
+		out[path] = choice
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	mm.Experts = out
+}
+
+// normaliseMTPChoices repairs the per-file multi-token prediction counts.
+//
+// Zero is kept: it is the stored "off", and the only way to say that about a file whose
+// header has the heads without also turning the setting into "whatever the app
+// recommends". A negative count is not a setting and drops out. A count past
+// MaxMTPDrafts is clamped for the same reason the number field has a maximum — the value
+// is still usable, and losing it over a typed extra digit would be worse.
+func normaliseMTPChoices(mm *ManagedModel) {
+	out := make(map[string]int, len(mm.MTP))
+	for path, drafts := range mm.MTP {
+		path = strings.TrimSpace(path)
+		if path == "" || drafts < 0 {
+			continue
+		}
+		out[path] = min(drafts, MaxMTPDrafts)
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	mm.MTP = out
+}
+
+// normaliseMTPConfidence repairs the per-file confidence floors.
+//
+// Zero is kept here for the same reason as a zero count — it is the stored "no floor",
+// which an absent entry does not say, since that follows the recommendation. A floor of 1
+// (or more) passes no draft at all and a negative one is not a probability: both drop
+// out. A value in between is kept as entered — the flag takes a probability, and
+// rounding it to a house grid would be a different number than the user asked for.
+func normaliseMTPConfidence(mm *ManagedModel) {
+	out := make(map[string]float64, len(mm.MTPConfidence))
+	for path, floor := range mm.MTPConfidence {
+		path = strings.TrimSpace(path)
+		if path == "" || floor < 0 || floor >= 1 {
+			continue
+		}
+		out[path] = floor
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	mm.MTPConfidence = out
+}
+
 // NormaliseMLX repairs the MLX-only section: a number the server would refuse is
 // dropped back to "its own default" rather than passed on, because an unknown
 // `--kv-bits` is a server that exits instead of a setting that looks odd. The
@@ -1131,9 +1365,16 @@ type CompactSettings struct {
 	// on a window mid-answer costs a summarisation the user is waiting for. Hence a switch,
 	// and off by default. It is subordinate to Enabled and to the chat's own AutoCompact,
 	// exactly like the threshold it asks about.
-	MidTurnCheck       bool    `json:"midTurnCheck"`
-	Threshold          float64 `json:"threshold"`
-	KeepRecentTurns    int     `json:"keepRecentTurns"`
+	MidTurnCheck    bool    `json:"midTurnCheck"`
+	Threshold       float64 `json:"threshold"`
+	KeepRecentTurns int     `json:"keepRecentTurns"`
+	// KeepRecentTokens bounds the tail kept verbatim by size instead of by count. A
+	// turn says how much of the conversation stays, not how much of the window it
+	// costs, so six turns are a few hundred tokens of questions and several windows of
+	// tool traffic. Zero derives the figure from the window (a quarter, clamped to
+	// 2000-15000) — one number cannot mean the same thing on an 8k and a 131k model.
+	// KeepRecentTurns still caps the count, so the smaller bound wins.
+	KeepRecentTokens   int     `json:"keepRecentTokens"`
 	ReserveForResponse int     `json:"reserveForResponse"`
 	SummaryTemperature float64 `json:"summaryTemperature"`
 	MaxSummaryTokens   int     `json:"maxSummaryTokens"`
@@ -1233,8 +1474,8 @@ func (d DigestSettings) DigestThreshold() int {
 // being condensed, so a 40k-token page above a 2000-token threshold can want far more
 // than 2000 tokens out. Worse, normalise stored the capped value, so a chosen 3000 came
 // back as 2000, was gone from the blob, and raising the threshold later did not bring
-// it back. The remaining bound is the tool budget: whatever comes back still passes
-// through toolOutputBudget.take.
+// it back. What bounds the result now is the same thing that bounds any other: the tool
+// service's own byte cap and ageing, not a share of the request (see COMPACT.md §17.6).
 func (d DigestSettings) DigestMaxTokens() int {
 	max := d.MaxTokens
 	if max <= 0 {
@@ -1301,36 +1542,27 @@ func Text(lang, de, en string) string { return ilang.Text(lang, de, en) }
 // speaks.
 func LangOf(lang func() string) string { return ilang.Of(lang) }
 
-// The tool loop's bounds: how many model/tool rounds one reply may take, and how many
-// tokens of tool results it may carry into the next request.
+// The tool loop's round bound: how many model/tool rounds one reply may take.
 //
-// There are two round figures because there are two shapes of reply. A chat's answer ends
-// when the model stops asking for tools, so its figure is the guard against a model that
-// never does. A project's reply is a piece of work: reading four files, editing two and
-// running `make check` is six rounds before the first failure comes back, and the failure
-// is then read and fixed. That is why the project's default is the larger one — and why it
-// is a separate field rather than one shared number, which is what stopped a project at
-// ten rounds when its chat setting said ten.
+// There are two figures because there are two shapes of reply. A chat's answer ends when
+// the model stops asking for tools, so its figure is the guard against a model that never
+// does. A project's reply is a piece of work: reading four files, editing two and running
+// `make check` is six rounds before the first failure comes back, and the failure is then
+// read and fixed. That is why the project's default is the larger one — and why it is a
+// separate field rather than one shared number, which is what stopped a project at ten
+// rounds when its chat setting said ten.
 //
-// A research turn does not get longer because the project has its own figures: the loop
-// still ends when the model stops calling tools, and the token budget is still capped by
-// the room the next request actually has (`chat.roomForToolResults`), so a small local
-// window keeps cutting results where it always did.
-//
-// The project's token budget is twice the chat's because the material is denser: a failing
-// `make check` is a few thousand tokens before anything is read, and a source file is worth
-// more per token than a page. It is not unbounded for the same reason the rounds are not —
-// it is what stops one enormous build log from filling the window on its own.
+// How much tool text a round may add is not a figure here and never was: a result is
+// bounded by the tool service's own byte cap, and a request that outgrows the window is
+// folded and retried once rather than priced against an allowance.
 //
 // MaxToolIterations is the ceiling both round fields are repaired against, and it is a
 // bound rather than a default because a long autonomous run is a choice — and because each
 // round is a request the user pays for in time and tokens.
 const (
-	DefaultToolIterations        = 24
-	DefaultCodingToolIterations  = 60
-	MaxToolIterations            = 100
-	DefaultToolTokenBudget       = 60000
-	DefaultCodingToolTokenBudget = 120000
+	DefaultToolIterations       = 24
+	DefaultCodingToolIterations = 60
+	MaxToolIterations           = 100
 )
 
 // Default returns the shipped configuration.
@@ -1367,9 +1599,11 @@ func Default() Settings {
 			// The mid-turn check ships off because it spends a request inside an
 			// answer the user is waiting for, and only a chat that is already folding
 			// at its threshold benefits from it.
-			MidTurnCheck:       false,
-			Threshold:          0.80,
-			KeepRecentTurns:    6,
+			MidTurnCheck:    false,
+			Threshold:       0.80,
+			KeepRecentTurns: 6,
+			// 0 derives the size bound from each model's window; see KeepRecentTokens.
+			KeepRecentTokens:   0,
 			ReserveForResponse: 1024,
 			SummaryTemperature: 0.2,
 			MaxSummaryTokens:   1200,
@@ -1392,14 +1626,19 @@ func Default() Settings {
 			Files:    false,
 			Commands: false,
 		},
-		DefaultSystemPrompt:   PromptBody(PresetResearch, LangEnglish),
-		PromptPresets:         DefaultPresets(LangEnglish),
-		AutoTitle:             true,
-		ToolIterations:        DefaultToolIterations,
-		CodingToolIterations:  DefaultCodingToolIterations,
-		ToolTokenBudget:       DefaultToolTokenBudget,
-		CodingToolTokenBudget: DefaultCodingToolTokenBudget,
-		NativeTools:           true,
+		Updates: UpdateSettings{
+			// On, once a day, and nothing checked yet: see UpdateSettings.
+			CheckDaily: true,
+		},
+		DefaultSystemPrompt: PromptBody(PresetResearch, LangEnglish),
+		PromptPresets:       DefaultPresets(LangEnglish), // Both modes name a prompt from the list above, so everything a conversation can start
+		// on is one of the named prompts the settings view shows.
+		ChatPromptPreset:     PresetResearch,
+		CodingPromptPreset:   PresetCodingAgent,
+		AutoTitle:            true,
+		ToolIterations:       DefaultToolIterations,
+		CodingToolIterations: DefaultCodingToolIterations,
+		NativeTools:          true,
 		// Image generation ships switched off. It is a second server the user has
 		// to be running — a WebUI is a several-gigabyte install of its own — so
 		// offering an address and probing it would report a failure for a feature
@@ -1439,6 +1678,10 @@ const (
 	// so an installation that edits one does not silently retype the other.
 	PresetCodingAgent = "coding-agent"
 	PresetBlank       = "blank"
+	// PresetCustom is not shipped. normalise creates it to keep an edited default prompt under
+	// a name, because the mode selectors pick prompts by name; the settings view translates
+	// that name through preset.custom.
+	PresetCustom = "custom"
 )
 
 // DefaultPresets are the system prompts available out of the box, written in
@@ -1538,6 +1781,33 @@ func (s Settings) Clone() Settings {
 				mlx := *mm.MLX
 				mm.MLX = &mlx
 			}
+			// The per-file expert choices are the entry's other map: a snapshot that
+			// shared it would be written by a picker start while another goroutine
+			// marshals the settings.
+			if mm.Experts != nil {
+				experts := make(map[string]ExpertChoice, len(mm.Experts))
+				for path, choice := range mm.Experts {
+					experts[path] = choice
+				}
+				mm.Experts = experts
+			}
+			// The MTP counts are the entry's third map, and the same rule applies: a
+			// value-type map that the clone shares is written underneath the marshaller.
+			if mm.MTP != nil {
+				mtp := make(map[string]int, len(mm.MTP))
+				for path, drafts := range mm.MTP {
+					mtp[path] = drafts
+				}
+				mm.MTP = mtp
+			}
+			// And the fourth: the confidence floor that goes with the count.
+			if mm.MTPConfidence != nil {
+				floors := make(map[string]float64, len(mm.MTPConfidence))
+				for path, floor := range mm.MTPConfidence {
+					floors[path] = floor
+				}
+				mm.MTPConfidence = floors
+			}
 			out.Runtime.Models[id] = mm
 		}
 	}
@@ -1574,6 +1844,11 @@ func (s *Settings) normalise() {
 	}
 	if s.Location == "" {
 		s.Location = DefaultLocation
+	}
+	if s.Updates.LastCheckUnix < 0 {
+		// A clock that jumped, or a hand-edited blob. Zero is "never checked", which
+		// a negative number would otherwise defer by decades.
+		s.Updates.LastCheckUnix = 0
 	}
 	if len(s.Backends) == 0 {
 		s.Backends = llm.DefaultBackendConfigs()
@@ -1722,6 +1997,9 @@ func (s *Settings) normalise() {
 		mm.CacheTypeK = normaliseCacheType(mm.CacheTypeK)
 		mm.CacheTypeV = normaliseCacheType(mm.CacheTypeV)
 		mm.Offload = normaliseOffload(mm.Offload)
+		normaliseExpertChoices(&mm)
+		normaliseMTPChoices(&mm)
+		normaliseMTPConfidence(&mm)
 		mm.MLX = NormaliseMLX(mm.MLX)
 		s.Runtime.Models[id] = mm
 	}
@@ -1760,6 +2038,9 @@ func (s *Settings) normalise() {
 	if s.Compact.KeepRecentTurns < 0 {
 		s.Compact.KeepRecentTurns = 6
 	}
+	if s.Compact.KeepRecentTokens < 0 {
+		s.Compact.KeepRecentTokens = 0
+	}
 	if s.Compact.ReserveForResponse <= 0 {
 		s.Compact.ReserveForResponse = 1024
 	}
@@ -1774,8 +2055,8 @@ func (s *Settings) normalise() {
 	}
 	// A half-filled digest model is unset for the same reason, and the threshold is
 	// kept in the range where the feature can pay for itself: below a few hundred
-	// tokens the second request is all cost, and above the tool budget it could never
-	// fire.
+	// tokens the second request is all cost, and above the room a request has it could
+	// never fire.
 	if s.Digest.Model.Backend == "" || s.Digest.Model.Model == "" {
 		s.Digest.Model = llm.Ref{}
 	}
@@ -1822,15 +2103,6 @@ func (s *Settings) normalise() {
 	if s.CodingToolIterations > MaxToolIterations {
 		s.CodingToolIterations = MaxToolIterations
 	}
-	if s.ToolTokenBudget <= 0 {
-		s.ToolTokenBudget = DefaultToolTokenBudget
-	}
-	// The project's budget is repaired the same way: an absent field is what every
-	// installation upgrading to it carries, and a zero from an emptied text box means
-	// the default rather than "no tool results at all".
-	if s.CodingToolTokenBudget <= 0 {
-		s.CodingToolTokenBudget = DefaultCodingToolTokenBudget
-	}
 	if len(s.PromptPresets) == 0 {
 		s.PromptPresets = DefaultPresets(s.Language)
 	}
@@ -1853,6 +2125,35 @@ func (s *Settings) normalise() {
 	// Last, so that a preset appended just above is left alone and only the
 	// ones already stored are moved to the interface language.
 	s.LocalisePrompts()
+	// The default prompt used to be edited in a textarea that had no name, and it was the text
+	// a new chat started on. Both modes now name a stored prompt, so an edited default is moved
+	// into one — the preset that already holds exactly that text if there is one, a
+	// PresetCustom otherwise — rather than being dropped. The field itself then goes back to the
+	// shipped body, which is what makes the move run once: nothing in the settings view writes
+	// this field any more, so finding it edited is an older blob and not a choice made since.
+	// A default that is still a shipped body needs no preset; the research one already has a
+	// name. The chat selection follows the text only while it is still the unnamed default: a
+	// user who has named a prompt since keeps starting there.
+	if s.DefaultSystemPrompt != "" && !isShippedPrompt(PresetResearch, s.DefaultSystemPrompt) {
+		id := presetWithPrompt(s.PromptPresets, s.DefaultSystemPrompt)
+		if id == "" && !hasPromptPreset(s.PromptPresets, PresetCustom) {
+			s.PromptPresets = append(s.PromptPresets, PromptPreset{
+				ID:     PresetCustom,
+				Name:   "Custom prompt",
+				Prompt: s.DefaultSystemPrompt,
+			})
+			id = PresetCustom
+		}
+		if id != "" && (s.ChatPromptPreset == "" || s.ChatPromptPreset == PresetResearch) {
+			s.ChatPromptPreset = id
+		}
+		s.DefaultSystemPrompt = PromptBody(PresetResearch, s.Language)
+	}
+	// The mode selections are repaired against the list that was just completed: a stored
+	// selection naming a preset this blob does not carry would leave a mode with no prompt at
+	// all, and an absent one is the default.
+	s.ChatPromptPreset = promptPresetChoice(s.ChatPromptPreset, PresetResearch, s.PromptPresets)
+	s.CodingPromptPreset = promptPresetChoice(s.CodingPromptPreset, PresetCodingAgent, s.PromptPresets)
 }
 
 // LocalisePrompts moves the built-in system prompts into the language the
@@ -1875,6 +2176,40 @@ func (s *Settings) LocalisePrompts() {
 	if s.DefaultSystemPrompt == "" || isShippedPrompt(PresetResearch, s.DefaultSystemPrompt) {
 		s.DefaultSystemPrompt = PromptBody(PresetResearch, s.Language)
 	}
+}
+
+// promptPresetChoice repairs one mode's prompt selection: fallback is the shipped prompt that
+// mode uses when nothing is chosen or the chosen preset is gone.
+func promptPresetChoice(id, fallback string, presets []PromptPreset) string {
+	if id == "" {
+		return fallback
+	}
+	for _, p := range presets {
+		if p.ID == id {
+			return id
+		}
+	}
+	return fallback
+}
+
+// presetWithPrompt is the id of the preset holding exactly this text, or "".
+func presetWithPrompt(presets []PromptPreset, prompt string) string {
+	for _, p := range presets {
+		if p.Prompt == prompt {
+			return p.ID
+		}
+	}
+	return ""
+}
+
+// hasPromptPreset reports whether the list already carries this id.
+func hasPromptPreset(presets []PromptPreset, id string) bool {
+	for _, p := range presets {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // IsAccelerator reports whether a value names a build family this app knows.

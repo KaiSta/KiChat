@@ -51,6 +51,11 @@ type Chain struct {
 	// language of the window it is shown in (config.ModelLanguage). A supplier rather than a
 	// string because a settings save has to reach the next search. Nil means English.
 	Lang func() string
+
+	// onChallenge is called when a search is refused with a check the reader can answer, so the
+	// window can open on it. A hook rather than an event emitted here: this package has no
+	// window, and inventing one would drag the bridge into it.
+	onChallenge func(Challenge)
 }
 
 // lang is the resolved model language for the text this chain writes.
@@ -79,10 +84,55 @@ func (c *Chain) Configure(opts Options) {
 	defer c.mu.Unlock()
 	c.opts = opts
 	c.order = append([]string(nil), opts.ProviderOrder...)
+	duckduckgo := NewDuckDuckGoProvider("")
+	duckduckgo.onChallenge = c.onChallenge
 	c.providers = map[string]SearchProvider{
 		"brave":      NewBraveProvider(opts.BraveAPIKey, c.braveEndpoint),
-		"duckduckgo": NewDuckDuckGoProvider(""),
+		"duckduckgo": duckduckgo,
 	}
+}
+
+// SetChallengeHandler installs the hook a window uses to show a bot check. It reaches the live
+// provider as well as the next one, because the handler is installed after the chain is built.
+func (c *Chain) SetChallengeHandler(handler func(Challenge)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onChallenge = handler
+	if provider, ok := c.providers["duckduckgo"].(*DuckDuckGoProvider); ok {
+		provider.onChallenge = handler
+	}
+}
+
+// duckduckgo answers this chain's DuckDuckGo provider, or nil when there is none.
+func (c *Chain) duckduckgo() *DuckDuckGoProvider {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	provider, _ := c.providers["duckduckgo"].(*DuckDuckGoProvider)
+	return provider
+}
+
+// SolveDuckDuckGoChallenge answers the pending check through this chain's own provider, so the
+// pause the refusal started is lifted by the identity that was refused.
+func (c *Chain) SolveDuckDuckGoChallenge(ctx context.Context, selections []string) (SearchOutcome, error) {
+	provider := c.duckduckgo()
+	if provider == nil {
+		return SearchOutcome{}, ErrNoProvider
+	}
+	results, err := provider.SolveChallenge(ctx, selections)
+	if err != nil {
+		return SearchOutcome{}, err
+	}
+	return SearchOutcome{Results: results, Provider: "duckduckgo"}, nil
+}
+
+// FetchChallengeTile downloads one tile of the pending check, by name, over the identity that was
+// asked to prove itself.
+func (c *Chain) FetchChallengeTile(ctx context.Context, name string) ([]byte, string, error) {
+	provider := c.duckduckgo()
+	if provider == nil {
+		return nil, "", ErrNoProvider
+	}
+	return provider.fetchTile(ctx, name)
 }
 
 // Options returns the active configuration.

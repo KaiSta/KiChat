@@ -387,10 +387,10 @@ function CopyLine({ text, label }: { text: string; label: string }) {
 
 /** Why a tool result is the size it is, in the words the numbers need.
  *
- * Three causes produce the same pair of sizes and only one of them is a setting the user
- * switched on: the summary model, this answer's tool budget, or neither. The inline line
- * carries the sizes, so the tooltip is where the cause can be named without making every
- * card three lines taller.
+ * Two causes produce the same pair of sizes and only one of them is a setting the user
+ * switched on: the summary model, or neither. A third — the room the request had left — and
+ * the withheld case are historical: nothing writes them any more, but rows recorded before
+ * the ration was removed still read as what they were.
  */
 function tokenHint(
   t: (key: MessageKey, vars?: Record<string, string | number>) => string,
@@ -1548,6 +1548,18 @@ function MessageImage({ attachment }: { attachment: storeTypes.Attachment }) {
         >
           {attachment.filename}
         </span>
+        {/* Where the project keeps the file. A picture drawn in a project is written into the
+            folder's root by the tool itself, so the card names it — otherwise the only record
+            of the file is the tool result above the picture. */}
+        {attachment.projectPath ? (
+          <span
+            className="faint truncate"
+            style={{ maxWidth: 220 }}
+            title={t('images.projectPathHint')}
+          >
+            {`${t('images.projectPath')}: ${attachment.projectPath}`}
+          </span>
+        ) : null}
         {/* The seed is the number that reproduces a picture, and it is what tells two
             redraws of one prompt apart once both are on screen. */}
         {recipe?.seed ? (

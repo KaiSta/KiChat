@@ -24,6 +24,26 @@ export function PromptTab({
   const [unknown, setUnknown] = useState<string[]>([])
   const [showPreview, setShowPreview] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  // Which stored prompt the editor above is changing, by id. This is a view state rather than a
+  // setting: it only says what the textarea shows. What a conversation starts on is the pair of
+  // selectors below, and both of them name one of these same prompts — which is why the editor
+  // has to write into the preset rather than into a field of its own: a prompt nobody can name
+  // is a prompt neither selector could ever pick.
+  const [editingID, setEditingID] = useState(() => {
+    const match = draft.promptPresets.find((p) => p.prompt === draft.defaultSystemPrompt)
+    return match?.id ?? draft.promptPresets[0]?.id ?? ''
+  })
+  const editing = draft.promptPresets.find((p) => p.id === editingID) ?? draft.promptPresets[0]
+  const prompt = editing?.prompt ?? ''
+
+  const setPrompt = (next: string) => {
+    if (!editing) return
+    patch({
+      promptPresets: draft.promptPresets.map((p) =>
+        p.id === editing.id ? { ...p, prompt: next } : p,
+      ),
+    })
+  }
 
   useEffect(() => {
     void App.GetPromptVariables().then(setVariables).catch(() => undefined)
@@ -32,25 +52,25 @@ export function PromptTab({
   // Debounce validation so typing does not spam the backend.
   useEffect(() => {
     const handle = window.setTimeout(() => {
-      void App.UnresolvedPromptVars(draft.defaultSystemPrompt).then(setUnknown).catch(() => undefined)
+      void App.UnresolvedPromptVars(prompt).then(setUnknown).catch(() => undefined)
       if (showPreview) {
-        void App.PreviewSystemPrompt(draft.defaultSystemPrompt).then(setPreview).catch(() => undefined)
+        void App.PreviewSystemPrompt(prompt).then(setPreview).catch(() => undefined)
       }
     }, 250)
     return () => window.clearTimeout(handle)
-  }, [draft.defaultSystemPrompt, showPreview])
+  }, [prompt, showPreview])
 
   const insertVariable = (name: string) => {
     const el = textareaRef.current
     const token = `{{${name}}}`
     if (!el) {
-      patch({ defaultSystemPrompt: draft.defaultSystemPrompt + token })
+      setPrompt(prompt + token)
       return
     }
-    const start = el.selectionStart ?? draft.defaultSystemPrompt.length
+    const start = el.selectionStart ?? prompt.length
     const end = el.selectionEnd ?? start
-    const next = draft.defaultSystemPrompt.slice(0, start) + token + draft.defaultSystemPrompt.slice(end)
-    patch({ defaultSystemPrompt: next })
+    const next = prompt.slice(0, start) + token + prompt.slice(end)
+    setPrompt(next)
     requestAnimationFrame(() => {
       el.focus()
       el.setSelectionRange(start + token.length, start + token.length)
@@ -64,13 +84,9 @@ export function PromptTab({
           <div className="flex gap-2">
             <select
               className="select"
-              value={draft.promptPresets.find((p) => p.prompt === draft.defaultSystemPrompt)?.id ?? ''}
-              onChange={(e) => {
-                const preset = draft.promptPresets.find((p) => p.id === e.target.value)
-                if (preset) patch({ defaultSystemPrompt: preset.prompt })
-              }}
+              value={editing?.id ?? ''}
+              onChange={(e) => setEditingID(e.target.value)}
             >
-              <option value="">–</option>
               {draft.promptPresets.map((p) => (
                 <option key={p.id} value={p.id}>
                   {presetLabel(p)}
@@ -104,8 +120,8 @@ export function PromptTab({
           ref={textareaRef}
           className="textarea mono text-[12px]"
           rows={18}
-          value={draft.defaultSystemPrompt}
-          onChange={(e) => patch({ defaultSystemPrompt: e.target.value })}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
         />
 
         {unknown.length > 0 && (
@@ -121,12 +137,15 @@ export function PromptTab({
           <button
             type="button"
             className="btn btn-sm"
-            onClick={async () => {
-              const fresh = await App.GetSettings()
-              const preset = fresh.promptPresets.find((p) => p.id === 'research')
-              patch({
-                defaultSystemPrompt: preset?.prompt ?? fresh.defaultSystemPrompt,
-              })
+            onClick={() => {
+              // Only this prompt: the other presets are the rest of the draft's work, and
+              // discarding them from a button beside one textarea would be a surprise.
+              void App.GetSettings()
+                .then((fresh) => {
+                  const stored = fresh.promptPresets.find((p) => p.id === editing?.id)
+                  if (stored) setPrompt(stored.prompt)
+                })
+                .catch((err) => useStore.getState().toast('error', errText(err)))
             }}
           >
             {t('settings.promptReset')}
@@ -141,6 +160,39 @@ export function PromptTab({
             {preview}
           </pre>
         )}
+      </Section>
+
+      {/* Which named prompt each mode starts on. The editor above changes one of these prompts;
+          these two say which one a new chat and a new project get, so a project no longer has
+          to take the coding-agent preset because it is the only one the app names for code. */}
+      <Section title={t('settings.promptModes')} hint={t('settings.promptModesHint')}>
+        <Field label={t('settings.promptModeChat')} hint={t('settings.promptModeChatHint')}>
+          <select
+            className="select"
+            value={draft.chatPromptPreset || 'research'}
+            onChange={(e) => patch({ chatPromptPreset: e.target.value })}
+          >
+            {draft.promptPresets.map((p) => (
+              <option key={p.id} value={p.id}>
+                {presetLabel(p)}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <Field label={t('settings.promptModeCoding')} hint={t('settings.promptModeCodingHint')}>
+          <select
+            className="select"
+            value={draft.codingPromptPreset || 'coding-agent'}
+            onChange={(e) => patch({ codingPromptPreset: e.target.value })}
+          >
+            {draft.promptPresets.map((p) => (
+              <option key={p.id} value={p.id}>
+                {presetLabel(p)}
+              </option>
+            ))}
+          </select>
+        </Field>
       </Section>
 
       <Section title={t('settings.promptVariables')}>
@@ -163,4 +215,3 @@ export function PromptTab({
 /* -------------------------------------------------------------------------
  * Research
  * ---------------------------------------------------------------------- */
-

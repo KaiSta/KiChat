@@ -577,16 +577,50 @@ strongest argument for the error boundary in the roadmap below.
 
 ## 6. Build and environment
 
+KiChat is a Go backend and a React frontend packaged by Wails v2, and the `Makefile`
+produces every artifact a release carries. The README's *Build from source* points here;
+the prerequisites, the artifact matrix and the traps live in this section.
+
 ```sh
 wails build -tags webkit2_41   # when only webkit2gtk-4.1 is available
 wails build                    # when webkit2gtk-4.0 is available
 ```
 
+**Prerequisites.** Go 1.27+ (see `go.mod`), the Wails CLI v2
+(`go install github.com/wailsapp/wails/v2/cmd/wails@latest`) and Node 20.19+ or 22.12+
+(so npm 10+). Linux needs GTK3 and WebKit2GTK. macOS needs the Xcode command line tools,
+and a Mac to build on. Windows needs nothing beyond Go, Wails and Node — the cross-build
+from Linux needs no mingw, though `make nsis` wants `makensis` on `PATH`.
+
+| Platform | Command | Artifact |
+| --- | --- | --- |
+| Linux (host platform) | `make build` | `build/bin/kichat` |
+| Linux (system-wide) | `sudo make install` | binary, `.desktop` entry, man page, icon |
+| Debian, Ubuntu, Mint | `make deb` | `build/deb/kichat_<version>_<arch>.deb` |
+| Windows, from Linux or macOS | `make windows` | `build/bin/kichat.exe` |
+| Windows installer | `make nsis` | `build/bin/kichat-<arch>-installer.exe` |
+| macOS | `make darwin` | `build/bin/kichat.app` (universal) |
+| macOS disk image | `make dmg` | `build/dmg/kichat_<version>_<arch>.dmg` |
+
+`make help` lists the rest. **`<arch>` is what that artifact was built for.** The Linux
+build links webkit2gtk and cannot be cross-linked, so an arm64 `.deb` needs an arm64 host.
+Windows on Arm is the other way round and cross-builds from Linux or macOS
+(`make windows WINDOWS_ARCH=arm64`). macOS has to be built on a Mac, because Wails bundles
+`.app` only for its host — `make darwin` and `make dmg` refuse elsewhere rather than
+producing nothing — and `DARWIN_ARCH=arm64` builds the one slice instead of the pair.
+
 - `-tags webkit2_41` is **mandatory** on systems shipping only `webkit2gtk-4.1`
-  (Ubuntu 24.04+, Linux Mint 22+). A bare `wails build` fails there.
+  (Ubuntu 24.04+, Linux Mint 22+). A bare `wails build` fails there. `make build` adds
+  the tag; a downloaded `.deb` needs none, because apt installed the 4.1 library it was
+  linked against.
 - A bare `go build ./...` on a fresh clone fails with
   `pattern all:frontend/dist: no matching files found`, because `main.go` embeds that
-  directory. The frontend must be built once first — expected, not a packaging bug.
+  directory. `wails build` installs the frontend dependencies and compiles `frontend/dist`
+  before Go, so the frontend must be built once first — expected, not a packaging bug.
+- **The Windows executable is pure Go.** No cgo is involved: Wails writes the version
+  resource, the manifest and the icon itself, and the result is a 22 MB GUI binary (no
+  console window) whose Properties come from the `info` block in `wails.json`, which
+  `make build` keeps in step with `VERSION`.
 - **Node 20.19+ or 22.12+ required** for a clean install and for `wails dev` (Vite 7
   calls `crypto.hash`, which Node 18 lacks).
 - On Node 18 / npm 9 a clean `npm install` silently skips
@@ -595,8 +629,16 @@ wails build                    # when webkit2gtk-4.0 is available
   cannot evaluate `libc`, and it reports a matching binary as an
   `UNMET OPTIONAL DEPENDENCY`; libc-aware optional resolution only arrived in npm 10.
   Neither declaring the package in `package.json` nor regenerating the lockfile helps
-  (both tested). The working route on Node 18 is
-  `npm i --no-save @tailwindcss/oxide-linux-x64-gnu@4.3.3` inside `frontend/`.
+  (both tested). The working route on Node 18 installs the binding by name, because npm
+  honours a requested package even when it cannot match it as an optional dependency:
+
+  ```sh
+  npm i --no-save @tailwindcss/oxide-linux-x64-gnu@4.3.3   # run inside frontend/
+  ```
+
+  `--no-save` keeps it out of the lockfile, so the command is repeated after any change
+  to it. The `engines.node: ">= 20"` declaration on `@tailwindcss/oxide` is the second
+  half of the same trap: npm 9 warns about it (`EBADENGINE`) instead of refusing.
 
 ---
 
