@@ -5,22 +5,22 @@ An external application supplies its own instructions, history and function tool
 KiChat budgets that input, optionally summarises completed older turns, and calls
 its existing model provider. Tools are returned to the client for execution.
 
-## Connecting LOMAssistant
+## Connecting a client
 
 1. Start the model in KiChat's Backends settings (or start the external model server).
 2. Open Settings → External API. Select that model, enable the local API and save.
 3. Copy the base URL and load/copy the connection key.
-4. In LOMAssistant select its custom OpenAI-compatible provider. Use the copied
+4. In the client select its custom OpenAI-compatible provider. Use the copied
    URL (normally `http://127.0.0.1:17841/v1`), the connection key as API key, and
-   the model name shown in KiChat (default `kichat`). Clear a separately configured deep/companion model
-   or set it to that same name too.
+   the model name shown in KiChat (default `kichat`).
 5. Keep KiChat and the upstream model running. Start with a simple question, then
-   ask about the current choice to exercise the Mod's `player_state`/`script` tools.
+   exercise any function tools supplied by the client.
 
 The settings choose the actual backend/model. The public alias defaults to `kichat`
 and can be edited separately. Save the setting and enter the same alias in each
-client; it stays the same when the actual model changes. Other clients using this protocol can use it too;
-a game still needs a Mod or integration that supplies its state and tools.
+client; it stays the same when the actual model changes. Clients must use the
+supported protocol subset below. The API does not collect application state;
+each client supplies its own context and tools.
 
 On a 16 GB Mac, the shipped 16,384-token budget and 2,048-token response reserve
 are starting settings, not measured performance claims. A client asking for more
@@ -28,6 +28,15 @@ output reserves that larger amount. Ollama receives `num_ctx`; llama.cpp and MLX
 must also be started with appropriate limits. The API budget does not enlarge the
 model server's loaded window. A known catalogue limit, per-model override or managed
 llama.cpp window can lower the configured budget.
+
+### Integration example: LOMAssistant
+
+LOMAssistant is one client used to test this general API. Select its custom
+OpenAI-compatible provider and enter the URL, key and model alias above. Clear a
+separately configured deep/companion model or set it to the same alias too.
+After a simple question succeeds, ask about the current choice to exercise the
+Mod's `player_state`/`script` tools. The Mod supplies game state and script access;
+KiChat's API has no game-specific logic.
 
 ## Protocol
 
@@ -70,7 +79,7 @@ supported. The full source is processed in bounded batches; large messages are
 split at rune boundaries rather than clipped. Summaries are lossy and can omit
 facts. Current-turn evidence is deliberately not summarised: if that portion alone
 is too large, or the summary does not free enough room, the API returns an error.
-The first version consequently cannot fix an oversized single `script` result in
+The first version consequently cannot fix an oversized single tool result in
 an active tool round; clients should page or narrow that query.
 
 Up to sixteen summaries are cached in process memory. A key includes the exact
@@ -99,8 +108,9 @@ looked reasonable with Qwen3-4B-Q4_K_M. The failed first request had an estimate
 8,334 input tokens against an 8,192-token loaded window; after restarting llama.cpp
 with 16,384 tokens, `/props` and `/v1/models` both confirmed that loaded window.
 Full gameplay, route advice, compaction quality and sustained latency remain
-unverified. Offline protocol tests use scripted providers. Cross-game memory, semantic game-state interpretation,
-LAN access and screenshots are outside this first protocol implementation.
+unverified. Offline protocol tests use scripted providers. Automatic application-state
+collection, cross-client memory, LAN access and screenshots are outside this first
+protocol implementation.
 
 ## Code
 

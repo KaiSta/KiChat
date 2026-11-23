@@ -944,4 +944,4 @@ the process.
 
 ### External AI API
 
-Settings → External API exposes a selected KiChat model at a local OpenAI-compatible endpoint for game Mods and other applications. It supports streaming, client-owned function tools and optional compaction of completed older turns. See [setup and limits](documentation/GATEWAY.md), including LOMAssistant connection settings.
+Settings → External API exposes a selected KiChat model at a local OpenAI-compatible endpoint for external applications. It supports streaming, client-owned function tools and optional compaction of completed older turns. See [client setup, supported protocol and limits](documentation/GATEWAY.md).
