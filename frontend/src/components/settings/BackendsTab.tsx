@@ -1587,6 +1587,29 @@ export function BackendsTab({
     return () => window.clearInterval(id)
   }, [runtimeMoving, refreshRuntime])
 
+  // A server can already be running on the first poll, with its card collapsed.
+  // Its free port then differs from the draft and the startup health report.
+  // Adopt only the connection fields so unrelated unsaved edits stay intact.
+  const liveConnections = JSON.stringify((runtimeStatus?.models ?? [])
+    .filter((m) => m.state === 'running' && m.url)
+    .map((m) => ({ id: m.backendId, url: m.url })))
+  const lastConnections = useRef('')
+  useEffect(() => {
+    if (lastConnections.current === liveConnections) return
+    lastConnections.current = liveConnections
+    const live = (runtimeStatus?.models ?? []).filter((m) => m.state === 'running' && m.url)
+    if (!live.length) return
+    const backends = draft.backends.map((backend) => {
+      const running = live.find((m) => m.backendId === backend.id)
+      return running ? { ...backend, baseUrl: running.url, enabled: true } : backend
+    })
+    if (backends.some((b, i) => b.baseUrl !== draft.backends[i].baseUrl || b.enabled !== draft.backends[i].enabled)) {
+      patch({ backends })
+    }
+    void useStore.getState().refreshHealth()
+    void useStore.getState().refreshModels(true)
+  }, [liveConnections, runtimeStatus, draft.backends, patch])
+
   // The cards the user opened, not the closed ones: a newly added backend starts
   // closed like the rest. A failure is on the summary line, so closing a card never
   // hides the reason to open it.
