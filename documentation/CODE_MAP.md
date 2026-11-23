@@ -35,6 +35,7 @@ Two rules keep this useful:
 | `api_database.go` | The encrypted database: `GetDatabaseStatus`, the lock state and key resolution at launch, `UnlockDatabase`, `StartFreshDatabase`, and the passphrase/keyring actions Settings → Data offers |
 | `api_runtime.go` | llama.cpp as the app installs and supervises it: builds, GPU families, model folders, start/stop, the image server's process |
 | `api_models.go` | Listing models and probing them, overrides, prompt variables, the model-file pickers |
+| `api_gateway.go` | External AI API status, connection key and model/server lifecycle; see [GATEWAY.md](GATEWAY.md) |
 | `api_chat.go` | Compaction, attachments, chats' documents and chunk search, web search and scrape |
 | `api_changes.go` | The app's half of a project tool's question: `confirmChange`, the `chat:approval` payload, `ResolveToolApproval` / `ResolveToolApprovalWith` (a command's line can be edited before it runs), the standing auto-approval check and the per-chat "always" |
 | `api_project_files.go` | What a project chat changed: `ProjectFileChanges` (one row per file, with a clamped diff and whether undo is safe) and `RevertFileChange` (the undo, refused for a file edited since or a running turn) |
@@ -52,6 +53,7 @@ Two rules keep this useful:
 
 | Package | Owns | Start at | Tests |
 | --- | --- | --- | --- |
+| `internal/gateway` | Loopback OpenAI-compatible API, external function tools, input budgets and compaction | `server.go`, `protocol.go`, `context.go` | `server_test.go` |
 | `internal/chat` | Context assembly, the model/tool loop, compaction, throttling and pacing, search-first turns | `engine.go` (`Engine.Send`), `context.go` (`Assemble`), `compact.go` (`PlanCompaction`) | package tests + root engine tests |
 | `internal/llm` | The provider abstraction and every backend that speaks it | `types.go` (`Provider`, `ChatRequest`, `StreamEvent`), `registry.go` (`DefaultBackendConfigs`, `NewRegistry`), `openai.go` (shared compatible path) | one `<vendor>_test.go` per backend + `live_*_test.go` |
 | `internal/config` | `Settings`, its defaults, normalisation, prompts and presets | `config.go` (`Default`, `Load`, `Save`, `normalise`, `Clone`), `prompts.go` | `config_test.go`, `clone_test.go` |

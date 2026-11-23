@@ -998,6 +998,7 @@ Available tools: {{tool_list}}`,
   const sdReleasePage = 'https://github.com/leejet/stable-diffusion.cpp/releases/latest'
 
   const settings = {
+    gateway: { enabled: false, clientModel: "kichat", port: 17841, model: { backend: "", model: "" }, contextLimit: 16384, reserveTokens: 2048, compact: true },
     // The fixture starts in English with the English prompt bodies, because that
     // is the only state the backend can be in: normalise() rewrites an untouched
     // built-in prompt into the interface language, so an English UI showing the
@@ -3164,7 +3165,6 @@ Available tools: {{tool_list}}`,
   }
 
 
-
   function followManagedServer(url) {
     const entry = settings.backends.find((b) => b.id === MANAGED_BACKEND)
     if (entry) {
@@ -3661,6 +3661,14 @@ Available tools: {{tool_list}}`,
   }
 
   const App = {
+    GetGatewayKey: () => Promise.resolve('mock-gateway-key'),
+    GetGatewayStatus: () => Promise.resolve({
+      running: settings.gateway.enabled, url: `http://127.0.0.1:${settings.gateway.port}/v1`, busy: false, error: '',
+      ...(new URLSearchParams(location.search).get('gateway') === 'used' ? {last: {
+        id: 'mock-request', before: 18000, after: 7200, compacted: true, cacheHit: false,
+        compactMs: 1200, generationMs: 2400, promptTokens: 7100, completionTokens: 120, usageReported: true, error: '',
+      }} : {}),
+    }),
     GetSettings: () => Promise.resolve(copy(settings)),
     SaveSettings: (next) => {
       Object.assign(settings, next)

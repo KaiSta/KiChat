@@ -941,3 +941,7 @@ Contributions are welcome under the [contributor licence
 agreement](CLA.md): you keep your copyright, and everything you contribute stays
 available to everyone under Apache-2.0. [CONTRIBUTING.md](CONTRIBUTING.md) has
 the process.
+
+### External AI API
+
+Settings → External API exposes a selected KiChat model at a local OpenAI-compatible endpoint for game Mods and other applications. It supports streaming, client-owned function tools and optional compaction of completed older turns. See [setup and limits](documentation/GATEWAY.md), including LOMAssistant connection settings.

@@ -835,6 +835,15 @@ type SummarizeOptions struct {
 	ContextLimit int
 }
 
+// SummaryRequestTokens includes the summary instructions as well as the transcript.
+// External callers use it to batch a history without clipping its source text.
+func SummaryRequestTokens(opts SummarizeOptions) int {
+	return llm.EstimateMessagesTokens([]llm.Message{
+		{Role: llm.RoleSystem, Content: summarySystemPrompt},
+		{Role: llm.RoleUser, Content: summarisePrompt(opts) + "\n\n" + noThinkTag},
+	})
+}
+
 // TranscriptBudget is the token allowance for one summarisation transcript,
 // derived from the window of the model that has to read it.
 type TranscriptBudget struct {

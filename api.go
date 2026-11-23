@@ -49,6 +49,15 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	// about the Brave key (GetSettings blanks the secret), and it never carries the
 	// installed build at all, so both are read from here.
 	recorded := a.Settings()
+	s.Gateway = config.NormaliseGateway(s.Gateway)
+	if s.Gateway.Enabled {
+		if err := validateGateway(s); err != nil {
+			return config.Settings{}, err
+		}
+		if _, err := a.gatewayKey(); err != nil {
+			return config.Settings{}, err
+		}
+	}
 	// An empty BraveAPIKey means "leave the stored key alone".
 	s.Search.BraveAPIKey = recorded.Search.BraveAPIKey
 	// The image server's credential follows the same rule as a backend key: a
@@ -127,6 +136,7 @@ func (a *App) SaveSettings(s config.Settings) (config.Settings, error) {
 	a.settings = s
 	a.settingsMu.Unlock()
 	a.rebuildServices(s)
+	a.applyGateway()
 	return a.sanitize(s), nil
 }
 
@@ -423,6 +433,9 @@ func (a *App) RedactSecrets(text string) string {
 		return text
 	}
 	var values []string
+	if v, ok := a.secrets.Get(config.GatewayKeyName); ok {
+		values = append(values, v)
+	}
 	if v, ok := a.secrets.Get("brave"); ok {
 		values = append(values, v)
 	}
