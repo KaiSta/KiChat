@@ -998,6 +998,7 @@ Available tools: {{tool_list}}`,
   const sdReleasePage = 'https://github.com/leejet/stable-diffusion.cpp/releases/latest'
 
   const settings = {
+    gateway: { enabled: false, clientModel: "kichat", port: 17841, model: { backend: "", model: "" }, contextLimit: 16384, reserveTokens: 2048, compact: true },
     // The fixture starts in English with the English prompt bodies, because that
     // is the only state the backend can be in: normalise() rewrites an untouched
     // built-in prompt into the interface language, so an English UI showing the
@@ -3200,6 +3201,23 @@ Available tools: {{tool_list}}`,
    * port.
    */
   const MANAGED_BACKEND = 'llamacpp'
+  const managedStartup = new URLSearchParams(location.search).get('managedstartup') === '1'
+  let startupFollowed = false
+  if (managedStartup) {
+    managed.installed = true
+    managed.tag = 'b11528-cpu'
+    settings.runtime.tag = managed.tag
+    managed.state = 'running'
+    managed.port = 55001
+    settings.runtime.models[MANAGED_BACKEND] = { enabled: true, modelPath: '/models/Qwen3-4B-Q4_K_M.gguf', ctxSize: 8192, extraArgs: '' }
+    const entry = settings.backends.find((b) => b.id === MANAGED_BACKEND)
+    entry.enabled = true
+    entry.baseUrl = 'http://127.0.0.1:55000'
+    const probe = probes.find((p) => p.id === MANAGED_BACKEND)
+    probe.ok = false
+    probe.error = 'connection refused at previous port 55000'
+  }
+
 
   function followManagedServer(url) {
     const entry = settings.backends.find((b) => b.id === MANAGED_BACKEND)
@@ -3721,6 +3739,14 @@ Available tools: {{tool_list}}`,
   }
 
   const App = {
+    GetGatewayKey: () => Promise.resolve('mock-gateway-key'),
+    GetGatewayStatus: () => Promise.resolve({
+      running: settings.gateway.enabled, url: `http://127.0.0.1:${settings.gateway.port}/v1`, busy: false, error: '',
+      ...(new URLSearchParams(location.search).get('gateway') === 'used' ? {last: {
+        id: 'mock-request', before: 18000, after: 7200, compacted: true, cacheHit: false,
+        compactMs: 1200, generationMs: 2400, promptTokens: 7100, completionTokens: 120, usageReported: true, error: '',
+      }} : {}),
+    }),
     GetSettings: () => Promise.resolve(copy(settings)),
     SaveSettings: (next) => {
       Object.assign(settings, next)
@@ -4008,7 +4034,13 @@ Available tools: {{tool_list}}`,
     // that is the part of the flow worth seeing: "starting" is what a real model
     // load reports for its first seconds, and it is the state the poll has to
     // pick up.
-    GetRuntimeStatus: () => Promise.resolve(copy(runtimeStatus())),
+    GetRuntimeStatus: () => {
+      if (managedStartup && !startupFollowed) {
+        startupFollowed = true
+        followManagedServer('http://127.0.0.1:55001')
+      }
+      return Promise.resolve(copy(runtimeStatus()))
+    },
     // One release lookup, cached, exactly as the real binding behaves: the answer
     // is what `?update=` decided, and the status reports it from then on.
     CheckLlamaRuntimeUpdate: () => {

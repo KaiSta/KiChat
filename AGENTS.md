@@ -150,6 +150,7 @@ check are [`verify-ui`](.claude/skills/verify-ui/SKILL.md).
 | Document | What it holds |
 | --- | --- |
 | [`PLAN.md`](documentation/PLAN.md) | the architecture, the reasoning behind it, and the build manual (§6: prerequisites, artifacts, traps) |
+| [`GATEWAY.md`](documentation/GATEWAY.md) | the external AI API: client setup, supported protocol, context budgets and compaction |
 | [`COMPACT.md`](documentation/COMPACT.md) | compaction: strategy, arithmetic, failure modes |
 | [`CODING.md`](documentation/CODING.md) | coding mode: folder boundary, confirmation gate, the terminal's shell, caps and timeout |
 | [`RESEARCH.md`](documentation/RESEARCH.md) | search and scraping: providers, refusals, guards, budgets |

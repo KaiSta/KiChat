@@ -252,6 +252,48 @@ export namespace config {
 	        this.layers = source["layers"];
 	    }
 	}
+	export class GatewaySettings {
+	    enabled: boolean;
+	    port: number;
+	    model: llm.Ref;
+	    clientModel: string;
+	    contextLimit: number;
+	    reserveTokens: number;
+	    compact: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new GatewaySettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.port = source["port"];
+	        this.model = this.convertValues(source["model"], llm.Ref);
+	        this.clientModel = source["clientModel"];
+	        this.contextLimit = source["contextLimit"];
+	        this.reserveTokens = source["reserveTokens"];
+	        this.compact = source["compact"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class ImageSettings {
 	    enabled: boolean;
 	    baseUrl: string;
@@ -604,6 +646,7 @@ export namespace config {
 	    }
 	}
 	export class Settings {
+	    gateway: GatewaySettings;
 	    language: string;
 	    location: string;
 	    theme: string;
@@ -635,6 +678,7 @@ export namespace config {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.gateway = this.convertValues(source["gateway"], GatewaySettings);
 	        this.language = source["language"];
 	        this.location = source["location"];
 	        this.theme = source["theme"];
@@ -659,6 +703,81 @@ export namespace config {
 	        this.imageProfiles = this.convertValues(source["imageProfiles"], ImageProfile);
 	        this.autoApprove = this.convertValues(source["autoApprove"], AutoApproveSettings);
 	        this.updates = this.convertValues(source["updates"], UpdateSettings);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
+export namespace gateway {
+	
+	export class Report {
+	    id: string;
+	    before: number;
+	    after: number;
+	    compacted: boolean;
+	    cacheHit: boolean;
+	    compactMs: number;
+	    generationMs: number;
+	    promptTokens: number;
+	    completionTokens: number;
+	    usageReported: boolean;
+	    error: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Report(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.before = source["before"];
+	        this.after = source["after"];
+	        this.compacted = source["compacted"];
+	        this.cacheHit = source["cacheHit"];
+	        this.compactMs = source["compactMs"];
+	        this.generationMs = source["generationMs"];
+	        this.promptTokens = source["promptTokens"];
+	        this.completionTokens = source["completionTokens"];
+	        this.usageReported = source["usageReported"];
+	        this.error = source["error"];
+	    }
+	}
+	export class Status {
+	    running: boolean;
+	    url: string;
+	    busy: boolean;
+	    error: string;
+	    last?: Report;
+	
+	    static createFrom(source: any = {}) {
+	        return new Status(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.running = source["running"];
+	        this.url = source["url"];
+	        this.busy = source["busy"];
+	        this.error = source["error"];
+	        this.last = this.convertValues(source["last"], Report);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

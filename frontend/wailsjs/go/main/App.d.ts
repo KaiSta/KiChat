@@ -3,6 +3,7 @@
 import {main} from '../models';
 import {store} from '../models';
 import {chat} from '../models';
+import {gateway} from '../models';
 import {llm} from '../models';
 import {config} from '../models';
 import {tools} from '../models';
@@ -59,6 +60,10 @@ export function GetChatState(arg1:string):Promise<main.ChatState>;
 export function GetDatabaseStatus():Promise<main.DatabaseStatus>;
 
 export function GetDocument(arg1:string):Promise<store.Document>;
+
+export function GetGatewayKey():Promise<string>;
+
+export function GetGatewayStatus():Promise<gateway.Status>;
 
 export function GetHealth():Promise<Array<llm.HealthStatus>>;
 

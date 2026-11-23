@@ -58,8 +58,9 @@ func TestTheSelectedSourceDecidesWhichBuildKiChatStarts(t *testing.T) {
 	if !hasString(status.Distributions, config.DistPrism) {
 		t.Errorf("the panel is not told the fork may be selected: %v", status.Distributions)
 	}
-	if !hasString(status.Variants, "openvino") {
-		t.Errorf("upstream's own family list is missing OpenVINO: %v", status.Variants)
+	wantOpenVINO := goruntime.GOARCH == "amd64" && (goruntime.GOOS == "linux" || goruntime.GOOS == "windows")
+	if hasString(status.Variants, "openvino") != wantOpenVINO {
+		t.Errorf("upstream OpenVINO availability on %s/%s = %v, want %v", goruntime.GOOS, goruntime.GOARCH, status.Variants, wantOpenVINO)
 	}
 
 	// The switch, with the recorded tag left where it was — which is the state a save

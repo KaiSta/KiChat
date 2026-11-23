@@ -20,6 +20,7 @@ import (
 	"kichat/internal/config"
 	"kichat/internal/dbkey"
 	"kichat/internal/events"
+	"kichat/internal/gateway"
 	"kichat/internal/images"
 	"kichat/internal/ingest"
 	"kichat/internal/llm"
@@ -92,8 +93,12 @@ type App struct {
 	// cannot orphan a generation that is already running. See chat.TurnState.
 	turns *chat.TurnState
 
-	settingsMu sync.RWMutex
-	settings   config.Settings
+	settingsMu    sync.RWMutex
+	settings      config.Settings
+	gatewayMu     sync.Mutex
+	gateway       *gateway.Server
+	gatewayConfig config.GatewaySettings
+	gatewayError  string
 
 	// pendingBackup is the archive OpenBackup decrypted and BackupImport writes. It is
 	// held between the two calls because the user chooses from it in between, and it is
@@ -303,12 +308,14 @@ func (a *App) startup(ctx context.Context) {
 	// most installs; see ImageSettings.StartWithApp for why it is not implied by
 	// choosing the kind.
 	a.startEnabledImages()
+	a.applyGateway()
 	// The daily release check, when the user switched it on. It runs in the background
 	// because nobody is waiting for its answer: the badge appears when it lands.
 	a.startUpdateCheck()
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	a.stopGateway()
 	// Cancelling is not enough on its own: a turn that is between two writes would
 	// go on to write to a database that is about to be closed. The wait is short
 	// because it is a courtesy, not a guarantee — a tool call stuck in a syscall

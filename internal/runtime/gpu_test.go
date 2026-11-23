@@ -3,6 +3,8 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -224,6 +226,10 @@ func TestROCmUsableAgreesWithTheInstalledRuntime(t *testing.T) {
 	have := hipRuntimeMajors()
 	usable, why := SuiteUsable(AcceleratorROCm, "10.0")
 	wanted := false
+	// Non-Linux platforms deliberately leave Linux driver probes unjudged.
+	if runtime.GOOS != "linux" {
+		wanted = true
+	}
 	for _, major := range have {
 		if major == 7 {
 			wanted = true
@@ -314,6 +320,9 @@ func TestServerEnvAddsTheROCMPathForAHipBuild(t *testing.T) {
 	env := envValue(t, serverEnv(filepath.Join(build, "llama-server")), "LD_LIBRARY_PATH")
 	parts := splitLibraryPath(env)
 	want := []string{build, filepath.Join(rocm, "lib"), "/opt/other/lib"}
+	if runtime.GOOS != "linux" {
+		want = []string{"/opt/other/lib"}
+	}
 	if len(parts) != len(want) {
 		t.Fatalf("LD_LIBRARY_PATH = %v, want %v", parts, want)
 	}
@@ -340,8 +349,12 @@ func TestServerEnvLeavesANonHIPBuildAlone(t *testing.T) {
 	t.Setenv("LD_LIBRARY_PATH", "")
 
 	parts := splitLibraryPath(envValue(t, serverEnv(filepath.Join(build, "llama-server")), "LD_LIBRARY_PATH"))
-	if len(parts) != 1 || parts[0] != build {
-		t.Errorf("LD_LIBRARY_PATH = %v, want only the build directory", parts)
+	want := []string{build}
+	if runtime.GOOS != "linux" {
+		want = nil
+	}
+	if !reflect.DeepEqual(parts, want) {
+		t.Errorf("LD_LIBRARY_PATH = %v, want %v on %s", parts, want, runtime.GOOS)
 	}
 }
 

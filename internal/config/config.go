@@ -37,6 +37,7 @@ func DataDir() (string, error) {
 
 // Settings is the complete user configuration.
 type Settings struct {
+	Gateway        GatewaySettings              `json:"gateway"`
 	Language       string                       `json:"language"`
 	Location       string                       `json:"location"`
 	Theme          string                       `json:"theme"`
@@ -1567,6 +1568,7 @@ const (
 // Default returns the shipped configuration.
 func Default() Settings {
 	return Settings{
+		Gateway:        DefaultGateway(),
 		Language:       LangEnglish,
 		Location:       DefaultLocation,
 		Theme:          "dark",
@@ -1834,6 +1836,7 @@ func (s Settings) Save(st *store.Store) error {
 // normalise repairs values that would otherwise break the app, e.g. a settings
 // file from an older version or a hand-edited config with an empty backend list.
 func (s *Settings) normalise() {
+	s.Gateway = NormaliseGateway(s.Gateway)
 	switch s.Language {
 	case LangEnglish, LangGerman, LangChinese:
 	default:

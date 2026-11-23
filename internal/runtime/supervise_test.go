@@ -123,6 +123,9 @@ func TestAServerRunsTheCallersCommandLineAndProbesItsOwnRoute(t *testing.T) {
 	srv := NewServer("images")
 	srv.readyTimeout = 10 * time.Second
 	srv.probe = func(_ context.Context, url string) error {
+		if _, err := os.Stat(argsFile); err != nil {
+			return err
+		}
 		select {
 		case probed <- url:
 		default:

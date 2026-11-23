@@ -431,7 +431,12 @@ func TestServerStartProbeAndStop(t *testing.T) {
 	srv.SetStateHandler(rec.add)
 	// Readiness is answered here rather than by a real model load; the process
 	// itself is real, which is what this test is about.
-	srv.probe = func(context.Context, string) error { return nil }
+	srv.probe = func(context.Context, string) error {
+		// A successful fake probe must wait until the child has actually started.
+		// On macOS the process can exist before its shell executes the script.
+		_, err := os.Stat(argsFile)
+		return err
+	}
 
 	if err := srv.Start(Options{Binary: binary, Model: model, Ctx: 4096}); err != nil {
 		t.Fatalf("Start: %v", err)

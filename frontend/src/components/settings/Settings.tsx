@@ -10,10 +10,12 @@ import { ResearchTab } from './ResearchTab'
 import { PayloadTab } from './PayloadTab'
 import { ContextTab } from './ContextTab'
 import { DataTab } from './DataTab'
+import { GatewayTab } from './GatewayTab'
 
 type Tab =
   | 'general'
   | 'backends'
+  | 'gateway'
   | 'images'
   | 'prompt'
   | 'coding'
@@ -82,6 +84,7 @@ export function Settings() {
   const tabs: { id: Tab; label: string }[] = [
     { id: 'general', label: t('settings.general') },
     { id: 'backends', label: t('settings.backends') },
+    { id: 'gateway', label: t('gateway.title') },
     // Next to the chat backends, because it is the other server a user has to run
     // themselves — but a tab of its own, because the setup does not fit beside one.
     { id: 'images', label: t('settings.images') },
@@ -106,7 +109,7 @@ export function Settings() {
         <strong>{t('settings.title')}</strong>
         {/* The tab strip is one control to a screen reader, not seven buttons: the
             selected tab is marked, and each names the panel it shows. */}
-        <div className="ml-4 flex gap-1" role="tablist" aria-label={t('settings.title')}>
+        <div className="ml-4 flex min-w-0 flex-1 gap-1 overflow-x-auto" role="tablist" aria-label={t('settings.title')}>
           {tabs.map((item) => (
             <button
               key={item.id}
@@ -139,6 +142,7 @@ export function Settings() {
         <div className="mx-auto max-w-3xl space-y-4">
           {tab === 'general' && <GeneralTab draft={draft} patch={patch} />}
           {tab === 'backends' && <BackendsTab draft={draft} patch={patch} onApply={save} />}
+          {tab === 'gateway' && <GatewayTab draft={draft} patch={patch} />}
           {tab === 'images' && <ImagesTab draft={draft} patch={patch} onApply={save} />}
           {tab === 'prompt' && <PromptTab draft={draft} patch={patch} />}
           {tab === 'coding' && <CodingTab draft={draft} patch={patch} />}

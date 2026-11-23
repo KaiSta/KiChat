@@ -232,6 +232,7 @@ func (a *App) unlock(passphrase string) (bool, error) {
 func (a *App) startAfterUnlock() {
 	a.startEnabledModels()
 	a.startEnabledImages()
+	a.applyGateway()
 }
 
 // completeUnlock builds the services the open database makes possible.

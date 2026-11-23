@@ -134,6 +134,13 @@ first-token time; light and dark themes; an interface in **English, German and C
   fits and refused rather than guessed at when none does, and another assistant's vocabulary
   (`bash`, `read`, `grep`, `edit`) is translated onto the real tool, arguments included.
 
+### External AI API
+
+Settings → External API exposes a selected KiChat model at a local OpenAI-compatible
+endpoint for external applications. It supports streaming, client-owned function tools
+and optional compaction of completed older turns. See [client setup, supported protocol
+and limits](documentation/GATEWAY.md).
+
 ### Research
 
 - **Web search** with **Brave** (one key, metered) and a **DuckDuckGo** fallback that needs none,

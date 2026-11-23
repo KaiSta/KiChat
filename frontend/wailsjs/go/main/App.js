@@ -102,6 +102,14 @@ export function GetDocument(arg1) {
   return window['go']['main']['App']['GetDocument'](arg1);
 }
 
+export function GetGatewayKey() {
+  return window['go']['main']['App']['GetGatewayKey']();
+}
+
+export function GetGatewayStatus() {
+  return window['go']['main']['App']['GetGatewayStatus']();
+}
+
 export function GetHealth() {
   return window['go']['main']['App']['GetHealth']();
 }

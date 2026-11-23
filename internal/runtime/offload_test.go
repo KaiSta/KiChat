@@ -271,7 +271,12 @@ func TestThePlacementIsKeptEvenWhenTheLogTailHasMovedPastIt(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	defer func() { _ = srv.Stop() }()
-	if !waitFor(t, 5*time.Second, func() bool { return srv.Status().State == StateRunning }) {
+	// Readiness and stdout consumption are independent goroutines. Wait for the
+	// observation under test, including the output that pushes it out of the tail.
+	if !waitFor(t, 5*time.Second, func() bool {
+		st := srv.Status()
+		return st.State == StateRunning && st.Offload.Reported() && strings.Contains(strings.Join(st.Log, "\n"), "graph 59 built")
+	}) {
 		t.Fatalf("server never became ready: %+v", srv.Status())
 	}
 
@@ -323,7 +328,10 @@ func TestAFailedServerReportsNoPlacement(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	defer func() { _ = srv.Stop() }()
-	if !waitFor(t, 5*time.Second, func() bool { return srv.Status().State == StateRunning }) {
+	if !waitFor(t, 5*time.Second, func() bool {
+		st := srv.Status()
+		return st.State == StateRunning && st.Offload.Reported()
+	}) {
 		t.Fatalf("server never became ready: %+v", srv.Status())
 	}
 	// While it is up the reading is there — otherwise the assertion below would

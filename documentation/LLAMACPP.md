@@ -1189,3 +1189,13 @@ state the backend would not produce. One caveat when reading that page: the cata
   from the front (§2.2).
 - **Sending `-lv 4` to a launcher the user supplied.** An older binary may not know the flag,
   and an unknown argument stops the server rather than producing a report (§3.6).
+
+### A model already running when Settings opens
+
+The Backends tab adopts the URL of every running managed model on its first status
+read, including collapsed cards, then refreshes health and models. It changes only
+the connection fields in the draft, preserving other unsaved edits. The harness
+flag `?managedstartup=1` starts with a draft/health report for port 55000 while the
+server is already running on 55001. Opening Backends must show 55001 and reachable
+without saving or expanding the card. This reproduces the stale startup report
+observed on macOS with a server answering `/health` 200 at its new port.
